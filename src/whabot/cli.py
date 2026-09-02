@@ -96,7 +96,7 @@ def serve(
         port=port,
         reload=reload,
         log_config=None,
-        http="whabot.core.connection_log:LoggingH11Protocol",
+        http="whabot.core.protocol:LoggingH11Protocol",
     )
 
 
