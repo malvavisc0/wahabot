@@ -6,7 +6,9 @@ import typer
 import uvicorn
 from loguru import logger
 
+from whabot.core.waha import WahaClient
 from whabot.handlers import register_agent_handler
+from whabot.reactions import register_reaction_handler
 from whabot.settings import get_settings, setup_logging
 
 app = typer.Typer(
@@ -50,7 +52,9 @@ def serve(
     if session:
         settings.session = session
     setup_logging(settings)
-    register_agent_handler(settings)
+    waha = WahaClient(base_url=settings.waha_url, api_key=settings.waha_api_key)
+    register_agent_handler(settings, waha=waha)
+    register_reaction_handler(settings, waha=waha)
     (settings.journal_dir / settings.session).mkdir(parents=True, exist_ok=True)
     host = host or settings.host
     port = port or settings.port

@@ -13,6 +13,7 @@ app = FastAPI(title="whabot webhook server")
 
 Handler = Callable[[WahaEvent], Awaitable[None]]
 _message_handlers: list[Handler] = []
+_reaction_handlers: list[Handler] = []
 
 
 def on_message(handler: Handler) -> None:
@@ -20,9 +21,20 @@ def on_message(handler: Handler) -> None:
     _message_handlers.append(handler)
 
 
+def on_reaction(handler: Handler) -> None:
+    """Register a coroutine invoked for every incoming `message.reaction` event."""
+    _reaction_handlers.append(handler)
+
+
 async def dispatch(event: WahaEvent) -> None:
     """Run all registered message handlers for the event."""
     for handler in _message_handlers:
+        await handler(event)
+
+
+async def dispatch_reaction(event: WahaEvent) -> None:
+    """Run all registered reaction handlers for the event."""
+    for handler in _reaction_handlers:
         await handler(event)
 
 
@@ -45,14 +57,27 @@ async def waha_webhook(
 
     save_event(settings.journal_dir, session, body)
 
-    event = WahaEvent.model_validate_json(body)
+    try:
+        event = WahaEvent.model_validate_json(body)
+    except (UnicodeDecodeError, ValueError) as exc:
+        logger.error("Rejecting malformed event body: {exc}", exc=exc)
+        raise HTTPException(status_code=400, detail="Malformed event body") from exc
+    if event.session != session:
+        logger.error(
+            "Event session {event_session} does not match webhook route {route_session}",
+            event_session=event.session,
+            route_session=session,
+        )
+        raise HTTPException(status_code=404, detail=f"Unknown session {event.session!r}")
     logger.info(
         "Received {event} event from session {session}",
         event=event.event,
         session=event.session,
     )
     logger.debug("Event payload: {payload}", payload=event.payload)
-    if event.event == "message":
+    if event.event == "message.reaction":
+        await dispatch_reaction(event)
+    elif event.event.startswith("message"):
         await dispatch(event)
     return event
 

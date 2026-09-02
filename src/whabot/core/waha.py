@@ -1,5 +1,8 @@
 """HTTP client for the WAHA WhatsApp HTTP API."""
 
+from typing import Any
+from urllib.parse import quote
+
 import httpx
 from loguru import logger
 
@@ -27,3 +30,14 @@ class WahaClient:
             chat_id=chat_id,
             session=session,
         )
+
+    def get_message(self, session: str, chat_id: str, message_id: str) -> dict[str, Any]:
+        """Fetch a single message by its serialized id, raising for HTTP errors."""
+        segment = quote(chat_id, safe="")
+        message_segment = quote(message_id, safe="")
+        response = self._client.get(
+            f"{API_PREFIX}/{session}/chats/{segment}/messages/{message_segment}",
+            params={"downloadMedia": False},
+        )
+        response.raise_for_status()
+        return response.json()
