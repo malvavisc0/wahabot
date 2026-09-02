@@ -22,7 +22,11 @@ The AI code is split into focused modules under `src/whabot/ai/`:
 | `events.py` | The workflow events (`InputEvent`, `ToolCallEvent`) |
 | `context.py` | Reply-context rendering + the `handle_message` entrypoint |
 | `messages.py` | Message classification and extraction (`extract_text`, `is_replyable`, …) |
+| `history.py` | Chat-history repair (`sanitize_chat_history`) and budget trimming (`trim_to_budget`) |
+| `schemas.py` | Explicit Pydantic parameter schemas for every tool |
 | `tools.py` | The bundled WhatsApp tools |
+| `web_search.py` / `visit_url.py` | Web lookup tools (webserp CLI, curl_cffi page fetch) |
+| `finance.py` / `youtube.py` | Market data (yfinance) and YouTube transcript tools |
 
 ## How the workflow works
 
@@ -118,6 +122,25 @@ only one session can be active; the `(session, chat)` key simply makes
 the memory indirection correct and future-proof if multiple sessions are
 ever served.
 
+### Memory hygiene and the token budget
+
+Before each run reaches the LLM, the buffered history passes through two
+`history.py` filters:
+
+1. **Repair** (`sanitize_chat_history`) — a failed run can leave memory
+   with a dangling user message, an assistant message advertising tool
+   calls whose `tool` replies never arrived, or orphan `tool` messages.
+   The OpenAI-compatible API rejects all of these, so the history is
+   rebalanced first (at run start with `drop_trailing_user=True`, and
+   again before every LLM call).
+2. **Trim** (`trim_to_budget`) — the newest tail that fits
+   `WHABOT_MEMORY_TOKEN_LIMIT` (default 8000) is kept; tool groups
+   (assistant call + its `tool` replies) are atomic so a trim never
+   splits them, and the newest user turn always survives. The system
+   prompt lives outside the rolling buffer so the trim can never evict
+   it; its token cost is accounted via `initial_token_count` (a prompt
+   larger than the budget is clamped and logged, not fatal).
+
 ## The entrypoint
 
 `handle_message(event, agent, ctx=None)` in `whabot.ai.context` is the
@@ -185,7 +208,7 @@ subsections below.
 | Tool | Purpose |
 |---|---|
 | `send_message(text, chat=None)` | Send a text — current chat (omit `chat`) or another group/person |
-| `send_image(url, caption="", chat=None)` | Send an image from a public URL, with an optional caption |
+| `send_image(url, caption="", chat=None)` | Send an image from a public URL (mimetype inferred from the URL extension), with an optional caption |
 | `forward_message(message_id, chat=None)` | Forward an existing message (by serialized id) to a chat |
 | `mark_seen(chat=None)` | Mark a chat as read/seen — WAHA recommends this before replying |
 
@@ -216,8 +239,8 @@ Underneath it calls WAHA `PUT /api/reaction` (see
 
 | Tool | Purpose |
 |---|---|
-| `fetch_chat_messages(chat=None, limit=20)` | Show the recent messages of a chat as text lines (`me:` / participant prefix) |
-| `get_chat(chat=None)` | Chat metadata (name, participants, …) via `/chats/overview` |
+| `fetch_chat_messages(chat=None, limit=20)` | Recent messages as text lines, each prefixed `[id:...]` (for react/forward); media-only messages render as `[mimetype] filename` |
+| `get_chat(chat=None)` | Chat metadata summary (name, participant count + JIDs, …) via `/chats/overview` |
 | `get_contact(contact_id)` | Contact details by JID |
 | `search_messages(query, chat=None, limit=20)` | Find recent messages containing a text substring |
 
@@ -246,6 +269,26 @@ set_typing(typing=True)
 # ...model composes...
 set_typing(typing=False)
 ```
+
+### External research
+
+Beyond the WhatsApp tools, the agent ships lookup tools for up-to-date
+external information. All follow the same convention: they return a
+status string and never raise.
+
+| Tool | Params | Source | Purpose |
+|---|---|---|---|
+| `web_search` | `query`, `max_results?` | `webserp` CLI | Metasearch (Google/DuckDuckGo/Brave/…) — no API key |
+| `visit_url` | `url` | `curl_cffi` | Fetch a page's visible text with a real Chrome TLS fingerprint (avoids blocks) |
+| `fetch_current_stock_price` | `ticker` | `yfinance` | Current price + day change for stock/ETF/crypto |
+| `fetch_company_information` | `ticker` | `yfinance` | Fundamentals, valuation, financial health |
+| `fetch_ticker_news` | `ticker`, `max_articles?` | `yfinance` | Recent articles for a ticker |
+| `get_youtube_transcript` | `url` | `youtube-transcript-api` | Video captions as text (needs captions on; returns inline, truncated) |
+
+Ticker normalization handles lowercase, `BTCUSD`/`BTC/USD` → `BTC-USD`.
+`web_search` shells out to the `webserp` CLI (from the `webserp` package);
+`visit_url` uses `curl_cffi` with a Chrome impersonation fingerprint. Both
+honor `WHABOT_WEB_SEARCH_TIMEOUT` and `WHABOT_WEB_SEARCH_PROXY`.
 
 ## Adding custom tools
 

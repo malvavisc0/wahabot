@@ -24,6 +24,10 @@ Configuration (`.env`, real env vars win):
 - `WHABOT_LOG_LEVEL` — loguru level (default `INFO`)
 - `WHABOT_HOST` / `WHABOT_PORT` — server bind address (default `0.0.0.0:8080`)
 - `WHABOT_WEBHOOK_HMAC_KEY` — **required**; must match WAHA's `hmac.key`
+- `WHABOT_MEMORY_TOKEN_LIMIT` — per-chat memory ceiling; oldest messages drop first (default `8000`)
+- `WHABOT_WEB_SEARCH_MAX_RESULTS` — default `web_search` results (default `5`)
+- `WHABOT_WEB_SEARCH_TIMEOUT` — `webserp` subprocess timeout in seconds (default `30`)
+- `WHABOT_WEB_SEARCH_PROXY` — optional proxy URL for `webserp`
 
 Point WAHA at the webhook:
 

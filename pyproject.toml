@@ -13,10 +13,13 @@ dependencies = [
     "llama-index-core",
     "llama-index-llms-openai-like",
     "loguru",
-    "pydantic-settings>=2.15.0",
-    "python-dotenv",
+    "pydantic-settings",
     "typer",
     "uvicorn[standard]",
+    "curl-cffi",
+    "webserp",
+    "yfinance",
+    "youtube-transcript-api",
 ]
 
 [project.scripts]

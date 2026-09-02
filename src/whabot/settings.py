@@ -5,7 +5,6 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
-from dotenv import find_dotenv, load_dotenv
 from loguru import logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -28,7 +27,12 @@ class Settings(BaseSettings):
     llm_api_base: str
     llm_api_key: str
     llm_model: str = "gpt-4o-mini"
+    memory_token_limit: int = 8000
     timezone: str = "UTC"
+
+    web_search_max_results: int = 5
+    web_search_timeout: float = 30.0
+    web_search_proxy: str | None = None
 
     session: str = "default"
 
@@ -47,9 +51,8 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Load .env then build the cached Settings instance."""
-    load_dotenv(find_dotenv(usecwd=True), override=False)
-    return Settings()  # pydantic-settings reads os.environ
+    """Build the cached Settings instance (pydantic reads .env and os.environ)."""
+    return Settings()
 
 
 class InterceptHandler(logging.Handler):

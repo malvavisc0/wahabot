@@ -21,8 +21,10 @@ from llama_index.core.workflow import (
     step,
 )
 from llama_index.llms.openai_like import OpenAILike
+from loguru import logger
 
 from whabot.ai.events import InputEvent, ToolCallEvent
+from whabot.ai.history import sanitize_chat_history, trim_to_budget
 from whabot.settings import Settings
 
 __all__ = [
@@ -53,6 +55,11 @@ def run_tool_call(
     return ChatMessage(role="tool", content=content, additional_kwargs=kwargs)
 
 
+def _token_count(msg: ChatMessage) -> int:
+    """Estimate a message's token count from its content length (1 char ≈ 1 token)."""
+    return len(str(msg.content or ""))
+
+
 class FunctionCallingAgentWorkflow(Workflow):
     """Stateful function calling agent built from plain workflow steps."""
 
@@ -62,25 +69,96 @@ class FunctionCallingAgentWorkflow(Workflow):
         llm: FunctionCallingLLM | None = None,
         tools: list[BaseTool] | None = None,
         system_prompt: str | None = None,
+        memory_token_limit: int = 8000,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.tools = tools or []
         self.system_prompt = system_prompt
         self.llm = llm or raise_missing_llm()
+        self.memory_token_limit = memory_token_limit
         assert self.llm.metadata.is_function_calling_model
+
+    def _system_message(self) -> ChatMessage | None:
+        """The system prompt as a message, or None when unset."""
+        if not self.system_prompt:
+            return None
+        return ChatMessage(role="system", content=self.system_prompt)
+
+    async def _chat_history(self, ctx: Context) -> list[ChatMessage]:
+        """The trimmed, structurally valid conversation plus system prompt.
+
+        The conversation is sanitised (balanced tool groups, alternating
+        turns) and trimmed to the memory token budget. The system message
+        is kept out of the rolling buffer so the token trim can never
+        evict it; its cost is accounted via ``initial_token_count`` so the
+        whole prompt still fits the budget.
+        """
+        memory = await ctx.store.get("memory")
+        system = self._system_message()
+        messages = await memory.aget_all()
+        messages = sanitize_chat_history(messages, drop_trailing_user=False)
+        messages = trim_to_budget(messages, self.memory_token_limit, _token_count)
+        await memory.aset(messages)
+        initial = self._system_token_count(memory)
+        history = await memory.aget(input=None, initial_token_count=initial)
+        return ([system] if system else []) + history
+
+    def _system_token_count(self, memory: ChatMemoryBuffer) -> int:
+        """Tokens the system prompt costs, clamped to the memory budget.
+
+        ``ChatMemoryBuffer.get`` raises when ``initial_token_count``
+        exceeds its token limit; a huge system prompt would crash every
+        run. Clamp so the conversation simply gets no room instead.
+        """
+        if not self.system_prompt:
+            return 0
+        tokens = len(memory.tokenizer_fn(self.system_prompt))
+        if tokens >= memory.token_limit:
+            logger.warning(
+                (
+                    "System prompt ({tokens} tokens) meets or exceeds "
+                    "memory_token_limit ({limit}); conversation history gets no room"
+                ),
+                tokens=tokens,
+                limit=memory.token_limit,
+            )
+            return max(memory.token_limit - 1, 0)
+        return tokens
+
+    async def _repair_memory(self, ctx: Context) -> None:
+        """Repair dangling state left by a failed workflow run.
+
+        After an LLM/infrastructure error mid-run, memory may end with a
+        dangling user message (no assistant reply) or an assistant
+        message advertising tool calls whose matching ``tool`` responses
+        are missing. :func:`sanitize_chat_history` fixes these in one
+        pass; the repair runs at the start of the next run so a broken
+        history never reaches the API.
+        """
+        memory = await ctx.store.get("memory", default=None)
+        if memory is None:
+            return
+        messages = await memory.aget_all()
+        if not messages:
+            return
+        repaired = sanitize_chat_history(messages, drop_trailing_user=True)
+        if repaired != messages:
+            await memory.aset(repaired)
 
     @step
     async def prepare_chat_history(self, ctx: Context, ev: StartEvent) -> InputEvent:
         """Add the incoming user message to memory and fetch chat history."""
         memory = await ctx.store.get("memory", default=None)
         if not memory:
-            memory = ChatMemoryBuffer.from_defaults(llm=None)
-            if self.system_prompt:
-                await memory.aput(ChatMessage(role="system", content=self.system_prompt))
+            memory = ChatMemoryBuffer.from_defaults(
+                token_limit=self.memory_token_limit, llm=self.llm
+            )
+        else:
+            await self._repair_memory(ctx)
         await memory.aput(ChatMessage(role="user", content=str(ev.input)))
         await ctx.store.set("memory", memory)
-        return InputEvent(input=await memory.aget())
+        return InputEvent(input=await self._chat_history(ctx))
 
     @step
     async def handle_llm_input(
@@ -109,7 +187,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         for msg in tool_msgs:
             await memory.aput(msg)
         await ctx.store.set("memory", memory)
-        return InputEvent(input=await memory.aget())
+        return InputEvent(input=await self._chat_history(ctx))
 
 
 def load_llm(settings: Settings) -> FunctionCallingLLM:
@@ -137,4 +215,5 @@ def build_agent(
         tools=tools or [],
         system_prompt=system_prompt,
         timeout=timeout,
+        memory_token_limit=settings.memory_token_limit,
     )
