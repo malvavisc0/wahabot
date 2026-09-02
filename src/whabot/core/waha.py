@@ -9,6 +9,15 @@ from loguru import logger
 API_PREFIX = "/api"
 
 
+def message_matches(message: dict[str, Any], needle: str) -> bool:
+    """Whether a message's body, media filename or mimetype contains ``needle``."""
+    body = str(message.get("body", "") or "").casefold()
+    media = message.get("media") or message.get("_data", {}).get("media") or {}
+    filename = str(media.get("filename") or "").casefold()
+    mimetype = str(media.get("mimetype") or "").casefold()
+    return needle in body or needle in filename or needle in mimetype
+
+
 class WahaClient:
     """Minimal WAHA API client (see https://waha.devlike.pro/docs/how-to/send-messages)."""
 
@@ -41,3 +50,164 @@ class WahaClient:
         )
         response.raise_for_status()
         return response.json()
+
+    def send_reaction(self, session: str, message_id: str, reaction: str) -> None:
+        """React to a message (empty reaction removes it), raising for HTTP errors."""
+        self._client.put(
+            f"{API_PREFIX}/reaction",
+            json={
+                "session": session,
+                "messageId": message_id,
+                "reaction": reaction,
+            },
+        ).raise_for_status()
+
+    def send_seen(self, session: str, chat_id: str) -> None:
+        """Mark the chat as seen/read, raising for HTTP errors."""
+        self._client.post(
+            f"{API_PREFIX}/sendSeen",
+            json={"session": session, "chatId": chat_id},
+        ).raise_for_status()
+
+    def send_image(
+        self,
+        session: str,
+        chat_id: str,
+        file: dict[str, Any],
+        caption: str | None = None,
+        reply_to: str | None = None,
+    ) -> None:
+        """Send an image from a url or base64 payload, raising for HTTP errors."""
+        body: dict[str, Any] = {"session": session, "chatId": chat_id, "file": file}
+        if caption:
+            body["caption"] = caption
+        if reply_to:
+            body["reply_to"] = reply_to
+        self._client.post(f"{API_PREFIX}/sendImage", json=body).raise_for_status()
+
+    def fetch_chat_messages(
+        self,
+        session: str,
+        chat_id: str,
+        limit: int = 50,
+        sort_order: str = "desc",
+        download_media: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Fetch recent messages of a chat, raising for HTTP errors."""
+        segment = quote(chat_id, safe="")
+        response = self._client.get(
+            f"{API_PREFIX}/{session}/chats/{segment}/messages",
+            params={
+                "limit": limit,
+                "sortOrder": sort_order,
+                "downloadMedia": download_media,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def get_chat_overview(
+        self,
+        session: str,
+        chat_id: str,
+    ) -> Any:
+        """Return a chat's metadata from the chats overview, raising for HTTP errors."""
+        segment = quote(chat_id, safe="")
+        body: dict[str, list[str]] = {"chatIds": [segment]}
+        response = self._client.post(
+            f"{API_PREFIX}/{session}/chats/overview",
+            json=body,
+        )
+        response.raise_for_status()
+        items = response.json()
+        return items[0] if isinstance(items, list) and items else {}
+
+    def get_contact(self, session: str, contact_id: str) -> dict[str, Any]:
+        """Fetch a single contact by id, raising for HTTP errors."""
+        segment = quote(contact_id, safe="")
+        response = self._client.get(
+            f"{API_PREFIX}/{session}/contacts/{segment}",
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def search_contacts(
+        self,
+        session: str,
+        query: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List contacts; when query is given, filter by name/id locally."""
+        params: dict[str, Any] = {"session": session, "limit": limit}
+        response = self._client.get(
+            f"{API_PREFIX}/contacts/all",
+            params=params,
+        )
+        response.raise_for_status()
+        contacts = response.json()
+        if query:
+            needle = query.casefold()
+            contacts = [
+                c
+                for c in contacts
+                if needle in str(c.get("name", "")).casefold()
+                or needle in str(c.get("id", "")).casefold()
+            ]
+        return contacts
+
+    def search_messages(
+        self,
+        session: str,
+        query: str,
+        chat_id: str | None = None,
+        limit: int = 200,
+        from_me: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search recent messages for a text substring, filtering locally.
+
+        Fetches up to ``limit`` recent messages (across all chats when
+        ``chat_id`` is None) and keeps those whose body, media filename
+        or media mimetype contains ``query`` (case-insensitive).
+        """
+        params: dict[str, Any] = {
+            "session": session,
+            "limit": limit,
+            "merge": True,
+        }
+        if chat_id:
+            params["chatId"] = chat_id
+        if from_me is not None:
+            params["filter.fromMe"] = from_me
+        response = self._client.get(f"{API_PREFIX}/messages", params=params)
+        response.raise_for_status()
+        messages = response.json()
+        needle = query.casefold()
+        return [m for m in messages if message_matches(m, needle)]
+
+    def forward_message(
+        self,
+        session: str,
+        chat_id: str,
+        message_id: str,
+    ) -> None:
+        """Forward a message to another chat, raising for HTTP errors."""
+        self._client.post(
+            f"{API_PREFIX}/forwardMessage",
+            json={
+                "session": session,
+                "chatId": chat_id,
+                "messageId": message_id,
+            },
+        ).raise_for_status()
+
+    def set_typing(
+        self,
+        session: str,
+        chat_id: str,
+        typing: bool,
+    ) -> None:
+        """Start or stop the typing indicator, raising for HTTP errors."""
+        endpoint = f"{API_PREFIX}/startTyping" if typing else f"{API_PREFIX}/stopTyping"
+        self._client.post(
+            endpoint, json={"session": session, "chatId": chat_id}
+        ).raise_for_status()

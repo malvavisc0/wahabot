@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     agent_system_prompt: str = (
         "You are a helpful assistant replying to WhatsApp messages."
     )
+    timezone: str = "UTC"
 
     session: str = "default"
 
