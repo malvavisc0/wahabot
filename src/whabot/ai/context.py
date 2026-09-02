@@ -106,4 +106,5 @@ async def handle_message(
     logger.info("Agent handling message from {chat_id}", chat_id=chat_id)
     user_msg = body + reply_context_section(message_replies_to(event))
     result = await agent.run(input=user_msg, ctx=ctx)
-    return str(result["response"])
+    content: str | None = result.message.content
+    return content.strip() if content else ""

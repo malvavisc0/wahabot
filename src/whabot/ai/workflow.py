@@ -22,7 +22,7 @@ from llama_index.core.workflow import (
 )
 from llama_index.llms.openai_like import OpenAILike
 
-from whabot.ai.events import InputEvent, StreamEvent, ToolCallEvent
+from whabot.ai.events import InputEvent, ToolCallEvent
 from whabot.settings import Settings
 
 __all__ = [
@@ -30,6 +30,11 @@ __all__ = [
     "build_agent",
     "load_llm",
 ]
+
+
+def raise_missing_llm() -> FunctionCallingLLM:
+    """Fail fast when no llm was passed to the workflow."""
+    raise ValueError("FunctionCallingAgentWorkflow requires an llm")
 
 
 class FunctionCallingAgentWorkflow(Workflow):
@@ -46,13 +51,12 @@ class FunctionCallingAgentWorkflow(Workflow):
         super().__init__(*args, **kwargs)
         self.tools = tools or []
         self.system_prompt = system_prompt
-        self.llm = llm or OpenAILike(model="gpt-4o-mini", api_base="", api_key="")
+        self.llm = llm or raise_missing_llm()
         assert self.llm.metadata.is_function_calling_model
 
     @step
     async def prepare_chat_history(self, ctx: Context, ev: StartEvent) -> InputEvent:
         """Add the incoming user message to memory and fetch chat history."""
-        await ctx.store.set("sources", [])
         memory = await ctx.store.get("memory", default=None)
         if not memory:
             memory = ChatMemoryBuffer.from_defaults(llm=None)
@@ -67,15 +71,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         self, ctx: Context, ev: InputEvent
     ) -> ToolCallEvent | StopEvent:
         """Call the LLM with tools + history; loop on tool calls."""
-        chat_history = ev.input
-        response_stream = await self.llm.astream_chat_with_tools(
-            self.tools, chat_history=chat_history
-        )
-        response = None
-        async for response in response_stream:
-            ctx.write_event_to_stream(StreamEvent(delta=response.delta or ""))
-        if response is None:
-            raise RuntimeError("LLM returned an empty response stream")
+        response = await self.llm.achat_with_tools(self.tools, chat_history=ev.input)
         memory = await ctx.store.get("memory")
         await memory.aput(response.message)
         await ctx.store.set("memory", memory)
@@ -83,8 +79,7 @@ class FunctionCallingAgentWorkflow(Workflow):
             response, error_on_no_tool_call=False
         )
         if not tool_calls:
-            sources = await ctx.store.get("sources", default=[])
-            return StopEvent(result={"response": response, "sources": sources})
+            return StopEvent(result=response)
         return ToolCallEvent(tool_calls=tool_calls)
 
     @step
@@ -92,7 +87,6 @@ class FunctionCallingAgentWorkflow(Workflow):
         """Run requested tools, collect outputs, feed them back to memory."""
         tools_by_name = {tool.metadata.get_name(): tool for tool in self.tools}
         tool_msgs: list[ChatMessage] = []
-        sources = await ctx.store.get("sources", default=[])
         for tool_call in ev.tool_calls:
             tool = tools_by_name.get(tool_call.tool_name)
             kwargs = {
@@ -119,7 +113,6 @@ class FunctionCallingAgentWorkflow(Workflow):
                     )
                 )
                 continue
-            sources.append(tool_output)
             tool_msgs.append(
                 ChatMessage(
                     role="tool",
@@ -130,17 +123,17 @@ class FunctionCallingAgentWorkflow(Workflow):
         memory = await ctx.store.get("memory")
         for msg in tool_msgs:
             await memory.aput(msg)
-        await ctx.store.set("sources", sources)
         await ctx.store.set("memory", memory)
         return InputEvent(input=await memory.aget())
 
 
 def load_llm(settings: Settings) -> FunctionCallingLLM:
-    """Configure the OpenAI-compatible LLM from settings."""
+    """Configure the OpenAI-compatible chat LLM from settings."""
     return OpenAILike(
         model=settings.llm_model,
         api_base=settings.llm_api_base,
         api_key=settings.llm_api_key,
+        is_chat_model=True,
         is_function_calling_model=True,
     )
 
@@ -148,13 +141,15 @@ def load_llm(settings: Settings) -> FunctionCallingLLM:
 def build_agent(
     settings: Settings,
     tools: list[BaseTool] | None = None,
-    system_prompt: str | None = None,
+    system_prompt: str = "",
     timeout: int = 120,
 ) -> FunctionCallingAgentWorkflow:
     """Build the function calling agent workflow with the configured LLM."""
+    if not system_prompt:
+        raise ValueError("build_agent requires a system_prompt")
     return FunctionCallingAgentWorkflow(
         llm=load_llm(settings),
         tools=tools or [],
-        system_prompt=system_prompt or settings.agent_system_prompt,
+        system_prompt=system_prompt,
         timeout=timeout,
     )
