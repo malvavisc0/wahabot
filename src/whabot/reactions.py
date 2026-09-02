@@ -26,7 +26,7 @@ def register_reaction_handler(settings: Settings, waha: WahaClient | None = None
                 sender=event.payload.get("from"),
             )
             return
-        message = _fetch_target(waha, event.session, target_id)
+        message = fetch_target(waha, event.session, target_id)
         if message is None or not message.get("fromMe"):
             return
         emoji = str(reaction.get("text", "")).strip() or "(removed)"
@@ -38,7 +38,7 @@ def register_reaction_handler(settings: Settings, waha: WahaClient | None = None
         )
 
 
-def _fetch_target(
+def fetch_target(
     waha: WahaClient, session: str, target_id: str
 ) -> dict[str, Any] | None:
     """Fetch the reacted-to message, or None if it cannot be retrieved."""

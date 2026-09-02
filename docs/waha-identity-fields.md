@@ -56,7 +56,11 @@ So you can:
 
 ## Access list file
 
-`bot/config.json` (path override: `WHABOT_ACCESS_CONFIG`):
+Access lists live in the session config at
+`data/sessions/<session>.json` (see
+[`docs/session-config.md`](./session-config.md)); the file also carries
+the session's `system_prompt`, bot mention regex and group
+participation mode:
 
 ```json
 {
