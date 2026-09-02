@@ -1,6 +1,7 @@
 """Per-session config (access lists + system prompt) loaded from a JSON file."""
 
 import json
+import threading
 from pathlib import Path
 
 from loguru import logger
@@ -40,13 +41,78 @@ def load_session_config(path: Path) -> SessionConfig:
     """
     if not path.exists():
         raise FileNotFoundError(f"Session config not found: {path}")
-    config = SessionConfig.model_validate(json.loads(path.read_text()))
+    config = parse_session_config(path.read_text(), path)
+    log_config_load(path, config)
+    return config
+
+
+def parse_session_config(raw: str, path: Path) -> SessionConfig:
+    """Parse and validate session config text; raise when unusable."""
+    config = SessionConfig.model_validate(json.loads(raw))
     if not config.system_prompt.strip():
         raise ValueError(f"Session config {path} has an empty system_prompt")
-    summary = (
-        f"Loaded session config from {path}: {len(config.whitelist)} whitelisted, "
-        f"{len(config.blacklist)} blacklisted, "
-        f"group_participation={config.group_participation}"
-    )
-    logger.info(summary)
     return config
+
+
+def log_config_load(path: Path, config: SessionConfig) -> None:
+    """Log a successful config load in one summary line."""
+    logger.info(
+        "Loaded session config from {path}: {wl} whitelisted, {bl} blacklisted, "
+        "group_participation={mode}",
+        path=path,
+        wl=len(config.whitelist),
+        bl=len(config.blacklist),
+        mode=config.group_participation,
+    )
+
+
+class SessionConfigReloader:
+    """Reloads the session config when its file changes, per event.
+
+    ``current_config`` stats the file on every call — microseconds — and
+    only re-reads/parses when mtime or size changed, so config edits
+    (whitelist, system prompt, participation mode) apply without a
+    restart. A file that becomes unreadable or invalid mid-edit keeps
+    the last good config and logs the problem; the next event retries.
+    Safe for concurrent handler use via a lock (stats are cheap).
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._config: SessionConfig | None = None
+        self._fingerprint: tuple[float, int] | None = None
+
+    def current_config(self) -> SessionConfig:
+        """The newest valid config, reloading only when the file changed."""
+        with self._lock:
+            try:
+                stat = self.path.stat()
+            except OSError:
+                logger.warning(
+                    "Session config {path} is gone; keeping last good", path=self.path
+                )
+                return self._cached()
+            fingerprint = (stat.st_mtime, stat.st_size)
+            if fingerprint != self._fingerprint:
+                try:
+                    config = parse_session_config(self.path.read_text(), self.path)
+                except Exception as exc:
+                    logger.error(
+                        "Session config {path} failed to reload: {exc}; "
+                        "keeping last good",
+                        path=self.path,
+                        exc=exc,
+                    )
+                    self._fingerprint = fingerprint
+                    return self._cached()
+                self._config = config
+                self._fingerprint = fingerprint
+                log_config_load(self.path, config)
+            return self._cached()
+
+    def _cached(self) -> SessionConfig:
+        """The last good config; raises when none was ever loaded."""
+        if self._config is None:
+            raise FileNotFoundError(f"Session config not found: {self.path}")
+        return self._config

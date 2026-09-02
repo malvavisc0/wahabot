@@ -1,5 +1,6 @@
 """Reaction handling: log reactions to messages the bot sent."""
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -23,7 +24,7 @@ def register_reaction_handler(waha: WahaClient) -> None:
                 sender=event.payload.get("from"),
             )
             return
-        message = fetch_target(waha, event.session, target_id)
+        message = await asyncio.to_thread(fetch_target, waha, event.session, target_id)
         if message is None or not message.get("fromMe"):
             return
         emoji = str(reaction.get("text", "")).strip() or "(removed)"

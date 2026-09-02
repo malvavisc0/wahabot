@@ -7,6 +7,9 @@ gets tools + history, tool results loop back, and the final text comes
 back in ``StopEvent.result``.
 """
 
+import asyncio
+from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from llama_index.core.llms import ChatMessage, MessageRole
@@ -39,17 +42,24 @@ def raise_missing_llm() -> FunctionCallingLLM:
     raise ValueError("FunctionCallingAgentWorkflow requires an llm")
 
 
-def run_tool_call(
+async def run_tool_call(
     tools_by_name: dict[str, BaseTool], tool_call: ToolSelection
 ) -> ChatMessage:
-    """Run one tool call, returning its output (or the failure) as a tool message."""
+    """Run one tool call, returning its output (or the failure) as a tool message.
+
+    Tool functions are sync and do network I/O (WAHA, web), so they run
+    in a worker thread via ``asyncio.to_thread`` to keep the event loop
+    responsive.
+    """
     tool = tools_by_name.get(tool_call.tool_name)
     kwargs = {"tool_call_id": tool_call.tool_id, "name": tool_call.tool_name}
     if tool is None:
         content = f"Tool {tool_call.tool_name} does not exist"
     else:
         try:
-            content = tool(**tool_call.tool_kwargs).content
+            fn = partial(tool, **tool_call.tool_kwargs)
+            called = await asyncio.to_thread(fn)
+            content = called.content
         except Exception as exc:
             content = f"Encountered error in tool call: {exc}"
     return ChatMessage(role="tool", content=content, additional_kwargs=kwargs)
@@ -69,21 +79,32 @@ class FunctionCallingAgentWorkflow(Workflow):
         llm: FunctionCallingLLM | None = None,
         tools: list[BaseTool] | None = None,
         system_prompt: str | None = None,
+        prompt_renderer: Callable[[str], str] | None = None,
         memory_token_limit: int = 8000,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.tools = tools or []
         self.system_prompt = system_prompt
+        self.prompt_renderer = prompt_renderer
         self.llm = llm or raise_missing_llm()
         self.memory_token_limit = memory_token_limit
         assert self.llm.metadata.is_function_calling_model
 
-    def _system_message(self) -> ChatMessage | None:
-        """The system prompt as a message, or None when unset."""
+    def _rendered_system_prompt(self) -> str | None:
+        """The system prompt with ``prompt_renderer`` applied when set."""
         if not self.system_prompt:
             return None
-        return ChatMessage(role="system", content=self.system_prompt)
+        if self.prompt_renderer is None:
+            return self.system_prompt
+        return self.prompt_renderer(self.system_prompt)
+
+    def _system_message(self) -> ChatMessage | None:
+        """The system prompt as a message, or None when unset."""
+        prompt = self._rendered_system_prompt()
+        if not prompt:
+            return None
+        return ChatMessage(role="system", content=prompt)
 
     async def _chat_history(self, ctx: Context) -> list[ChatMessage]:
         """The trimmed, structurally valid conversation plus system prompt.
@@ -111,9 +132,10 @@ class FunctionCallingAgentWorkflow(Workflow):
         exceeds its token limit; a huge system prompt would crash every
         run. Clamp so the conversation simply gets no room instead.
         """
-        if not self.system_prompt:
+        prompt = self._rendered_system_prompt()
+        if not prompt:
             return 0
-        tokens = len(memory.tokenizer_fn(self.system_prompt))
+        tokens = len(memory.tokenizer_fn(prompt))
         if tokens >= memory.token_limit:
             logger.warning(
                 (
@@ -191,18 +213,25 @@ class FunctionCallingAgentWorkflow(Workflow):
     async def handle_llm_input(
         self, ctx: Context, ev: InputEvent
     ) -> ToolCallEvent | StopEvent:
-        """Call the LLM with tools + history; loop on tool calls."""
+        """Call the LLM with tools + history; loop on tool calls.
+
+        An assistant response with empty content is a chosen silence,
+        not data: it is never stored to memory, so the rolling buffer
+        never carries empty ``assistant`` turns that some
+        OpenAI-compatible providers reject outright.
+        """
         image_blocks = await ctx.store.get("image_blocks", default=None)
         if image_blocks:
             await ctx.store.set("image_blocks", None)
         chat_history = self._with_image(list(ev.input), image_blocks)
         response = await self.llm.achat_with_tools(self.tools, chat_history=chat_history)
-        memory = await ctx.store.get("memory")
-        await memory.aput(response.message)
-        await ctx.store.set("memory", memory)
         tool_calls = self.llm.get_tool_calls_from_response(
             response, error_on_no_tool_call=False
         )
+        memory = await ctx.store.get("memory")
+        if tool_calls or str(response.message.content or "").strip():
+            await memory.aput(response.message)
+        await ctx.store.set("memory", memory)
         if not tool_calls:
             return StopEvent(result=response)
         return ToolCallEvent(tool_calls=tool_calls)
@@ -212,7 +241,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         """Run requested tools, collect outputs, feed them back into memory."""
         tools_by_name = {tool.metadata.get_name(): tool for tool in self.tools}
         tool_msgs = [
-            run_tool_call(tools_by_name, tool_call) for tool_call in ev.tool_calls
+            await run_tool_call(tools_by_name, tool_call) for tool_call in ev.tool_calls
         ]
         memory = await ctx.store.get("memory")
         for msg in tool_msgs:
@@ -236,15 +265,22 @@ def build_agent(
     settings: Settings,
     tools: list[BaseTool] | None = None,
     system_prompt: str = "",
+    prompt_renderer: Callable[[str], str] | None = None,
     timeout: int = 120,
 ) -> FunctionCallingAgentWorkflow:
-    """Build the function calling agent workflow with the configured LLM."""
+    """Build the function calling agent workflow with the configured LLM.
+
+    ``prompt_renderer`` (optional) re-renders ``{{...}}`` placeholders in
+    the system prompt on every run, so date/time values stay current for
+    the life of the process.
+    """
     if not system_prompt:
         raise ValueError("build_agent requires a system_prompt")
     return FunctionCallingAgentWorkflow(
         llm=load_llm(settings),
         tools=tools or [],
         system_prompt=system_prompt,
+        prompt_renderer=prompt_renderer,
         timeout=timeout,
         memory_token_limit=settings.memory_token_limit,
     )

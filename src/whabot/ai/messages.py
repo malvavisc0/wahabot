@@ -80,11 +80,15 @@ def bot_mention_pattern(
     Prefers the configured ``bot_mention_regex`` (the user controls the
     variants, e.g. `@?[kĸ]a[iy]` for kai/kay/ĸay). Falls back to a
     case-insensitive whole-word match of ``bot_name`` with an optional
-    ``@`` prefix.
+    ``@`` prefix. Without a name or regex there is nothing to match, so
+    the pattern never matches (an empty ``bot_name`` would otherwise
+    compile to a zero-width regex matching almost any text).
     """
     if bot_mention_regex:
         return re.compile(bot_mention_regex)
-    quoted = re.escape(bot_name or "")
+    if not bot_name:
+        return re.compile(r"(?!x)x")
+    quoted = re.escape(bot_name)
     return re.compile(rf"(?iu)(?<![^\W_])@?{quoted}(?!\w)")
 
 
@@ -96,16 +100,25 @@ def bot_mentioned(
     """Whether the message mentions the bot by name/regex or via our JID.
 
     In groups this matches the configured regex (e.g. ``@kai``,
-    ``@kay``, ``ĸay``, ``kai``) or the bot's JID in ``mentionedJidList``.
+    ``@kay``, ``ĸay``, ``kai``) or the bot's own JID(s) in
+    ``mentionedJidList``. Both identities are checked: WhatsApp
+    carries mentions of the account's phone JID (``@c.us``) or its
+    linked-device LID (``@lid``) depending on the group type.
     """
     payload = event.payload
-    me = (event.me or {}).get("id")
+    me_ids = bot_jids(event)
     mentioned = payload.get("_data", {}).get("mentionedJidList", [])
-    if me and me in mentioned:
+    if me_ids & {str(jid) for jid in mentioned}:
         return True
     pattern = bot_mention_pattern(bot_name, bot_mention_regex)
     body = str(payload.get("body", ""))
     return bool(pattern.search(body))
+
+
+def bot_jids(event: WahaEvent) -> set[str]:
+    """The bot's own JIDs — its phone id and, when known, its LID."""
+    me = event.me or {}
+    return {str(me[key]) for key in ("id", "lid") if me.get(key)}
 
 
 def is_group_addressed(
@@ -143,9 +156,13 @@ def replies_to_bot(
     bot_name: str | None = None,
     bot_mention_regex: str | None = None,
 ) -> bool:
-    """Whether a group message mentions the bot or quotes one of its messages."""
+    """Whether a group message mentions the bot or quotes one of its messages.
+
+    The quoted message's sender is matched against both of the bot's
+    identities: quotes of the bot's messages carry its phone JID or its
+    LID depending on the group type.
+    """
     if bot_mentioned(event, bot_name, bot_mention_regex):
         return True
     quoted = message_replies_to(event)
-    me = (event.me or {}).get("id")
-    return bool(quoted and me and quoted.get("participant") == me)
+    return bool(quoted and str(quoted.get("participant", "")) in bot_jids(event))
