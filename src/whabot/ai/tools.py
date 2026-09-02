@@ -50,6 +50,7 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         if not session or not chat_id:
             return "Error: no active conversation context."
         waha.send_text(session, chat_id, text)
+        target["sent"] = chat_id
         return f"Sent '{text}' to {chat_id}."
 
     return FunctionTool.from_defaults(
@@ -261,22 +262,23 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         chat: str | None = None,
         limit: int = 20,
     ) -> str:
-        """Search recent messages containing a text substring.
+        """Search a chat's recent messages containing a text substring.
 
         Searches body text, media filenames and mimetypes.
 
         Args:
             query: The text to look for.
             chat: Optional chat id to scope the search. Omit to search
-                across all chats.
+                the current chat.
             limit: Max matches to return (default 20).
         """
         session = target.get("session", "")
-        if not session:
+        chat_id = chat or target.get("chat_id", "")
+        if not session or not chat_id:
             return "Error: no active conversation context."
         if not query.strip():
             return "Error: query is required."
-        messages = waha.search_messages(session, query, chat_id=chat or None, limit=limit)
+        messages = waha.search_messages(session, query, chat_id, limit=limit)
         lines: list[str] = []
         for m in messages[:limit]:
             chat_id = m.get("chatId") or m.get("_data", {}).get("id", {}).get(
@@ -295,9 +297,9 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         fn=search_messages_fn,
         name="search_messages",
         description=(
-            "Search recent messages for a text substring in body, media "
-            "filename or mimetype. Returns matching message lines. Pass "
-            "chat to search within one chat, else search across chats."
+            "Search a chat's recent messages for a text substring in body, "
+            "media filename or mimetype. Returns matching message lines. "
+            "Pass chat to search another chat, else the current one."
         ),
     )
 

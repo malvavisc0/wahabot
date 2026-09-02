@@ -8,13 +8,11 @@ from loguru import logger
 from whabot.core.messages import chat_id_from_message_id, message_preview
 from whabot.core.models import WahaEvent
 from whabot.core.waha import WahaClient
-from whabot.settings import Settings
 from whabot.webhook import on_reaction
 
 
-def register_reaction_handler(settings: Settings, waha: WahaClient | None = None) -> None:
+def register_reaction_handler(waha: WahaClient) -> None:
     """Log reactions the recipients give to messages the bot sent."""
-    waha = waha or WahaClient(base_url=settings.waha_url, api_key=settings.waha_api_key)
 
     @on_reaction
     async def log_reaction(event: WahaEvent) -> None:
@@ -38,9 +36,7 @@ def register_reaction_handler(settings: Settings, waha: WahaClient | None = None
         )
 
 
-def fetch_target(
-    waha: WahaClient, session: str, target_id: str
-) -> dict[str, Any] | None:
+def fetch_target(waha: WahaClient, session: str, target_id: str) -> dict[str, Any] | None:
     """Fetch the reacted-to message, or None if it cannot be retrieved."""
     try:
         return waha.get_message(session, chat_id_from_message_id(target_id), target_id)
