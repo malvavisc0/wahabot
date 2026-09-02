@@ -12,7 +12,7 @@ system prompt, and how the bot participates in group chats.
 |---|---|---|---|
 | `whitelist` | `string[]` | `[]` | Allowed chats/participants. Empty = answer everybody. |
 | `blacklist` | `string[]` | `[]` | Denied chats/participants. Always wins over the whitelist. |
-| `system_prompt` | `string` | **required** | The agent system prompt. Supports `{{date}}`, `{{time}}`, `{{now}}`, `{{tz}}` variables. The server refuses to start without it. |
+| `system_prompt` | `string` | **required** | The agent system prompt. Supports `{{date}}`, `{{time}}`, `{{now}}`, `{{tz}}`, `{{bot_name}}` variables. The server refuses to start without it. |
 | `bot_name` | `string \| null` | `null` | The bot's display name (e.g. `"Kai"`). Used only as a fallback mention matcher. |
 | `bot_mention_regex` | `string \| null` | `null` | A regex detecting when the bot is addressed in a group. Defaults to a case-insensitive whole-word `@?<bot_name>`. |
 | `group_participation` | `"never" \| "mentioned" \| "judicious"` | `"mentioned"` | How the bot joins group conversations (below). |
@@ -25,7 +25,7 @@ Example:
   "blacklist": [],
   "system_prompt": "You are Kai, a friend in this WhatsApp group... Today is {{date}}. Current time {{time}} ({{tz}}).",
   "bot_name": "Kai",
-  "bot_mention_regex": "(?i)@?[kĸ]a[iy]",
+  "bot_mention_regex": "(?i)(?<![a-z@])@?k[aā]i(?![a-z])",
   "group_participation": "judicious"
 }
 ```
@@ -47,6 +47,7 @@ any code-side default.
 - `{{time}}` — e.g. `14:30`
 - `{{now}}` / `{{datetime}}` — e.g. `2026-09-02 14:30 UTC`
 - `{{tz}}` — the timezone name, e.g. `America/Santiago`
+- `{{bot_name}}` — the `bot_name` field, e.g. `Kai`
 
 ## Group participation
 
@@ -68,15 +69,18 @@ A group message "addresses" the bot when:
 2. `bot_mention_regex` (or the `bot_name` fallback) matches the message
    text.
 
-The regex is applied as-is, so you control the variants — for example,
-to let people reach Kai as `@kai`, `@kay`, `ĸay` or just `kai`:
+The regex is applied as-is, so you control the variants. Add word
+boundaries (`(?<![a-z@])…(?![a-z])`) so the name only counts as a
+standalone word and does not fire inside ordinary words like
+`kaizo` or `chikai`:
 
 ```json
-"bot_mention_regex": "(?i)@?[kĸ]a[iy]"
+"bot_mention_regex": "(?i)(?<![a-z@])@?k[aā]i(?![a-z])"
 ```
 
-`(?i)` makes the character class case-insensitive, so `@KAY`,
-`ĸay`, `kai` and `kay` all count as a mention.
+`(?i)` makes it case-insensitive (so `kAI` matches), and the
+lookarounds require a word boundary before and after, so `kAI`,
+`@kai` and `KAI!` are mentions but `kaizo` is not.
 
 ## Access control
 
