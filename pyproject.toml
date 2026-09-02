@@ -20,6 +20,10 @@ dependencies = [
     "webserp",
     "yfinance",
     "youtube-transcript-api",
+    # LLM observability (Langfuse); observability.py degrades to a no-op
+    # without credentials, and these stay dormant unless enabled.
+    "langfuse",
+    "opentelemetry-instrumentation-llamaindex",
 ]
 
 [project.scripts]

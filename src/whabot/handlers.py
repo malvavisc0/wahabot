@@ -14,6 +14,7 @@ from whabot.ai.messages import (
     is_group_addressed,
     is_replyable,
 )
+from whabot.ai.observability import chat_trace_attributes, enable_langfuse
 from whabot.ai.tools import build_default_tools
 from whabot.ai.workflow import build_agent
 from whabot.core.access import load_session_config
@@ -91,6 +92,7 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
     """Build the agent and register the reply handler."""
     send_tool_holder: dict[str, str] = {}
     config = load_session_config(settings.access_config)
+    enable_langfuse(settings)
     agent = build_agent(
         settings,
         tools=build_default_tools(waha, send_tool_holder),
@@ -149,9 +151,10 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
         send_tool_holder["sent"] = ""
         ctx = contexts.setdefault((event.session, chat_id), Context(agent))
         async with _agent_lock:
-            reply = await handle_message(
-                event, agent, ctx=ctx, image=image, settings=settings
-            )
+            with chat_trace_attributes(chat_id):
+                reply = await handle_message(
+                    event, agent, ctx=ctx, image=image, settings=settings
+                )
         if send_tool_holder["sent"]:
             logger.debug("Agent already sent its reply in {chat_id}", chat_id=chat_id)
             return

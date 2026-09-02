@@ -28,6 +28,7 @@ The AI code is split into focused modules under `src/whabot/ai/`:
 | `web_search.py` / `visit_url.py` | Web lookup tools (webserp CLI, curl_cffi page fetch) |
 | `url_images.py` | Image-URL sniffing from message text (curl_cffi fetch, Content-Type check) |
 | `finance.py` / `youtube.py` | Market data (yfinance) and YouTube transcript tools |
+| `observability.py` | Opt-in Langfuse trace export (see below) |
 
 ## How the workflow works
 
@@ -196,6 +197,30 @@ example serves `image/webp` despite the `.png` path), and the
 Fetched images join the WhatsApp-attached ones as additional
 `image_blocks` on the same first-LLM-call injection; failures are
 logged and skipped, never fatal for the turn.
+
+## LLM observability (Langfuse)
+
+`whabot.ai.observability` exports every agent run's LLM calls —
+prompts, completions, token usage, model, latency — to
+[Langfuse](https://langfuse.com) when credentials are configured.
+Strictly opt-in and fail-soft: without both `LANGFUSE_PUBLIC_KEY` and
+`LANGFUSE_SECRET_KEY` (plus optional `LANGFUSE_BASE_URL` for the
+region/self-hosted instance, read via `Settings` from `.env`),
+`enable_langfuse` is a no-op and nothing leaves the process; when they
+are set, `LlamaIndexInstrumentor` emits OpenTelemetry spans through the
+global tracer provider and the Langfuse client ships them from
+background threads.
+
+Each turn is wrapped in `chat_trace_attributes(chat_id)`, which stamps
+the OpenTelemetry context with a stable `wa:<chat_id>` session id and a
+`whabot` tag — so one WhatsApp chat shows up as one session in the
+Langfuse UI, with each bot turn as a trace. WhatsApp JIDs are PII; the
+export-stage `mask_otel_spans` hook rewrites span attributes to
+`[jid redacted]` before they leave the process (the session id itself is
+exempt — masking it would collapse every chat into one anonymous
+session). Credentials are checked
+once with a best-effort `auth_check` (a failure warns but never disables
+tracing), and an `atexit` flush covers the server's shutdown.
 
 > **Group participation.** `handle_message` is only reached for a group
 > message when the participation mode decides to wake the agent —

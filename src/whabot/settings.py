@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from loguru import logger
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,6 +30,12 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     memory_token_limit: int = 8000
     timezone: str = "UTC"
+
+    #: Langfuse credentials (no WHABOT_ prefix — the SDK's conventional
+    #: names); empty disables LLM trace export entirely.
+    langfuse_public_key: str = Field(default="", alias="LANGFUSE_PUBLIC_KEY")
+    langfuse_secret_key: str = Field(default="", alias="LANGFUSE_SECRET_KEY")
+    langfuse_base_url: str = Field(default="", alias="LANGFUSE_BASE_URL")
 
     #: Only download and attach image messages when the model supports vision.
     vision: bool = True

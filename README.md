@@ -48,6 +48,9 @@ Point WAHA at the webhook:
   than 5 minutes, are dropped as WhatsApp replay backlog.
 - **Agent & tools** — see [`docs/agent-workflow.md`](docs/agent-workflow.md);
   per-session access/persona in [`docs/session-config.md`](docs/session-config.md).
+- **LLM observability** — with `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY`
+  set (optional `LANGFUSE_BASE_URL` for self-hosted), every agent turn is
+  exported to Langfuse as one session per chat; JIDs are masked.
 
 ## Checks
 
