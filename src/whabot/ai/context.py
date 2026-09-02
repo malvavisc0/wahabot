@@ -20,15 +20,19 @@ __all__ = [
 ]
 
 
-def render_system_prompt(prompt: str, tz_name: str = "UTC") -> str:
-    """Substitute date/time placeholders in the system prompt.
+def render_system_prompt(
+    prompt: str, tz_name: str = "UTC", bot_name: str | None = None
+) -> str:
+    """Substitute date/time/name placeholders in the system prompt.
 
-    Supported placeholders (all use the ``tz_name`` timezone):
+    Supported placeholders (all but ``{{bot_name}}`` use the ``tz_name``
+    timezone):
 
     - ``{{now}}`` / ``{{datetime}}`` — full timestamp, e.g. ``2026-09-02 14:05 UTC``
     - ``{{date}}`` — date only, e.g. ``2026-09-02``
     - ``{{time}}`` — time only, e.g. ``14:05``
     - ``{{tz}}`` — the timezone name, e.g. ``UTC``
+    - ``{{bot_name}}`` — the bot's display name, e.g. ``Kai``
 
     Unknown/invalid timezone names fall back to UTC.
     """
@@ -44,6 +48,7 @@ def render_system_prompt(prompt: str, tz_name: str = "UTC") -> str:
         "{{date}}": now.strftime("%Y-%m-%d"),
         "{{time}}": now.strftime("%H:%M"),
         "{{tz}}": tz_name,
+        "{{bot_name}}": bot_name or "the bot",
     }
     for key, value in replacements.items():
         prompt = prompt.replace(key, value)

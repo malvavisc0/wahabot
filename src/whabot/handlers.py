@@ -43,7 +43,9 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
     agent = build_agent(
         settings,
         tools=build_default_tools(waha, send_tool_holder),
-        system_prompt=render_system_prompt(config.system_prompt, settings.timezone),
+        system_prompt=render_system_prompt(
+            config.system_prompt, settings.timezone, config.bot_name
+        ),
     )
     access = config
 
