@@ -75,14 +75,11 @@ class WahaClient:
         chat_id: str,
         file: dict[str, Any],
         caption: str | None = None,
-        reply_to: str | None = None,
     ) -> None:
         """Send an image from a url or base64 payload, raising for HTTP errors."""
         body: dict[str, Any] = {"session": session, "chatId": chat_id, "file": file}
         if caption:
             body["caption"] = caption
-        if reply_to:
-            body["reply_to"] = reply_to
         self._client.post(f"{API_PREFIX}/sendImage", json=body).raise_for_status()
 
     def fetch_chat_messages(
@@ -90,18 +87,12 @@ class WahaClient:
         session: str,
         chat_id: str,
         limit: int = 50,
-        sort_order: str = "desc",
-        download_media: bool = False,
     ) -> list[dict[str, Any]]:
         """Fetch recent messages of a chat, raising for HTTP errors."""
         segment = quote(chat_id, safe="")
         response = self._client.get(
             f"{API_PREFIX}/{session}/chats/{segment}/messages",
-            params={
-                "limit": limit,
-                "sortOrder": sort_order,
-                "downloadMedia": download_media,
-            },
+            params={"limit": limit, "downloadMedia": False},
         )
         response.raise_for_status()
         return response.json()
@@ -112,12 +103,11 @@ class WahaClient:
         chat_id: str,
     ) -> Any:
         """Return a chat's metadata from the chats overview, raising for HTTP errors."""
-        segment = quote(chat_id, safe="")
-        body: dict[str, list[str]] = {"chatIds": [segment]}
-        response = self._client.post(
-            f"{API_PREFIX}/{session}/chats/overview",
-            json=body,
-        )
+        body = {
+            "filter": {"ids": [chat_id]},
+            "pagination": {"limit": 1, "offset": 0},
+        }
+        response = self._client.post(f"{API_PREFIX}/{session}/chats/overview", json=body)
         response.raise_for_status()
         items = response.json()
         return items[0] if isinstance(items, list) and items else {}
@@ -131,53 +121,25 @@ class WahaClient:
         response.raise_for_status()
         return response.json()
 
-    def search_contacts(
-        self,
-        session: str,
-        query: str | None = None,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        """List contacts; when query is given, filter by name/id locally."""
-        params: dict[str, Any] = {"session": session, "limit": limit}
-        response = self._client.get(
-            f"{API_PREFIX}/contacts/all",
-            params=params,
-        )
-        response.raise_for_status()
-        contacts = response.json()
-        if query:
-            needle = query.casefold()
-            contacts = [
-                c
-                for c in contacts
-                if needle in str(c.get("name", "")).casefold()
-                or needle in str(c.get("id", "")).casefold()
-            ]
-        return contacts
-
     def search_messages(
         self,
         session: str,
         query: str,
-        chat_id: str | None = None,
+        chat_id: str,
         limit: int = 200,
-        from_me: bool | None = None,
     ) -> list[dict[str, Any]]:
-        """Search recent messages for a text substring, filtering locally.
+        """Search a chat's recent messages for a text substring, filtering locally.
 
-        Fetches up to ``limit`` recent messages (across all chats when
-        ``chat_id`` is None) and keeps those whose body, media filename
-        or media mimetype contains ``query`` (case-insensitive).
+        Fetches up to ``limit`` recent messages of ``chat_id`` and keeps
+        those whose body, media filename or media mimetype contains
+        ``query`` (case-insensitive).
         """
         params: dict[str, Any] = {
             "session": session,
+            "chatId": chat_id,
             "limit": limit,
             "merge": True,
         }
-        if chat_id:
-            params["chatId"] = chat_id
-        if from_me is not None:
-            params["filter.fromMe"] = from_me
         response = self._client.get(f"{API_PREFIX}/messages", params=params)
         response.raise_for_status()
         messages = response.json()
