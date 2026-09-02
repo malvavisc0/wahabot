@@ -27,31 +27,21 @@ class Settings(BaseSettings):
     llm_api_base: str
     llm_api_key: str
     llm_model: str = "gpt-4o-mini"
-    agent_system_prompt: str = (
-        "You are a helpful assistant replying to WhatsApp messages."
-    )
     timezone: str = "UTC"
 
     session: str = "default"
 
     data_dir: Path = Path("data")
-    sessions_dir: Path | None = None
-    events_dir: Path | None = None
 
     @property
     def access_config(self) -> Path:
         """Path of this session's access config."""
-        return self.sessions_dir_config / f"{self.session}.json"
-
-    @property
-    def sessions_dir_config(self) -> Path:
-        """Directory holding per-session config files."""
-        return self.sessions_dir if self.sessions_dir else self.data_dir / "sessions"
+        return self.data_dir / "sessions" / f"{self.session}.json"
 
     @property
     def journal_dir(self) -> Path:
         """Directory of the raw event journal."""
-        return self.events_dir if self.events_dir else self.data_dir / "events"
+        return self.data_dir / "events"
 
 
 @lru_cache(maxsize=1)

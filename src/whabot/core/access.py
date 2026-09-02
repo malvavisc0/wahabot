@@ -11,8 +11,7 @@ class SessionConfig(BaseModel):
     """Per-session settings read from `<data>/sessions/<session>.json`.
 
     An empty whitelist means answer everybody; a blacklist entry is
-    always ignored, regardless of the whitelist. ``system_prompt``, when
-    set, overrides the agent's default system prompt.
+    always ignored, regardless of the whitelist.
 
     ``bot_name`` is the bot's display name used to detect when a group
     message is aimed at it (e.g. "Kai"). ``group_participation``
@@ -27,30 +26,27 @@ class SessionConfig(BaseModel):
 
     whitelist: set[str] = set()
     blacklist: set[str] = set()
-    system_prompt: str | None = None
+    system_prompt: str
     bot_name: str | None = None
     bot_mention_regex: str | None = None
     group_participation: str = "mentioned"
 
 
 def load_session_config(path: Path) -> SessionConfig:
-    """Read the session config file.
+    """Read the session config file; fail fast when it is unusable.
 
-    The file may be absent or empty; both mean "no filtering" and no
-    system prompt override.
+    The file must exist and define a ``system_prompt`` — a bot without
+    instructions must not start.
     """
     if not path.exists():
-        logger.info("No session config at {path}; using defaults", path=path)
-        return SessionConfig()
+        raise FileNotFoundError(f"Session config not found: {path}")
     config = SessionConfig.model_validate(json.loads(path.read_text()))
-    logger.info(
-        "Loaded session config from {path}: {n_white} whitelisted, "
-        "{n_black} blacklisted, system_prompt={has_prompt}, "
-        "group_participation={participation}",
-        path=path,
-        n_white=len(config.whitelist),
-        n_black=len(config.blacklist),
-        has_prompt=bool(config.system_prompt),
-        participation=config.group_participation,
+    if not config.system_prompt.strip():
+        raise ValueError(f"Session config {path} has an empty system_prompt")
+    summary = (
+        f"Loaded session config from {path}: {len(config.whitelist)} whitelisted, "
+        f"{len(config.blacklist)} blacklisted, "
+        f"group_participation={config.group_participation}"
     )
+    logger.info(summary)
     return config
