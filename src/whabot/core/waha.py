@@ -40,6 +40,12 @@ class WahaClient:
             session=session,
         )
 
+    def get_me(self, session: str) -> dict[str, Any]:
+        """Fetch the logged-in user's info; 404s when the session is dead."""
+        response = self._client.get(f"{API_PREFIX}/sessions/{session}/me")
+        response.raise_for_status()
+        return response.json()
+
     def get_message(self, session: str, chat_id: str, message_id: str) -> dict[str, Any]:
         """Fetch a single message by its serialized id, raising for HTTP errors."""
         segment = quote(chat_id, safe="")
