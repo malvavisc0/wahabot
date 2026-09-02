@@ -120,13 +120,17 @@ def is_group_addressed(
     if participation == "judicious":
         # Let the agent judge every text message; it may stay silent.
         return True
-    # "mentioned" mode
+    return replies_to_bot(event, bot_name, bot_mention_regex)
+
+
+def replies_to_bot(
+    event: WahaEvent,
+    bot_name: str | None = None,
+    bot_mention_regex: str | None = None,
+) -> bool:
+    """Whether a group message mentions the bot or quotes one of its messages."""
     if bot_mentioned(event, bot_name, bot_mention_regex):
         return True
     quoted = message_replies_to(event)
-    if quoted:
-        me = (event.me or {}).get("id")
-        quoted_by = quoted.get("participant")
-        if me and quoted_by == me:
-            return True
-    return False
+    me = (event.me or {}).get("id")
+    return bool(quoted and me and quoted.get("participant") == me)

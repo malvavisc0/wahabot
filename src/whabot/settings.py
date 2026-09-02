@@ -1,5 +1,6 @@
 """Typed settings loaded from environment variables and .env files."""
 
+import logging
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -51,7 +52,24 @@ def get_settings() -> Settings:
     return Settings()  # pydantic-settings reads os.environ
 
 
+class InterceptHandler(logging.Handler):
+    """Bridge stdlib logging records into loguru, one format for all logs."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+
+
 def setup_logging(settings: Settings) -> None:
-    """Configure loguru sinks from the log level."""
+    """Configure loguru sinks and route stdlib logging (uvicorn) through it."""
     logger.remove()
     logger.add(sys.stderr, level=settings.log_level.upper())
+    logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "httpx"):
+        std_logger = logging.getLogger(name)
+        std_logger.handlers = []
+        std_logger.propagate = True
+    logging.getLogger("httpx").setLevel(logging.WARNING)

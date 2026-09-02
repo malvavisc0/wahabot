@@ -54,9 +54,18 @@ async def waha_webhook(
 
     body = await request.body()
     verify_hmac(settings, body, x_webhook_hmac, x_webhook_hmac_algorithm)
-
     save_event(settings.journal_dir, session, body)
+    event = parse_event(session, body)
+    log_event(event)
+    if event.event == "message.reaction":
+        await dispatch_reaction(event)
+    elif event.event.startswith("message"):
+        await dispatch(event)
+    return event
 
+
+def parse_event(session: str, body: bytes) -> WahaEvent:
+    """Validate the event body; reject malformed or foreign-session events."""
     try:
         event = WahaEvent.model_validate_json(body)
     except (UnicodeDecodeError, ValueError) as exc:
@@ -69,17 +78,17 @@ async def waha_webhook(
             route_session=session,
         )
         raise HTTPException(status_code=404, detail=f"Unknown session {event.session!r}")
+    return event
+
+
+def log_event(event: WahaEvent) -> None:
+    """Log the incoming event briefly."""
     logger.info(
         "Received {event} event from session {session}",
         event=event.event,
         session=event.session,
     )
     logger.debug("Event payload: {payload}", payload=event.payload)
-    if event.event == "message.reaction":
-        await dispatch_reaction(event)
-    elif event.event.startswith("message"):
-        await dispatch(event)
-    return event
 
 
 @app.get("/health")

@@ -10,7 +10,7 @@ from loguru import logger
 from whabot.core.waha import WahaClient
 from whabot.handlers import register_agent_handler
 from whabot.reactions import register_reaction_handler
-from whabot.settings import get_settings, setup_logging
+from whabot.settings import Settings, get_settings, setup_logging
 
 app = typer.Typer(
     name="whabot",
@@ -35,6 +35,24 @@ def config() -> None:
         typer.echo(f"{key}={shown}")
 
 
+def ensure_session_live(waha: WahaClient, settings: Settings) -> None:
+    """Abort startup when the WAHA session is not reachable."""
+    try:
+        me = waha.get_me(settings.session)
+    except httpx.HTTPError as exc:
+        message = (
+            f"WAHA session '{settings.session}' is not reachable at"
+            f" {settings.waha_url}: {exc}"
+        )
+        raise typer.BadParameter(message) from exc
+    logger.info(
+        "WAHA session {session} is live as {push_name} ({id})",
+        session=settings.session,
+        push_name=me.get("pushName") or "?",
+        id=me.get("id") or "?",
+    )
+
+
 @app.command()
 def serve(
     host: str = typer.Option(
@@ -54,20 +72,7 @@ def serve(
         settings.session = session
     setup_logging(settings)
     waha = WahaClient(base_url=settings.waha_url, api_key=settings.waha_api_key)
-    try:
-        me = waha.get_me(settings.session)
-    except httpx.HTTPError as exc:
-        message = (
-            f"WAHA session '{settings.session}' is not reachable at"
-            f" {settings.waha_url}: {exc}"
-        )
-        raise typer.BadParameter(message) from exc
-    logger.info(
-        "WAHA session {session} is live as {push_name} ({id})",
-        session=settings.session,
-        push_name=me.get("pushName") or "?",
-        id=me.get("id") or "?",
-    )
+    ensure_session_live(waha, settings)
     register_agent_handler(settings, waha=waha)
     register_reaction_handler(waha=waha)
     (settings.journal_dir / settings.session).mkdir(parents=True, exist_ok=True)
@@ -90,6 +95,7 @@ def serve(
         host=host,
         port=port,
         reload=reload,
+        log_config=None,
         http="whabot.core.connection_log:LoggingH11Protocol",
     )
 

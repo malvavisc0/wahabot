@@ -12,7 +12,7 @@ from typing import Any
 from llama_index.core.llms import ChatMessage
 from llama_index.core.llms.function_calling import FunctionCallingLLM
 from llama_index.core.memory import ChatMemoryBuffer
-from llama_index.core.tools import BaseTool
+from llama_index.core.tools import BaseTool, ToolSelection
 from llama_index.core.workflow import (
     Context,
     StartEvent,
@@ -35,6 +35,22 @@ __all__ = [
 def raise_missing_llm() -> FunctionCallingLLM:
     """Fail fast when no llm was passed to the workflow."""
     raise ValueError("FunctionCallingAgentWorkflow requires an llm")
+
+
+def run_tool_call(
+    tools_by_name: dict[str, BaseTool], tool_call: ToolSelection
+) -> ChatMessage:
+    """Run one tool call, returning its output (or the failure) as a tool message."""
+    tool = tools_by_name.get(tool_call.tool_name)
+    kwargs = {"tool_call_id": tool_call.tool_id, "name": tool_call.tool_name}
+    if tool is None:
+        content = f"Tool {tool_call.tool_name} does not exist"
+    else:
+        try:
+            content = tool(**tool_call.tool_kwargs).content
+        except Exception as exc:
+            content = f"Encountered error in tool call: {exc}"
+    return ChatMessage(role="tool", content=content, additional_kwargs=kwargs)
 
 
 class FunctionCallingAgentWorkflow(Workflow):
@@ -84,42 +100,11 @@ class FunctionCallingAgentWorkflow(Workflow):
 
     @step
     async def handle_tool_calls(self, ctx: Context, ev: ToolCallEvent) -> InputEvent:
-        """Run requested tools, collect outputs, feed them back to memory."""
+        """Run requested tools, collect outputs, feed them back into memory."""
         tools_by_name = {tool.metadata.get_name(): tool for tool in self.tools}
-        tool_msgs: list[ChatMessage] = []
-        for tool_call in ev.tool_calls:
-            tool = tools_by_name.get(tool_call.tool_name)
-            kwargs = {
-                "tool_call_id": tool_call.tool_id,
-                "name": tool_call.tool_name,
-            }
-            if not tool:
-                tool_msgs.append(
-                    ChatMessage(
-                        role="tool",
-                        content=f"Tool {tool_call.tool_name} does not exist",
-                        additional_kwargs=kwargs,
-                    )
-                )
-                continue
-            try:
-                tool_output = tool(**tool_call.tool_kwargs)
-            except Exception as exc:
-                tool_msgs.append(
-                    ChatMessage(
-                        role="tool",
-                        content=f"Encountered error in tool call: {exc}",
-                        additional_kwargs=kwargs,
-                    )
-                )
-                continue
-            tool_msgs.append(
-                ChatMessage(
-                    role="tool",
-                    content=tool_output.content,
-                    additional_kwargs=kwargs,
-                )
-            )
+        tool_msgs = [
+            run_tool_call(tools_by_name, tool_call) for tool_call in ev.tool_calls
+        ]
         memory = await ctx.store.get("memory")
         for msg in tool_msgs:
             await memory.aput(msg)

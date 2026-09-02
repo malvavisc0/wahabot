@@ -9,13 +9,24 @@ from loguru import logger
 API_PREFIX = "/api"
 
 
+def message_media(message: dict[str, Any]) -> dict[str, Any]:
+    """The media dict of a message, from either payload location."""
+    return message.get("media") or message.get("_data", {}).get("media") or {}
+
+
+def message_fields(message: dict[str, Any]) -> tuple[str, str, str]:
+    """Body text, media filename and mimetype of a message."""
+    media = message_media(message)
+    return (
+        str(message.get("body", "") or ""),
+        str(media.get("filename") or ""),
+        str(media.get("mimetype") or ""),
+    )
+
+
 def message_matches(message: dict[str, Any], needle: str) -> bool:
     """Whether a message's body, media filename or mimetype contains ``needle``."""
-    body = str(message.get("body", "") or "").casefold()
-    media = message.get("media") or message.get("_data", {}).get("media") or {}
-    filename = str(media.get("filename") or "").casefold()
-    mimetype = str(media.get("mimetype") or "").casefold()
-    return needle in body or needle in filename or needle in mimetype
+    return any(needle in field.casefold() for field in message_fields(message))
 
 
 class WahaClient:

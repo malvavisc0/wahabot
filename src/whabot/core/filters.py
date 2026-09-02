@@ -12,27 +12,29 @@ def chat_allowed(event: WahaEvent, whitelist: set[str], blacklist: set[str]) -> 
     blacklist always wins; when the whitelist is non-empty only
     listed chats are answered. Every decision is logged.
     """
-    chat_id = str(event.payload.get("from", ""))
-    participant = str(event.payload.get("participant", ""))
-
-    senders = [chat_id]
-    if participant and participant != chat_id:
-        senders.append(participant)
-
-    if any(sender in blacklist for sender in senders):
-        logger.info(
-            "Dropping message from blacklisted {chat_id} (participant {participant})",
-            chat_id=chat_id,
-            participant=participant,
-        )
-        return False
-
-    if whitelist and not any(sender in whitelist for sender in senders):
-        logger.info(
-            "Dropping message from non-whitelisted {chat_id} (participant {participant})",
-            chat_id=chat_id,
-            participant=participant,
-        )
-        return False
-
+    senders = {
+        str(event.payload.get("from", "")),
+        str(event.payload.get("participant", "")),
+    }
+    senders.discard("")
+    if is_listed(senders, blacklist):
+        return drop_message(event, "blacklisted")
+    if whitelist and not is_listed(senders, whitelist):
+        return drop_message(event, "non-whitelisted")
     return True
+
+
+def is_listed(senders: set[str], listed: set[str]) -> bool:
+    """Whether any sender appears in the given access list."""
+    return any(sender in listed for sender in senders)
+
+
+def drop_message(event: WahaEvent, reason: str) -> bool:
+    """Log a dropped message and tell the caller to drop it."""
+    logger.info(
+        "Dropping message from {reason} {chat_id} (participant {participant})",
+        reason=reason,
+        chat_id=event.payload.get("from"),
+        participant=event.payload.get("participant"),
+    )
+    return False

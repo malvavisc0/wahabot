@@ -20,22 +20,32 @@ class LoggingH11Protocol(H11Protocol):
     @override
     def data_received(self, data: bytes) -> None:
         """Log a diagnostic if the chunk fails HTTP parsing, then defer."""
-        if (
+        error = parse_error(data) if self.fresh_connection() else ""
+        if error:
+            logger.warning(
+                "Invalid HTTP request from {client}: {error}; bytes: {chunk!r}",
+                client=self.client or None,
+                error=error,
+                chunk=data[:64],
+            )
+            self.send_400_response("Invalid HTTP request received.")
+            return
+        super().data_received(data)
+
+    def fresh_connection(self) -> bool:
+        """Whether the connection is idle and awaiting its first request."""
+        return (
             self.conn.our_state is h11.IDLE
             and not self.conn.they_are_waiting_for_100_continue
-        ):
-            probe = h11.Connection(our_role=h11.SERVER)
-            try:
-                probe.receive_data(data)
-                probe.next_event()
-            except h11.RemoteProtocolError as error:
-                client = self.client if self.client else None
-                logger.warning(
-                    "Invalid HTTP request from {client}: {error}; bytes: {chunk!r}",
-                    client=client,
-                    error=error,
-                    chunk=data[:64],
-                )
-                self.send_400_response("Invalid HTTP request received.")
-                return
-        super().data_received(data)
+        )
+
+
+def parse_error(data: bytes) -> str:
+    """The h11 parse error for a chunk sent to a fresh server, empty when valid."""
+    try:
+        probe = h11.Connection(our_role=h11.SERVER)
+        probe.receive_data(data)
+        probe.next_event()
+    except h11.RemoteProtocolError as error:
+        return str(error)
+    return ""

@@ -63,21 +63,25 @@ def reply_context(message_reply: dict[str, Any] | None) -> str:
     """
     if not message_reply:
         return ""
-    id_ = message_reply.get("id") or message_reply.get("stanzaId") or ""
+    parts = [
+        part
+        for part in (
+            quoted_participant(message_reply),
+            reply_description(message_reply),
+        )
+        if part
+    ]
+    return "; ".join(parts)
+
+
+def quoted_participant(message_reply: dict[str, Any]) -> str:
+    """The quoted message's sender, prefixed ``from:``; empty when unknown."""
     participant = (
         message_reply.get("participant")
         or message_reply.get("_data", {}).get("author")
         or ""
     )
-    description = reply_description(message_reply)
-    parts: list[str] = []
-    if participant:
-        parts.append(f"from: {participant}")
-    if id_:
-        parts.append(f"id: {id_}")
-    if description:
-        parts.append(description)
-    return "; ".join(parts)
+    return f"from: {participant}" if participant else ""
 
 
 def reply_description(message_reply: dict[str, Any]) -> str:
