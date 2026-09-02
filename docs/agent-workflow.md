@@ -18,11 +18,11 @@ The AI code is split into focused modules under `src/whabot/ai/`:
 
 | Module | What it does |
 |---|---|
-| `agent.py` | The public entry point — import everything from here |
 | `workflow.py` | `FunctionCallingAgentWorkflow` (the `@step` methods), `load_llm`, `build_agent` |
-| `events.py` | The workflow events (`InputEvent`, `StreamEvent`, `ToolCallEvent`, …) |
+| `events.py` | The workflow events (`InputEvent`, `ToolCallEvent`) |
 | `context.py` | Reply-context rendering + the `handle_message` entrypoint |
 | `messages.py` | Message classification and extraction (`extract_text`, `is_replyable`, …) |
+| `tools.py` | The bundled WhatsApp tools |
 
 ## How the workflow works
 
@@ -55,7 +55,6 @@ until the model returns an answer without asking for a tool.
 Before anything else, we make sure the agent knows what the user just
 said and what was said before:
 
-- clears the previous run's `sources`;
 - loads the chat's memory buffer (the first time a chat writes, a fresh
   buffer is created for it);
 - adds the new user message to that memory and hands the full chat
@@ -65,11 +64,11 @@ said and what was said before:
 
 Now the LLM looks at the history and the available tools:
 
-- it receives the tools and the conversation so far, and streams its
-  answer chunk by chunk (each chunk is emitted as a `StreamEvent`);
+- it receives the tools and the conversation so far and produces its
+  answer;
 - the assistant response is stored in memory;
 - if the model made **no** tool calls, the step finishes with a
-  `StopEvent` carrying the response and any sources gathered;
+  `StopEvent` carrying the response;
 - if the model **did** request tools, a `ToolCallEvent` is emitted with
   those requests.
 
@@ -80,8 +79,7 @@ The model's tool requests are carried out here:
 - each request is looked up by tool name;
 - unknown tools and raised exceptions are turned into `role="tool"`
   messages explaining what went wrong — the model can then adjust;
-- successful outputs are added to the `sources` and stored in memory as
-  `role="tool"` messages;
+- successful outputs are stored in memory as `role="tool"` messages;
 - a new `InputEvent` with the updated history is emitted, sending the
   model back to Step 2. The cycle repeats until no tools are needed.
 
@@ -90,9 +88,7 @@ The model's tool requests are carried out here:
 | Event | Carries |
 |---|---|
 | `InputEvent` | `input: list[ChatMessage]` — the conversation history for the LLM |
-| `StreamEvent` | `delta: str` — a single streamed chunk of the answer |
 | `ToolCallEvent` | `tool_calls: list[ToolSelection]` — the tools the model asked for |
-| `FunctionOutputEvent` | `output: ToolOutput` — the result of one tool run |
 
 The workflow also validates itself from the steps' type annotations.
 If a step claims it can return `InputEvent | StopEvent`, that contract
@@ -132,8 +128,8 @@ single function the handlers call. It:
    reply to an earlier one, so the model knows what is being quoted
    (see `reply_context` / `message_replies_to`);
 3. runs the workflow — `await agent.run(input=user_msg, ctx=ctx)`;
-4. returns `str(result["response"])`, which the handler sends back to
-   the chat through WAHA.
+4. returns the response text (`result.message.content`, stripped),
+   which the handler sends back to the chat through WAHA.
 
 > **Group participation.** `handle_message` is only reached for a group
 > message when the participation mode decides to wake the agent —
@@ -232,9 +228,10 @@ get_contact(contact_id="9876543210@c.us")
 search_messages(query="invoice", chat="1234567890@g.us")
 ```
 
-> `search_messages` has no free-text endpoint in WAHA — the client
-> filters recently fetched messages locally (`WahaClient.search_messages`),
-> so results cover the recent window, not arbitrary old messages.
+> WAHA's `GET /api/messages` requires a `chatId`, so `search_messages`
+> always scopes to one chat and filters recently fetched messages
+> locally (`WahaClient.search_messages`) — results cover the recent
+> window, not arbitrary old messages.
 > `get_chat` uses `POST /api/{session}/chats/overview` since the spec
 > offers no plain `GET .../chats/{chatId}`.
 
@@ -256,7 +253,7 @@ Tools are optional but easy to plug in:
 
 ```python
 from llama_index.core.tools import FunctionTool
-from whabot.ai.agent import build_agent
+from whabot.ai.workflow import build_agent
 
 
 def add(x: int, y: int) -> int:
@@ -273,9 +270,10 @@ workflow runs any requested tool automatically.
 
 ## A few constraints worth knowing
 
-- The LLM must support function calling (`is_function_calling_model`).
-  `load_llm` sets this flag on the `OpenAILike` model, and the workflow
-  constructor fails loudly if it is missing.
+- The LLM must be an OpenAI-compatible **chat completions** model with
+  function calling (`is_chat_model=True`, `is_function_calling_model=True`
+  in `load_llm`); the workflow constructor fails loudly if function
+  calling is missing.
 - Workflow runs have a timeout (120 s by default), so a runaway tool
   loop cannot hang the webhook forever.
 - Tools run inside a `try/except`: a failing tool never crashes the

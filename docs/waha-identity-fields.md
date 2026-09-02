@@ -38,7 +38,7 @@ naively expect: `from` is "where the message landed" (which chat), not
 (phone numbers) — `@lid` values are stable identifiers that do not
 directly expose a phone number.
 
-## How `bot/config.json` uses these
+## How the session config uses these
 
 `chat_allowed()` (in `src/whabot/core/filters.py`) checks, in order:
 

@@ -12,7 +12,7 @@ system prompt, and how the bot participates in group chats.
 |---|---|---|---|
 | `whitelist` | `string[]` | `[]` | Allowed chats/participants. Empty = answer everybody. |
 | `blacklist` | `string[]` | `[]` | Denied chats/participants. Always wins over the whitelist. |
-| `system_prompt` | `string \| null` | `null` | Overrides the agent system prompt. Supports `{{date}}`, `{{time}}`, `{{now}}`, `{{tz}}` variables. Falls back to `WHABOT_AGENT_SYSTEM_PROMPT`. |
+| `system_prompt` | `string` | **required** | The agent system prompt. Supports `{{date}}`, `{{time}}`, `{{now}}`, `{{tz}}` variables. The server refuses to start without it. |
 | `bot_name` | `string \| null` | `null` | The bot's display name (e.g. `"Kai"`). Used only as a fallback mention matcher. |
 | `bot_mention_regex` | `string \| null` | `null` | A regex detecting when the bot is addressed in a group. Defaults to a case-insensitive whole-word `@?<bot_name>`. |
 | `group_participation` | `"never" \| "mentioned" \| "judicious"` | `"mentioned"` | How the bot joins group conversations (below). |
@@ -23,12 +23,20 @@ Example:
 {
   "whitelist": ["120363012345678901@g.us"],
   "blacklist": [],
-  "system_prompt": "You are Kai, a helpful assistant... Today is {{date}}. The current time is {{time}} ({{tz}}).",
+  "system_prompt": "You are Kai, a friend in this WhatsApp group... Today is {{date}}. Current time {{time}} ({{tz}}).",
   "bot_name": "Kai",
   "bot_mention_regex": "(?i)@?[kĸ]a[iy]",
   "group_participation": "judicious"
 }
 ```
+
+The `system_prompt` is the bot's whole personality — how it talks,
+what it knows, when to stay quiet. Write it as a persona description
+(a friend, a participant), not as "a helpful assistant": the model
+will copy whatever tone you set here into every reply. Keep style
+rules in the prompt itself (e.g. "short replies", "no markdown",
+"match the group's slang") — they change the output far more than
+any code-side default.
 
 ## System prompt variables
 
