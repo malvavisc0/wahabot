@@ -1,0 +1,375 @@
+"""Bundled WhatsApp tools for the function calling agent.
+
+Each builder takes the shared mutable ``target`` holder refreshed by the
+handler before every agent run with the current ``session`` and default
+``chat_id``, so the shared agent's tools always speak for the message
+being handled. Tools calling a WAHA endpoint raise on HTTP errors; the
+tool functions here return a status string instead, so a failure feeds
+back to the model rather than crashing the workflow.
+"""
+
+from llama_index.core.tools import BaseTool, FunctionTool
+
+from whabot.core.waha import WahaClient
+
+__all__ = [
+    "build_default_tools",
+    "fetch_chat_messages",
+    "forward_message",
+    "get_chat",
+    "get_contact",
+    "react_to_message",
+    "search_messages",
+    "send_image",
+    "send_message",
+    "send_seen",
+    "set_typing",
+]
+
+
+def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+    """Build a tool that sends a WhatsApp text message.
+
+    Sends to the current chat by default; the model may pass an explicit
+    ``chat`` (a group or a person's JID) to reach a different target.
+    """
+
+    def send_message_fn(chat: str | None = None, text: str = "") -> str:
+        """Send a WhatsApp text message.
+
+        Args:
+            chat: Optional chat id (group or person JID, e.g.
+                `1234567890@g.us` or `9876543210@c.us`). Omit to reply
+                in the current conversation.
+            text: The text to send.
+        """
+        if not text.strip():
+            return "Error: empty message text."
+        session = target.get("session", "")
+        chat_id = chat or target.get("chat_id", "")
+        if not session or not chat_id:
+            return "Error: no active conversation context."
+        waha.send_text(session, chat_id, text)
+        return f"Sent '{text}' to {chat_id}."
+
+    return FunctionTool.from_defaults(
+        fn=send_message_fn,
+        name="send_message",
+        description=(
+            "Send a WhatsApp text message. Use this to reply in the "
+            "current chat (omit chat) or to message another group or "
+            "person (pass chat)."
+        ),
+    )
+
+
+def react_to_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+    """Build a tool that reacts to a WhatsApp message."""
+
+    def react_to_message_fn(message_id: str, reaction: str) -> str:
+        """React to a message.
+
+        Args:
+            message_id: The serialized id of the message to react to
+                (e.g. `false_12132132130@c.us_AAAAAAAAAAAAAAAAAAAA`).
+            reaction: The emoji to react with, or empty string to remove
+                an existing reaction.
+        """
+        session = target.get("session", "")
+        if not session:
+            return "Error: no active conversation context."
+        if not message_id:
+            return "Error: message_id is required."
+        waha.send_reaction(session, message_id, reaction)
+        return (
+            f"Reacted to {message_id} with '{reaction}'."
+            if reaction
+            else f"Removed reaction from {message_id}."
+        )
+
+    return FunctionTool.from_defaults(
+        fn=react_to_message_fn,
+        name="react_to_message",
+        description=(
+            "React with an emoji to a WhatsApp message. Provide the "
+            "message's serialized id. Pass an empty reaction to remove "
+            "the bot's reaction."
+        ),
+    )
+
+
+def send_seen(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+    """Build a tool that marks the chat as seen/read."""
+
+    def mark_seen(chat: str | None = None) -> str:
+        """Mark a chat as read/seen.
+
+        Args:
+            chat: Optional chat id. Omit to mark the current chat.
+        """
+        session = target.get("session", "")
+        chat_id = chat or target.get("chat_id", "")
+        if not session or not chat_id:
+            return "Error: no active conversation context."
+        waha.send_seen(session, chat_id)
+        return f"Marked {chat_id} as seen."
+
+    return FunctionTool.from_defaults(
+        fn=mark_seen,
+        name="mark_seen",
+        description=(
+            "Mark a WhatsApp chat as read/seen. Use before replying to "
+            "an incoming message. Pass chat to mark another chat."
+        ),
+    )
+
+
+def send_image(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+    """Build a tool that sends an image to a chat."""
+
+    def send_image_fn(
+        url: str | None = None,
+        caption: str = "",
+        chat: str | None = None,
+    ) -> str:
+        """Send an image.
+
+        Args:
+            url: Public URL of the image to send.
+            caption: Optional caption text.
+            chat: Optional chat id. Omit to send to the current chat.
+        """
+        session = target.get("session", "")
+        chat_id = chat or target.get("chat_id", "")
+        if not session or not chat_id:
+            return "Error: no active conversation context."
+        if not url:
+            return "Error: url is required."
+        waha.send_image(
+            session,
+            chat_id,
+            file={"mimetype": "image/jpeg", "url": url},
+            caption=caption,
+        )
+        caption_text = f" with caption: {caption}" if caption else ""
+        return f"Sent image{caption_text} to {chat_id}."
+
+    return FunctionTool.from_defaults(
+        fn=send_image_fn,
+        name="send_image",
+        description=(
+            "Send an image to a WhatsApp chat from a public URL. "
+            "Pass chat to reach another group/person, else sends to the "
+            "current chat. caption is optional."
+        ),
+    )
+
+
+def fetch_chat_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+    """Build a tool that fetches recent messages from a chat."""
+
+    def fetch_chat_messages_fn(chat: str | None = None, limit: int = 20) -> str:
+        """Fetch recent messages from a chat.
+
+        Args:
+            chat: Optional chat id. Omit to fetch from the current chat.
+            limit: Max messages to return (default 20).
+        """
+        session = target.get("session", "")
+        chat_id = chat or target.get("chat_id", "")
+        if not session or not chat_id:
+            return "Error: no active conversation context."
+        messages = waha.fetch_chat_messages(session, chat_id, limit=limit)
+        lines: list[str] = []
+        for m in messages[:limit]:
+            who = (
+                "me"
+                if m.get("fromMe")
+                else str(m.get("participant") or m.get("from", ""))
+            )
+            body = str(m.get("body", "") or "").strip()[:200]
+            lines.append(f"{who}: {body}")
+        return "\n".join(lines) if lines else "(no messages found)"
+
+    return FunctionTool.from_defaults(
+        fn=fetch_chat_messages_fn,
+        name="fetch_chat_messages",
+        description=(
+            "Fetch the most recent messages of a chat as text lines. Use "
+            "to read what has been said in the current or another chat. "
+            "limit caps the number of lines."
+        ),
+    )
+
+
+def get_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+    """Build a tool that returns metadata about a chat."""
+
+    def get_chat_fn(chat: str | None = None) -> str:
+        """Get metadata about a chat (name, participants, ...).
+
+        Args:
+            chat: Optional chat id. Omit for the current chat.
+        """
+        session = target.get("session", "")
+        chat_id = chat or target.get("chat_id", "")
+        if not session or not chat_id:
+            return "Error: no active conversation context."
+        overview = waha.get_chat_overview(session, chat_id)
+        if not overview:
+            return f"No metadata found for {chat_id}."
+        return str(overview)[:1000]
+
+    return FunctionTool.from_defaults(
+        fn=get_chat_fn,
+        name="get_chat",
+        description=(
+            "Get metadata (name, participants count, picture, etc.) "
+            "about a WhatsApp chat. Omit chat for the current chat."
+        ),
+    )
+
+
+def get_contact(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+    """Build a tool that returns details about a contact."""
+
+    def get_contact_fn(contact_id: str) -> str:
+        """Get details about a contact by its id.
+
+        Args:
+            contact_id: A contact's JID (e.g. `9876543210@c.us`).
+        """
+        session = target.get("session", "")
+        if not session:
+            return "Error: no active conversation context."
+        if not contact_id:
+            return "Error: contact_id is required."
+        return str(waha.get_contact(session, contact_id))[:1000]
+
+    return FunctionTool.from_defaults(
+        fn=get_contact_fn,
+        name="get_contact",
+        description="Get details about a WhatsApp contact by its id (JID).",
+    )
+
+
+def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+    """Build a tool that searches recent messages for text."""
+
+    def search_messages_fn(
+        query: str,
+        chat: str | None = None,
+        limit: int = 20,
+    ) -> str:
+        """Search recent messages containing a text substring.
+
+        Searches body text, media filenames and mimetypes.
+
+        Args:
+            query: The text to look for.
+            chat: Optional chat id to scope the search. Omit to search
+                across all chats.
+            limit: Max matches to return (default 20).
+        """
+        session = target.get("session", "")
+        if not session:
+            return "Error: no active conversation context."
+        if not query.strip():
+            return "Error: query is required."
+        messages = waha.search_messages(session, query, chat_id=chat or None, limit=limit)
+        lines: list[str] = []
+        for m in messages[:limit]:
+            chat_id = m.get("chatId") or m.get("_data", {}).get("id", {}).get(
+                "remote", ""
+            )
+            body = str(m.get("body", "") or "").strip()[:200]
+            if not body:
+                media = m.get("media") or m.get("_data", {}).get("media") or {}
+                mimetype = str(media.get("mimetype", "media") or "media")
+                filename = media.get("filename") or ""
+                body = f"[{mimetype}] {filename}".strip()
+            lines.append(f"{chat_id}: {body}")
+        return "\n".join(lines) if lines else "(no matches)"
+
+    return FunctionTool.from_defaults(
+        fn=search_messages_fn,
+        name="search_messages",
+        description=(
+            "Search recent messages for a text substring in body, media "
+            "filename or mimetype. Returns matching message lines. Pass "
+            "chat to search within one chat, else search across chats."
+        ),
+    )
+
+
+def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+    """Build a tool that forwards a message to a chat."""
+
+    def forward_message_fn(message_id: str, chat: str | None = None) -> str:
+        """Forward a message to a chat.
+
+        Args:
+            message_id: The serialized id of the message to forward.
+            chat: Optional chat id to forward into. Defaults to current.
+        """
+        session = target.get("session", "")
+        chat_id = chat or target.get("chat_id", "")
+        if not session or not chat_id:
+            return "Error: no active conversation context."
+        if not message_id:
+            return "Error: message_id is required."
+        waha.forward_message(session, chat_id, message_id)
+        return f"Forwarded {message_id} to {chat_id}."
+
+    return FunctionTool.from_defaults(
+        fn=forward_message_fn,
+        name="forward_message",
+        description=(
+            "Forward an existing WhatsApp message (by its serialized id) "
+            "to a chat. Pass chat to choose the destination, else current."
+        ),
+    )
+
+
+def set_typing(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+    """Build a tool that toggles the typing indicator."""
+
+    def set_typing_fn(typing: bool, chat: str | None = None) -> str:
+        """Start or stop typing.
+
+        Args:
+            typing: True to start typing, False to stop.
+            chat: Optional chat id. Omit for the current chat.
+        """
+        session = target.get("session", "")
+        chat_id = chat or target.get("chat_id", "")
+        if not session or not chat_id:
+            return "Error: no active conversation context."
+        waha.set_typing(session, chat_id, bool(typing))
+        return f"{'Started' if typing else 'Stopped'} typing in {chat_id}."
+
+    return FunctionTool.from_defaults(
+        fn=set_typing_fn,
+        name="set_typing",
+        description=(
+            "Show or hide the typing indicator in a WhatsApp chat. "
+            "Call with typing=true before beginning to compose a long "
+            "reply, then typing=false once done, for a natural feel."
+        ),
+    )
+
+
+def build_default_tools(waha: WahaClient, target: dict[str, str]) -> list[BaseTool]:
+    """Build all bundled WhatsApp tools bound to the shared session/chat holder."""
+    return [
+        send_message(waha, target),
+        react_to_message(waha, target),
+        send_seen(waha, target),
+        send_image(waha, target),
+        fetch_chat_messages(waha, target),
+        get_chat(waha, target),
+        get_contact(waha, target),
+        search_messages(waha, target),
+        forward_message(waha, target),
+        set_typing(waha, target),
+    ]
