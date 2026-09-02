@@ -16,27 +16,18 @@ from urllib.parse import urlsplit
 from llama_index.core.tools import BaseTool, FunctionTool
 
 from whabot.ai.finance import (
-    fetch_company_information as _fetch_company_information_fn,
-)
-from whabot.ai.finance import (
     fetch_current_stock_price as _fetch_current_stock_price_fn,
 )
-from whabot.ai.finance import fetch_ticker_news as _fetch_ticker_news_fn
 from whabot.ai.schemas import (
     FetchChatMessagesSchema,
-    FetchCompanyInfoSchema,
     FetchStockPriceSchema,
-    FetchTickerNewsSchema,
     ForwardMessageSchema,
     GetChatSchema,
-    GetContactSchema,
     GetYoutubeTranscriptSchema,
     ReactToMessageSchema,
     SearchMessagesSchema,
     SendImageSchema,
     SendMessageSchema,
-    SendSeenSchema,
-    SetTypingSchema,
     VisitUrlSchema,
     WebSearchSchema,
 )
@@ -48,19 +39,14 @@ from whabot.settings import Settings
 
 __all__ = [
     "build_default_tools",
-    "company_info_builder",
     "fetch_chat_messages",
     "forward_message",
     "get_chat",
-    "get_contact",
     "react_to_message",
     "search_messages",
     "send_image",
     "send_message",
-    "send_seen",
-    "set_typing",
     "stock_price_builder",
-    "ticker_news_builder",
     "visit_url_builder",
     "web_search_builder",
     "youtube_transcript_builder",
@@ -154,33 +140,6 @@ def react_to_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             "React with an emoji to a WhatsApp message. Provide the "
             "message's serialized id. Pass an empty reaction to remove "
             "the bot's reaction."
-        ),
-    )
-
-
-def send_seen(waha: WahaClient, target: dict[str, str]) -> BaseTool:
-    """Build a tool that marks the chat as seen/read."""
-
-    def mark_seen(chat: str | None = None) -> str:
-        """Mark a chat as read/seen.
-
-        Args:
-            chat: Optional chat id. Omit to mark the current chat.
-        """
-        session = target.get("session", "")
-        chat_id = chat or target.get("chat_id", "")
-        if not session or not chat_id:
-            return "Error: no active conversation context."
-        waha.send_seen(session, chat_id)
-        return f"Marked {chat_id} as seen."
-
-    return FunctionTool.from_defaults(
-        fn=mark_seen,
-        fn_schema=SendSeenSchema,
-        name="mark_seen",
-        description=(
-            "Mark a WhatsApp chat as read/seen. Use before replying to "
-            "an incoming message. Pass chat to mark another chat."
         ),
     )
 
@@ -383,30 +342,6 @@ def _needs_raw_fallback(scalar: dict[str, Any]) -> bool:
     return not scalar or all(key == "id" for key in scalar)
 
 
-def get_contact(waha: WahaClient, target: dict[str, str]) -> BaseTool:
-    """Build a tool that returns details about a contact."""
-
-    def get_contact_fn(contact_id: str) -> str:
-        """Get details about a contact by its id.
-
-        Args:
-            contact_id: A contact's JID (e.g. `9876543210@c.us`).
-        """
-        session = target.get("session", "")
-        if not session:
-            return "Error: no active conversation context."
-        if not contact_id:
-            return "Error: contact_id is required."
-        return str(waha.get_contact(session, contact_id))[:1000]
-
-    return FunctionTool.from_defaults(
-        fn=get_contact_fn,
-        fn_schema=GetContactSchema,
-        name="get_contact",
-        description="Get details about a WhatsApp contact by its id (JID).",
-    )
-
-
 def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
     """Build a tool that searches recent messages for text."""
 
@@ -488,35 +423,6 @@ def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
     )
 
 
-def set_typing(waha: WahaClient, target: dict[str, str]) -> BaseTool:
-    """Build a tool that toggles the typing indicator."""
-
-    def set_typing_fn(typing: bool, chat: str | None = None) -> str:
-        """Start or stop typing.
-
-        Args:
-            typing: True to start typing, False to stop.
-            chat: Optional chat id. Omit for the current chat.
-        """
-        session = target.get("session", "")
-        chat_id = chat or target.get("chat_id", "")
-        if not session or not chat_id:
-            return "Error: no active conversation context."
-        waha.set_typing(session, chat_id, bool(typing))
-        return f"{'Started' if typing else 'Stopped'} typing in {chat_id}."
-
-    return FunctionTool.from_defaults(
-        fn=set_typing_fn,
-        fn_schema=SetTypingSchema,
-        name="set_typing",
-        description=(
-            "Show or hide the typing indicator in a WhatsApp chat. "
-            "Call with typing=true before beginning to compose a long "
-            "reply, then typing=false once done, for a natural feel."
-        ),
-    )
-
-
 def web_search_builder(settings: Settings) -> BaseTool:
     """Build the web search tool bound to settings."""
 
@@ -555,41 +461,6 @@ def stock_price_builder() -> BaseTool:
         description=(
             "Fetch the current price of a stock, ETF or crypto ticker "
             "(e.g. AAPL, BTC-USD). Use for price and day-change questions."
-        ),
-    )
-
-
-def company_info_builder() -> BaseTool:
-    """Build the company-information tool."""
-
-    def company_info_fn(ticker: str) -> str:
-        return _fetch_company_information_fn(ticker)
-
-    return FunctionTool.from_defaults(
-        fn=company_info_fn,
-        fn_schema=FetchCompanyInfoSchema,
-        name="fetch_company_information",
-        description=(
-            "Fetch company fundamentals and metadata (sector, valuation, "
-            "financial health) for a ticker. Use for business questions, "
-            "not simple price lookups."
-        ),
-    )
-
-
-def ticker_news_builder() -> BaseTool:
-    """Build the ticker-news tool."""
-
-    def ticker_news_fn(ticker: str, max_articles: int = 10) -> str:
-        return _fetch_ticker_news_fn(ticker, max_articles=max_articles)
-
-    return FunctionTool.from_defaults(
-        fn=ticker_news_fn,
-        fn_schema=FetchTickerNewsSchema,
-        name="fetch_ticker_news",
-        description=(
-            "Fetch recent news for a stock or crypto ticker. Use for "
-            "recent-events or sentiment questions."
         ),
     )
 
@@ -643,18 +514,13 @@ def build_default_tools(
     return [
         send_message(waha, target),
         react_to_message(waha, target),
-        send_seen(waha, target),
         send_image(waha, target),
         fetch_chat_messages(waha, target),
         get_chat(waha, target),
-        get_contact(waha, target),
         search_messages(waha, target),
         forward_message(waha, target),
-        set_typing(waha, target),
         web_search_builder(settings),
         stock_price_builder(),
-        company_info_builder(),
-        ticker_news_builder(),
         youtube_transcript_builder(),
         visit_url_builder(settings),
     ]

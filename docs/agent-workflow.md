@@ -190,14 +190,11 @@ JID to reach another group or person (e.g. `1234567890@g.us`,
 |---|---|---|---|
 | `send_message` | `chat?`, `text` | `POST /api/sendText` | Send a text (current chat or elsewhere) |
 | `react_to_message` | `message_id`, `reaction` | `PUT /api/reaction` | Emoji-react to a message (empty = remove) |
-| `mark_seen` | `chat?` | `POST /api/sendSeen` | Mark a chat read/seen |
 | `send_image` | `url`, `caption?`, `chat?` | `POST /api/sendImage` | Send an image from a URL |
 | `fetch_chat_messages` | `chat?`, `limit?` | `GET /api/{session}/chats/{chatId}/messages` | Read recent chat messages as text |
 | `get_chat` | `chat?` | `POST /api/{session}/chats/overview` | Chat metadata (name, participants, …) |
-| `get_contact` | `contact_id` | `GET /api/{session}/contacts/{id}` | Contact details by JID |
 | `search_messages` | `query`, `chat?`, `limit?` | `GET /api/messages` (local filter) | Find recent messages by text / media |
 | `forward_message` | `message_id`, `chat?` | `POST /api/forwardMessage` | Forward a message to a chat |
-| `set_typing` | `typing`, `chat?` | `POST /api/startTyping` / `stopTyping` | Show/hide the typing indicator |
 
 All tool implementations live in `src/whabot/ai/tools.py`; the
 WAHA HTTP calls are in `src/whabot/core/waha.py`. Details in the
@@ -210,14 +207,12 @@ subsections below.
 | `send_message(text, chat=None)` | Send a text — current chat (omit `chat`) or another group/person |
 | `send_image(url, caption="", chat=None)` | Send an image from a public URL (mimetype inferred from the URL extension), with an optional caption |
 | `forward_message(message_id, chat=None)` | Forward an existing message (by serialized id) to a chat |
-| `mark_seen(chat=None)` | Mark a chat as read/seen — WAHA recommends this before replying |
 
 ```python
 send_message(text="Just replying here")  # current chat
 send_message(chat="1234567890@g.us", text="Hello team!")  # to a group
 send_image(url="https://example.com/plot.png", caption="Q3 chart")
 forward_message(message_id="false_1111@c.us_ABC")
-mark_seen()
 ```
 
 ### Reactions
@@ -241,13 +236,11 @@ Underneath it calls WAHA `PUT /api/reaction` (see
 |---|---|
 | `fetch_chat_messages(chat=None, limit=20)` | Recent messages as text lines, each prefixed `[id:...]` (for react/forward); media-only messages render as `[mimetype] filename` |
 | `get_chat(chat=None)` | Chat metadata summary (name, participant count + JIDs, …) via `/chats/overview` |
-| `get_contact(contact_id)` | Contact details by JID |
 | `search_messages(query, chat=None, limit=20)` | Find recent messages containing a text substring |
 
 ```python
 fetch_chat_messages(limit=10)  # read the current conversation
 get_chat(chat="1234567890@g.us")  # group metadata
-get_contact(contact_id="9876543210@c.us")
 search_messages(query="invoice", chat="1234567890@g.us")
 ```
 
@@ -257,18 +250,6 @@ search_messages(query="invoice", chat="1234567890@g.us")
 > window, not arbitrary old messages.
 > `get_chat` uses `POST /api/{session}/chats/overview` since the spec
 > offers no plain `GET .../chats/{chatId}`.
-
-### Presence
-
-| Tool | Purpose |
-|---|---|
-| `set_typing(typing, chat=None)` | Show/hide the typing indicator — `typing=true` before composing a long reply, `typing=false` after, for a natural feel |
-
-```python
-set_typing(typing=True)
-# ...model composes...
-set_typing(typing=False)
-```
 
 ### External research
 
@@ -281,8 +262,6 @@ status string and never raise.
 | `web_search` | `query`, `max_results?` | `webserp` CLI | Metasearch (Google/DuckDuckGo/Brave/…) — no API key |
 | `visit_url` | `url` | `curl_cffi` | Fetch a page's visible text with a real Chrome TLS fingerprint (avoids blocks) |
 | `fetch_current_stock_price` | `ticker` | `yfinance` | Current price + day change for stock/ETF/crypto |
-| `fetch_company_information` | `ticker` | `yfinance` | Fundamentals, valuation, financial health |
-| `fetch_ticker_news` | `ticker`, `max_articles?` | `yfinance` | Recent articles for a ticker |
 | `get_youtube_transcript` | `url` | `youtube-transcript-api` | Video captions as text (needs captions on; returns inline, truncated) |
 
 Ticker normalization handles lowercase, `BTCUSD`/`BTC/USD` → `BTC-USD`.

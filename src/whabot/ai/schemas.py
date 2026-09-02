@@ -47,15 +47,6 @@ class ReactToMessageSchema(BaseModel):
     )
 
 
-class SendSeenSchema(BaseModel):
-    """Mark a WhatsApp chat as read/seen."""
-
-    chat: str | None = Field(
-        default=None,
-        description="Optional chat id. Omit to mark the current chat.",
-    )
-
-
 class SendImageSchema(BaseModel):
     """Send an image to a WhatsApp chat from a public URL."""
 
@@ -95,14 +86,6 @@ class GetChatSchema(BaseModel):
     )
 
 
-class GetContactSchema(BaseModel):
-    """Get details about a WhatsApp contact by its id."""
-
-    contact_id: str = Field(
-        description="A contact's JID (e.g. `9876543210@c.us`).",
-    )
-
-
 class SearchMessagesSchema(BaseModel):
     """Search a chat's recent messages for a text substring."""
 
@@ -133,18 +116,6 @@ class ForwardMessageSchema(BaseModel):
     )
 
 
-class SetTypingSchema(BaseModel):
-    """Show or hide the typing indicator in a WhatsApp chat."""
-
-    typing: bool = Field(
-        description="True to start typing, False to stop.",
-    )
-    chat: str | None = Field(
-        default=None,
-        description="Optional chat id. Omit for the current chat.",
-    )
-
-
 class WebSearchSchema(BaseModel):
     """Search the web via the webserp metasearch CLI."""
 
@@ -159,28 +130,11 @@ class WebSearchSchema(BaseModel):
     )
 
 
-class TickerSchema(BaseModel):
-    """Base schema for ticker-keyed tools."""
+class FetchStockPriceSchema(BaseModel):
+    """Fetch the current price for a stock, ETF, or crypto ticker."""
 
     ticker: str = Field(
         description=("A stock, ETF or crypto symbol, e.g. `AAPL`, `MSFT`, or `BTC-USD`."),
-    )
-
-
-class FetchStockPriceSchema(TickerSchema):
-    """Fetch the current price for a stock, ETF, or crypto ticker."""
-
-
-class FetchCompanyInfoSchema(TickerSchema):
-    """Fetch company fundamentals and metadata for a ticker."""
-
-
-class FetchTickerNewsSchema(TickerSchema):
-    """Fetch recent news for a stock or crypto ticker."""
-
-    max_articles: int = Field(
-        default=10,
-        description="Maximum number of articles to return.",
     )
 
 

@@ -79,13 +79,6 @@ class WahaClient:
             },
         ).raise_for_status()
 
-    def send_seen(self, session: str, chat_id: str) -> None:
-        """Mark the chat as seen/read, raising for HTTP errors."""
-        self._client.post(
-            f"{API_PREFIX}/sendSeen",
-            json={"session": session, "chatId": chat_id},
-        ).raise_for_status()
-
     def send_image(
         self,
         session: str,
@@ -129,15 +122,6 @@ class WahaClient:
         items = response.json()
         return items[0] if isinstance(items, list) and items else {}
 
-    def get_contact(self, session: str, contact_id: str) -> dict[str, Any]:
-        """Fetch a single contact by id, raising for HTTP errors."""
-        segment = quote(contact_id, safe="")
-        response = self._client.get(
-            f"{API_PREFIX}/{session}/contacts/{segment}",
-        )
-        response.raise_for_status()
-        return response.json()
-
     def search_messages(
         self,
         session: str,
@@ -177,16 +161,4 @@ class WahaClient:
                 "chatId": chat_id,
                 "messageId": message_id,
             },
-        ).raise_for_status()
-
-    def set_typing(
-        self,
-        session: str,
-        chat_id: str,
-        typing: bool,
-    ) -> None:
-        """Start or stop the typing indicator, raising for HTTP errors."""
-        endpoint = f"{API_PREFIX}/startTyping" if typing else f"{API_PREFIX}/stopTyping"
-        self._client.post(
-            endpoint, json={"session": session, "chatId": chat_id}
         ).raise_for_status()
