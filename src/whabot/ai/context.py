@@ -17,6 +17,7 @@ __all__ = [
     "reply_context",
     "reply_context_section",
     "reply_description",
+    "sender_tag",
 ]
 
 
@@ -55,6 +56,22 @@ def render_system_prompt(
     return prompt
 
 
+def sender_tag(event: WahaEvent) -> str:
+    """The sender's display identity for the agent prompt, e.g. ``[Ana]``.
+
+    Prefers the WhatsApp display name (``_data.notifyName``, then a
+    top-level ``notifyName`` for engines that hoist it); falls back to
+    the participant/author id so a group turn is never anonymous.
+    Returns an empty tag when nothing is known (should not happen).
+    """
+    data = event.payload.get("_data", {})
+    name = str(data.get("notifyName") or event.payload.get("notifyName") or "").strip()
+    if name:
+        return f"[{name}]"
+    participant = event.payload.get("participant") or data.get("author") or ""
+    return f"[{participant}]" if participant else ""
+
+
 def reply_context(message_reply: dict[str, Any] | None) -> str:
     """Render the quoted message as context for the agent.
 
@@ -75,10 +92,16 @@ def reply_context(message_reply: dict[str, Any] | None) -> str:
 
 
 def quoted_participant(message_reply: dict[str, Any]) -> str:
-    """The quoted message's sender, prefixed ``from:``; empty when unknown."""
+    """The quoted message's sender, prefixed ``from:``; empty when unknown.
+
+    Prefers the quoted message's display name (``_data.notifyName``) over
+    the raw participant/author id.
+    """
+    data = message_reply.get("_data", {})
     participant = (
-        message_reply.get("participant")
-        or message_reply.get("_data", {}).get("author")
+        data.get("notifyName")
+        or message_reply.get("participant")
+        or data.get("author")
         or ""
     )
     return f"from: {participant}" if participant else ""
@@ -113,7 +136,10 @@ async def handle_message(
     chat_id = str(event.payload.get("from", ""))
     body = str(event.payload.get("body", ""))
     logger.info("Agent handling message from {chat_id}", chat_id=chat_id)
-    user_msg = body + reply_context_section(message_replies_to(event))
+    tag = sender_tag(event)
+    user_msg = (f"{tag} {body}" if tag else body) + reply_context_section(
+        message_replies_to(event)
+    )
     result = await agent.run(input=user_msg, ctx=ctx)
     content: str | None = result.message.content
     return content.strip() if content else ""

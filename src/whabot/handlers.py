@@ -22,6 +22,9 @@ _SEE_TTL_S = 120
 contexts: dict[tuple[str, str], Context] = {}
 _agent_lock = asyncio.Lock()
 
+#: Messages older than this many seconds are stale backlog, not live turns.
+_MAX_MESSAGE_AGE_S = 300
+
 
 def seen_recently(message_id: str) -> bool:
     """Return True if this message id was already handled in the last TTL."""
@@ -36,6 +39,22 @@ def seen_recently(message_id: str) -> bool:
     return False
 
 
+def is_stale(event: WahaEvent, started_at: float) -> bool:
+    """True when the message is replayed backlog rather than a live turn.
+
+    WhatsApp redelivers undelivered messages when the WAHA session or the
+    phone reconnects, and WAHA forwards them as fresh ``message`` events.
+    Two guards: anything sent before this process started is definitionally
+    backlog, and anything older than ``_MAX_MESSAGE_AGE_S`` is stale even
+    mid-run (phone reconnect flush). Unknown timestamps pass — better one
+    late reply than silence.
+    """
+    ts = event.payload.get("timestamp")
+    if not isinstance(ts, (int, float)):
+        return False
+    return ts < started_at or time.time() - ts > _MAX_MESSAGE_AGE_S
+
+
 def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
     """Build the agent and register the reply handler."""
     send_tool_holder: dict[str, str] = {}
@@ -48,6 +67,7 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
         ),
     )
     access = config
+    started_at = time.time()
 
     @on_message
     async def reply_with_agent(event: WahaEvent) -> None:
@@ -55,6 +75,13 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
         message_id = str(event.payload.get("id", ""))
         if seen_recently(message_id):
             logger.debug("Skipping duplicate event for message {id}", id=message_id)
+            return
+        if is_stale(event, started_at):
+            logger.info(
+                "Skipping stale message {id} (ts={ts})",
+                id=message_id,
+                ts=event.payload.get("timestamp"),
+            )
             return
         if event.payload.get("fromMe"):
             logger.debug("Ignoring own outbound message {id}", id=message_id)
