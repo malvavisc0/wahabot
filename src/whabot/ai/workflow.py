@@ -9,7 +9,7 @@ back in ``StopEvent.result``.
 
 from typing import Any
 
-from llama_index.core.llms import ChatMessage
+from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.llms.function_calling import FunctionCallingLLM
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.tools import BaseTool, ToolSelection
@@ -156,16 +156,47 @@ class FunctionCallingAgentWorkflow(Workflow):
             )
         else:
             await self._repair_memory(ctx)
+        await ctx.store.set("image_blocks", getattr(ev, "image_blocks", None))
         await memory.aput(ChatMessage(role="user", content=str(ev.input)))
         await ctx.store.set("memory", memory)
         return InputEvent(input=await self._chat_history(ctx))
+
+    @staticmethod
+    def _with_image(
+        history: list[ChatMessage], image_blocks: list[Any] | None
+    ) -> list[ChatMessage]:
+        """Return *history* with image blocks on the newest user message.
+
+        The newest user message is replaced by a copy carrying the
+        blocks — the memory-stored originals are never mutated, so
+        images ride the first LLM call of a run without ever entering
+        the rolling buffer (no megabyte payloads, no re-sends in a
+        tool-call loop).
+        """
+        if not image_blocks or not history:
+            return history
+        out = list(history)
+        for i in range(len(out) - 1, -1, -1):
+            if out[i].role == MessageRole.USER:
+                msg = out[i]
+                out[i] = ChatMessage(
+                    role=msg.role,
+                    blocks=[*msg.blocks, *image_blocks],
+                    additional_kwargs=dict(msg.additional_kwargs),
+                )
+                break
+        return out
 
     @step
     async def handle_llm_input(
         self, ctx: Context, ev: InputEvent
     ) -> ToolCallEvent | StopEvent:
         """Call the LLM with tools + history; loop on tool calls."""
-        response = await self.llm.achat_with_tools(self.tools, chat_history=ev.input)
+        image_blocks = await ctx.store.get("image_blocks", default=None)
+        if image_blocks:
+            await ctx.store.set("image_blocks", None)
+        chat_history = self._with_image(list(ev.input), image_blocks)
+        response = await self.llm.achat_with_tools(self.tools, chat_history=chat_history)
         memory = await ctx.store.get("memory")
         await memory.aput(response.message)
         await ctx.store.set("memory", memory)

@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     memory_token_limit: int = 8000
     timezone: str = "UTC"
 
+    #: Only download and attach image messages when the model supports vision.
+    vision: bool = True
+    #: Images larger than this many bytes are skipped (vision APIs reject
+    #: oversized payloads and RAM spikes ~4/3x via base64).
+    max_image_bytes: int = 10 * 1024 * 1024
+    #: How many image URLs sniffed from a message's text to download.
+    max_url_images: int = 2
+
     web_search_max_results: int = 5
     web_search_timeout: float = 30.0
     web_search_proxy: str | None = None

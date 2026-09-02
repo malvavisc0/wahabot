@@ -2,18 +2,24 @@
 
 import asyncio
 import time
+from typing import Any
 
 from llama_index.core.workflow import Context
 from loguru import logger
 
 from whabot.ai.context import handle_message, render_system_prompt
-from whabot.ai.messages import extract_text, is_group_addressed, is_replyable
+from whabot.ai.messages import (
+    extract_text,
+    image_media,
+    is_group_addressed,
+    is_replyable,
+)
 from whabot.ai.tools import build_default_tools
 from whabot.ai.workflow import build_agent
 from whabot.core.access import load_session_config
 from whabot.core.filters import chat_allowed
 from whabot.core.models import WahaEvent
-from whabot.core.waha import WahaClient
+from whabot.core.waha import MediaTooLargeError, WahaClient
 from whabot.settings import Settings
 from whabot.webhook import on_message
 
@@ -53,6 +59,32 @@ def is_stale(event: WahaEvent, started_at: float) -> bool:
     if not isinstance(ts, (int, float)):
         return False
     return ts < started_at or time.time() - ts > _MAX_MESSAGE_AGE_S
+
+
+def download_image(
+    waha: WahaClient, media: dict[str, Any], message_id: str, max_bytes: int
+) -> dict[str, Any] | None:
+    """Download an image's bytes; None keeps the turn text-only on failure."""
+    url = str(media.get("url", ""))
+    if not url:
+        return None
+    try:
+        data = waha.download_media(url, max_bytes=max_bytes)
+    except MediaTooLargeError:
+        logger.info(
+            "Skipping image over {max_bytes} B in message {id}",
+            max_bytes=max_bytes,
+            id=message_id,
+        )
+        return None
+    except Exception as exc:
+        logger.warning(
+            "Image download failed for message {id}: {exc}", id=message_id, exc=exc
+        )
+        return None
+    mimetype = str(media.get("mimetype") or "image/jpeg")
+    logger.info("Downloaded image ({mime}, {size} B)", mime=mimetype, size=len(data))
+    return {"data": data, "mimetype": mimetype}
 
 
 def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
@@ -95,7 +127,8 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
         if not chat_allowed(event, access.whitelist, access.blacklist):
             return
         body = extract_text(event)
-        if body is None:
+        image = image_media(event) if settings.vision else None
+        if body is None and image is None:
             logger.debug("Skipping media/album message {id}", id=event.payload.get("id"))
             return
         if not is_group_addressed(
@@ -108,13 +141,17 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
                 "Ignoring unaddressed group message {id}", id=event.payload.get("id")
             )
             return
+        if image is not None:
+            image = download_image(waha, image, message_id, settings.max_image_bytes)
         chat_id = str(event.payload["from"])
         send_tool_holder["session"] = event.session
         send_tool_holder["chat_id"] = chat_id
         send_tool_holder["sent"] = ""
         ctx = contexts.setdefault((event.session, chat_id), Context(agent))
         async with _agent_lock:
-            reply = await handle_message(event, agent, ctx=ctx)
+            reply = await handle_message(
+                event, agent, ctx=ctx, image=image, settings=settings
+            )
         if send_tool_holder["sent"]:
             logger.debug("Agent already sent its reply in {chat_id}", chat_id=chat_id)
             return

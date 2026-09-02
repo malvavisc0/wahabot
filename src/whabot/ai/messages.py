@@ -42,6 +42,21 @@ def extract_text(event: WahaEvent) -> str | None:
     return body or None
 
 
+def image_media(event: WahaEvent) -> dict[str, Any] | None:
+    """The media dict of an image message, or None.
+
+    Only ``image`` messages qualify — stickers, videos and documents
+    carry media too, but the vision model only accepts images. The dict
+    holds ``url``, ``mimetype`` and optionally ``filename``.
+    """
+    if message_kind(event) != "image":
+        return None
+    media: Any = event.payload.get("media") or event.payload.get("_data", {}).get("media")
+    if not isinstance(media, dict) or not media.get("url"):
+        return None
+    return media
+
+
 def message_replies_to(event: WahaEvent) -> dict[str, Any] | None:
     """Return the quoted message when this message is a reply.
 

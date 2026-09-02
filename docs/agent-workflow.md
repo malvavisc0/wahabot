@@ -20,12 +20,13 @@ The AI code is split into focused modules under `src/whabot/ai/`:
 |---|---|
 | `workflow.py` | `FunctionCallingAgentWorkflow` (the `@step` methods), `load_llm`, `build_agent` |
 | `events.py` | The workflow events (`InputEvent`, `ToolCallEvent`) |
-| `context.py` | Reply-context rendering + the `handle_message` entrypoint |
-| `messages.py` | Message classification and extraction (`extract_text`, `is_replyable`, …) |
+| `context.py` | Sender tagging, reply-context rendering + the `handle_message` entrypoint |
+| `messages.py` | Message classification and extraction (`extract_text`, `image_media`, `is_replyable`, …) |
 | `history.py` | Chat-history repair (`sanitize_chat_history`) and budget trimming (`trim_to_budget`) |
 | `schemas.py` | Explicit Pydantic parameter schemas for every tool |
 | `tools.py` | The bundled WhatsApp tools |
 | `web_search.py` / `visit_url.py` | Web lookup tools (webserp CLI, curl_cffi page fetch) |
+| `url_images.py` | Image-URL sniffing from message text (curl_cffi fetch, Content-Type check) |
 | `finance.py` / `youtube.py` | Market data (yfinance) and YouTube transcript tools |
 
 ## How the workflow works
@@ -122,6 +123,14 @@ only one session can be active; the `(session, chat)` key simply makes
 the memory indirection correct and future-proof if multiple sessions are
 ever served.
 
+### Backlog filter
+
+WhatsApp redelivers undelivered messages when the WAHA session or the
+phone reconnects, and WAHA forwards them as fresh `message` events —
+without a guard, the bot answers hours-old replay. `is_stale` drops any
+message sent before this process started or older than 300s; messages
+with unknown timestamps still pass through.
+
 ### Memory hygiene and the token budget
 
 Before each run reaches the LLM, the buffered history passes through two
@@ -143,16 +152,50 @@ Before each run reaches the LLM, the buffered history passes through two
 
 ## The entrypoint
 
-`handle_message(event, agent, ctx=None)` in `whabot.ai.context` is the
-single function the handlers call. It:
+`handle_message(event, agent, ctx=None, image=None)` in
+`whabot.ai.context` is the single function the handlers call. It:
 
-1. reads the message body from `event.payload["body"]`;
+1. reads the message body from `event.payload["body"]` and prefixes a
+   **sender tag** — `[notifyName]`, falling back to the participant id —
+   so the model can tell group members apart (the tag also persists in
+   memory, giving history speaker identity for free);
 2. attaches a small `[Message quoting] …` note when the message is a
    reply to an earlier one, so the model knows what is being quoted
    (see `reply_context` / `message_replies_to`);
-3. runs the workflow — `await agent.run(input=user_msg, ctx=ctx)`;
+3. runs the workflow — `await agent.run(input=user_msg, image_blocks=..., ctx=ctx)`;
 4. returns the response text (`result.message.content`, stripped),
    which the handler sends back to the chat through WAHA.
+
+### Images (vision)
+
+When `WHABOT_VISION` is `true` (default) and the model is vision-capable,
+the handler downloads photo messages via `WahaClient.download_media`
+(`image_media(event)` gates on `_data.type == "image"` — stickers/videos/
+documents are ignored), streaming with a `WHABOT_MAX_IMAGE_BYTES` cap so
+an oversized image is skipped instead of buffered. The download happens
+after the group-participation check, so unaddressed group images cost
+nothing. The bytes pass through as `image`, the workflow carries them on
+the run as `image_blocks`, and `_with_image` injects them into a **copy**
+of the newest user message for the first LLM call only — memory stays
+text-only, so no megabyte payloads enter the rolling buffer and a
+tool-call loop never resends the picture. The turn's text side is the
+caption, or `(image)` when there is none. When `WHABOT_VISION=false`, or
+a download fails, the turn degrades to text-only.
+
+### Image URLs in text (vision)
+
+A bare link in the text ("look at this
+`https://host/path/pic.png/revision/latest`") is not a media message, so
+`whabot.ai.url_images` sniffs image URLs out of the body: any path
+segment ending in an image extension qualifies (wikia-style derivative
+paths included), up to `WHABOT_MAX_URL_IMAGES` per message. Each URL is
+streamed with the same Chrome TLS impersonation `visit_url` uses —
+the **Content-Type header** decides whether it is an image (the wikia
+example serves `image/webp` despite the `.png` path), and the
+`WHABOT_MAX_IMAGE_BYTES` cap aborts oversized bodies mid-stream.
+Fetched images join the WhatsApp-attached ones as additional
+`image_blocks` on the same first-LLM-call injection; failures are
+logged and skipped, never fatal for the turn.
 
 > **Group participation.** `handle_message` is only reached for a group
 > message when the participation mode decides to wake the agent —

@@ -35,6 +35,20 @@ Point WAHA at the webhook:
 {"name": "default", "config": {"webhooks": [{"url": "http://host:8080/api/webhook", "events": ["message"], "hmac": {"key": "your-secret-key"}}]}}
 ```
 
+## Behavior notes
+
+- **Vision** — with `WHABOT_VISION=true` (default) and a vision-capable
+  `WHABOT_LLM_MODEL`, incoming image messages (photo + optional caption)
+  are downloaded from WAHA and shown to the model on that turn only; chat
+  memory stays text-only. Bare image links in the text (up to
+  `WHABOT_MAX_URL_IMAGES` per message) are fetched and shown too. Images
+  over `WHABOT_MAX_IMAGE_BYTES` (10 MB) are skipped, and download failures
+  degrade to a text-only turn.
+- **Backlog filter** — messages sent before the server started, or older
+  than 5 minutes, are dropped as WhatsApp replay backlog.
+- **Agent & tools** — see [`docs/agent-workflow.md`](docs/agent-workflow.md);
+  per-session access/persona in [`docs/session-config.md`](docs/session-config.md).
+
 ## Checks
 
 ```bash

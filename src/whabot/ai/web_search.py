@@ -22,8 +22,6 @@ from whabot.settings import Settings
 
 __all__ = ["web_search"]
 
-_DEFAULT_TIMEOUT_SECONDS = 30.0
-_DEFAULT_MAX_RESULTS = 5
 _MIN_TIMEOUT_SECONDS = 2.0
 
 

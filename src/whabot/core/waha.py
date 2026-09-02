@@ -8,6 +8,8 @@ from loguru import logger
 
 API_PREFIX = "/api"
 
+__all__ = ["MediaTooLargeError", "WahaClient"]
+
 
 def message_media(message: dict[str, Any]) -> dict[str, Any]:
     """The media dict of a message, from either payload location."""
@@ -67,6 +69,28 @@ class WahaClient:
         )
         response.raise_for_status()
         return response.json()
+
+    def download_media(self, url: str, max_bytes: int | None = None) -> bytes:
+        """Download a message's media file, raising for HTTP errors.
+
+        When ``max_bytes`` is set, the body is streamed and a
+        ``MediaTooLargeError`` is raised (fail fast) instead of
+        buffering a file the vision API would reject anyway.
+        """
+        if max_bytes is None:
+            response = self._client.get(url)
+            response.raise_for_status()
+            return response.content
+        chunks: list[bytes] = []
+        size = 0
+        with self._client.stream("GET", url) as response:
+            response.raise_for_status()
+            for chunk in response.iter_bytes():
+                size += len(chunk)
+                if size > max_bytes:
+                    raise MediaTooLargeError(url, max_bytes)
+                chunks.append(chunk)
+        return b"".join(chunks)
 
     def send_reaction(self, session: str, message_id: str, reaction: str) -> None:
         """React to a message (empty reaction removes it), raising for HTTP errors."""
@@ -162,3 +186,12 @@ class WahaClient:
                 "messageId": message_id,
             },
         ).raise_for_status()
+
+
+class MediaTooLargeError(Exception):
+    """A media file exceeded the configured maximum size."""
+
+    def __init__(self, url: str, max_bytes: int) -> None:
+        super().__init__(f"media at {url} exceeds {max_bytes} bytes")
+        self.url = url
+        self.max_bytes = max_bytes

@@ -4,12 +4,15 @@ import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from llama_index.core.base.llms.types import ImageBlock
 from llama_index.core.workflow import Context
 from loguru import logger
 
 from whabot.ai.messages import message_replies_to
+from whabot.ai.url_images import fetch_url_images, image_urls
 from whabot.ai.workflow import FunctionCallingAgentWorkflow
 from whabot.core.models import WahaEvent
+from whabot.settings import Settings
 
 __all__ = [
     "handle_message",
@@ -131,15 +134,40 @@ async def handle_message(
     event: WahaEvent,
     agent: FunctionCallingAgentWorkflow,
     ctx: Context | None = None,
+    image: dict[str, Any] | None = None,
+    settings: Settings | None = None,
 ) -> str:
-    """Run the agent workflow over an incoming message event and return its reply."""
+    """Run the agent workflow over an incoming message event and return its reply.
+
+    ``image`` carries downloaded image bytes (``data`` + ``mimetype``);
+    when present, it rides along as ``image_blocks`` on the run and is
+    injected into the first LLM call only — memory stays text-only, so
+    no megabyte payloads accumulate in the rolling buffer.
+
+    With ``settings.vision`` enabled, image URLs sniffed from the
+    message text are fetched too (see ``whabot.ai.url_images``), so a
+    bare link like "look at this https://host/pic.png" shows the model
+    the picture as well.
+    """
     chat_id = str(event.payload.get("from", ""))
-    body = str(event.payload.get("body", ""))
+    body = str(event.payload.get("body", "")).strip()
     logger.info("Agent handling message from {chat_id}", chat_id=chat_id)
     tag = sender_tag(event)
-    user_msg = (f"{tag} {body}" if tag else body) + reply_context_section(
-        message_replies_to(event)
-    )
-    result = await agent.run(input=user_msg, ctx=ctx)
+    text = f"{tag} {body}".strip() if tag else body
+    images = [image] if image is not None else []
+    if settings is not None and settings.vision:
+        urls = image_urls(text, settings.max_url_images)
+        images.extend(fetch_url_images(settings, urls))
+    if images and not body:
+        text = f"{tag} (image)".strip()
+    user_msg = text + reply_context_section(message_replies_to(event))
+    image_blocks = [
+        ImageBlock(
+            image=img["data"],
+            image_mimetype=img.get("mimetype") or "image/jpeg",
+        )
+        for img in images
+    ]
+    result = await agent.run(input=user_msg, image_blocks=image_blocks, ctx=ctx)
     content: str | None = result.message.content
     return content.strip() if content else ""
