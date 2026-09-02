@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+
+# uv
+# (uv.lock should be committed)
+
+# Environment
+.env
+
+# Samples (real webhook payloads, not for the repo)
+samples/
+
+# Data (event journal, session runtime files)
+data/
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store

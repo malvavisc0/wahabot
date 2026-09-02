@@ -1,0 +1,71 @@
+[project]
+name = "whabot"
+version = "0.0.1"
+description = "whabot command-line interface"
+readme = "README.md"
+authors = [
+    { name = "Malvavisc0", email = "207609879+malvavisc0@users.noreply.github.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi",
+    "httpx",
+    "llama-index-core",
+    "llama-index-llms-openai-like",
+    "loguru",
+    "pydantic-settings>=2.15.0",
+    "python-dotenv",
+    "typer",
+    "uvicorn[standard]",
+]
+
+[project.scripts]
+whabot = "whabot:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "whabot"
+module-root = "src"
+
+[dependency-groups]
+dev = [
+    "basedpyright",
+    "radon",
+    "ruff",
+]
+
+[tool.basedpyright]
+reportCallInDefaultInitializer = false
+reportUnusedCallResult = false
+reportExplicitAny = false
+reportAny = false
+reportUnannotatedClassAttribute = false
+reportImportCycles = false
+reportMissingTypeStubs = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportDeprecated = false
+reportUnusedFunction = false
+reportUnusedImport = false
+reportCallIssue = false
+
+[tool.ruff]
+target-version = "py314"
+src = ["src"]
+line-length = 90
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+
