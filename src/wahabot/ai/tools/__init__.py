@@ -25,6 +25,7 @@ from wahabot.ai.tools.whatsapp import (
     search_messages,
     send_image,
     send_message,
+    stay_silent,
 )
 from wahabot.core.waha import WahaClient
 from wahabot.settings import Settings
@@ -44,6 +45,7 @@ def build_default_tools(
         settings = get_settings()
     tools = [
         send_message(waha, target),
+        stay_silent(),
         react_to_message(waha, target),
         send_image(waha, target),
         fetch_chat_messages(waha, target),

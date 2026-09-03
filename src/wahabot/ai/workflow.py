@@ -12,7 +12,12 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any, cast
 
-from llama_index.core.llms import ChatMessage, MessageRole
+from llama_index.core.base.llms.types import (
+    ChatMessage,
+    ChatResponse,
+    MessageRole,
+    ToolCallBlock,
+)
 from llama_index.core.llms.function_calling import FunctionCallingLLM
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.tools import BaseTool, ToolSelection
@@ -35,6 +40,17 @@ __all__ = [
     "build_agent",
     "load_llm",
 ]
+
+#: Mirrors LlamaIndex's DEFAULT_EARLY_STOPPING_PROMPT (base_agent.py):
+#: when the tool-round budget is spent, the model is asked for a final
+#: answer without tools instead of the run being cut off mid-research.
+_EARLY_STOPPING_PROMPT = (
+    "You have reached the maximum number of tool rounds ({limit}). "
+    "Based on the information gathered so far, provide a helpful final "
+    "response to the user's original message. Do not attempt to use any "
+    "more tools. If you already sent your reply, say nothing more — "
+    "answer with an empty message."
+)
 
 
 def raise_missing_llm() -> FunctionCallingLLM:
@@ -66,8 +82,16 @@ async def run_tool_call(
 
 
 def _token_count(msg: ChatMessage) -> int:
-    """Estimate a message's token count from its content length (1 char ≈ 1 token)."""
-    return len(str(msg.content or ""))
+    """Estimate a message's token count from its content length (1 char ≈ 1 token).
+
+    Tool-call arguments ride on the message as blocks/kwargs, not in
+    ``content`` — without them a long tool-call history looks nearly
+    free and the true prompt size drifts far past the budget.
+    """
+    args = "".join(
+        str(block.tool_kwargs) for block in msg.blocks if isinstance(block, ToolCallBlock)
+    ) or str(msg.additional_kwargs.get("tool_calls", ""))
+    return len(str(msg.content or "")) + len(args)
 
 
 class FunctionCallingAgentWorkflow(Workflow):
@@ -81,6 +105,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         system_prompt: str | None = None,
         prompt_renderer: Callable[[], str] | None = None,
         memory_token_limit: int = 8000,
+        tool_round_limit: int = 50,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -89,6 +114,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         self.prompt_renderer = prompt_renderer
         self.llm = llm or raise_missing_llm()
         self.memory_token_limit = memory_token_limit
+        self.tool_round_limit = tool_round_limit
         assert self.llm.metadata.is_function_calling_model
 
     def _rendered_system_prompt(self) -> str | None:
@@ -179,6 +205,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         else:
             await self._repair_memory(ctx)
         await ctx.store.set("image_blocks", getattr(ev, "image_blocks", None))
+        await ctx.store.set("tool_rounds", 0)
         await memory.aput(ChatMessage(role="user", content=str(ev.input)))
         await ctx.store.set("memory", memory)
         return InputEvent(input=await self._chat_history(ctx))
@@ -220,6 +247,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         never carries empty ``assistant`` turns that some
         OpenAI-compatible providers reject outright.
         """
+        rounds = await self._next_round(ctx)
         image_blocks = await ctx.store.get("image_blocks", default=None)
         if image_blocks:
             await ctx.store.set("image_blocks", None)
@@ -234,7 +262,46 @@ class FunctionCallingAgentWorkflow(Workflow):
         await ctx.store.set("memory", memory)
         if not tool_calls:
             return StopEvent(result=response)
+        if rounds >= self.tool_round_limit:
+            logger.warning(
+                "Tool round limit ({limit}) hit; forcing a final answer",
+                limit=self.tool_round_limit,
+            )
+            return StopEvent(result=await self._early_stopping_response(ctx))
         return ToolCallEvent(tool_calls=tool_calls)
+
+    async def _early_stopping_response(self, ctx: Context) -> ChatResponse:
+        """One last tool-free LLM call, mirroring LlamaIndex's
+        ``early_stopping_method="generate"``: the model is told the
+        iteration budget is spent and asked for a final answer.
+
+        A hard stop would break legitimate research that needs many
+        tool calls; instead the model gets one forced chance to wrap
+        up. The round counter is already over the limit, so even a
+        defiant model requesting tools again cannot continue the run.
+        """
+        logger.warning(
+            "Generating early stopping response after {limit} rounds",
+            limit=self.tool_round_limit,
+        )
+        memory = await ctx.store.get("memory")
+        history = await memory.aget_all()
+        system = self._system_message()
+        messages = ([system] if system else []) + list(history)
+        messages.append(
+            ChatMessage(
+                role="user",
+                content=_EARLY_STOPPING_PROMPT.format(limit=self.tool_round_limit),
+            )
+        )
+        return await self.llm.achat(messages)
+
+    async def _next_round(self, ctx: Context) -> int:
+        """Increment and return this run's tool-round counter."""
+        rounds = await ctx.store.get("tool_rounds", default=0)
+        rounds += 1
+        await ctx.store.set("tool_rounds", rounds)
+        return rounds
 
     @step
     async def handle_tool_calls(self, ctx: Context, ev: ToolCallEvent) -> InputEvent:
@@ -305,4 +372,5 @@ def build_agent(
         prompt_renderer=prompt_renderer,
         timeout=timeout,
         memory_token_limit=settings.memory_token_limit,
+        tool_round_limit=settings.tool_round_limit,
     )

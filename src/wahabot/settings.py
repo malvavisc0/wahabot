@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     #: the workflow timeout so a hung provider fails fast and clean.
     llm_timeout: float = 60.0
     memory_token_limit: int = 8000
+    #: Max LLM→tool round trips per agent run (above LlamaIndex's
+    #: default max_iterations of 20, to leave room for long research
+    #: runs). Past the limit the model gets one final tool-free call
+    #: (early stopping), not a hard cut; a model that re-issues the
+    #: same tool call forever is still bounded.
+    tool_round_limit: int = 50
     timezone: str = "UTC"
 
     #: Langfuse credentials (no WAHABOT_ prefix — the SDK's conventional

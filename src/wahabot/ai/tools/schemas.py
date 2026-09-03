@@ -34,6 +34,12 @@ class SendMessageSchema(BaseModel):
     )
 
 
+class StaySilentSchema(BaseModel):
+    """Stay silent: send nothing in this conversation."""
+
+    model_config = {"extra": "forbid"}
+
+
 class ReactToMessageSchema(BaseModel):
     """React with an emoji to a WhatsApp message."""
 

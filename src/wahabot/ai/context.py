@@ -1,6 +1,7 @@
 """Reply context rendering and the agent entrypoint."""
 
 import datetime
+import re
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -16,12 +17,45 @@ from wahabot.settings import Settings
 
 __all__ = [
     "handle_message",
+    "is_silence_narration",
     "render_system_prompt",
     "reply_context",
     "reply_context_section",
     "reply_description",
     "sender_tag",
 ]
+
+#: Replies that narrate a chosen silence instead of being one. Small
+#: models asked to "reply with an empty string to stay silent" often
+#: answer with meta-commentary ("I'll stay silent here — ...", "No
+#: response.") — matching it here keeps it out of the chat. The reply
+#: must *be about* staying silent, not merely contain the word (so
+#: "silence is golden, but I'll answer anyway" still goes through).
+_SILENCE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"^no response\b",
+        r"^no reply\b",
+        r"^nothing to (add|say)\b",
+        r"^(i'?ll |i will |i'?m )?(stay|staying|remain|choosing to stay)[\s'-]*silent\b",
+        r"^(i'?ll |i will )?(stay|keep) (quiet|out of (this|it|the conversation))\b",
+        r"^silence[.!…]?$",
+        r"^\(silence\)$",
+        r"^not (addressed|directed) (to|at) me\b",
+        r"^(i'?ll |i will )?say nothing\b",
+    )
+)
+
+
+def is_silence_narration(reply: str) -> bool:
+    """True when *reply* narrates a silence instead of being one.
+
+    Stripped of surrounding whitespace/quotes/parentheses and matched
+    case-insensitively against the silence-meta patterns; anything the
+    model actually wanted to say still goes through.
+    """
+    cleaned = reply.strip().strip("\"'`()").strip()
+    return any(pattern.search(cleaned) for pattern in _SILENCE_PATTERNS)
 
 
 def render_system_prompt(
@@ -164,10 +198,7 @@ async def handle_message(
     logger.info("Agent handling message from {chat_id}", chat_id=chat_id)
     tag = sender_tag(event)
     text = f"{tag} {body}".strip() if tag else body
-    images = [image] if image is not None else []
-    if settings is not None and settings.vision:
-        urls = image_urls(text, settings.max_url_images)
-        images.extend(fetch_url_images(settings, urls))
+    images = collect_images(image, settings, text)
     if images and not body:
         text = f"{tag} (image)".strip()
     user_msg = text + reply_context_section(message_replies_to(event))
@@ -179,6 +210,28 @@ async def handle_message(
         for img in images
     ]
     result = await agent.run(input=user_msg, image_blocks=image_blocks, ctx=ctx)
+    return final_reply(result)
+
+
+def collect_images(
+    image: dict[str, Any] | None,
+    settings: Settings | None,
+    text: str,
+) -> list[dict[str, Any]]:
+    """The message's images: the attached one plus sniffed URL images."""
+    images = [image] if image is not None else []
+    if settings is not None and settings.vision:
+        urls = image_urls(text, settings.max_url_images)
+        images.extend(fetch_url_images(settings, urls))
+    return images
+
+
+def final_reply(result: Any) -> str:
+    """The run's reply text, emptied when the model narrated a silence."""
     message = cast(ChatMessage, result.message)
     content = message.content
-    return content.strip() if isinstance(content, str) else ""
+    reply = content.strip() if isinstance(content, str) else ""
+    if is_silence_narration(reply):
+        logger.debug("Filtering silence narration: {reply!r}", reply=reply)
+        return ""
+    return reply

@@ -219,6 +219,7 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
                 send_tool_holder["session"] = event.session
                 send_tool_holder["chat_id"] = chat_id
                 send_tool_holder["sent"] = ""
+                send_tool_holder["reacted"] = ""
                 ctx = context_for(event.session, chat_id, agent)
                 with chat_trace_attributes(chat_id):
                     reply = await handle_message(

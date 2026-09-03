@@ -260,7 +260,8 @@ JID to reach another group or person (e.g. `1234567890@g.us`,
 
 | Tool | Params | WAHA endpoint | Purpose |
 |---|---|---|---|
-| `send_message` | `chat?`, `text` | `POST /api/sendText` | Send a text (current chat or elsewhere) |
+| `send_message` | `chat?`, `text` | `POST /api/sendText` | Send a text (current chat or elsewhere); once per run |
+| `stay_silent` | — | — | End the run with no reply at all |
 | `react_to_message` | `message_id`, `reaction` | `PUT /api/reaction` | Emoji-react to a message (empty = remove) |
 | `send_image` | `url`, `caption?`, `chat?` | `POST /api/sendImage` | Send an image from a URL |
 | `fetch_chat_messages` | `chat?`, `limit?` | `GET /api/{session}/chats/{chatId}/messages` | Read recent chat messages (JSON `messages` list) |
@@ -371,6 +372,21 @@ workflow runs any requested tool automatically.
   calling is missing.
 - Workflow runs have a timeout (120 s by default), so a runaway tool
   loop cannot hang the webhook forever.
+- The tool loop is also bounded by `WAHABOT_TOOL_ROUND_LIMIT`
+  (default 50): a model that re-issues tool calls forever — observed
+  with small models at low temperature repeating the same
+  `send_message` dozens of times per run — is stopped after that many
+  LLM→tool round trips. The counter resets at every run start.
+- `send_message` (and `send_image` / `forward_message`) deliver **at
+  most once per run**: after a successful send, further calls return an
+  error envelope instead of sending, so a looping model cannot spam
+  the chat even below the round limit. `react_to_message` is likewise
+  bounded to one reaction per run.
+- `stay_silent` is the explicit exit for "no reply": the system prompt
+  tells the model to call it instead of writing an empty string (which
+  small models tend to replace with narration like "I'll stay silent
+  here — …"). As a last line of defense, `handle_message` drops
+  replies that merely narrate a silence (`is_silence_narration`).
 - Tools run inside a `try/except`: a failing tool never crashes the
   workflow. It only feeds an error message back to the model, which can
   then decide what to do next.

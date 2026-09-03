@@ -24,6 +24,7 @@ from wahabot.ai.tools.schemas import (
     SearchMessagesSchema,
     SendImageSchema,
     SendMessageSchema,
+    StaySilentSchema,
 )
 from wahabot.core.waha import WahaClient
 
@@ -35,6 +36,7 @@ __all__ = [
     "search_messages",
     "send_image",
     "send_message",
+    "stay_silent",
 ]
 
 
@@ -60,6 +62,11 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
 
     Sends to the current chat by default; the model may pass an explicit
     ``chat`` (a group or a person's JID) to reach a different target.
+
+    One message per run: once a send succeeds, further calls fail with
+    an error envelope instead of sending again. A looping model (the
+    same tool call repeated dozens of times) can therefore deliver at
+    most one message per incoming event.
     """
 
     def send_message_fn(chat: str | None = None, text: str = "") -> str:
@@ -73,6 +80,10 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         """
         if not text.strip():
             return error("empty message text")
+        if target.get("sent"):
+            return error(
+                f"message already sent this run (to {target['sent']}); do not send again"
+            )
         session = target.get("session", "")
         chat_id = chat or target.get("chat_id", "")
         if not session or not chat_id:
@@ -88,13 +99,43 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         description=(
             "Send a WhatsApp text message. Use this to reply in the "
             "current chat (omit chat) or to message another group or "
-            "person (pass chat)."
+            "person (pass chat). Send at most once per run."
+        ),
+    )
+
+
+def stay_silent() -> BaseTool:
+    """Build the explicit silence tool: choose to not reply at all.
+
+    Models follow a tool call far more reliably than the "reply with
+    an empty string" instruction — without this, small models narrate
+    their silence ("I'll stay silent here — ...") and the narration is
+    sent to the chat as a normal reply.
+    """
+
+    def stay_silent_fn() -> str:
+        """Stay silent in this conversation (send nothing)."""
+        return ok()
+
+    return FunctionTool.from_defaults(
+        fn=stay_silent_fn,
+        fn_schema=StaySilentSchema,
+        name="stay_silent",
+        description=(
+            "Stay silent: say nothing in this chat. Call this instead of "
+            "replying when the message needs no answer (not addressed to "
+            "you, nothing useful to add). Never combine with send_message."
         ),
     )
 
 
 def react_to_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
-    """Build a tool that reacts to a WhatsApp message."""
+    """Build a tool that reacts to a WhatsApp message.
+
+    One reaction per run: like the send tools, a successful reaction
+    latches the holder and further calls fail with an error envelope —
+    a looping model (the same react call repeated) cannot spam emoji.
+    """
 
     def react_to_message_fn(message_id: str, reaction: str = "") -> str:
         """React to a message.
@@ -105,12 +146,15 @@ def react_to_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             reaction: The emoji to react with, or empty string to remove
                 an existing reaction.
         """
+        if target.get("reacted"):
+            return error("already reacted this run; do not react again")
         session = target.get("session", "")
         if not session:
             return error("no active conversation context")
         if not message_id:
             return error("message_id is required")
         waha.send_reaction(session, message_id, reaction)
+        target["reacted"] = message_id
         return ok(message_id=message_id, reaction=reaction, removed=not reaction)
 
     return FunctionTool.from_defaults(
@@ -120,7 +164,8 @@ def react_to_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         description=(
             "React with an emoji to a WhatsApp message. Provide the "
             "message's serialized id (use fetch_chat_messages to find "
-            "ids). Pass an empty reaction to remove the bot's reaction."
+            "ids). Pass an empty reaction to remove the bot's reaction. "
+            "React at most once per run."
         ),
     )
 
@@ -153,6 +198,7 @@ def send_image(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             file={"mimetype": mimetype, "url": url},
             caption=caption,
         )
+        target["sent"] = chat_id
         return ok(chat=chat_id, url=url, mimetype=mimetype, caption=caption)
 
     return FunctionTool.from_defaults(
@@ -370,6 +416,7 @@ def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         if not message_id:
             return error("message_id is required")
         waha.forward_message(session, chat_id, message_id)
+        target["sent"] = chat_id
         return ok(message_id=message_id, chat=chat_id)
 
     return FunctionTool.from_defaults(
