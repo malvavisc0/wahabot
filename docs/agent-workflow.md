@@ -152,10 +152,18 @@ Before each run reaches the LLM, the buffered history passes through two
    prompt lives outside the rolling buffer so the trim can never evict
    it; its token cost is accounted via `initial_token_count` (a prompt
    larger than the budget is clamped and logged, not fatal).
+3. **Cap** (`MAX_TOOL_RESULT_TOKENS`, 2000 chars) — tool outputs are
+   truncated in `run_tool_call` before entering memory. A single
+   oversized tool group defeats both trims: `trim_to_budget` keeps it
+   ("a single group larger than the budget is kept"), then
+   `ChatMemoryBuffer.get` re-trims with the real tokenizer, finds only
+   that group, and drops everything but the tool message — the LLM
+   request goes out with no user turn and the provider answers 400
+   ("No user query found in messages").
 
 ## The entrypoint
 
-`handle_message(event, agent, ctx=None, image=None)` in
+`handle_message(event, agent, ctx=None, image=None, settings=None, waha=None)` in
 `wahabot.ai.context` is the single function the handlers call. It:
 
 1. reads the message body from `event.payload["body"]` and prefixes a
@@ -437,6 +445,17 @@ that is why `_system_token_count` clamps instead of letting it raise.
 Because trimming is read-side, `_chat_history` re-trims and `aset`s
 the buffer on every round; the store can be at most one tool-round
 over budget when `_early_stopping_response` reads it via `aget_all()`.
+
+Two of `get`'s behaviors shape the design:
+
+- Its tokenizer counts `" ".join(str(m.content))` — real tokens, not
+  our chars≈tokens estimate — so a history that passed
+  `trim_to_budget` can still be over budget here. `get` then keeps
+  dropping oldest messages until only the newest survives; if that is
+  a `tool` message, the request has no user turn (the 400 above).
+  `MAX_TOOL_RESULT_TOKENS` exists so no single group can force this.
+- It never starts history on `assistant`/`tool` — it drops extra
+  leading messages to avoid it — which compounds the collapse above.
 
 ### Tool calls live in two places on a message
 
