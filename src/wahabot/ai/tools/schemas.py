@@ -9,6 +9,10 @@ docstring-derived schema with these definitions.
 ``chat`` is always optional: omit it to target the current conversation,
 or pass a group/person JID (e.g. ``1234567890@g.us`` or ``9876543210@c.us``)
 to reach another chat.
+
+Every tool returns the shared JSON envelope (see
+``wahabot.ai.tools.envelope``): ``{"ok": true, ...payload}`` on success,
+``{"ok": false, "error": "..."}`` on failure.
 """
 
 from pydantic import BaseModel, Field
@@ -65,7 +69,7 @@ class SendImageSchema(BaseModel):
 
 
 class FetchChatMessagesSchema(BaseModel):
-    """Fetch the most recent messages of a chat as text lines."""
+    """Fetch the most recent messages of a chat as a JSON envelope."""
 
     chat: str | None = Field(
         default=None,
@@ -147,7 +151,7 @@ class GetYoutubeTranscriptSchema(BaseModel):
 
 
 class VisitUrlSchema(BaseModel):
-    """Fetch a web page and return its visible text."""
+    """Fetch a web page and return its visible text as a JSON envelope."""
 
     url: str = Field(
         description="The web page URL to visit.",

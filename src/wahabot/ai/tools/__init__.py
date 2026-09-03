@@ -2,8 +2,10 @@
 
 ``whatsapp`` holds the seven WhatsApp tools (send/react/image/history/
 metadata/search/forward), ``external`` the research and host tools
-(web search, page fetch, stock prices, YouTube transcripts, shell) and
-``schemas`` the Pydantic parameter schemas for all of them.
+(web search, page fetch, stock prices, YouTube transcripts, shell),
+``schemas`` the Pydantic parameter schemas for all of them, and
+``envelope`` the unified JSON envelope (``ok`` / ``error``) every tool
+returns.
 """
 
 from llama_index.core.tools import BaseTool

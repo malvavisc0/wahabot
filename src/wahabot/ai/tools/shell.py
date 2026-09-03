@@ -1,8 +1,8 @@
 """Rich shell execution tool.
 
 Runs an arbitrary shell command on the host via ``subprocess`` and returns
-a bounded, status-style string — the same "never raises" contract as the
-other tools. Because this can do anything on the host, it is **off by
+a bounded result in the shared JSON envelope — the same "never raises"
+contract as the other tools. Because this can do anything on the host, it is **off by
 default**: the tool is only registered when ``shell_tool`` is enabled in
 settings (``WAHABOT_SHELL_TOOL=true``). Operators must also cap runtime
 (``WAHABOT_SHELL_TIMEOUT``) and output size (``WAHABOT_SHELL_MAX_OUTPUT``)
@@ -18,6 +18,7 @@ from typing import IO
 
 from loguru import logger
 
+from wahabot.ai.tools.envelope import error, ok
 from wahabot.settings import Settings
 
 __all__ = ["shell_command"]
@@ -31,19 +32,20 @@ _SHELL = "/bin/sh"
 
 
 def shell_command(settings: Settings, command: str) -> str:
-    """Run a shell command and return its trimmed output, prefixed with status.
+    """Run a shell command and return its result as a JSON envelope.
 
     The command runs through ``/bin/sh`` so pipes, redirection and the
     usual shell features work; stdin is closed so a command that reads
     it cannot hang. Capture is bounded: reader threads stop collecting
     past ``settings.shell_max_output`` bytes per stream, so a flooding
-    command cannot exhaust memory. A non-zero exit code is reported
-    rather than raised. On timeout the shell and its whole process
-    group are reaped (SIGTERM, then SIGKILL), so background children
-    cannot survive orphaned on the host.
+    command cannot exhaust memory. A non-zero exit code is reported in
+    the envelope (``ok`` stays true — the command ran), while a start
+    failure or timeout yields an ``error`` envelope. On timeout the
+    shell and its whole process group are reaped (SIGTERM, then
+    SIGKILL), so background children cannot survive orphaned on the host.
     """
     if not command.strip():
-        return "Error: command cannot be empty."
+        return error("command cannot be empty")
     run_timeout = max(settings.shell_timeout, _MIN_TIMEOUT_SECONDS)
     max_output = max(settings.shell_max_output, _MIN_MAX_OUTPUT)
     logger.debug("Running shell command: {cmd}", cmd=command)
@@ -59,7 +61,7 @@ def shell_command(settings: Settings, command: str) -> str:
         )
     except Exception as exc:
         logger.warning("shell_command failed to start: {exc}", exc=exc)
-        return f"Command failed to run: {exc}"
+        return error(f"command failed to run: {exc}")
     readers = [
         _start_reader(proc.stdout, max_output),
         _start_reader(proc.stderr, max_output),
@@ -67,13 +69,7 @@ def shell_command(settings: Settings, command: str) -> str:
     if not _join_readers(readers, run_timeout):
         _kill_tree(proc)
         logger.warning("shell_command timed out after {t}s", t=run_timeout)
-        return _render_result(
-            proc.returncode,
-            readers[0].text,
-            readers[1].text,
-            max_output,
-            header=f"Command timed out after {run_timeout}s.",
-        )
+        return error(f"command timed out after {run_timeout}s")
     proc.wait()
     return _render_result(proc.returncode, readers[0].text, readers[1].text, max_output)
 
@@ -146,31 +142,20 @@ def _render_result(
     stdout: str | None,
     stderr: str | None,
     max_output: int,
-    header: str | None = None,
 ) -> str:
-    """Render a completed command into the status string returned to the agent."""
-    code = returncode if returncode is not None else "unknown"
-    parts = [header] if header else []
-    parts.append(f"exit code: {code}")
-    parts.extend(_output_lines(stdout, stderr, max_output))
-    return "\n".join(parts)
+    """Render a completed command into the JSON envelope returned to the agent."""
+    out, out_truncated = _cap((stdout or "").strip(), max_output)
+    err, err_truncated = _cap((stderr or "").strip(), max_output)
+    return ok(
+        exit_code=returncode if returncode is not None else "unknown",
+        stdout=out,
+        stderr=err,
+        truncated=out_truncated or err_truncated,
+    )
 
 
-def _output_lines(stdout: str | None, stderr: str | None, max_output: int) -> list[str]:
-    """Labelled, capped stdout/stderr blocks, or a no-output marker."""
-    lines: list[str] = []
-    out = (stdout or "").strip()
-    err = (stderr or "").strip()
-    if out:
-        lines.append(f"stdout:\n{_cap(out, max_output)}")
-    if err:
-        lines.append(f"stderr:\n{_cap(err, max_output)}")
-    return lines or ["(no output)"]
-
-
-def _cap(text: str, max_output: int) -> str:
-    """Trim *text* to *max_output* characters, flagging the truncation."""
-    omitted = len(text) - max_output
-    if omitted <= 0:
-        return text
-    return f"{text[:max_output]}\n... [truncated, {omitted} chars omitted]"
+def _cap(text: str, max_output: int) -> tuple[str, bool]:
+    """Trim *text* to *max_output* characters, reporting any truncation."""
+    if len(text) <= max_output:
+        return text, False
+    return text[:max_output], True

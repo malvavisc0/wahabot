@@ -26,6 +26,7 @@ The AI code is split into focused modules under `src/wahabot/ai/`:
 | `tools/whatsapp.py` | The bundled WhatsApp tools |
 | `tools/external.py` | Web, finance, YouTube & (opt-in) shell tool builders |
 | `tools/schemas.py` | Explicit Pydantic parameter schemas for every tool |
+| `tools/envelope.py` | The unified JSON envelope (`ok` / `error`) every tool returns |
 | `tools/web_search.py` / `tools/visit_url.py` | Web lookup tools (webserp CLI, curl_cffi page fetch) |
 | `tools/url_images.py` | Image-URL sniffing from message text (curl_cffi fetch, Content-Type check) |
 | `tools/finance.py` / `tools/youtube.py` | Market data (yfinance) and YouTube transcript tools |
@@ -244,9 +245,11 @@ agent = build_agent(
 )
 ```
 
-Every tool returns a short status string (or an error message) rather
-than raising — a failed call never crashes the workflow, it just feeds
-the error back to the model.
+Every tool returns a compact JSON envelope rather than raising —
+`{"ok": true, ...payload}` on success, `{"ok": false, "error": "..."}`
+on failure (built once by `wahabot.ai.tools.envelope.ok` / `.error`, so
+no tool hand-rolls JSON). A failed call never crashes the workflow; it
+just feeds an `error` envelope back to the model.
 
 Most tools take an optional `chat` argument: omit it to act on the
 **current chat** (the one the incoming message came from), or pass a
@@ -260,7 +263,7 @@ JID to reach another group or person (e.g. `1234567890@g.us`,
 | `send_message` | `chat?`, `text` | `POST /api/sendText` | Send a text (current chat or elsewhere) |
 | `react_to_message` | `message_id`, `reaction` | `PUT /api/reaction` | Emoji-react to a message (empty = remove) |
 | `send_image` | `url`, `caption?`, `chat?` | `POST /api/sendImage` | Send an image from a URL |
-| `fetch_chat_messages` | `chat?`, `limit?` | `GET /api/{session}/chats/{chatId}/messages` | Read recent chat messages as text |
+| `fetch_chat_messages` | `chat?`, `limit?` | `GET /api/{session}/chats/{chatId}/messages` | Read recent chat messages (JSON `messages` list) |
 | `get_chat` | `chat?` | `POST /api/{session}/chats/overview` | Chat metadata (name, participants, …) |
 | `search_messages` | `query`, `chat?`, `limit?` | `GET /api/messages` (local filter) | Find recent messages by text / media |
 | `forward_message` | `message_id`, `chat?` | `POST /api/forwardMessage` | Forward a message to a chat |
@@ -304,7 +307,7 @@ Underneath it calls WAHA `PUT /api/reaction` (see
 
 | Tool | Purpose |
 |---|---|
-| `fetch_chat_messages(chat=None, limit=20)` | Recent messages as text lines, each prefixed `[id:...]` (for react/forward); media-only messages render as `[mimetype] filename` |
+| `fetch_chat_messages(chat=None, limit=20)` | Recent messages as a JSON `messages` list, each entry carrying its serialized `id` (for react/forward), body, sender and media info |
 | `get_chat(chat=None)` | Chat metadata summary (name, participant count + JIDs, …) via `/chats/overview` |
 | `search_messages(query, chat=None, limit=20)` | Find recent messages containing a text substring |
 
@@ -324,8 +327,8 @@ search_messages(query="invoice", chat="1234567890@g.us")
 ### External research
 
 Beyond the WhatsApp tools, the agent ships lookup tools for up-to-date
-external information. All follow the same convention: they return a
-status string and never raise.
+external information. All follow the same convention: they return the
+JSON envelope (`{"ok": ...}`) and never raise.
 
 | Tool | Params | Source | Purpose |
 |---|---|---|---|

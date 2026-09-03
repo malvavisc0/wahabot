@@ -3,7 +3,7 @@
 Builders for tools that reach outside WhatsApp: web search, page fetch,
 stock prices, YouTube transcripts and the (opt-in) shell. Each binds the
 shared settings and wraps a plain function from its own module, keeping
-the "return a status string, never raise" contract.
+the "return the JSON envelope, never raise" contract.
 """
 
 from llama_index.core.tools import BaseTool, FunctionTool
@@ -49,9 +49,9 @@ def web_search_builder(settings: Settings) -> BaseTool:
         fn_schema=WebSearchSchema,
         name="web_search",
         description=(
-            "Search the web and return results (title, url, snippet, "
-            "engine). Use to answer questions needing up-to-date or "
-            "external information."
+            "Search the web and return a JSON envelope with `results` "
+            "(title, url, snippet, engine). Use to answer questions "
+            "needing up-to-date or external information."
         ),
     )
 
@@ -68,10 +68,11 @@ def shell_builder(settings: Settings) -> BaseTool:
         name="run_shell_command",
         description=(
             "Run a shell command on the host machine (bash; pipes, redirection "
-            "and usual shell features work) and return its exit code plus "
-            "stdout/stderr. Use for anything the other tools cannot do: "
-            "filesystem, processes, system state, installing or running "
-            "utilities. Commands time out after "
+            "and usual shell features work) and return a JSON envelope with "
+            "`exit_code`, `stdout`, `stderr` and a `truncated` flag. Use for "
+            "anything the other tools cannot do: filesystem, processes, "
+            "system state, installing or running utilities. Commands time "
+            "out after "
             f"{int(settings.shell_timeout)}s and output is truncated past "
             f"{settings.shell_max_output} chars — keep them quick and quiet."
         ),
@@ -90,7 +91,8 @@ def stock_price_builder() -> BaseTool:
         name="fetch_current_stock_price",
         description=(
             "Fetch the current price of a stock, ETF or crypto ticker "
-            "(e.g. AAPL, BTC-USD). Use for price and day-change questions."
+            "(e.g. AAPL, BTC-USD) as a JSON envelope with price, currency "
+            "and day change. Use for price and day-change questions."
         ),
     )
 
@@ -106,8 +108,9 @@ def visit_url_builder(settings: Settings) -> BaseTool:
         fn_schema=VisitUrlSchema,
         name="visit_url",
         description=(
-            "Fetch a web page and return its visible text. Use to read "
-            "the content of a specific URL."
+            "Fetch a web page and return a JSON envelope with its visible "
+            "`text` (plus `status`, `truncated`). Use to read the content "
+            "of a specific URL."
         ),
     )
 
@@ -123,8 +126,10 @@ def youtube_transcript_builder() -> BaseTool:
         fn_schema=GetYoutubeTranscriptSchema,
         name="get_youtube_transcript",
         description=(
-            "Fetch a YouTube video's captions/transcript as text. Use to "
-            "extract the spoken content of a video for summarization. "
-            "Only works when captions are available."
+            "Fetch a YouTube video's captions/transcript as a JSON "
+            "envelope with `text` (plus `video_id`, `segments`, "
+            "`duration_s`, `truncated`). Use to extract the spoken "
+            "content of a video for summarization. Only works when "
+            "captions are available."
         ),
     )

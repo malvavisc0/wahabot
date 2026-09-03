@@ -2,8 +2,8 @@
 
 Ported from aria-ai's ``aria.tools.search.finance``. Pure Python via the
 ``yfinance`` library; no API key. The tool follows wahabot conventions:
-it returns a human-readable status string and never raises (failures
-become an explanatory message fed back to the model).
+it returns the shared JSON envelope and never raises (failures become an
+``error`` envelope fed back to the model).
 """
 
 import math
@@ -12,6 +12,8 @@ from typing import Any
 
 import yfinance
 from loguru import logger
+
+from wahabot.ai.tools.envelope import error, ok
 
 __all__ = [
     "fetch_current_stock_price",
@@ -40,8 +42,8 @@ def fetch_current_stock_price(ticker: str) -> str:
     """Fetch the current price for a stock, ETF, or crypto ticker.
 
     Returns:
-        A short status line with the price, currency and day change, or
-        an explanatory error message.
+        A JSON envelope with the price, currency and day change, or an
+        ``error`` envelope.
     """
     raw_ticker = ticker
     try:
@@ -60,7 +62,7 @@ def fetch_current_stock_price(ticker: str) -> str:
         market_state = info.get("marketState", "UNKNOWN")
 
         prev_close = _finite_price(info.get("previousClose"))
-        result = {
+        result: dict[str, Any] = {
             "ticker": ticker,
             "current_price": round(current_price, 2),
             "currency": currency,
@@ -71,31 +73,18 @@ def fetch_current_stock_price(ticker: str) -> str:
             day_change = current_price - prev_close
             result["day_change"] = round(day_change, 2)
             result["day_change_percent"] = round((day_change / prev_close) * 100, 2)
-        return _format_price(result)
+        return ok(**result)
     except YFinanceValidationError as exc:
         logger.warning("Validation error for {ticker}: {exc}", ticker=raw_ticker, exc=exc)
-        return f"Stock price error: {exc}"
+        return error(f"stock price error: {exc}")
     except YFinanceDataError as exc:
         logger.warning("Data error for {ticker}: {exc}", ticker=raw_ticker, exc=exc)
-        return f"Stock price error: {exc}"
+        return error(f"stock price error: {exc}")
     except Exception as exc:
         logger.exception(
             "Unexpected error fetching price for {ticker}", ticker=raw_ticker
         )
-        return f"Stock price error: {exc}"
-
-
-def _format_price(result: dict[str, Any]) -> str:
-    """Render the price result as a compact status string."""
-    price = f"{result['current_price']} {result['currency']} ({result['market_state']})"
-    lines = [f"{result['ticker']}: {price}"]
-    if result.get("day_change") is not None:
-        lines.append(
-            f"day change: {result['day_change']} ({result['day_change_percent']}%)"
-        )
-    if result.get("previous_close") is not None:
-        lines.append(f"previous close: {result['previous_close']}")
-    return "\n".join(lines)
+        return error(f"stock price error: {exc}")
 
 
 def _finite_price(value: Any) -> float | None:

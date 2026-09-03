@@ -3,9 +3,9 @@
 ``webserp`` is a light metasearch CLI that queries Google, DuckDuckGo,
 Brave, Yahoo, Mojeek, Startpage and Presearch in parallel, using browser
 impersonation (curl_cffi) and **no API key**. It is invoked as a
-subprocess and its JSON output is normalised into a short status string,
-matching wahabot's other tools (which return descriptive text rather than
-raising).
+subprocess and its JSON output is normalised into the shared JSON
+envelope, matching wahabot's other tools (which return structured JSON
+rather than raising).
 
 The tool is built with a ``Settings`` so operators can tune timeout,
 result count and an optional proxy without touching code.
@@ -18,6 +18,7 @@ from typing import Any
 
 from loguru import logger
 
+from wahabot.ai.tools.envelope import error, ok
 from wahabot.settings import Settings
 
 __all__ = ["web_search"]
@@ -38,14 +39,14 @@ def web_search(
             ``WAHABOT_WEB_SEARCH_MAX_RESULTS``.
 
     Returns:
-        A short human-readable listing of findings, or an explanatory
-        error message (a failure never raises).
+        A JSON envelope with a ``results`` list of findings, or an
+        ``error`` envelope (a failure never raises).
     """
     if not query.strip():
-        return "Error: query cannot be empty."
+        return error("query cannot be empty")
     limit = settings.web_search_max_results if max_results is None else max_results
     if limit < 1:
-        return "Error: max_results must be positive."
+        return error("max_results must be positive")
     try:
         output = _run_webserp(
             query=query,
@@ -56,11 +57,8 @@ def web_search(
         findings = _parse_output(output)
     except Exception as exc:
         logger.warning("web_search failed: {exc}", exc=exc)
-        return f"web_search failed: {exc}"
-    if not findings:
-        return "No results found."
-    lines = [_finding_line(f) for f in findings]
-    return "\n".join(lines)
+        return error(f"web_search failed: {exc}")
+    return ok(query=query, count=len(findings), results=findings)
 
 
 def _run_webserp(
@@ -130,10 +128,3 @@ def _build_finding(raw: dict[str, Any]) -> dict[str, Any] | None:
     if raw.get("engine"):
         finding["engine"] = raw["engine"]
     return finding
-
-
-def _finding_line(finding: dict[str, Any]) -> str:
-    """Render one finding as a compact line for the model."""
-    engine = f" [{finding['engine']}]" if finding.get("engine") else ""
-    content = f" — {finding['content']}" if finding.get("content") else ""
-    return f"{finding['title']} ({finding['url']}){engine}{content}"

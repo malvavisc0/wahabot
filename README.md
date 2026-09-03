@@ -26,7 +26,7 @@ Because the interesting part isn't calling an LLM — it's giving it *hands*.
 
 wahabot ships seven WhatsApp tools (send text, send image, react, forward, read recent messages, get chat metadata, search messages) plus four external research tools (web search via `webserp`, page fetch with Chrome TLS fingerprinting, stock prices via `yfinance`, YouTube transcripts) and an optional shell tool (arbitrary host commands, off unless `WAHABOT_SHELL_TOOL=true`). The model picks which tool to call, the workflow executes it, feeds the result back, and lets the model decide if it needs more. It stops when the model is content.
 
-Every tool returns a status string, never raises — a failed lookup just feeds an error back to the model so it can adapt. The whole run is capped at 120 s so a pathological loop can't hold the webhook hostage.
+Every tool returns a compact JSON envelope — `{"ok": true, ...payload}` on success, `{"ok": false, "error": "..."}` on failure — and never raises; a failed lookup just feeds an error envelope back to the model so it can adapt. The whole run is capped at 120 s so a pathological loop can't hold the webhook hostage.
 
 ## What it can see
 
@@ -122,6 +122,7 @@ The agent workflow lives under `src/wahabot/ai/` as a set of focused modules:
 | `tools/whatsapp.py` | The seven WhatsApp tools |
 | `tools/external.py` | Web, finance, YouTube & (opt-in) shell tool builders |
 | `tools/schemas.py` | Pydantic parameter schemas for every tool |
+| `tools/envelope.py` | The unified JSON envelope (`ok` / `error`) every tool returns |
 | `tools/web_search.py` / `tools/visit_url.py` / `tools/url_images.py` / `tools/shell.py` | Web lookup, image-URL & shell tool functions |
 | `tools/finance.py` / `tools/youtube.py` | Market data and transcript tools |
 | `observability.py` | Langfuse export |

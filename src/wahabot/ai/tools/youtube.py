@@ -3,7 +3,7 @@
 Ported from aria-ai's ``aria.tools.search.youtube``, but returns the
 transcript text inline (truncated) instead of writing it to disk, since
 wahabot has no file tools. Pure Python via ``youtube-transcript-api``; no
-API key. The tool returns a status string and never raises.
+API key. The tool returns the shared JSON envelope and never raises.
 """
 
 import re
@@ -15,6 +15,8 @@ from youtube_transcript_api import (
     TranscriptsDisabled,
     YouTubeTranscriptApi,
 )
+
+from wahabot.ai.tools.envelope import error, ok
 
 __all__ = ["get_youtube_transcript"]
 
@@ -35,32 +37,38 @@ def get_youtube_transcript(url: str) -> str:
         url: A YouTube video URL, e.g. ``https://youtube.com/watch?v=...``.
 
     Returns:
-        Readable paragraphed prose (truncated), or an explanatory error
-        message. Only works for videos that have captions available.
+        A JSON envelope with the paragraphed prose ``text`` (truncated),
+        ``video_id``, ``segments``, ``duration_s`` and a ``truncated``
+        flag, or an ``error`` envelope. Only works for videos that have
+        captions available.
     """
     video_id = _extract_video_id(url)
     if not video_id:
-        return "Could not extract YouTube video ID from URL."
+        return error("could not extract YouTube video ID from URL")
 
     try:
         transcript_text, segments, duration = _get_youtube_transcript(video_id)
     except _TRANSCRIPT_ERRORS:
-        return (
-            f"No captions available for video {video_id}. The video may "
-            "lack subtitles or have them disabled."
+        return error(
+            f"no captions available for video {video_id}; the video may "
+            + "lack subtitles or have them disabled"
         )
     except Exception as exc:
         logger.exception(
             "Failed to get YouTube transcript for {video_id}", video_id=video_id
         )
-        return f"Failed to get YouTube transcript: {exc}"
+        return error(f"failed to get YouTube transcript: {exc}")
 
-    header = (
-        f"YouTube transcript for {video_id} ({segments} segments, ~{duration:.0f}s):\n"
+    truncated = len(transcript_text) > _MAX_TRANSCRIPT_CHARS
+    if truncated:
+        transcript_text = transcript_text[:_MAX_TRANSCRIPT_CHARS]
+    return ok(
+        video_id=video_id,
+        segments=segments,
+        duration_s=round(duration),
+        truncated=truncated,
+        text=transcript_text,
     )
-    if len(transcript_text) > _MAX_TRANSCRIPT_CHARS:
-        transcript_text = transcript_text[:_MAX_TRANSCRIPT_CHARS] + "\n...[truncated]"
-    return header + transcript_text
 
 
 _VIDEO_ID_PATTERN = (

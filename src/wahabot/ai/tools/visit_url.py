@@ -6,8 +6,9 @@ Plain tightly-scoped HTTP clients are often blocked by anti-bot checks.
 sites than a bare ``httpx`` client could.
 
 The response body is returned inline (HTML stripped, truncated), since
-wahabot has no file tools. Tools follow wahabot conventions: they return a
-status string and never raise (failures become an explanatory message).
+wahabot has no file tools. Tools follow wahabot conventions: they return
+the shared JSON envelope and never raise (failures become an ``error``
+envelope fed back to the model).
 """
 
 import re
@@ -16,6 +17,7 @@ from typing import Any
 from curl_cffi import requests as cffi_requests
 from loguru import logger
 
+from wahabot.ai.tools.envelope import error, ok
 from wahabot.settings import Settings
 
 __all__ = ["visit_url"]
@@ -35,22 +37,28 @@ def visit_url(settings: Settings, url: str) -> str:
         url: The web page URL to visit.
 
     Returns:
-        Up to ~4000 chars of readable page text, or an explanatory error
-        message if the page could not be fetched.
+        A JSON envelope with the page ``text`` (up to ~4000 chars), its
+        final ``url``, HTTP ``status`` and a ``truncated`` flag, or an
+        ``error`` envelope if the page could not be fetched.
     """
     if not url.strip():
-        return "Error: url cannot be empty."
+        return error("url cannot be empty")
     try:
         response = _fetch(url, settings)
     except Exception as exc:
         logger.warning("visit_url failed for {url}: {exc}", url=url, exc=exc)
-        return f"visit_url failed: {exc}"
+        return error(f"visit_url failed: {exc}")
 
     text = _to_text(response)
-    header = f"{response.url} [{response.status_code}]\n"
-    if len(text) > _MAX_CHARS:
-        text = text[:_MAX_CHARS] + "\n...[truncated]"
-    return header + text
+    truncated = len(text) > _MAX_CHARS
+    if truncated:
+        text = text[:_MAX_CHARS]
+    return ok(
+        url=str(response.url),
+        status=response.status_code,
+        truncated=truncated,
+        text=text,
+    )
 
 
 def _fetch(url: str, settings: Settings) -> Any:

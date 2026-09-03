@@ -4,8 +4,8 @@ Each builder takes the shared mutable ``target`` holder refreshed by the
 handler before every agent run with the current ``session`` and default
 ``chat_id``, so the shared agent's tools always speak for the message
 being handled. Tools calling a WAHA endpoint raise on HTTP errors; the
-tool functions here return a status string instead, so a failure feeds
-back to the model rather than crashing the workflow.
+tool functions here return the shared JSON envelope instead, so a
+failure feeds back to the model rather than crashing the workflow.
 """
 
 import mimetypes
@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from llama_index.core.tools import BaseTool, FunctionTool
 
+from wahabot.ai.tools.envelope import error, ok
 from wahabot.ai.tools.schemas import (
     FetchChatMessagesSchema,
     ForwardMessageSchema,
@@ -24,7 +25,7 @@ from wahabot.ai.tools.schemas import (
     SendImageSchema,
     SendMessageSchema,
 )
-from wahabot.core.waha import WahaClient, message_media
+from wahabot.core.waha import WahaClient
 
 __all__ = [
     "fetch_chat_messages",
@@ -71,14 +72,14 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             text: The text to send.
         """
         if not text.strip():
-            return "Error: empty message text."
+            return error("empty message text")
         session = target.get("session", "")
         chat_id = chat or target.get("chat_id", "")
         if not session or not chat_id:
-            return "Error: no active conversation context."
+            return error("no active conversation context")
         waha.send_text(session, chat_id, text)
         target["sent"] = chat_id
-        return f"Sent '{text}' to {chat_id}."
+        return ok(chat=chat_id, text=text)
 
     return FunctionTool.from_defaults(
         fn=send_message_fn,
@@ -106,15 +107,11 @@ def react_to_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         """
         session = target.get("session", "")
         if not session:
-            return "Error: no active conversation context."
+            return error("no active conversation context")
         if not message_id:
-            return "Error: message_id is required."
+            return error("message_id is required")
         waha.send_reaction(session, message_id, reaction)
-        return (
-            f"Reacted to {message_id} with '{reaction}'."
-            if reaction
-            else f"Removed reaction from {message_id}."
-        )
+        return ok(message_id=message_id, reaction=reaction, removed=not reaction)
 
     return FunctionTool.from_defaults(
         fn=react_to_message_fn,
@@ -146,17 +143,17 @@ def send_image(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         session = target.get("session", "")
         chat_id = chat or target.get("chat_id", "")
         if not session or not chat_id:
-            return "Error: no active conversation context."
+            return error("no active conversation context")
         if not url:
-            return "Error: url is required."
+            return error("url is required")
+        mimetype = infer_image_mimetype(url)
         waha.send_image(
             session,
             chat_id,
-            file={"mimetype": infer_image_mimetype(url), "url": url},
+            file={"mimetype": mimetype, "url": url},
             caption=caption,
         )
-        caption_text = f" with caption: {caption}" if caption else ""
-        return f"Sent image{caption_text} to {chat_id}."
+        return ok(chat=chat_id, url=url, mimetype=mimetype, caption=caption)
 
     return FunctionTool.from_defaults(
         fn=send_image_fn,
@@ -199,34 +196,20 @@ def fetch_chat_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         session = target.get("session", "")
         chat_id = chat or target.get("chat_id", "")
         if not session or not chat_id:
-            return "Error: no active conversation context."
+            return error("no active conversation context")
         messages = waha.fetch_chat_messages(session, chat_id, limit=limit)
-        lines: list[str] = []
-        for m in messages[:limit]:
-            who = (
-                "me"
-                if m.get("fromMe")
-                else str(m.get("participant") or m.get("from", ""))
-            )
-            body = str(m.get("body", "") or "").strip()[:200]
-            message_id = str(m.get("id", ""))
-            if not body:
-                media = message_media(m)
-                mimetype = str(media.get("mimetype", "media") or "media")
-                filename = media.get("filename") or ""
-                body = f"[{mimetype}] {filename}".strip()
-            lines.append(f"[id:{message_id}] {who}: {body}")
-        return "\n".join(lines) if lines else "(no messages found)"
+        return ok(chat=chat_id, count=len(messages), messages=messages)
 
     return FunctionTool.from_defaults(
         fn=fetch_chat_messages_fn,
         fn_schema=FetchChatMessagesSchema,
         name="fetch_chat_messages",
         description=(
-            "Fetch the most recent messages of a chat as text lines, each "
-            "prefixed with its `[id:...]` serialized message id. Use to "
-            "read what has been said in the current or another chat; the "
-            "ids let you forward or react to a message. limit caps lines."
+            "Fetch the most recent messages of a chat. Returns a JSON "
+            "envelope with `messages` (each carrying its serialized `id`, "
+            "`body`, sender and media info). Use to read the current or "
+            "another chat; the ids let you forward or react to a message. "
+            "limit caps the number of messages."
         ),
     )
 
@@ -243,11 +226,11 @@ def get_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         session = target.get("session", "")
         chat_id = chat or target.get("chat_id", "")
         if not session or not chat_id:
-            return "Error: no active conversation context."
+            return error("no active conversation context")
         overview = waha.get_chat_overview(session, chat_id)
         if not overview:
-            return f"No metadata found for {chat_id}."
-        return summarize_chat(chat_id, overview)
+            return error(f"no metadata found for {chat_id}")
+        return ok(**summarize_chat(chat_id, overview))
 
     return FunctionTool.from_defaults(
         fn=get_chat_fn,
@@ -255,24 +238,25 @@ def get_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         name="get_chat",
         description=(
             "Get metadata (name, participants count, group flags, unread "
-            "count) about a WhatsApp chat. Omit chat for the current chat."
+            "count) about a WhatsApp chat as a JSON envelope. Omit chat "
+            "for the current chat."
         ),
     )
 
 
-def summarize_chat(chat_id: str, overview: dict[str, Any]) -> str:
-    """Render a compact, model-friendly summary of a chat overview dict.
+def summarize_chat(chat_id: str, overview: dict[str, Any]) -> dict[str, Any]:
+    """Build a compact, model-friendly summary of a chat overview dict.
 
     Extracts the stable scalar fields and the participant JIDs, skipping
     nested blobs like ``lastMessage`` and ``picture`` that carry no
-    useful metadata for the model.
+    useful metadata for the model. Returns a dict ready for the envelope.
     """
     scalar = _chat_scalars(overview)
     _add_participant_summary(scalar, overview)
     if _needs_raw_fallback(scalar):
         scalar["chat_id"] = chat_id
         scalar["_raw"] = str(overview)[:1000]
-    return "\n".join(f"{key}: {value}" for key, value in scalar.items())
+    return scalar
 
 
 def _chat_scalars(overview: dict[str, Any]) -> dict[str, Any]:
@@ -350,11 +334,11 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         session = target.get("session", "")
         chat_id = chat or target.get("chat_id", "")
         if not session or not chat_id:
-            return "Error: no active conversation context."
+            return error("no active conversation context")
         if not query.strip():
-            return "Error: query is required."
+            return error("query is required")
         messages = waha.search_messages(session, query, chat_id, limit=limit)
-        return _format_matches(messages[:limit])
+        return ok(chat=chat_id, query=query, count=len(messages), messages=messages)
 
     return FunctionTool.from_defaults(
         fn=search_messages_fn,
@@ -362,38 +346,11 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         name="search_messages",
         description=(
             "Search a chat's recent messages for a text substring in body, "
-            "media filename or mimetype. Returns matching message lines. "
-            "Pass chat to search another chat, else the current one."
+            "media filename or mimetype. Returns a JSON envelope with "
+            "matching `messages`. Pass chat to search another chat, else "
+            "the current one."
         ),
     )
-
-
-def _format_matches(messages: list[dict[str, Any]]) -> str:
-    """Render search hits as ``chat_id: body`` lines for the model."""
-    lines: list[str] = []
-    for m in messages:
-        chat_id = str(m.get("chatId") or _remote_chat_id(m))
-        body = str(m.get("body", "") or "").strip()[:200]
-        if not body:
-            media = message_media(m)
-            mimetype = str(media.get("mimetype", "media") or "media")
-            filename = media.get("filename") or ""
-            body = f"[{mimetype}] {filename}".strip()
-        lines.append(f"{chat_id}: {body}")
-    return "\n".join(lines) if lines else "(no matches)"
-
-
-def _remote_chat_id(message: dict[str, Any]) -> str:
-    """The chat id buried at ``_data.id.remote``, when present."""
-    data = message.get("_data")
-    if not isinstance(data, dict):
-        return ""
-    data_dict: dict[str, Any] = data
-    data_id = data_dict.get("id")
-    if isinstance(data_id, dict):
-        remote: dict[str, Any] = data_id
-        return str(remote.get("remote", ""))
-    return ""
 
 
 def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
@@ -409,11 +366,11 @@ def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         session = target.get("session", "")
         chat_id = chat or target.get("chat_id", "")
         if not session or not chat_id:
-            return "Error: no active conversation context."
+            return error("no active conversation context")
         if not message_id:
-            return "Error: message_id is required."
+            return error("message_id is required")
         waha.forward_message(session, chat_id, message_id)
-        return f"Forwarded {message_id} to {chat_id}."
+        return ok(message_id=message_id, chat=chat_id)
 
     return FunctionTool.from_defaults(
         fn=forward_message_fn,
