@@ -4,6 +4,7 @@ import logging
 import sys
 from functools import lru_cache
 from pathlib import Path
+from typing import override
 
 from loguru import logger
 from pydantic import Field
@@ -49,6 +50,13 @@ class Settings(BaseSettings):
     web_search_timeout: float = 30.0
     web_search_proxy: str | None = None
 
+    #: Shell tool (off by default): lets the agent run arbitrary host
+    #: commands. Best run unprivileged and sandboxed; caps guard output
+    #: size and runtime so a runaway command can't hang the webhook.
+    shell_tool: bool = False
+    shell_timeout: float = 30.0
+    shell_max_output: int = 2000
+
     session: str = "default"
 
     data_dir: Path = Path("data")
@@ -73,6 +81,7 @@ def get_settings() -> Settings:
 class InterceptHandler(logging.Handler):
     """Bridge stdlib logging records into loguru, one format for all logs."""
 
+    @override
     def emit(self, record: logging.LogRecord) -> None:
         try:
             level = logger.level(record.levelname).name
