@@ -106,6 +106,10 @@ def _token_count(msg: ChatMessage) -> int:
 class FunctionCallingAgentWorkflow(Workflow):
     """Stateful function calling agent built from plain workflow steps."""
 
+    #: Run-scoped delivery holder shared with the tools and the handler;
+    #: set by ``handlers.register_agent_handler`` after ``build_agent``.
+    send_holder: dict[str, str] | None = None
+
     def __init__(
         self,
         *args: Any,
@@ -118,6 +122,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
+        self.send_holder = None
         self.tools = tools or []
         self.system_prompt = system_prompt
         self.prompt_renderer = prompt_renderer
@@ -255,6 +260,14 @@ class FunctionCallingAgentWorkflow(Workflow):
         not data: it is never stored to memory, so the rolling buffer
         never carries empty ``assistant`` turns that some
         OpenAI-compatible providers reject outright.
+
+        A final text produced *after* a delivery tool succeeded is
+        usually the model repeating an earlier reply (small models
+        pattern-complete their own last assistant text at low
+        temperature) rather than a new answer: the reply already went
+        out via ``send_message``. Such a text is neither stored nor
+        returned — the run closes empty. Research runs (no delivery
+        tool involved) keep their final answer untouched.
         """
         rounds = await self._next_round(ctx)
         image_blocks = await ctx.store.get("image_blocks", default=None)
@@ -265,6 +278,8 @@ class FunctionCallingAgentWorkflow(Workflow):
         tool_calls = self.llm.get_tool_calls_from_response(
             response, error_on_no_tool_call=False
         )
+        if not tool_calls and rounds > 1:
+            response = self.drop_post_delivery_text(response)
         memory = await ctx.store.get("memory")
         if tool_calls or str(response.message.content or "").strip():
             await memory.aput(response.message)
@@ -278,6 +293,23 @@ class FunctionCallingAgentWorkflow(Workflow):
             )
             return StopEvent(result=await self._early_stopping_response(ctx))
         return ToolCallEvent(tool_calls=tool_calls)
+
+    def drop_post_delivery_text(self, response: ChatResponse) -> ChatResponse:
+        """Empty *response* when a delivery tool already fired this run.
+
+        A final text after ``send_message``/``send_image``/
+        ``forward_message`` succeeded is the model repeating an earlier
+        reply (small models pattern-complete their last assistant text
+        at low temperature), not a new answer — dropping it keeps the
+        duplicate out of memory and out of the chat. Research runs (no
+        delivery) keep their final answer; the holder is absent in
+        tests, where nothing was provably delivered.
+        """
+        delivered = bool(self.send_holder and self.send_holder.get("sent"))
+        if not delivered or not str(response.message.content or "").strip():
+            return response
+        logger.debug("Dropping post-delivery final text (reply already sent via tool)")
+        return ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content=""))
 
     async def _early_stopping_response(self, ctx: Context) -> ChatResponse:
         """One last tool-free LLM call, mirroring LlamaIndex's

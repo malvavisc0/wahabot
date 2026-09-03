@@ -173,6 +173,9 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
         system_prompt=config.system_prompt,
         prompt_renderer=render_prompt,
     )
+    # The workflow reads the holder to know a delivery tool already
+    # fired this run (post-delivery final texts are dropped, not sent).
+    agent.send_holder = send_tool_holder
     logger.info(
         "Agent ready with {count} tools: {tools}",
         count=len(agent.tools),

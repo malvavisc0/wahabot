@@ -471,6 +471,16 @@ and fall back to kwargs, or it will silently see zero.
   small models tend to replace with narration like "I'll stay silent
   here — …"). As a last line of defense, `handle_message` drops
   replies that merely narrate a silence (`is_silence_narration`).
+- A final text produced *after* a delivery tool succeeded is dropped,
+  not stored or returned: small models pattern-complete their own last
+  assistant text at low temperature, so the "answer" after
+  `send_message` is usually a stale repeat, not a new reply. Research
+  runs (no delivery tool) keep their final answer.
+- List tools (`fetch_chat_messages`, `search_messages`) return
+  *slimmed* messages (`slim_message`): WAHA's raw `_data` blob
+  (~90% of the payload) is stripped before enveloping, so results stay
+  valid JSON and small enough for the memory budget. Tool outputs are
+  additionally capped at `MAX_TOOL_RESULT_TOKENS` chars.
 - Tools run inside a `try/except`: a failing tool never crashes the
   workflow. It only feeds an error message back to the model, which can
   then decide what to do next.

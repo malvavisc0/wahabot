@@ -36,6 +36,7 @@ __all__ = [
     "search_messages",
     "send_image",
     "send_message",
+    "slim_message",
     "stay_silent",
 ]
 
@@ -237,6 +238,18 @@ def infer_image_mimetype(url: str) -> str:
     return guessed if guessed and guessed.startswith("image/") else "image/jpeg"
 
 
+def slim_message(message: dict[str, Any]) -> dict[str, Any]:
+    """The model-relevant fields of a WAHA message, without the noise.
+
+    WAHA messages carry a raw ``_data`` blob (messageSecret,
+    reportingToken, engine flags — ~90% of the payload) that is useless
+    to the model and inflates every tool result. Slimmed messages keep
+    valid JSON and stay small enough for the memory budget.
+    """
+    keys = ("id", "timestamp", "from", "fromMe", "participant", "body", "hasMedia", "ack")
+    return {key: message[key] for key in keys if message.get(key) is not None}
+
+
 def fetch_chat_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
     """Build a tool that fetches recent messages from a chat."""
 
@@ -252,7 +265,8 @@ def fetch_chat_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         if not session or not chat_id:
             return error("no active conversation context")
         messages = waha.fetch_chat_messages(session, chat_id, limit=limit)
-        return ok(chat=chat_id, count=len(messages), messages=messages)
+        slimmed = [slim_message(m) for m in messages]
+        return ok(chat=chat_id, count=len(slimmed), messages=slimmed)
 
     return FunctionTool.from_defaults(
         fn=fetch_chat_messages_fn,
@@ -392,7 +406,12 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         if not query.strip():
             return error("query is required")
         messages = waha.search_messages(session, query, chat_id, limit=limit)
-        return ok(chat=chat_id, query=query, count=len(messages), messages=messages)
+        return ok(
+            chat=chat_id,
+            query=query,
+            count=len(messages),
+            messages=[slim_message(m) for m in messages],
+        )
 
     return FunctionTool.from_defaults(
         fn=search_messages_fn,
