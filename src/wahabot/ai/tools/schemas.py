@@ -152,3 +152,14 @@ class VisitUrlSchema(BaseModel):
     url: str = Field(
         description="The web page URL to visit.",
     )
+
+
+class ShellCommandSchema(BaseModel):
+    """Run a shell command on the host and return its output."""
+
+    command: str = Field(
+        description=(
+            "The shell command line to execute (e.g. `ls -la`). Supports pipes, "
+            "redirection and the usual shell features."
+        ),
+    )

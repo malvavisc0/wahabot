@@ -24,7 +24,7 @@ StartEvent ──► prepare_chat_history ──► InputEvent
 
 Because the interesting part isn't calling an LLM — it's giving it *hands*.
 
-wahabot ships seven WhatsApp tools (send text, send image, react, forward, read recent messages, get chat metadata, search messages) plus four external research tools (web search via `webserp`, page fetch with Chrome TLS fingerprinting, stock prices via `yfinance`, YouTube transcripts). The model picks which tool to call, the workflow executes it, feeds the result back, and lets the model decide if it needs more. It stops when the model is content.
+wahabot ships seven WhatsApp tools (send text, send image, react, forward, read recent messages, get chat metadata, search messages) plus four external research tools (web search via `webserp`, page fetch with Chrome TLS fingerprinting, stock prices via `yfinance`, YouTube transcripts) and an optional shell tool (arbitrary host commands, off unless `WAHABOT_SHELL_TOOL=true`). The model picks which tool to call, the workflow executes it, feeds the result back, and lets the model decide if it needs more. It stops when the model is content.
 
 Every tool returns a status string, never raises — a failed lookup just feeds an error back to the model so it can adapt. The whole run is capped at 120 s so a pathological loop can't hold the webhook hostage.
 
@@ -70,6 +70,9 @@ Key env vars:
 | `WAHABOT_WEB_SEARCH_MAX_RESULTS` | Default web search results | `5` |
 | `WAHABOT_WEB_SEARCH_TIMEOUT` | webserp subprocess timeout (s) | `30` |
 | `WAHABOT_WEB_SEARCH_PROXY` | Optional proxy for webserp | — |
+| `WAHABOT_SHELL_TOOL` | Enable shell tool (off by default; run unprivileged/sandboxed) | `false` |
+| `WAHABOT_SHELL_TIMEOUT` | Shell command timeout (s) | `30` |
+| `WAHABOT_SHELL_MAX_OUTPUT` | Max chars returned from a shell command | `2000` |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Opt-in tracing (see below) | — |
 
 ## Usage
@@ -116,9 +119,10 @@ The agent workflow lives under `src/wahabot/ai/` as a set of focused modules:
 | `context.py` | Sender tagging, reply-context rendering, `handle_message` entrypoint |
 | `messages.py` | Message classification, `extract_text`, `image_media`, `is_replyable` |
 | `history.py` | `sanitize_chat_history` (repair) + `trim_to_budget` (token budget) |
-| `schemas.py` | Pydantic parameter schemas for every tool |
-| `tools.py` | The seven WhatsApp tools |
-| `web_search.py` / `visit_url.py` / `url_images.py` | Web lookup & image-URL tools |
+| `tools/whatsapp.py` | The seven WhatsApp tools |
+| `tools/external.py` | Web, finance, YouTube & (opt-in) shell tool builders |
+| `tools/schemas.py` | Pydantic parameter schemas for every tool |
+| `web_search.py` / `visit_url.py` / `url_images.py` / `shell.py` | Web lookup, image-URL & shell tool functions |
 | `finance.py` / `youtube.py` | Market data and transcript tools |
 | `observability.py` | Langfuse export |
 

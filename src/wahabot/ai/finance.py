@@ -87,10 +87,8 @@ def fetch_current_stock_price(ticker: str) -> str:
 
 def _format_price(result: dict[str, Any]) -> str:
     """Render the price result as a compact status string."""
-    lines = [
-        f"{result['ticker']}: {result['current_price']} {result['currency']}"
-        f" ({result['market_state']})"
-    ]
+    price = f"{result['current_price']} {result['currency']} ({result['market_state']})"
+    lines = [f"{result['ticker']}: {price}"]
     if result.get("day_change") is not None:
         lines.append(
             f"day change: {result['day_change']} ({result['day_change_percent']}%)"

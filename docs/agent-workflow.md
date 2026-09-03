@@ -23,8 +23,9 @@ The AI code is split into focused modules under `src/wahabot/ai/`:
 | `context.py` | Sender tagging, reply-context rendering + the `handle_message` entrypoint |
 | `messages.py` | Message classification and extraction (`extract_text`, `image_media`, `is_replyable`, …) |
 | `history.py` | Chat-history repair (`sanitize_chat_history`) and budget trimming (`trim_to_budget`) |
-| `schemas.py` | Explicit Pydantic parameter schemas for every tool |
-| `tools.py` | The bundled WhatsApp tools |
+| `tools/whatsapp.py` | The bundled WhatsApp tools |
+| `tools/external.py` | Web, finance, YouTube & (opt-in) shell tool builders |
+| `tools/schemas.py` | Explicit Pydantic parameter schemas for every tool |
 | `web_search.py` / `visit_url.py` | Web lookup tools (webserp CLI, curl_cffi page fetch) |
 | `url_images.py` | Image-URL sniffing from message text (curl_cffi fetch, Content-Type check) |
 | `finance.py` / `youtube.py` | Market data (yfinance) and YouTube transcript tools |
@@ -264,7 +265,8 @@ JID to reach another group or person (e.g. `1234567890@g.us`,
 | `search_messages` | `query`, `chat?`, `limit?` | `GET /api/messages` (local filter) | Find recent messages by text / media |
 | `forward_message` | `message_id`, `chat?` | `POST /api/forwardMessage` | Forward a message to a chat |
 
-All tool implementations live in `src/wahabot/ai/tools.py`; the
+All tool implementations live under `src/wahabot/ai/tools/` (WhatsApp
+tools in `whatsapp.py`, external tools in `external.py`); the
 WAHA HTTP calls are in `src/wahabot/core/waha.py`. Details in the
 subsections below.
 

@@ -1,4 +1,4 @@
-"""Bundled WhatsApp tools for the function calling agent.
+"""WhatsApp tools for the function calling agent.
 
 Each builder takes the shared mutable ``target`` holder refreshed by the
 handler before every agent run with the current ``session`` and default
@@ -15,30 +15,18 @@ from urllib.parse import urlsplit
 
 from llama_index.core.tools import BaseTool, FunctionTool
 
-from wahabot.ai.finance import (
-    fetch_current_stock_price as _fetch_current_stock_price_fn,
-)
-from wahabot.ai.schemas import (
+from wahabot.ai.tools.schemas import (
     FetchChatMessagesSchema,
-    FetchStockPriceSchema,
     ForwardMessageSchema,
     GetChatSchema,
-    GetYoutubeTranscriptSchema,
     ReactToMessageSchema,
     SearchMessagesSchema,
     SendImageSchema,
     SendMessageSchema,
-    VisitUrlSchema,
-    WebSearchSchema,
 )
-from wahabot.ai.visit_url import visit_url as _visit_url_fn
-from wahabot.ai.web_search import web_search as _web_search_fn
-from wahabot.ai.youtube import get_youtube_transcript as _get_youtube_transcript_fn
 from wahabot.core.waha import WahaClient, message_media
-from wahabot.settings import Settings
 
 __all__ = [
-    "build_default_tools",
     "fetch_chat_messages",
     "forward_message",
     "get_chat",
@@ -46,10 +34,6 @@ __all__ = [
     "search_messages",
     "send_image",
     "send_message",
-    "stock_price_builder",
-    "visit_url_builder",
-    "web_search_builder",
-    "youtube_transcript_builder",
 ]
 
 
@@ -315,12 +299,14 @@ def _add_participant_summary(scalar: dict[str, Any], overview: dict[str, Any]) -
     WAHA returns participants either at top level or under ``_chat``, as
     plain JID strings or as ``{"id": ...}`` objects depending on engine.
     """
-    participants = overview.get("participants")
+    participants: Any = overview.get("participants")
     if not isinstance(participants, list):
-        chat_blob = overview.get("_chat")
-        participants = (
-            chat_blob.get("participants") if isinstance(chat_blob, dict) else None
-        )
+        chat_blob: Any = overview.get("_chat")
+        if isinstance(chat_blob, dict):
+            blob: dict[str, Any] = chat_blob
+            participants = blob.get("participants")
+        else:
+            participants = None
     if not isinstance(participants, list):
         return
     scalar["participants"] = len(participants)
@@ -333,7 +319,8 @@ def _add_participant_summary(scalar: dict[str, Any], overview: dict[str, Any]) -
 def _participant_jid(participant: Any) -> str:
     """The JID of one participant entry (string or ``{"id": ...}`` object)."""
     if isinstance(participant, dict):
-        return str(participant.get("id") or "")
+        entry: dict[str, Any] = participant
+        return str(entry.get("id") or "")
     return str(participant or "")
 
 
@@ -367,19 +354,7 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         if not query.strip():
             return "Error: query is required."
         messages = waha.search_messages(session, query, chat_id, limit=limit)
-        lines: list[str] = []
-        for m in messages[:limit]:
-            chat_id = m.get("chatId") or m.get("_data", {}).get("id", {}).get(
-                "remote", ""
-            )
-            body = str(m.get("body", "") or "").strip()[:200]
-            if not body:
-                media = m.get("media") or m.get("_data", {}).get("media") or {}
-                mimetype = str(media.get("mimetype", "media") or "media")
-                filename = media.get("filename") or ""
-                body = f"[{mimetype}] {filename}".strip()
-            lines.append(f"{chat_id}: {body}")
-        return "\n".join(lines) if lines else "(no matches)"
+        return _format_matches(messages[:limit])
 
     return FunctionTool.from_defaults(
         fn=search_messages_fn,
@@ -391,6 +366,34 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             "Pass chat to search another chat, else the current one."
         ),
     )
+
+
+def _format_matches(messages: list[dict[str, Any]]) -> str:
+    """Render search hits as ``chat_id: body`` lines for the model."""
+    lines: list[str] = []
+    for m in messages:
+        chat_id = str(m.get("chatId") or _remote_chat_id(m))
+        body = str(m.get("body", "") or "").strip()[:200]
+        if not body:
+            media = message_media(m)
+            mimetype = str(media.get("mimetype", "media") or "media")
+            filename = media.get("filename") or ""
+            body = f"[{mimetype}] {filename}".strip()
+        lines.append(f"{chat_id}: {body}")
+    return "\n".join(lines) if lines else "(no matches)"
+
+
+def _remote_chat_id(message: dict[str, Any]) -> str:
+    """The chat id buried at ``_data.id.remote``, when present."""
+    data = message.get("_data")
+    if not isinstance(data, dict):
+        return ""
+    data_dict: dict[str, Any] = data
+    data_id = data_dict.get("id")
+    if isinstance(data_id, dict):
+        remote: dict[str, Any] = data_id
+        return str(remote.get("remote", ""))
+    return ""
 
 
 def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
@@ -421,106 +424,3 @@ def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             "to a chat. Pass chat to choose the destination, else current."
         ),
     )
-
-
-def web_search_builder(settings: Settings) -> BaseTool:
-    """Build the web search tool bound to settings."""
-
-    def web_search_fn(query: str, max_results: int | None = None) -> str:
-        """Search the web.
-
-        Args:
-            query: The search query text.
-            max_results: Optional max results to return; defaults to the
-                configured limit.
-        """
-        return _web_search_fn(settings, query, max_results=max_results)
-
-    return FunctionTool.from_defaults(
-        fn=web_search_fn,
-        fn_schema=WebSearchSchema,
-        name="web_search",
-        description=(
-            "Search the web via the webserp metasearch CLI and return "
-            "normalised results (title, url, snippet, engine). Use to "
-            "answer questions needing up-to-date or external information."
-        ),
-    )
-
-
-def stock_price_builder() -> BaseTool:
-    """Build the current-stock-price tool."""
-
-    def stock_price_fn(ticker: str) -> str:
-        return _fetch_current_stock_price_fn(ticker)
-
-    return FunctionTool.from_defaults(
-        fn=stock_price_fn,
-        fn_schema=FetchStockPriceSchema,
-        name="fetch_current_stock_price",
-        description=(
-            "Fetch the current price of a stock, ETF or crypto ticker "
-            "(e.g. AAPL, BTC-USD). Use for price and day-change questions."
-        ),
-    )
-
-
-def visit_url_builder(settings: Settings) -> BaseTool:
-    """Build the website-fetching tool bound to settings."""
-
-    def visit_url_fn(url: str) -> str:
-        return _visit_url_fn(settings, url)
-
-    return FunctionTool.from_defaults(
-        fn=visit_url_fn,
-        fn_schema=VisitUrlSchema,
-        name="visit_url",
-        description=(
-            "Fetch a web page and return its visible text. Uses a real "
-            "Chrome browser TLS fingerprint (curl_cffi) to avoid being "
-            "blocked. Use to read the content of a specific URL."
-        ),
-    )
-
-
-def youtube_transcript_builder() -> BaseTool:
-    """Build the YouTube transcript tool."""
-
-    def youtube_transcript_fn(url: str) -> str:
-        return _get_youtube_transcript_fn(url)
-
-    return FunctionTool.from_defaults(
-        fn=youtube_transcript_fn,
-        fn_schema=GetYoutubeTranscriptSchema,
-        name="get_youtube_transcript",
-        description=(
-            "Fetch a YouTube video's captions/transcript as text. Use to "
-            "extract the spoken content of a video for summarization. "
-            "Only works when captions are available."
-        ),
-    )
-
-
-def build_default_tools(
-    waha: WahaClient,
-    target: dict[str, str],
-    settings: Settings | None = None,
-) -> list[BaseTool]:
-    """Build all bundled WhatsApp tools bound to the shared session/chat holder."""
-    if settings is None:
-        from wahabot.settings import get_settings
-
-        settings = get_settings()
-    return [
-        send_message(waha, target),
-        react_to_message(waha, target),
-        send_image(waha, target),
-        fetch_chat_messages(waha, target),
-        get_chat(waha, target),
-        search_messages(waha, target),
-        forward_message(waha, target),
-        web_search_builder(settings),
-        stock_price_builder(),
-        youtube_transcript_builder(),
-        visit_url_builder(settings),
-    ]

@@ -51,10 +51,22 @@ def image_media(event: WahaEvent) -> dict[str, Any] | None:
     """
     if message_kind(event) != "image":
         return None
-    media: Any = event.payload.get("media") or event.payload.get("_data", {}).get("media")
-    if not isinstance(media, dict) or not media.get("url"):
+    media = event.payload.get("media") or _data_media(event.payload)
+    if not isinstance(media, dict):
         return None
-    return media
+    media_dict: dict[str, Any] = media
+    if not media_dict.get("url"):
+        return None
+    return media_dict
+
+
+def _data_media(payload: dict[str, Any]) -> Any:
+    """The ``_data.media`` blob of a payload, when present."""
+    data = payload.get("_data")
+    if isinstance(data, dict):
+        data_dict: dict[str, Any] = data
+        return data_dict.get("media")
+    return None
 
 
 def message_replies_to(event: WahaEvent) -> dict[str, Any] | None:

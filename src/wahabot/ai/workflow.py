@@ -10,7 +10,7 @@ back in ``StopEvent.result``.
 import asyncio
 from collections.abc import Callable
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.llms.function_calling import FunctionCallingLLM
@@ -79,7 +79,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         llm: FunctionCallingLLM | None = None,
         tools: list[BaseTool] | None = None,
         system_prompt: str | None = None,
-        prompt_renderer: Callable[[str], str] | None = None,
+        prompt_renderer: Callable[[], str] | None = None,
         memory_token_limit: int = 8000,
         **kwargs: Any,
     ) -> None:
@@ -93,11 +93,9 @@ class FunctionCallingAgentWorkflow(Workflow):
 
     def _rendered_system_prompt(self) -> str | None:
         """The system prompt with ``prompt_renderer`` applied when set."""
-        if not self.system_prompt:
-            return None
-        if self.prompt_renderer is None:
-            return self.system_prompt
-        return self.prompt_renderer(self.system_prompt)
+        if self.prompt_renderer is not None:
+            return self.prompt_renderer()
+        return self.system_prompt or None
 
     def _system_message(self) -> ChatMessage | None:
         """The system prompt as a message, or None when unset."""
@@ -135,7 +133,8 @@ class FunctionCallingAgentWorkflow(Workflow):
         prompt = self._rendered_system_prompt()
         if not prompt:
             return 0
-        tokens = len(memory.tokenizer_fn(prompt))
+        tokenizer = cast(Callable[[str], list[Any]], memory.tokenizer_fn)
+        tokens = len(tokenizer(prompt))
         if tokens >= memory.token_limit:
             logger.warning(
                 (
@@ -173,9 +172,10 @@ class FunctionCallingAgentWorkflow(Workflow):
         """Add the incoming user message to memory and fetch chat history."""
         memory = await ctx.store.get("memory", default=None)
         if not memory:
-            memory = ChatMemoryBuffer.from_defaults(
-                token_limit=self.memory_token_limit, llm=self.llm
+            from_defaults = cast(
+                Callable[..., ChatMemoryBuffer], ChatMemoryBuffer.from_defaults
             )
+            memory = from_defaults(token_limit=self.memory_token_limit, llm=self.llm)
         else:
             await self._repair_memory(ctx)
         await ctx.store.set("image_blocks", getattr(ev, "image_blocks", None))
@@ -265,14 +265,14 @@ def build_agent(
     settings: Settings,
     tools: list[BaseTool] | None = None,
     system_prompt: str = "",
-    prompt_renderer: Callable[[str], str] | None = None,
+    prompt_renderer: Callable[[], str] | None = None,
     timeout: int = 120,
 ) -> FunctionCallingAgentWorkflow:
     """Build the function calling agent workflow with the configured LLM.
 
-    ``prompt_renderer`` (optional) re-renders ``{{...}}`` placeholders in
-    the system prompt on every run, so date/time values stay current for
-    the life of the process.
+    ``prompt_renderer`` (optional) returns the freshly rendered system
+    prompt on every run, so date/time placeholders and config edits stay
+    current for the life of the process.
     """
     if not system_prompt:
         raise ValueError("build_agent requires a system_prompt")

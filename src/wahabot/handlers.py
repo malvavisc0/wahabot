@@ -129,16 +129,15 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
     config_reloader = SessionConfigReloader(settings.access_config)
     enable_langfuse(settings)
 
-    def render_prompt(template: str) -> str:
+    def render_prompt() -> str:
         """Re-render ``{{date}}``/``{{time}}`` and pick up config edits.
 
-        The template argument is the startup snapshot; the current
-        config's prompt wins when it has been edited since, so prompt
-        changes apply without a restart too.
+        The current config's prompt always wins over the startup
+        snapshot, so prompt changes apply without a restart too.
         """
         current = config_reloader.current_config()
         return render_system_prompt(
-            current.system_prompt, settings.timezone, current.bot_name
+            current.system_prompt, settings.timezone, current.bot_name, current.goal
         )
 
     agent = build_agent(
