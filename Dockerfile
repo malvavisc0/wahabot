@@ -1,6 +1,24 @@
 # wahabot webhook server image; meant to be run via docker compose.
 FROM astral/uv:python3.14-trixie
 
+# OCI annotations. Docker build args set at build time (build-push-action
+# passes IMAGE_REVISION=github.sha, IMAGE_CREATED, IMAGE_VERSION); their
+# defaults below make a plain `docker build .` succeed too.
+ARG IMAGE_TITLE="wahabot"
+ARG IMAGE_DESCRIPTION="WhatsApp bot bridge on the WAHA HTTP API"
+ARG IMAGE_LICENSES=MIT
+ARG IMAGE_SOURCE="https://github.com/malvavisc0/wahabot"
+ARG IMAGE_VERSION
+ARG IMAGE_REVISION
+ARG IMAGE_CREATED
+LABEL org.opencontainers.image.title="${IMAGE_TITLE}" \
+      org.opencontainers.image.description="${IMAGE_DESCRIPTION}" \
+      org.opencontainers.image.licenses="${IMAGE_LICENSES}" \
+      org.opencontainers.image.source="${IMAGE_SOURCE}" \
+      org.opencontainers.image.version="${IMAGE_VERSION:-0.0.0}" \
+      org.opencontainers.image.revision="${IMAGE_REVISION:-unknown}" \
+      org.opencontainers.image.created="${IMAGE_CREATED:-unknown}"
+
 # Default shell for RUN and exec; the Debian base ships /bin/bash.
 SHELL ["/bin/bash", "-c"]
 

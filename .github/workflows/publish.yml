@@ -63,12 +63,28 @@ jobs:
           # package page as stray "unknown/unknown" artifacts.
           provenance: false
           sbom: false
+          # Labels/annotations per the GHCR labelling guide
+          # (org.opencontainers.image.*). The Dockerfile declares matching
+          # ARGs; these build args populate the image labels at build time.
+          # annotation-index.* surfaces the description on the multi-arch
+          # manifest so it shows on the GHCR package page.
+          build-args: |
+            IMAGE_VERSION=${{ steps.version.outputs.version }}
+            IMAGE_REVISION=${{ github.sha }}
+            IMAGE_CREATED=${{ github.event.repository.updated_at }}
           tags: |
             ${{ steps.image.outputs.image }}:latest
             ${{ steps.image.outputs.image }}:${{ steps.version.outputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.title=wahabot
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
+            org.opencontainers.image.description=WhatsApp bot bridge on the WAHA HTTP API
+          annotations: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=WhatsApp bot bridge on the WAHA HTTP API
           cache-from: type=gha
           cache-to: type=gha,mode=max
