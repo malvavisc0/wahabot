@@ -80,6 +80,9 @@ Key env vars:
 ```bash
 uv run wahabot serve [--host H] [--port P] [--reload]   # webhook server
 uv run wahabot config                                    # show WAHABOT_* env
+uv run wahabot sessions init [--name N] [--force]        # write a starter session config
+uv run wahabot sessions list                             # list session configs
+uv run wahabot sessions view [--name N] [--raw]          # show a config, prompt rendered
 uv run wahabot version
 ```
 
@@ -89,10 +92,12 @@ Point WAHA at the webhook in your session config:
 {"url": "http://host:8080/api/webhook", "events": ["message"], "hmac": {"key": "your-secret-key"}}
 ```
 
-And create `data/sessions/default.json` with at minimum a `system_prompt`:
+And create the session config — `uv run wahabot sessions init` writes a starter
+`data/sessions/default.json` — then edit it to at least set a `system_prompt`:
 
 ```json
 {
+  "goal": "Be a witty friend in this WhatsApp group.",
   "system_prompt": "You are Kai, a witty friend in this WhatsApp group. Today is {{date}}. Keep it short — no markdown, match the group's energy.",
   "bot_name": "Kai",
   "bot_mention_regex": "(?i)(?<![a-z@])@?kai(?![a-z])",

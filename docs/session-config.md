@@ -6,6 +6,11 @@ default `default`). wahabot loads it at startup via
 `load_session_config()` and uses it for access control, the agent's
 system prompt, and how the bot participates in group chats.
 
+Manage these files with the CLI: `wahabot sessions init` writes a
+starter config, `wahabot sessions list` shows existing ones, and
+`wahabot sessions view` prints one with the system prompt rendered
+(placeholders expanded, `Goal:` block prepended).
+
 ## Fields
 
 | Field | Type | Default | Purpose |
