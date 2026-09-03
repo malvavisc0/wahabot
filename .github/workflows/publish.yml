@@ -66,8 +66,6 @@ jobs:
           # Labels/annotations per the GHCR labelling guide
           # (org.opencontainers.image.*). The Dockerfile declares matching
           # ARGs; these build args populate the image labels at build time.
-          # annotation-index.* surfaces the description on the multi-arch
-          # manifest so it shows on the GHCR package page.
           build-args: |
             IMAGE_VERSION=${{ steps.version.outputs.version }}
             IMAGE_REVISION=${{ github.sha }}
@@ -83,8 +81,14 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ github.event.repository.updated_at }}
             org.opencontainers.image.description=WhatsApp bot bridge on the WAHA HTTP API
+          # index: prefix applies the annotation to the top-level OCI
+          # index (the multi-arch manifest list) — that is what the GHCR
+          # package page reads for the description. Bare keys only land
+          # on each per-arch image manifest and GHCR ignores them there.
           annotations: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.description=WhatsApp bot bridge on the WAHA HTTP API
+            index:org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            index:org.opencontainers.image.description=WhatsApp bot bridge on the WAHA HTTP API
+            manifest:org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            manifest:org.opencontainers.image.description=WhatsApp bot bridge on the WAHA HTTP API
           cache-from: type=gha
           cache-to: type=gha,mode=max
