@@ -1,10 +1,10 @@
 """Reply context rendering and the agent entrypoint."""
 
 import datetime
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from llama_index.core.base.llms.types import ImageBlock
+from llama_index.core.base.llms.types import ChatMessage, ImageBlock
 from llama_index.core.workflow import Context
 from loguru import logger
 
@@ -25,9 +25,15 @@ __all__ = [
 
 
 def render_system_prompt(
-    prompt: str, tz_name: str = "UTC", bot_name: str | None = None
+    prompt: str,
+    tz_name: str = "UTC",
+    bot_name: str | None = None,
+    goal: str = "",
 ) -> str:
     """Substitute date/time/name placeholders in the system prompt.
+
+    When ``goal`` is non-empty, it is prepended as a ``Goal:`` block so
+    the model always starts from the bot's intended purpose.
 
     Supported placeholders (all but ``{{bot_name}}`` use the ``tz_name``
     timezone):
@@ -56,6 +62,10 @@ def render_system_prompt(
     }
     for key, value in replacements.items():
         prompt = prompt.replace(key, value)
+        goal = goal.replace(key, value)
+    goal = goal.strip()
+    if goal:
+        return f"Goal: {goal}\n\n{prompt}"
     return prompt
 
 
@@ -169,5 +179,6 @@ async def handle_message(
         for img in images
     ]
     result = await agent.run(input=user_msg, image_blocks=image_blocks, ctx=ctx)
-    content: str | None = result.message.content
-    return content.strip() if content else ""
+    message = cast(ChatMessage, result.message)
+    content = message.content
+    return content.strip() if isinstance(content, str) else ""

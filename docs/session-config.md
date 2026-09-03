@@ -12,6 +12,7 @@ system prompt, and how the bot participates in group chats.
 |---|---|---|---|
 | `whitelist` | `string[]` | `[]` | Allowed chats/participants. Empty = answer everybody. |
 | `blacklist` | `string[]` | `[]` | Denied chats/participants. Always wins over the whitelist. |
+| `goal` | `string` | `""` | Optional objective prepended to the rendered system prompt as a `Goal:` block. Supports the same placeholders as `system_prompt`. Leave empty to skip. |
 | `system_prompt` | `string` | **required** | The agent system prompt. Supports `{{date}}`, `{{time}}`, `{{now}}`, `{{tz}}`, `{{bot_name}}` variables. The server refuses to start without it. |
 | `bot_name` | `string \| null` | `null` | The bot's display name (e.g. `"Kai"`). Used only as a fallback mention matcher. |
 | `bot_mention_regex` | `string \| null` | `null` | A regex detecting when the bot is addressed in a group. Defaults to a case-insensitive whole-word `@?<bot_name>`. |
@@ -23,6 +24,7 @@ Example:
 {
   "whitelist": ["<group-jid>@g.us"],
   "blacklist": [],
+  "goal": "Be a warm, super helpful chat participant.",
   "system_prompt": "You are Kai, a friend in this WhatsApp group... Today is {{date}}. Current time {{time}} ({{tz}}).",
   "bot_name": "Kai",
   "bot_mention_regex": "(?i)(?<![a-z@])@?k[aā]i(?![a-z])",

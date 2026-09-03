@@ -15,7 +15,9 @@ class SessionConfig(BaseModel):
     always ignored, regardless of the whitelist.
 
     ``bot_name`` is the bot's display name used to detect when a group
-    message is aimed at it (e.g. "Kai"). ``group_participation``
+    message is aimed at it (e.g. "Kai"). ``goal`` is an optional
+    statement of what the bot should aim for; when set it is prepended
+    to the rendered system prompt. ``group_participation``
     controls whether/how the bot joins group conversations:
 
     - ``never`` — never reply in groups.
@@ -27,6 +29,7 @@ class SessionConfig(BaseModel):
 
     whitelist: set[str] = set()
     blacklist: set[str] = set()
+    goal: str = ""
     system_prompt: str
     bot_name: str | None = None
     bot_mention_regex: str | None = None
@@ -57,8 +60,10 @@ def parse_session_config(raw: str, path: Path) -> SessionConfig:
 def log_config_load(path: Path, config: SessionConfig) -> None:
     """Log a successful config load in one summary line."""
     logger.info(
-        "Loaded session config from {path}: {wl} whitelisted, {bl} blacklisted, "
-        "group_participation={mode}",
+        (
+            "Loaded session config from {path}: {wl} whitelisted, {bl} blacklisted, "
+            "group_participation={mode}"
+        ),
         path=path,
         wl=len(config.whitelist),
         bl=len(config.blacklist),
@@ -99,8 +104,10 @@ class SessionConfigReloader:
                     config = parse_session_config(self.path.read_text(), self.path)
                 except Exception as exc:
                     logger.error(
-                        "Session config {path} failed to reload: {exc}; "
-                        "keeping last good",
+                        (
+                            "Session config {path} failed to reload: {exc}; "
+                            "keeping last good"
+                        ),
                         path=self.path,
                         exc=exc,
                     )
