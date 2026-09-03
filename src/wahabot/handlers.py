@@ -146,6 +146,11 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
         system_prompt=config.system_prompt,
         prompt_renderer=render_prompt,
     )
+    logger.info(
+        "Agent ready with {count} tools: {tools}",
+        count=len(agent.tools),
+        tools=", ".join(sorted(tool.metadata.get_name() for tool in agent.tools)),
+    )
     started_at = time.time()
 
     @on_message

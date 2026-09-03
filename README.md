@@ -24,7 +24,7 @@ StartEvent ──► prepare_chat_history ──► InputEvent
 
 Because the interesting part isn't calling an LLM — it's giving it *hands*.
 
-wahabot ships seven WhatsApp tools (send text, send image, react, forward, read recent messages, get chat metadata, search messages) plus four external research tools (web search via `webserp`, page fetch with Chrome TLS fingerprinting, stock prices via `yfinance`, YouTube transcripts) and an optional shell tool (arbitrary host commands, off unless `WAHABOT_SHELL_TOOL=true`). The model picks which tool to call, the workflow executes it, feeds the result back, and lets the model decide if it needs more. It stops when the model is content.
+wahabot ships **11 tools by default, 12 with the optional shell tool enabled** — seven WhatsApp tools (send text, send image, react, forward, read recent messages, get chat metadata, search messages) plus four external research tools (web search via `webserp`, page fetch with Chrome TLS fingerprinting, stock prices via `yfinance`, YouTube transcripts) and an optional host shell tool (off unless `WAHABOT_SHELL_TOOL=true`). The model picks which tool to call, the workflow executes it, feeds the result back, and lets the model decide if it needs more. It stops when the model is content.
 
 Every tool returns a compact JSON envelope — `{"ok": true, ...payload}` on success, `{"ok": false, "error": "..."}` on failure — and never raises; a failed lookup just feeds an error envelope back to the model so it can adapt. The whole run is capped at 120 s so a pathological loop can't hold the webhook hostage.
 
@@ -67,7 +67,7 @@ Key env vars:
 | `WAHABOT_MEMORY_TOKEN_LIMIT` | Per-chat rolling memory budget | `8000` |
 | `WAHABOT_VISION` | Enable image understanding | `true` |
 | `WAHABOT_MAX_IMAGE_BYTES` | Per-image download cap | `10485760` |
-| `WAHABOT_MAX_URL_IMAGES` | Max image-URLs to fetch per message | `3` |
+| `WAHABOT_MAX_URL_IMAGES` | Max image-URLs to fetch per message | `2` |
 | `WAHABOT_WEB_SEARCH_MAX_RESULTS` | Default web search results | `5` |
 | `WAHABOT_WEB_SEARCH_TIMEOUT` | webserp subprocess timeout (s) | `30` |
 | `WAHABOT_WEB_SEARCH_PROXY` | Optional proxy for webserp | — |
@@ -76,15 +76,13 @@ Key env vars:
 | `WAHABOT_SHELL_MAX_OUTPUT` | Max chars returned from a shell command | `2000` |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Opt-in tracing (see below) | — |
 
-## Usage
+## Quick start
 
 ```bash
-uv run wahabot serve [--host H] [--port P] [--reload]   # webhook server
-uv run wahabot config                                    # show WAHABOT_* env
-uv run wahabot sessions init [--name N] [--force]        # write a starter session config
-uv run wahabot sessions list                             # list session configs
-uv run wahabot sessions view [--name N] [--raw]          # show a config, prompt rendered
-uv run wahabot version
+uv sync
+cp .env.example .env   # fill in WAHABOT_* + LLM values
+uv run wahabot sessions init          # write a starter session config
+uv run wahabot serve                  # start the webhook server
 ```
 
 Point WAHA at the webhook in your session config:
@@ -93,8 +91,8 @@ Point WAHA at the webhook in your session config:
 {"url": "http://host:8080/api/webhook", "events": ["message"], "hmac": {"key": "your-secret-key"}}
 ```
 
-And create the session config — `uv run wahabot sessions init` writes a starter
-`data/sessions/default.json` — then edit it to at least set a `system_prompt`:
+`wahabot sessions init` writes a starter `data/sessions/default.json` — edit it
+to at least set a `system_prompt`:
 
 ```json
 {
@@ -109,6 +107,41 @@ And create the session config — `uv run wahabot sessions init` writes a starte
 ```
 
 The `system_prompt` is the bot's entire personality. Write it like you're describing a friend, not a service. The model will mirror whatever tone you set.
+
+### Other commands
+
+```bash
+uv run wahabot version                                   # show the version
+uv run wahabot config                                    # show WAHABOT_* env (secrets redacted)
+uv run wahabot sessions list                             # list session configs
+uv run wahabot sessions view [--name N] [--raw]          # show a config, prompt rendered
+uv run wahabot serve [--host H] [--port P] [--reload]    # webhook server
+```
+
+## Startup logs
+
+`wahabot serve` prints a short banner so one glance tells you what's running:
+version + Python, session name, LLM model/endpoint, memory token ceiling, and
+enabled features (vision / shell / langfuse). It then logs the WAHA session's
+live identity, the loaded session config summary, tracing status, and the tools
+the agent was built with:
+
+```
+Info: wahabot 0.0.4 (Python 3.14.6)
+Info: Session: default
+Info: LLM: gpt-4o-mini @ https://api.openai.com/v1
+Info: Memory: 8000 token ceiling
+Info: Features: vision, no-shell
+Info: Webhook: http://0.0.0.0:8080/api/webhook/default
+Info: WAHA session default is live as My Name (4917...@c.us)
+Info: Loaded session config from data/sessions/default.json: 0 whitelisted, 0 blacklisted, group_participation=mentioned
+Info: Agent ready with 11 tools: fetch_chat_messages, forward_message, ...
+```
+
+For a machine-readable dump of every `WAHABOT_*` value (secrets redacted) use
+`uv run wahabot config`. A shell tool and Langfuse only show up when
+`WAHABOT_SHELL_TOOL=true` / `LANGFUSE_*` keys are configured. The `Agent ready`
+line lists every tool the model can call this session.
 
 ## Observability
 

@@ -1,6 +1,8 @@
 """CLI entrypoints and commands for wahabot."""
 
 import json
+import platform
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
 
 import httpx
@@ -39,12 +41,62 @@ def version() -> None:
     typer.echo(get_version("wahabot"))
 
 
+def _redact_key(key: str) -> bool:
+    """True when a settings key holds a secret and must be redacted."""
+    lowered = key.casefold()
+    return any(part in lowered for part in ("key", "secret", "hmac"))
+
+
+def _feature_flags(settings: Settings) -> list[str]:
+    """Human-readable toggles derived from the loaded settings."""
+    flags = [
+        "vision" if settings.vision else "no-vision",
+        "shell" if settings.shell_tool else "no-shell",
+    ]
+    if settings.langfuse_public_key and settings.langfuse_secret_key:
+        flags.append("langfuse")
+    return flags
+
+
+def _version_line() -> str:
+    """A short line for the startup banner with the wahabot version."""
+    try:
+        version = get_version("wahabot")
+    except PackageNotFoundError:
+        version = "unknown"
+    return f"wahabot {version} (Python {platform.python_version()})"
+
+
+def _log_startup_banner(
+    settings: Settings, host: str | None = None, port: int | None = None
+) -> None:
+    """Log the running configuration in one readable banner at startup."""
+    logger.info("──────────────── wahabot startup ────────────────")
+    logger.info("{line}", line=_version_line())
+    logger.info("Session: {session}", session=settings.session)
+    logger.info(
+        "LLM: {model} @ {base}", model=settings.llm_model, base=settings.llm_api_base
+    )
+    logger.info("Memory: {tokens} token ceiling", tokens=settings.memory_token_limit)
+    logger.info(
+        "Features: {features}",
+        features=", ".join(_feature_flags(settings)),
+    )
+    logger.info(
+        "Webhook: http://{host}:{port}/api/webhook/{session}",
+        host=host or settings.host,
+        port=port or settings.port,
+        session=settings.session,
+    )
+    logger.info("──────────────────────────────────────────────")
+
+
 @app.command()
 def config() -> None:
     """Show the loaded configuration (secrets redacted)."""
     settings = get_settings()
     for key, value in settings.model_dump().items():
-        shown = "***" if "key" in key else value
+        shown = "***" if _redact_key(key) else value
         typer.echo(f"{key}={shown}")
 
 
@@ -181,6 +233,9 @@ def serve(
     if session:
         settings.session = session
     setup_logging(settings)
+    host = host or settings.host
+    port = port or settings.port
+    _log_startup_banner(settings, host, port)
     if not settings.access_config.exists():
         message = (
             f"Session config not found: {settings.access_config}"
@@ -192,20 +247,6 @@ def serve(
     register_agent_handler(settings, waha=waha)
     register_reaction_handler(waha=waha)
     (settings.journal_dir / settings.session).mkdir(parents=True, exist_ok=True)
-    host = host or settings.host
-    port = port or settings.port
-    logger.info(
-        "Starting webhook server on {host}:{port} for session {session}",
-        host=host,
-        port=port,
-        session=settings.session,
-    )
-    logger.info(
-        "Webhook URL: http://{host}:{port}/api/webhook/{session}",
-        host=host,
-        port=port,
-        session=settings.session,
-    )
     uvicorn.run(
         "wahabot.webhook:app",
         host=host,
