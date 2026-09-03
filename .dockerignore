@@ -1,0 +1,17 @@
+# Everything the image build must not ship (secrets especially).
+.git
+.gitignore
+.env
+.venv
+.ruff_cache
+.vscode
+.kilo
+.idea
+data
+dist
+build
+docs
+samples
+__pycache__/
+*.py[cod]
+*.egg-info/

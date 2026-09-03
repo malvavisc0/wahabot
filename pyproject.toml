@@ -6,6 +6,8 @@ readme = "README.md"
 authors = [
     { name = "Malvavisc0", email = "207609879+malvavisc0@users.noreply.github.com" }
 ]
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.14"
 dependencies = [
     "fastapi",

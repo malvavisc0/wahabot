@@ -1,0 +1,52 @@
+# wahabot deployment, run by Coolify.
+#
+# Coolify pulls ghcr.io/malvavisc0/wahabot:latest (published by the
+# "Publish image" GitHub Action on every v* tag) and provides the env
+# vars below via its UI. Required vars must be set or compose refuses
+# to start; optional ones default to the values shown.
+#
+# The session config ${WAHABOT_DATA_DIR}/sessions/${WAHABOT_SESSION}.json
+# (with its system_prompt) must exist in the wahabot-data volume.
+services:
+  wahabot:
+    image: ghcr.io/malvavisc0/wahabot:latest
+    restart: unless-stopped
+    environment:
+      # Required.
+      WAHABOT_WEBHOOK_HMAC_KEY: ${WAHABOT_WEBHOOK_HMAC_KEY:?set WAHABOT_WEBHOOK_HMAC_KEY}
+      WAHABOT_WAHA_URL: ${WAHABOT_WAHA_URL:?set WAHABOT_WAHA_URL}
+      WAHABOT_WAHA_API_KEY: ${WAHABOT_WAHA_API_KEY:?set WAHABOT_WAHA_API_KEY}
+      WAHABOT_LLM_API_BASE: ${WAHABOT_LLM_API_BASE:?set WAHABOT_LLM_API_BASE}
+      WAHABOT_LLM_API_KEY: ${WAHABOT_LLM_API_KEY:?set WAHABOT_LLM_API_KEY}
+      WAHABOT_LLM_MODEL: ${WAHABOT_LLM_MODEL:?set WAHABOT_LLM_MODEL}
+      WAHABOT_VISION: ${WAHABOT_VISION:?set WAHABOT_VISION}
+      # Optional.
+      WAHABOT_TIMEZONE: ${WAHABOT_TIMEZONE:-UTC}
+      WAHABOT_LOG_LEVEL: ${WAHABOT_LOG_LEVEL:-INFO}
+      WAHABOT_MAX_IMAGE_BYTES: ${WAHABOT_MAX_IMAGE_BYTES:-10485760}
+      WAHABOT_MAX_URL_IMAGES: ${WAHABOT_MAX_URL_IMAGES:-2}
+      WAHABOT_MEMORY_TOKEN_LIMIT: ${WAHABOT_MEMORY_TOKEN_LIMIT:-8000}
+      WAHABOT_WEB_SEARCH_MAX_RESULTS: ${WAHABOT_WEB_SEARCH_MAX_RESULTS:-5}
+      WAHABOT_WEB_SEARCH_TIMEOUT: ${WAHABOT_WEB_SEARCH_TIMEOUT:-30}
+      WAHABOT_WEB_SEARCH_PROXY: ${WAHABOT_WEB_SEARCH_PROXY:-}
+      WAHABOT_SESSION: ${WAHABOT_SESSION:-default}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-}
+      # Fixed by the container layout: bind and volume are always these.
+      WAHABOT_HOST: 0.0.0.0
+      WAHABOT_PORT: "8080"
+      WAHABOT_DATA_DIR: /app/data
+    ports:
+      - "${WAHABOT_PORT:-8080}:8080"
+    volumes:
+      - wahabot-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  wahabot-data:
