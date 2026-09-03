@@ -364,6 +364,78 @@ To wire them in, pass the tools through `handlers.register_agent_handler`
 by calling `build_agent(settings, tools=[...])` there. From then on, the
 workflow runs any requested tool automatically.
 
+## Engine semantics that the design relies on
+
+These behaviors of the underlying engine were verified against the
+installed source; several fixes depend on them, and misunderstanding
+them is how the 2026-09 spam loop happened. Read this before touching
+`workflow.py` or `handlers.py`.
+
+### The engine is the `workflows` package, not `llama_index.core.workflow`
+
+`llama_index.core.workflow` only re-exports the standalone
+[`workflows`](https://github.com/run-llama/workflows) package
+(`inspect.getfile(Workflow)` → `workflows/workflow.py`). When debugging,
+read *that* source — the llama-index copy is a shim.
+
+### `Context.store` persists across runs on a shared `Context`
+
+`Context.to_dict()` serializes the **global state store, event queues,
+buffers, and broker log**, and `_workflow_run` builds the next run from
+that snapshot. Reusing a per-chat `Context` (as `handlers.py` does)
+therefore carries `memory`, `tool_rounds`, and `image_blocks` into the
+next run. Two consequences:
+
+- **Any per-run value in the store must be reset at run start.**
+  `prepare_chat_history` resets `tool_rounds = 0` and `image_blocks`
+  for exactly this reason — removing those lines silently leaks state
+  across runs (e.g. the round budget shrinking run over run).
+- **A shared `Context` refuses concurrent runs**
+  (`ContextStateError: Cannot start a new run while context is already
+  running`). The global `_agent_lock` in `handlers.py` is what stands
+  between the bot and that exception — do not run two agent turns
+  concurrently, even for different chats, without per-chat locking.
+
+The store is a `DictState` (a Pydantic model that shoves undeclared
+keys into a `_data` dict), which is why heterogenous values — a
+`ChatMemoryBuffer` object, an int, a list — coexist without a schema.
+`store.set(path, value)` is a single-path write under a write lock.
+
+### Step dispatch is event-type routing; termination is structural
+
+The control loop is a reducer: a step's returned event is published,
+and the step whose accepted type matches runs next. The tool loop is
+literally `handle_llm_input → ToolCallEvent → handle_tool_calls →
+InputEvent → handle_llm_input`. The round limit works *because* of
+this: at the limit the step returns `StopEvent` instead of
+`ToolCallEvent`, so nothing is published that `handle_tool_calls`
+accepts — **no flag the model can talk its way past**. The 120 s
+workflow timeout is enforced independently by a broker timeout tick
+(`WorkflowTimeoutError`), so the two bounds stack: 50 rounds *or*
+120 s, whichever comes first.
+
+### `ChatMemoryBuffer` trims on read, not on write
+
+`aput`/`aset` only append/replace in the chat store — **nothing is
+trimmed at write time**. The token trim lives in
+`ChatMemoryBuffer.get`, which also raises
+`ValueError("Initial token count exceeds token limit")` if the
+`initial_token_count` (our system-prompt cost) exceeds the budget —
+that is why `_system_token_count` clamps instead of letting it raise.
+Because trimming is read-side, `_chat_history` re-trims and `aset`s
+the buffer on every round; the store can be at most one tool-round
+over budget when `_early_stopping_response` reads it via `aget_all()`.
+
+### Tool calls live in two places on a message
+
+LlamaIndex carries tool calls as `ToolCallBlock` objects in
+`message.blocks` (modern path) or `additional_kwargs["tool_calls"]`
+(legacy path), with blocks taking precedence. `ToolCallBlock` fields
+are `tool_call_id` / `tool_name` / `tool_kwargs` — there is **no**
+`arguments` attribute. Anything counting or inspecting tool calls
+(`_token_count`, `history.py`'s group logic) must check blocks first
+and fall back to kwargs, or it will silently see zero.
+
 ## A few constraints worth knowing
 
 - The LLM must be an OpenAI-compatible **chat completions** model with
