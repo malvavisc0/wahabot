@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 from loguru import logger
 
-from whabot.core.models import WahaEvent
+from wahabot.core.models import WahaEvent
 
 
 def chat_allowed(

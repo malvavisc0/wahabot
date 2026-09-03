@@ -5,11 +5,11 @@ from collections.abc import Awaitable, Callable
 from fastapi import FastAPI, Header, HTTPException, Request
 from loguru import logger
 
-from whabot.core.hmac import verify_hmac
-from whabot.core.journal import save_event
-from whabot.core.models import WahaEvent
+from wahabot.core.hmac import verify_hmac
+from wahabot.core.journal import save_event
+from wahabot.core.models import WahaEvent
 
-app = FastAPI(title="whabot webhook server")
+app = FastAPI(title="wahabot webhook server")
 
 Handler = Callable[[WahaEvent], Awaitable[None]]
 _message_handlers: list[Handler] = []
@@ -46,7 +46,7 @@ async def waha_webhook(
     x_webhook_hmac_algorithm: str | None = Header(default=None),
 ) -> WahaEvent:
     """Receive WAHA webhook events, dispatching messages to registered handlers."""
-    from whabot.settings import get_settings
+    from wahabot.settings import get_settings
 
     settings = get_settings()
     if session != settings.session:

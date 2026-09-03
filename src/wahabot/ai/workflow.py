@@ -26,9 +26,9 @@ from llama_index.core.workflow import (
 from llama_index.llms.openai_like import OpenAILike
 from loguru import logger
 
-from whabot.ai.events import InputEvent, ToolCallEvent
-from whabot.ai.history import sanitize_chat_history, trim_to_budget
-from whabot.settings import Settings
+from wahabot.ai.events import InputEvent, ToolCallEvent
+from wahabot.ai.history import sanitize_chat_history, trim_to_budget
+from wahabot.settings import Settings
 
 __all__ = [
     "FunctionCallingAgentWorkflow",

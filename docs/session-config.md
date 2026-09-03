@@ -1,8 +1,8 @@
 # Session Config (`data/sessions/<session>.json`)
 
 Every WhatsApp session is configured by a JSON file at
-`data/sessions/<session>.json` (the session name is `WHABOT_SESSION`,
-default `default`). whabot loads it at startup via
+`data/sessions/<session>.json` (the session name is `WAHABOT_SESSION`,
+default `default`). wahabot loads it at startup via
 `load_session_config()` and uses it for access control, the agent's
 system prompt, and how the bot participates in group chats.
 
@@ -41,7 +41,7 @@ any code-side default.
 ## System prompt variables
 
 `system_prompt` supports these placeholders (resolved at startup with
-`WHABOT_TIMEZONE`, default `UTC`):
+`WAHABOT_TIMEZONE`, default `UTC`):
 
 - `{{date}}` — e.g. `2026-09-02`
 - `{{time}}` — e.g. `14:30`
@@ -84,7 +84,7 @@ lookarounds require a word boundary before and after, so `kAI`,
 
 ## Access control
 
-`chat_allowed()` (in `src/whabot/core/filters.py`) applies
+`chat_allowed()` (in `src/wahabot/core/filters.py`) applies
 whitelist/blacklist against both the chat `from` JID and the message
 `participant`:
 

@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 from curl_cffi import requests as cffi_requests
 from loguru import logger
 
-from whabot.settings import Settings
+from wahabot.settings import Settings
 
 __all__ = ["fetch_url_images", "image_urls"]
 

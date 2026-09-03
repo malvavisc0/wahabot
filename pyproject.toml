@@ -1,7 +1,7 @@
 [project]
-name = "whabot"
+name = "wahabot"
 version = "0.0.1"
-description = "whabot command-line interface"
+description = "wahabot command-line interface"
 readme = "README.md"
 authors = [
     { name = "Malvavisc0", email = "207609879+malvavisc0@users.noreply.github.com" }
@@ -27,14 +27,14 @@ dependencies = [
 ]
 
 [project.scripts]
-whabot = "whabot:main"
+wahabot = "wahabot:main"
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-name = "whabot"
+module-name = "wahabot"
 module-root = "src"
 
 [dependency-groups]

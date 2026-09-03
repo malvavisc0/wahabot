@@ -6,9 +6,9 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from whabot.core.models import WahaEvent
-from whabot.core.waha import WahaClient
-from whabot.webhook import on_reaction
+from wahabot.core.models import WahaEvent
+from wahabot.core.waha import WahaClient
+from wahabot.webhook import on_reaction
 
 
 def register_reaction_handler(waha: WahaClient) -> None:

@@ -4,7 +4,7 @@
 Brave, Yahoo, Mojeek, Startpage and Presearch in parallel, using browser
 impersonation (curl_cffi) and **no API key**. It is invoked as a
 subprocess and its JSON output is normalised into a short status string,
-matching whabot's other tools (which return descriptive text rather than
+matching wahabot's other tools (which return descriptive text rather than
 raising).
 
 The tool is built with a ``Settings`` so operators can tune timeout,
@@ -18,7 +18,7 @@ from typing import Any
 
 from loguru import logger
 
-from whabot.settings import Settings
+from wahabot.settings import Settings
 
 __all__ = ["web_search"]
 
@@ -35,7 +35,7 @@ def web_search(
     Args:
         query: Search query text.
         max_results: Maximum results to return. Defaults to
-            ``WHABOT_WEB_SEARCH_MAX_RESULTS``.
+            ``WAHABOT_WEB_SEARCH_MAX_RESULTS``.
 
     Returns:
         A short human-readable listing of findings, or an explanatory

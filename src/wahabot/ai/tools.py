@@ -15,10 +15,10 @@ from urllib.parse import urlsplit
 
 from llama_index.core.tools import BaseTool, FunctionTool
 
-from whabot.ai.finance import (
+from wahabot.ai.finance import (
     fetch_current_stock_price as _fetch_current_stock_price_fn,
 )
-from whabot.ai.schemas import (
+from wahabot.ai.schemas import (
     FetchChatMessagesSchema,
     FetchStockPriceSchema,
     ForwardMessageSchema,
@@ -31,11 +31,11 @@ from whabot.ai.schemas import (
     VisitUrlSchema,
     WebSearchSchema,
 )
-from whabot.ai.visit_url import visit_url as _visit_url_fn
-from whabot.ai.web_search import web_search as _web_search_fn
-from whabot.ai.youtube import get_youtube_transcript as _get_youtube_transcript_fn
-from whabot.core.waha import WahaClient, message_media
-from whabot.settings import Settings
+from wahabot.ai.visit_url import visit_url as _visit_url_fn
+from wahabot.ai.web_search import web_search as _web_search_fn
+from wahabot.ai.youtube import get_youtube_transcript as _get_youtube_transcript_fn
+from wahabot.core.waha import WahaClient, message_media
+from wahabot.settings import Settings
 
 __all__ = [
     "build_default_tools",
@@ -508,7 +508,7 @@ def build_default_tools(
 ) -> list[BaseTool]:
     """Build all bundled WhatsApp tools bound to the shared session/chat holder."""
     if settings is None:
-        from whabot.settings import get_settings
+        from wahabot.settings import get_settings
 
         settings = get_settings()
     return [

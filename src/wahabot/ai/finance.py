@@ -1,7 +1,7 @@
 """Yahoo Finance-backed market data tool.
 
 Ported from aria-ai's ``aria.tools.search.finance``. Pure Python via the
-``yfinance`` library; no API key. The tool follows whabot conventions:
+``yfinance`` library; no API key. The tool follows wahabot conventions:
 it returns a human-readable status string and never raises (failures
 become an explanatory message fed back to the model).
 """

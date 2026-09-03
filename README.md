@@ -1,4 +1,4 @@
-# whabot
+# wahabot
 
 WhatsApp bot bridge for the [WAHA](https://waha.devlike.pro) HTTP API.
 Runs a FastAPI webhook server that receives and HMAC-verifies WAHA
@@ -14,20 +14,20 @@ cp .env.example .env   # then fill in values
 ## Usage
 
 ```bash
-uv run whabot serve [--host H] [--port P] [--reload]   # webhook server
-uv run whabot config                                    # show WHABOT_* env
-uv run whabot version
+uv run wahabot serve [--host H] [--port P] [--reload]   # webhook server
+uv run wahabot config                                    # show WAHABOT_* env
+uv run wahabot version
 ```
 
 Configuration (`.env`, real env vars win):
 
-- `WHABOT_LOG_LEVEL` — loguru level (default `INFO`)
-- `WHABOT_HOST` / `WHABOT_PORT` — server bind address (default `0.0.0.0:8080`)
-- `WHABOT_WEBHOOK_HMAC_KEY` — **required**; must match WAHA's `hmac.key`
-- `WHABOT_MEMORY_TOKEN_LIMIT` — per-chat memory ceiling; oldest messages drop first (default `8000`)
-- `WHABOT_WEB_SEARCH_MAX_RESULTS` — default `web_search` results (default `5`)
-- `WHABOT_WEB_SEARCH_TIMEOUT` — `webserp` subprocess timeout in seconds (default `30`)
-- `WHABOT_WEB_SEARCH_PROXY` — optional proxy URL for `webserp`
+- `WAHABOT_LOG_LEVEL` — loguru level (default `INFO`)
+- `WAHABOT_HOST` / `WAHABOT_PORT` — server bind address (default `0.0.0.0:8080`)
+- `WAHABOT_WEBHOOK_HMAC_KEY` — **required**; must match WAHA's `hmac.key`
+- `WAHABOT_MEMORY_TOKEN_LIMIT` — per-chat memory ceiling; oldest messages drop first (default `8000`)
+- `WAHABOT_WEB_SEARCH_MAX_RESULTS` — default `web_search` results (default `5`)
+- `WAHABOT_WEB_SEARCH_TIMEOUT` — `webserp` subprocess timeout in seconds (default `30`)
+- `WAHABOT_WEB_SEARCH_PROXY` — optional proxy URL for `webserp`
 
 Point WAHA at the webhook:
 
@@ -37,12 +37,12 @@ Point WAHA at the webhook:
 
 ## Behavior notes
 
-- **Vision** — with `WHABOT_VISION=true` (default) and a vision-capable
-  `WHABOT_LLM_MODEL`, incoming image messages (photo + optional caption)
+- **Vision** — with `WAHABOT_VISION=true` (default) and a vision-capable
+  `WAHABOT_LLM_MODEL`, incoming image messages (photo + optional caption)
   are downloaded from WAHA and shown to the model on that turn only; chat
   memory stays text-only. Bare image links in the text (up to
-  `WHABOT_MAX_URL_IMAGES` per message) are fetched and shown too. Images
-  over `WHABOT_MAX_IMAGE_BYTES` (10 MB) are skipped, and download failures
+  `WAHABOT_MAX_URL_IMAGES` per message) are fetched and shown too. Images
+  over `WAHABOT_MAX_IMAGE_BYTES` (10 MB) are skipped, and download failures
   degrade to a text-only turn.
 - **Backlog filter** — messages sent before the server started, or older
   than 5 minutes, are dropped as WhatsApp replay backlog.

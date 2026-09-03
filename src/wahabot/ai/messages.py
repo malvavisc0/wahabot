@@ -3,7 +3,7 @@
 import re
 from typing import Any
 
-from whabot.core.models import WahaEvent
+from wahabot.core.models import WahaEvent
 
 NON_REPLYABLE_SUFFIXES = ("@broadcast", "@newsletter")
 

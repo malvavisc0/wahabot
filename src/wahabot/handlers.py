@@ -7,22 +7,22 @@ from typing import Any
 from llama_index.core.workflow import Context
 from loguru import logger
 
-from whabot.ai.context import handle_message, render_system_prompt
-from whabot.ai.messages import (
+from wahabot.ai.context import handle_message, render_system_prompt
+from wahabot.ai.messages import (
     extract_text,
     image_media,
     is_group_addressed,
     is_replyable,
 )
-from whabot.ai.observability import chat_trace_attributes, enable_langfuse
-from whabot.ai.tools import build_default_tools
-from whabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
-from whabot.core.access import SessionConfigReloader, load_session_config
-from whabot.core.filters import chat_allowed, jid_alias_lookup
-from whabot.core.models import WahaEvent
-from whabot.core.waha import MediaTooLargeError, WahaClient
-from whabot.settings import Settings
-from whabot.webhook import on_message
+from wahabot.ai.observability import chat_trace_attributes, enable_langfuse
+from wahabot.ai.tools import build_default_tools
+from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
+from wahabot.core.access import SessionConfigReloader, load_session_config
+from wahabot.core.filters import chat_allowed, jid_alias_lookup
+from wahabot.core.models import WahaEvent
+from wahabot.core.waha import MediaTooLargeError, WahaClient
+from wahabot.settings import Settings
+from wahabot.webhook import on_message
 
 _seen_ids: dict[str, float] = {}
 _SEE_TTL_S = 120

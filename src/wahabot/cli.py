@@ -1,4 +1,4 @@
-"""CLI entrypoints and commands for whabot."""
+"""CLI entrypoints and commands for wahabot."""
 
 from importlib.metadata import version as get_version
 
@@ -7,14 +7,14 @@ import typer
 import uvicorn
 from loguru import logger
 
-from whabot.core.waha import WahaClient
-from whabot.handlers import register_agent_handler
-from whabot.reactions import register_reaction_handler
-from whabot.settings import Settings, get_settings, setup_logging
+from wahabot.core.waha import WahaClient
+from wahabot.handlers import register_agent_handler
+from wahabot.reactions import register_reaction_handler
+from wahabot.settings import Settings, get_settings, setup_logging
 
 app = typer.Typer(
-    name="whabot",
-    help="whabot command-line interface.",
+    name="wahabot",
+    help="wahabot command-line interface.",
     no_args_is_help=True,
     add_completion=True,
 )
@@ -22,8 +22,8 @@ app = typer.Typer(
 
 @app.command()
 def version() -> None:
-    """Show the whabot version."""
-    typer.echo(get_version("whabot"))
+    """Show the wahabot version."""
+    typer.echo(get_version("wahabot"))
 
 
 @app.command()
@@ -56,13 +56,13 @@ def ensure_session_live(waha: WahaClient, settings: Settings) -> None:
 @app.command()
 def serve(
     host: str = typer.Option(
-        None, "--host", "-h", help="Bind address. [default: WHABOT_HOST]"
+        None, "--host", "-h", help="Bind address. [default: WAHABOT_HOST]"
     ),
     port: int = typer.Option(
-        None, "--port", "-p", help="Bind port. [default: WHABOT_PORT]"
+        None, "--port", "-p", help="Bind port. [default: WAHABOT_PORT]"
     ),
     session: str = typer.Option(
-        None, "--session", "-s", help="WAHA session name. [default: WHABOT_SESSION]"
+        None, "--session", "-s", help="WAHA session name. [default: WAHABOT_SESSION]"
     ),
     reload: bool = typer.Option(False, "--reload", help="Enable auto-reload."),
 ) -> None:
@@ -91,17 +91,17 @@ def serve(
         session=settings.session,
     )
     uvicorn.run(
-        "whabot.webhook:app",
+        "wahabot.webhook:app",
         host=host,
         port=port,
         reload=reload,
         log_config=None,
-        http="whabot.core.protocol:LoggingH11Protocol",
+        http="wahabot.core.protocol:LoggingH11Protocol",
     )
 
 
 def main() -> None:
-    """Run the whabot CLI."""
+    """Run the wahabot CLI."""
     setup_logging(get_settings())
     app()
 

@@ -37,7 +37,7 @@ JID ending `@newsletter`. Same treatment: read-only, do not reply.
 
 ## Handling rule
 
-whabot's `is_replyable()` (in `src/whabot/ai/messages.py`) rejects
+wahabot's `is_replyable()` (in `src/wahabot/ai/messages.py`) rejects
 senders ending in:
 
 ```python

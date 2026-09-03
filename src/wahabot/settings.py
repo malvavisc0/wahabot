@@ -11,10 +11,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """whabot configuration; real env vars win over .env values."""
+    """wahabot configuration; real env vars win over .env values."""
 
     model_config = SettingsConfigDict(
-        env_prefix="WHABOT_", env_file=".env", extra="ignore"
+        env_prefix="WAHABOT_", env_file=".env", extra="ignore"
     )
 
     host: str = "0.0.0.0"
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     memory_token_limit: int = 8000
     timezone: str = "UTC"
 
-    #: Langfuse credentials (no WHABOT_ prefix — the SDK's conventional
+    #: Langfuse credentials (no WAHABOT_ prefix — the SDK's conventional
     #: names); empty disables LLM trace export entirely.
     langfuse_public_key: str = Field(default="", alias="LANGFUSE_PUBLIC_KEY")
     langfuse_secret_key: str = Field(default="", alias="LANGFUSE_SECRET_KEY")

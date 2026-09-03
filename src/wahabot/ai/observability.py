@@ -1,6 +1,6 @@
 """LLM observability: export agent traces to Langfuse when configured.
 
-Two pieces connect whabot's llama-index workflow to Langfuse, sharing the
+Two pieces connect wahabot's llama-index workflow to Langfuse, sharing the
 global OpenTelemetry tracer provider without either side calling the
 other directly:
 
@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from whabot.settings import Settings
+from wahabot.settings import Settings
 
 if TYPE_CHECKING:
     from langfuse import Langfuse
@@ -156,7 +156,7 @@ def chat_trace_attributes(chat_id: str) -> Iterator[None]:
 
         propagation = propagate_attributes(
             session_id=f"wa:{chat_id}",
-            tags=["whabot"],
+            tags=["wahabot"],
         )
     except Exception:
         logger.exception("Failed to start Langfuse attribute propagation")

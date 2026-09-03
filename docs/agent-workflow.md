@@ -1,6 +1,6 @@
 # Agent Workflow
 
-Every WhatsApp message that reaches whabot is answered by a LlamaIndex
+Every WhatsApp message that reaches wahabot is answered by a LlamaIndex
 **Workflow** that behaves like a function-calling agent. Instead of
 wiring the agent together from a high-level framework, we build it
 explicitly, step by step, following the official reference:
@@ -14,7 +14,7 @@ ready to give a final, human-friendly answer.
 
 ## Where the code lives
 
-The AI code is split into focused modules under `src/whabot/ai/`:
+The AI code is split into focused modules under `src/wahabot/ai/`:
 
 | Module | What it does |
 |---|---|
@@ -144,7 +144,7 @@ Before each run reaches the LLM, the buffered history passes through two
    rebalanced first (at run start with `drop_trailing_user=True`, and
    again before every LLM call).
 2. **Trim** (`trim_to_budget`) — the newest tail that fits
-   `WHABOT_MEMORY_TOKEN_LIMIT` (default 8000) is kept; tool groups
+   `WAHABOT_MEMORY_TOKEN_LIMIT` (default 8000) is kept; tool groups
    (assistant call + its `tool` replies) are atomic so a trim never
    splits them, and the newest user turn always survives. The system
    prompt lives outside the rolling buffer so the trim can never evict
@@ -154,7 +154,7 @@ Before each run reaches the LLM, the buffered history passes through two
 ## The entrypoint
 
 `handle_message(event, agent, ctx=None, image=None)` in
-`whabot.ai.context` is the single function the handlers call. It:
+`wahabot.ai.context` is the single function the handlers call. It:
 
 1. reads the message body from `event.payload["body"]` and prefixes a
    **sender tag** — `[notifyName]`, falling back to the participant id —
@@ -169,10 +169,10 @@ Before each run reaches the LLM, the buffered history passes through two
 
 ### Images (vision)
 
-When `WHABOT_VISION` is `true` (default) and the model is vision-capable,
+When `WAHABOT_VISION` is `true` (default) and the model is vision-capable,
 the handler downloads photo messages via `WahaClient.download_media`
 (`image_media(event)` gates on `_data.type == "image"` — stickers/videos/
-documents are ignored), streaming with a `WHABOT_MAX_IMAGE_BYTES` cap so
+documents are ignored), streaming with a `WAHABOT_MAX_IMAGE_BYTES` cap so
 an oversized image is skipped instead of buffered. The download happens
 after the group-participation check, so unaddressed group images cost
 nothing. The bytes pass through as `image`, the workflow carries them on
@@ -180,27 +180,27 @@ the run as `image_blocks`, and `_with_image` injects them into a **copy**
 of the newest user message for the first LLM call only — memory stays
 text-only, so no megabyte payloads enter the rolling buffer and a
 tool-call loop never resends the picture. The turn's text side is the
-caption, or `(image)` when there is none. When `WHABOT_VISION=false`, or
+caption, or `(image)` when there is none. When `WAHABOT_VISION=false`, or
 a download fails, the turn degrades to text-only.
 
 ### Image URLs in text (vision)
 
 A bare link in the text ("look at this
 `https://host/path/pic.png/revision/latest`") is not a media message, so
-`whabot.ai.url_images` sniffs image URLs out of the body: any path
+`wahabot.ai.url_images` sniffs image URLs out of the body: any path
 segment ending in an image extension qualifies (wikia-style derivative
-paths included), up to `WHABOT_MAX_URL_IMAGES` per message. Each URL is
+paths included), up to `WAHABOT_MAX_URL_IMAGES` per message. Each URL is
 streamed with the same Chrome TLS impersonation `visit_url` uses —
 the **Content-Type header** decides whether it is an image (the wikia
 example serves `image/webp` despite the `.png` path), and the
-`WHABOT_MAX_IMAGE_BYTES` cap aborts oversized bodies mid-stream.
+`WAHABOT_MAX_IMAGE_BYTES` cap aborts oversized bodies mid-stream.
 Fetched images join the WhatsApp-attached ones as additional
 `image_blocks` on the same first-LLM-call injection; failures are
 logged and skipped, never fatal for the turn.
 
 ## LLM observability (Langfuse)
 
-`whabot.ai.observability` exports every agent run's LLM calls —
+`wahabot.ai.observability` exports every agent run's LLM calls —
 prompts, completions, token usage, model, latency — to
 [Langfuse](https://langfuse.com) when credentials are configured.
 Strictly opt-in and fail-soft: without both `LANGFUSE_PUBLIC_KEY` and
@@ -213,7 +213,7 @@ background threads.
 
 Each turn is wrapped in `chat_trace_attributes(chat_id)`, which stamps
 the OpenTelemetry context with a stable `wa:<chat_id>` session id and a
-`whabot` tag — so one WhatsApp chat shows up as one session in the
+`wahabot` tag — so one WhatsApp chat shows up as one session in the
 Langfuse UI, with each bot turn as a trace. WhatsApp JIDs are PII; the
 export-stage `mask_otel_spans` hook rewrites span attributes to
 `[jid redacted]` before they leave the process (the session id itself is
@@ -264,8 +264,8 @@ JID to reach another group or person (e.g. `1234567890@g.us`,
 | `search_messages` | `query`, `chat?`, `limit?` | `GET /api/messages` (local filter) | Find recent messages by text / media |
 | `forward_message` | `message_id`, `chat?` | `POST /api/forwardMessage` | Forward a message to a chat |
 
-All tool implementations live in `src/whabot/ai/tools.py`; the
-WAHA HTTP calls are in `src/whabot/core/waha.py`. Details in the
+All tool implementations live in `src/wahabot/ai/tools.py`; the
+WAHA HTTP calls are in `src/wahabot/core/waha.py`. Details in the
 subsections below.
 
 ### Messaging
@@ -335,7 +335,7 @@ status string and never raise.
 Ticker normalization handles lowercase, `BTCUSD`/`BTC/USD` → `BTC-USD`.
 `web_search` shells out to the `webserp` CLI (from the `webserp` package);
 `visit_url` uses `curl_cffi` with a Chrome impersonation fingerprint. Both
-honor `WHABOT_WEB_SEARCH_TIMEOUT` and `WHABOT_WEB_SEARCH_PROXY`.
+honor `WAHABOT_WEB_SEARCH_TIMEOUT` and `WAHABOT_WEB_SEARCH_PROXY`.
 
 ## Adding custom tools
 
@@ -343,7 +343,7 @@ Tools are optional but easy to plug in:
 
 ```python
 from llama_index.core.tools import FunctionTool
-from whabot.ai.workflow import build_agent
+from wahabot.ai.workflow import build_agent
 
 
 def add(x: int, y: int) -> int:

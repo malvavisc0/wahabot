@@ -1,7 +1,7 @@
 # WAHA Message Identity Fields
 
 How `from`, `participant`, and `to` identify who sent what — and how
-whabot's access lists use them. JIDs below are anonymized.
+wahabot's access lists use them. JIDs below are anonymized.
 
 ## Field semantics per chat type
 
@@ -40,7 +40,7 @@ directly expose a phone number.
 
 ## How the session config uses these
 
-`chat_allowed()` (in `src/whabot/core/filters.py`) checks, in order:
+`chat_allowed()` (in `src/wahabot/core/filters.py`) checks, in order:
 
 1. **Blacklist** — matched against both `from` and `participant`
    (blacklisted participant → drop, even if their group is whitelisted).

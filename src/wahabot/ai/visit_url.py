@@ -6,7 +6,7 @@ Plain tightly-scoped HTTP clients are often blocked by anti-bot checks.
 sites than a bare ``httpx`` client could.
 
 The response body is returned inline (HTML stripped, truncated), since
-whabot has no file tools. Tools follow whabot conventions: they return a
+wahabot has no file tools. Tools follow wahabot conventions: they return a
 status string and never raise (failures become an explanatory message).
 """
 
@@ -16,7 +16,7 @@ from typing import Any
 from curl_cffi import requests as cffi_requests
 from loguru import logger
 
-from whabot.settings import Settings
+from wahabot.settings import Settings
 
 __all__ = ["visit_url"]
 

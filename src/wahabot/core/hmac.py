@@ -5,7 +5,7 @@ import hmac
 
 from fastapi import HTTPException
 
-from whabot.settings import Settings
+from wahabot.settings import Settings
 
 
 def verify_hmac(

@@ -2,7 +2,7 @@
 
 Ported from aria-ai's ``aria.tools.search.youtube``, but returns the
 transcript text inline (truncated) instead of writing it to disk, since
-whabot has no file tools. Pure Python via ``youtube-transcript-api``; no
+wahabot has no file tools. Pure Python via ``youtube-transcript-api``; no
 API key. The tool returns a status string and never raises.
 """
 
