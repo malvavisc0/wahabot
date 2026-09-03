@@ -65,13 +65,13 @@ def _message_tool_call_count(msg: ChatMessage) -> int:
     (legacy/streaming path). Blocks take precedence; the kwargs list is
     only consulted when no blocks are present.
     """
-    block_calls = sum(1 for block in msg.blocks if isinstance(block, ToolCallBlock))
-    if block_calls:
+    if block_calls := sum(1 for block in msg.blocks if isinstance(block, ToolCallBlock)):
         return block_calls
-    kwarg_calls = msg.additional_kwargs.get("tool_calls")
-    if kwarg_calls:
-        return len(kwarg_calls)
-    return 0
+    # The legacy/streaming path may store ``None`` (an assistant turn
+    # explicitly cleared of calls); count that as zero rather than
+    # crashing on ``len(None)``.
+    kwarg_calls = msg.additional_kwargs.get("tool_calls") or []
+    return len(kwarg_calls)
 
 
 def _is_tool_message(msg: ChatMessage) -> bool:
@@ -146,19 +146,21 @@ def _trim_history(
     Drop trailing assistant with unfulfilled tool calls.
     Drop trailing user when drop_trailing_user is True.
     """
-    while messages and messages[0].role != MessageRole.USER:
-        messages.pop(0)
+    trimmed = list(messages)
 
-    while messages:
-        last = messages[-1]
+    while trimmed and trimmed[0].role != MessageRole.USER:
+        trimmed.pop(0)
+
+    while trimmed:
+        last = trimmed[-1]
         if _message_tool_call_count(last) > 0 or (
             drop_trailing_user and last.role == MessageRole.USER
         ):
-            messages.pop()
+            trimmed.pop()
         else:
             break
 
-    return messages
+    return trimmed
 
 
 def sanitize_chat_history(
@@ -174,11 +176,9 @@ def sanitize_chat_history(
     if not chat_history:
         return chat_history
 
-    step1 = _deduplicate_messages(chat_history)
-    step2 = _validate_tool_groups(step1)
-    step3 = _trim_history(step2, drop_trailing_user)
-
-    return step3
+    deduplicated = _deduplicate_messages(chat_history)
+    validated = _validate_tool_groups(deduplicated)
+    return _trim_history(validated, drop_trailing_user)
 
 
 def _group_boundaries(messages: list[ChatMessage]) -> list[int]:
@@ -194,7 +194,7 @@ def _group_boundaries(messages: list[ChatMessage]) -> list[int]:
     while i < n:
         starts.append(i)
         call_count = _message_tool_call_count(messages[i])
-        i += 1 + call_count if call_count else 1
+        i += 1 + call_count
     return starts
 
 

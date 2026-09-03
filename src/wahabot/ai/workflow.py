@@ -62,6 +62,8 @@ DELIVERY_TOOLS = frozenset(
     {"send_message", "send_image", "forward_message", "react_to_message"}
 )
 
+SILENCE_TOOL = "stay_silent"
+
 
 def raise_missing_llm() -> FunctionCallingLLM:
     """Fail fast when no llm was passed to the workflow."""
@@ -294,15 +296,25 @@ class FunctionCallingAgentWorkflow(Workflow):
         tool_calls = self.llm.get_tool_calls_from_response(
             response, error_on_no_tool_call=False
         )
+        if any(call.tool_name == SILENCE_TOOL for call in tool_calls):
+            logger.debug("Stopping run: model chose stay_silent")
+            return self.stopped_response()
         if tool_calls and await self.repeats_tool_call(ctx, tool_calls):
             return self.stopped_response()
-        await self.remember(ctx, response, tool_calls)
         if not tool_calls:
-            if rounds > 1:
-                response = self.drop_post_delivery_text(response)
+            response = self.drop_post_delivery_text(response)
+            await self.remember(ctx, response, tool_calls)
             return StopEvent(result=response)
         if self.delivery_complete(tool_calls) or rounds >= self.tool_round_limit:
-            return StopEvent(result=await self.wrap_up_response(ctx))
+            # Do not store calls which will not be executed: the chat API
+            # requires every advertised call to have a tool response.
+            reason = (
+                "non-delivery round after completed delivery"
+                if self.delivery_complete(tool_calls)
+                else f"round limit {self.tool_round_limit}"
+            )
+            return StopEvent(result=await self.wrap_up_response(ctx, reason))
+        await self.remember(ctx, response, tool_calls)
         return ToolCallEvent(tool_calls=tool_calls)
 
     async def populated_history(self, ctx: Context, ev: InputEvent) -> list[ChatMessage]:
@@ -381,7 +393,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         empty = ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content=""))
         return StopEvent(result=empty)
 
-    async def wrap_up_response(self, ctx: Context) -> ChatResponse:
+    async def wrap_up_response(self, ctx: Context, reason: str) -> ChatResponse:
         """One last tool-free LLM call after a delivered reply / round limit.
 
         Mirrors LlamaIndex's ``early_stopping_method="generate"``: the
@@ -392,11 +404,8 @@ class FunctionCallingAgentWorkflow(Workflow):
         it is dropped like any other post-delivery final text.
         """
         limit = self.tool_round_limit
-        logger.warning("Generating wrap-up response (round limit {limit})", limit=limit)
-        memory = await ctx.store.get("memory")
-        history = await memory.aget_all()
-        system = self.system_message()
-        messages = ([system] if system else []) + list(history)
+        logger.warning("Generating wrap-up response ({reason})", reason=reason)
+        messages = await self.chat_history(ctx)
         messages.append(
             ChatMessage(
                 role="user",
@@ -434,8 +443,13 @@ class FunctionCallingAgentWorkflow(Workflow):
     async def handle_tool_calls(self, ctx: Context, ev: ToolCallEvent) -> InputEvent:
         """Run requested tools, collect outputs, feed them back into memory."""
         tools_by_name = {tool.metadata.get_name(): tool for tool in self.tools}
+        # Execute reads/research before delivery calls in a mixed model batch.
+        # Once delivery succeeds, no non-delivery action may run afterward.
+        ordered_calls = sorted(
+            ev.tool_calls, key=lambda call: call.tool_name in DELIVERY_TOOLS
+        )
         tool_msgs = [
-            await run_tool_call(tools_by_name, tool_call) for tool_call in ev.tool_calls
+            await run_tool_call(tools_by_name, tool_call) for tool_call in ordered_calls
         ]
         memory = await ctx.store.get("memory")
         for msg in tool_msgs:

@@ -280,14 +280,14 @@ JID to reach another group or person (e.g. `1234567890@g.us`,
 
 | Tool | Params | WAHA endpoint | Purpose |
 |---|---|---|---|
-| `send_message` | `chat?`, `text`, `reply_to?` | `POST /api/sendText` | Send a text (current chat or elsewhere); `reply_to` quotes a message; once per run |
-| `stay_silent` | — | — | End the run with no reply at all |
-| `react_to_message` | `message_id`, `reaction` | `PUT /api/reaction` | Emoji-react to a message (empty = remove) |
-| `send_image` | `url`, `caption?`, `chat?` | `POST /api/sendImage` | Send an image from a URL |
+| `send_message` | `chat?`, `text`, `reply_to?` | `POST /api/sendText` | Send a text (current chat or elsewhere); `reply_to` quotes a message; once per run (shared latch) |
+| `stay_silent` | — | — | End the run with no reply at all (terminal: the workflow stops before executing it) |
+| `react_to_message` | `message_id`, `reaction` | `PUT /api/reaction` | Emoji-react to a message (empty = remove); once per run |
+| `send_image` | `url`, `caption?`, `chat?` | `POST /api/sendImage` | Send an image from a URL; once per run (shared latch) |
 | `fetch_chat_messages` | `chat?`, `limit?` | `GET /api/{session}/chats/{chatId}/messages` | Read recent chat messages (JSON `messages` list) |
 | `get_chat` | `chat?` | `POST /api/{session}/chats/overview` | Chat metadata (name, participants, …) |
 | `search_messages` | `query`, `chat?`, `limit?` | `GET /api/messages` (local filter) | Find recent messages by text / media |
-| `forward_message` | `message_id`, `chat?` | `POST /api/forwardMessage` | Forward a message to a chat |
+| `forward_message` | `message_id`, `chat?` | `POST /api/forwardMessage` | Forward a message to a chat; once per run (shared latch) |
 
 All tool implementations live under `src/wahabot/ai/tools/` (WhatsApp
 tools in `whatsapp.py`, external tools in `external.py`); the
@@ -479,18 +479,26 @@ and fall back to kwargs, or it will silently see zero.
 - The tool loop is also bounded by `WAHABOT_TOOL_ROUND_LIMIT`
   (default 50): a model that keeps re-issuing tool calls — small
   models at low temperature can repeat the same call deterministically —
-  is stopped after that many LLM→tool round trips. The counter resets
+  is stopped after that many LLM→tool round trips with one final
+  tool-free wrap-up call (logged with its trigger: the round limit, or
+  a non-delivery round after a completed delivery). The counter resets
   at every run start.
-- `send_message` (and `send_image` / `forward_message`) deliver **at
-  most once per run**: after a successful send, further calls return an
-  error envelope instead of sending, so a looping model cannot spam
-  the chat even below the round limit. `react_to_message` is likewise
-  bounded to one reaction per run.
+- `send_message`, `send_image`, and `forward_message` share a single
+  delivery latch and collectively deliver **at most once per run**:
+  after a successful send, further calls return an error envelope
+  instead of sending, so a looping model cannot spam the chat even
+  below the round limit. `react_to_message` is likewise bounded to one
+  reaction per run.
 - `stay_silent` is the explicit exit for "no reply": the system prompt
   tells the model to call it instead of writing an empty string (which
   small models tend to replace with narration like "I'll stay silent
-  here — …"). As a last line of defense, `handle_message` drops
-  replies that merely narrate a silence (`is_silence_narration`).
+  here — …"). It is **terminal**: the workflow stops the run as soon as
+  the call appears, without executing it or looping the result back
+  into another LLM round — a follow-up model response cannot leak text
+  into the chat. A batch mixing `stay_silent` with other calls still
+  ends silently: nothing else in the batch runs. As a last line of
+  defense, `handle_message` drops replies that merely narrate a silence
+  (`is_silence_narration`).
 - A final text produced *after* a delivery tool succeeded is dropped,
   not stored or returned: small models pattern-complete their own last
   assistant text at low temperature, so the "answer" after
@@ -505,6 +513,12 @@ and fall back to kwargs, or it will silently see zero.
   has fired, only delivery-tool rounds may continue** — a legitimate
   "reply, then react" still works, but non-delivery rounds wrap the
   turn up (with the wrap-up answer dropped as post-delivery chatter).
+  When a model emits research and delivery calls in one batch, research
+  calls run first so no non-delivery operation occurs after delivery.
+  In both wrap-up cases the assistant message advertising the
+  never-executed calls is **not stored**: the chat API requires every
+  advertised tool call to have a matching tool response, so storing it
+  would poison the next run's history with an invalid turn.
   The sampling defaults (temperature 1.0, top_p 0.95 — the model card
   values, see `Settings`) make the deterministic repeat unlikely in
   the first place; these two breaks are the hard guarantee behind it.

@@ -194,6 +194,10 @@ def send_image(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             caption: Optional caption text.
             chat: Optional chat id. Omit to send to the current chat.
         """
+        if target.get("sent"):
+            return error(
+                f"message already sent this run (to {target['sent']}); do not send again"
+            )
         session = target.get("session", "")
         chat_id = chat or target.get("chat_id", "")
         if not session or not chat_id:
@@ -436,6 +440,10 @@ def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             message_id: The serialized id of the message to forward.
             chat: Optional chat id to forward into. Defaults to current.
         """
+        if target.get("sent"):
+            return error(
+                f"message already sent this run (to {target['sent']}); do not send again"
+            )
         session = target.get("session", "")
         chat_id = chat or target.get("chat_id", "")
         if not session or not chat_id:
