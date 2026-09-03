@@ -181,6 +181,12 @@ def serve(
     if session:
         settings.session = session
     setup_logging(settings)
+    if not settings.access_config.exists():
+        message = (
+            f"Session config not found: {settings.access_config}"
+            " (create it with `wahabot sessions init`)"
+        )
+        raise typer.BadParameter(message)
     waha = WahaClient(base_url=settings.waha_url, api_key=settings.waha_api_key)
     ensure_session_live(waha, settings)
     register_agent_handler(settings, waha=waha)
