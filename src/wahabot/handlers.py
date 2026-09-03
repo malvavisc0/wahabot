@@ -255,10 +255,10 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
                     reply = await handle_message(
                         event, agent, ctx=ctx, image=image, settings=settings, waha=waha
                     )
-                if send_tool_holder["sent"]:
+                if send_tool_holder["sent"] or send_tool_holder["reacted"]:
                     logger.debug(
-                        "Agent already sent its reply in {chat_id}",
-                        chat_id=send_tool_holder["sent"],
+                        "Agent already delivered its reply in {chat_id}",
+                        chat_id=chat_id,
                     )
                     return
             if not reply or not reply.strip():

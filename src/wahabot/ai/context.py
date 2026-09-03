@@ -1,6 +1,7 @@
 """Reply context rendering and the agent entrypoint."""
 
 import datetime
+import json
 import re
 import time
 from typing import Any, cast
@@ -18,7 +19,9 @@ from wahabot.core.waha import WahaClient
 from wahabot.settings import Settings
 
 __all__ = [
+    "final_reply",
     "handle_message",
+    "is_error_narration",
     "is_silence_narration",
     "participant_names",
     "render_system_prompt",
@@ -33,18 +36,27 @@ __all__ = [
 #: response.") — matching it here keeps it out of the chat. The reply
 #: must *be about* staying silent, not merely contain the word (so
 #: "silence is golden, but I'll answer anyway" still goes through).
+#: The same happens after a delivered reaction or reply: the model
+#: pattern-completes "I already reacted to that message, so I'm done
+#: here." instead of going quiet — the reaction/reply already went out
+#: via the tool, so the narration is chatter, not an answer.
 _SILENCE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
         r"^no response\b",
         r"^no reply\b",
         r"^nothing to (add|say)\b",
+        r"^nothing (more|else) to (add|say|do)\b",
         r"^(i'?ll |i will |i'?m )?(stay|staying|remain|choosing to stay)[\s'-]*silent\b",
         r"^(i'?ll |i will )?(stay|keep) (quiet|out of (this|it|the conversation))\b",
         r"^silence[.!…]?$",
         r"^\(silence\)$",
         r"^not (addressed|directed) (to|at) me\b",
         r"^(i'?ll |i will )?say nothing\b",
+        r"^i (already )?(reacted|replied|sent|answered)\b[^.]*" + r"(so )?i'?m done\b",
+        r"^i (already )?(reacted|replied|sent|answered)\b[^.]*"
+        + r"(so )?(there'?s?|there is) nothing (more|else|left) (to )?(add|say|do)",
+        r"^i'?m done (here|with this)\b",
     )
 )
 
@@ -58,6 +70,32 @@ def is_silence_narration(reply: str) -> bool:
     """
     cleaned = reply.strip().strip("\"'`()").strip()
     return any(pattern.search(cleaned) for pattern in _SILENCE_PATTERNS)
+
+
+def is_error_narration(reply: str) -> bool:
+    """True when *reply* is an error payload, not a chat answer.
+
+    Small models sometimes *write* an API error as their reply — e.g.
+    a made-up ``{"error": {"message": "resource exhausted …", "type":
+    "upstream_error", "code": "resource_exhausted"}}`` naming a provider
+    the bot never used. Whatever the model's reason (pattern-
+    completing text it has seen), the result must never reach the
+    chat. Only near-JSON bodies whose top level is an ``error`` object
+    match; genuine prose answers never do.
+    """
+    stripped = reply.strip()
+    if not stripped.startswith("{"):
+        return False
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError, ValueError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    error = cast(dict[str, Any], data).get("error")
+    return isinstance(error, dict) and any(
+        key in error for key in ("message", "code", "type", "status")
+    )
 
 
 def render_system_prompt(
@@ -318,11 +356,21 @@ def collect_images(
 
 
 def final_reply(result: Any) -> str:
-    """The run's reply text, emptied when the model narrated a silence."""
+    """The run's reply text, emptied when the model narrated instead of answered.
+
+    Silence narration ("I'll stay silent here — ...") and invented
+    error payloads (``{"error": {...}}``) are chatter, not answers:
+    both are dropped so they never reach the chat.
+    """
     message = cast(ChatMessage, result.message)
     content = message.content
     reply = content.strip() if isinstance(content, str) else ""
     if is_silence_narration(reply):
         logger.debug("Filtering silence narration: {reply!r}", reply=reply)
+        return ""
+    if is_error_narration(reply):
+        logger.warning(
+            "Dropping invented error payload as final reply: {reply!r}", reply=reply[:200]
+        )
         return ""
     return reply

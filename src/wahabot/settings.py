@@ -29,6 +29,21 @@ class Settings(BaseSettings):
     llm_api_base: str
     llm_api_key: str
     llm_model: str = "gpt-4o-mini"
+    #: Sampling options, defaulting to the Qwen model card (temperature
+    #: 1.0, top_p 0.95, top_k 20, min_p 0). The library default of
+    #: temperature 0.1 is near-greedy — under it a small model
+    #: deterministically re-issues the same tool call and pattern-
+    #: completes its own words, which is the decoding bug behind the
+    #: loop incidents. "temp ≈ 0" and low top_p are explicitly
+    #: discouraged for these models; if repetition still appears,
+    #: raise llm_presence_penalty (up to ~2) rather than dropping
+    #: temperature.
+    llm_temperature: float = 1.0
+    llm_top_p: float = 0.95
+    llm_top_k: int = 20
+    llm_min_p: float = 0.0
+    llm_presence_penalty: float = 0.0
+    llm_repetition_penalty: float = 1.0
     #: Per-request HTTP timeout (seconds) for LLM calls; must stay below
     #: the workflow timeout so a hung provider fails fast and clean.
     llm_timeout: float = 60.0

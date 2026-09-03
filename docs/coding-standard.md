@@ -32,8 +32,8 @@ uv sync                                # install deps
 uv run wahabot serve [--port N] [--reload]   # webhook server
 uv run ruff check --fix .               # lint
 uv run ruff format .                   # format
-uv run basedpyright                    # type check
-uv run radon cc src -s                 # complexity (must show no C/D/E/F blocks)
+uv run basedpyright ./src/wahabot       # type check
+uv run radon cc ./src/wahabot -s        # complexity (must show no C/D/E/F blocks)
 uv run wahabot --help                   # CLI surface
 ```
 Run `ruff check`, `ruff format --check`, `basedpyright`, and `radon cc`

@@ -59,6 +59,12 @@ Key env vars:
 | Variable | Purpose | Default |
 |---|---|---|
 | `WAHABOT_LLM_MODEL` | OpenAI-compatible chat model with function calling | **required** |
+| `WAHABOT_LLM_TEMPERATURE` | Sampling temperature (model-card default; don't lower it) | `1.0` |
+| `WAHABOT_LLM_TOP_P` | Nucleus sampling cutoff | `0.95` |
+| `WAHABOT_LLM_TOP_K` | Top-k sampling candidates | `20` |
+| `WAHABOT_LLM_MIN_P` | Min-p sampling floor | `0.0` |
+| `WAHABOT_LLM_PRESENCE_PENALTY` | Presence penalty (raise toward 2 if the model ever repeats itself) | `0.0` |
+| `WAHABOT_LLM_REPETITION_PENALTY` | Repetition penalty | `1.0` |
 | `WAHABOT_LLM_TIMEOUT` | Per-request LLM HTTP timeout (s; client retries disabled) | `60` |
 | `WAHABOT_WEBHOOK_HMAC_KEY` | Shared secret matching WAHA's `hmac.key` | **required** |
 | `WAHABOT_HOST` / `WAHABOT_PORT` | Webhook server bind | `0.0.0.0:8080` |

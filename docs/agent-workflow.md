@@ -198,7 +198,7 @@ are normalized to a static PNG first frame (`first_frame_png`) — vision
 models take stills, not animations. The download happens after the
 group-participation check, so unaddressed group images cost nothing. The
 bytes pass through as `image`, the workflow carries them on the run as
-`image_blocks`, and `_with_image` injects them into a **copy** of the
+`image_blocks`, and `with_image` injects them into a **copy** of the
 newest user message for the first LLM call only — memory stays text-only,
 so no megabyte payloads enter the rolling buffer and a tool-call loop
 never resends the picture. The turn's text side is the caption, or
@@ -407,9 +407,10 @@ therefore carries `memory`, `tool_rounds`, and `image_blocks` into the
 next run. Two consequences:
 
 - **Any per-run value in the store must be reset at run start.**
-  `prepare_chat_history` resets `tool_rounds = 0` and `image_blocks`
-  for exactly this reason — removing those lines silently leaks state
-  across runs (e.g. the round budget shrinking run over run).
+  `prepare_chat_history` resets `tool_rounds = 0`, `last_tool_calls`,
+  and `image_blocks` for exactly this reason — removing those lines
+  silently leaks state across runs (e.g. the round budget shrinking
+  run over run).
 - **A shared `Context` refuses concurrent runs**
   (`ContextStateError: Cannot start a new run while context is already
   running`). The global `_agent_lock` in `handlers.py` is what stands
@@ -441,10 +442,10 @@ trimmed at write time**. The token trim lives in
 `ChatMemoryBuffer.get`, which also raises
 `ValueError("Initial token count exceeds token limit")` if the
 `initial_token_count` (our system-prompt cost) exceeds the budget —
-that is why `_system_token_count` clamps instead of letting it raise.
-Because trimming is read-side, `_chat_history` re-trims and `aset`s
+that is why `system_token_count` clamps instead of letting it raise.
+Because trimming is read-side, `chat_history` re-trims and `aset`s
 the buffer on every round; the store can be at most one tool-round
-over budget when `_early_stopping_response` reads it via `aget_all()`.
+over budget when `wrap_up_response` reads it via `aget_all()`.
 
 Two of `get`'s behaviors shape the design:
 
@@ -464,7 +465,7 @@ LlamaIndex carries tool calls as `ToolCallBlock` objects in
 (legacy path), with blocks taking precedence. `ToolCallBlock` fields
 are `tool_call_id` / `tool_name` / `tool_kwargs` — there is **no**
 `arguments` attribute. Anything counting or inspecting tool calls
-(`_token_count`, `history.py`'s group logic) must check blocks first
+(`token_count`, `history.py`'s group logic) must check blocks first
 and fall back to kwargs, or it will silently see zero.
 
 ## A few constraints worth knowing
@@ -493,8 +494,25 @@ and fall back to kwargs, or it will silently see zero.
 - A final text produced *after* a delivery tool succeeded is dropped,
   not stored or returned: small models pattern-complete their own last
   assistant text at low temperature, so the "answer" after
-  `send_message` is usually a stale repeat, not a new reply. Research
-  runs (no delivery tool) keep their final answer.
+  `send_message` **or `react_to_message`** is usually a stale repeat,
+  not a new reply. The wrap-up call after a completed delivery is
+  subject to the same drop. Research runs (no delivery tool) keep
+  their final answer.
+- Two structural loop breaks bound a degenerate run before the round
+  limit: **a repeated identical tool call ends the run immediately**
+  (consecutive rounds re-issuing the same call name+arguments mean the
+  tool already answered "you already did that"), and **once a delivery
+  has fired, only delivery-tool rounds may continue** — a legitimate
+  "reply, then react" still works, but non-delivery rounds wrap the
+  turn up (with the wrap-up answer dropped as post-delivery chatter).
+  The sampling defaults (temperature 1.0, top_p 0.95 — the model card
+  values, see `Settings`) make the deterministic repeat unlikely in
+  the first place; these two breaks are the hard guarantee behind it.
+- `is_silence_narration` also drops post-delivery chatter ("I already
+  reacted to that message, so I'm done here.") and `is_error_narration`
+  drops invented API-error payloads (e.g. a made-up
+  `{"error": {"code": "resource_exhausted", …}}` naming a provider the
+  bot never used) — model-authored noise never reaches the chat.
 - List tools (`fetch_chat_messages`, `search_messages`) return
   *slimmed* messages (`slim_message`): WAHA's raw `_data` blob
   (~90% of the payload) is stripped before enveloping, so results stay
