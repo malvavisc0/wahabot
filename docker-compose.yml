@@ -1,5 +1,3 @@
-# wahabot deployment, run by Coolify.
-#
 # The session config ${WAHABOT_DATA_DIR}/sessions/${WAHABOT_SESSION}.json
 # (with its system_prompt) must exist in the data volume.
 services:
