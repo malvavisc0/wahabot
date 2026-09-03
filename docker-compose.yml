@@ -1,9 +1,11 @@
-# The session config ${WAHABOT_DATA_DIR}/sessions/${WAHABOT_SESSION}.json
-# (with its system_prompt) must exist in the data volume.
+# The session config data/sessions/${WAHABOT_SESSION}.json
+# (with its system_prompt) must exist in the bind-mounted data dir.
 services:
-  wahabot:
+  cli:
     image: ghcr.io/malvavisc0/wahabot:latest
     restart: unless-stopped
+    container_name: cli
+    hostname: wahabot
     environment:
       # Required.
       WAHABOT_WEBHOOK_HMAC_KEY: ${WAHABOT_WEBHOOK_HMAC_KEY:?set WAHABOT_WEBHOOK_HMAC_KEY}
@@ -36,13 +38,12 @@ services:
     ports:
       - "${WAHABOT_PORT:-8080}:8080"
     volumes:
-      - data:/app/data
+      # Bind-mounted so session configs and the event journal are plain
+      # files on the host — edit them directly, no docker cp needed.
+      - ./data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
-
-volumes:
-  data:
