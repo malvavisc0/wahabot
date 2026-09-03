@@ -250,9 +250,27 @@ class FunctionCallingAgentWorkflow(Workflow):
         return InputEvent(input=await self._chat_history(ctx))
 
 
+class ObservableOpenAILike(OpenAILike):
+    """OpenAILike whose instrumentation payload names model/temperature.
+
+    The OTel llama-index instrumentor reads ``model_dict["model"]`` and
+    ``model_dict["temperature"]`` for the ``gen_ai.request.*`` span
+    attributes, but the base ``to_payload`` only exposes metadata
+    (``model_name``, no temperature) — leaving both as ``None`` and
+    spamming OTel "Invalid type NoneType" warnings per LLM call.
+    """
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            **super().to_payload(),
+            "model": self.model,
+            "temperature": self.temperature,
+        }
+
+
 def load_llm(settings: Settings) -> FunctionCallingLLM:
     """Configure the OpenAI-compatible chat LLM from settings."""
-    return OpenAILike(
+    return ObservableOpenAILike(
         model=settings.llm_model,
         api_base=settings.llm_api_base,
         api_key=settings.llm_api_key,
