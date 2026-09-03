@@ -95,7 +95,7 @@ def _deduplicate_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
             and _message_tool_call_count(msg) == 0
         )
         if can_collapse:
-            deduplicated[-1] = msg  # replace — keep latest
+            deduplicated[-1] = msg
         else:
             deduplicated.append(msg)
     return deduplicated
@@ -114,13 +114,11 @@ def _validate_tool_groups(messages: list[ChatMessage]) -> list[ChatMessage]:
         msg = messages[i]
 
         if _is_tool_message(msg):
-            # Orphan tool message — drop.
             i += 1
             continue
 
         call_count = _message_tool_call_count(msg)
         if call_count > 0:
-            # Gather the immediately following tool messages.
             j = i + 1
             tool_msgs: list[ChatMessage] = []
             while j < n and _is_tool_message(messages[j]):
@@ -128,11 +126,8 @@ def _validate_tool_groups(messages: list[ChatMessage]) -> list[ChatMessage]:
                 j += 1
 
             if len(tool_msgs) >= call_count:
-                # Keep the assistant message plus exactly call_count tool
-                # responses.
                 validated.append(msg)
                 validated.extend(tool_msgs[:call_count])
-            # else: dangling/partial group — drop.
             i = j
             continue
 
@@ -151,11 +146,9 @@ def _trim_history(
     Drop trailing assistant with unfulfilled tool calls.
     Drop trailing user when drop_trailing_user is True.
     """
-    # Step 3: Ensure it starts with a user message.
     while messages and messages[0].role != MessageRole.USER:
         messages.pop(0)
 
-    # Step 4: Ensure it ends on a clean boundary.
     while messages:
         last = messages[-1]
         if _message_tool_call_count(last) > 0 or (

@@ -19,7 +19,6 @@ __all__ = [
     "fetch_current_stock_price",
 ]
 
-# Valid ticker symbol pattern (letters, numbers, dots, hyphens)
 _TICKER_PATTERN = re.compile(r"^[A-Z0-9.-]{1,10}$")
 
 # Common quote currencies for crypto pairs where users often omit the dash.

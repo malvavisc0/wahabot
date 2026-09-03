@@ -22,8 +22,6 @@ __all__ = ["get_youtube_transcript"]
 
 _MAX_TRANSCRIPT_CHARS = 6000
 
-# Split the joined transcript into paragraphs roughly every N sentences so
-# the output is readable prose, not hundreds of caption-fragment lines.
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
 _PARAGRAPH_SENTENCES = 3
 
