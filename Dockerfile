@@ -26,7 +26,7 @@ RUN --mount=type=cache,target=/home/wahabot/.cache/uv,uid=1000,gid=1000 \
 
 # Project layer: install wahabot itself.
 COPY --chown=wahabot:wahabot src ./src
-COPY --chown=wahabot:wahabot README.md ./
+COPY --chown=wahabot:wahabot README.md LICENSE ./
 RUN --mount=type=cache,target=/home/wahabot/.cache/uv,uid=1000,gid=1000 \
     uv sync --frozen --no-dev
 
