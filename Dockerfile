@@ -17,9 +17,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #  archive/util  : zip, unzip, 7-zip, xz, file, ripgrep, jq, sqlite3, git, curl
 #  toolchain     : build-essential, cmake, ninja, pkg-config, gdb
 #  node          : nodejs + npm (trixie LTS)
-RUN --mount=type=cache,target=/var/cache/apt,uid=0,gid=0 \
-    --mount=type=cache,target=/var/lib/apt,uid=0,gid=0 \
-    apt-get update \
+# No --mount=type=cache for apt: buildx builds amd64+arm64 concurrently and
+# they would share the same cache target, so apt's lock at /var/lib/apt/lists/lock
+# is grabbed by two builds at once and the second fails (exit 100). Layer caching
+# plus the GHA cache (type=gha) already keeps repeat builds fast.
+RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ffmpeg \
         poppler-utils \
