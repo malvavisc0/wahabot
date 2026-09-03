@@ -2,6 +2,7 @@
 
 import datetime
 import re
+import time
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -13,15 +14,16 @@ from wahabot.ai.messages import message_replies_to
 from wahabot.ai.tools.url_images import fetch_url_images, image_urls
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.models import WahaEvent
+from wahabot.core.waha import WahaClient
 from wahabot.settings import Settings
 
 __all__ = [
     "handle_message",
     "is_silence_narration",
+    "participant_names",
     "render_system_prompt",
     "reply_context",
     "reply_context_section",
-    "reply_description",
     "sender_tag",
 ]
 
@@ -119,39 +121,45 @@ def sender_tag(event: WahaEvent) -> str:
     return f"[{participant}]" if participant else ""
 
 
-def reply_context(message_reply: dict[str, Any] | None) -> str:
+def reply_context(
+    message_reply: dict[str, Any] | None,
+    participant_names: dict[str, str] | None = None,
+) -> str:
     """Render the quoted message as context for the agent.
 
     Empty/None input yields nothing; the caller decides whether to
-    include a ``Reply context`` block in the prompt.
+    include a ``Reply context`` block in the prompt. *participant_names*
+    maps chat JIDs to display names so the quoted sender renders as a
+    name, not a raw ``@lid`` JID.
     """
     if not message_reply:
         return ""
-    parts = [
-        part
-        for part in (
-            quoted_participant(message_reply),
-            reply_description(message_reply),
-        )
-        if part
-    ]
-    return "; ".join(parts)
+    sender = quoted_participant(message_reply, participant_names)
+    description = reply_description(message_reply)
+    if sender and description:
+        return f'{sender}: "{description}"'
+    return sender or description
 
 
-def quoted_participant(message_reply: dict[str, Any]) -> str:
-    """The quoted message's sender, prefixed ``from:``; empty when unknown.
+def quoted_participant(
+    message_reply: dict[str, Any],
+    participant_names: dict[str, str] | None = None,
+) -> str:
+    """The quoted message's sender display name; empty when unknown.
 
-    Prefers the quoted message's display name (``_data.notifyName``) over
-    the raw participant/author id.
+    Prefers the quoted message's own ``_data.notifyName``, then the
+    chat's participant roster (*participant_names*), then the raw
+    participant/author id stripped of its ``@…`` domain — a bare number
+    reads like an id, a full JID reads like noise.
     """
     data = message_reply.get("_data", {})
-    participant = (
-        data.get("notifyName")
-        or message_reply.get("participant")
-        or data.get("author")
-        or ""
-    )
-    return f"from: {participant}" if participant else ""
+    jid = str(message_reply.get("participant") or data.get("author") or "")
+    name = str(data.get("notifyName") or "").strip()
+    if not name and jid and participant_names:
+        name = participant_names.get(jid, "")
+    if name:
+        return name
+    return jid.split("@", 1)[0] if jid else ""
 
 
 def reply_description(message_reply: dict[str, Any]) -> str:
@@ -166,12 +174,78 @@ def reply_description(message_reply: dict[str, Any]) -> str:
     return description[:400]
 
 
-def reply_context_section(message_reply: dict[str, Any] | None) -> str:
+def reply_context_section(
+    message_reply: dict[str, Any] | None,
+    participant_names: dict[str, str] | None = None,
+) -> str:
     """Message text with the quoted/replied-to message attached as context."""
     if not message_reply:
         return ""
-    line = reply_context(message_reply)
-    return f"\n[Message quoting] {line}" if line else ""
+    line = reply_context(message_reply, participant_names)
+    return f"\n[quoting] {line}" if line else ""
+
+
+#: Per-chat participant roster cache (JID → display name), refreshed
+#: at most once per TTL. Quoted messages carry no sender name (WAHA's
+#: ``replyTo._data`` has only type/kind/body), so the roster is the only
+#: way to render "Ada" instead of "000000000000000@lid".
+_roster_cache: dict[tuple[str, str], tuple[float, dict[str, str]]] = {}
+_ROSTER_TTL_S = 3600
+
+
+def participant_names(
+    waha: WahaClient | None, session: str, chat_id: str
+) -> dict[str, str]:
+    """JID → display name for a chat's participants,cached per chat.
+
+    Fails soft: any WAHA error yields an empty map and quoted senders
+    fall back to their bare id. Non-group chats skip the lookup — a DM
+    partner's name already rides the sender tag.
+    """
+    if waha is None or not chat_id.endswith("@g.us"):
+        return {}
+    now = time.monotonic()
+    cached = _roster_cache.get((session, chat_id))
+    if cached and now - cached[0] < _ROSTER_TTL_S:
+        return cached[1]
+    try:
+        overview = waha.get_chat_overview(session, chat_id)
+    except Exception as exc:
+        logger.debug(
+            "Participant roster fetch failed for {chat}: {exc}", chat=chat_id, exc=exc
+        )
+        return {}
+    names = _roster_names(overview)
+    _roster_cache[(session, chat_id)] = (now, names)
+    return names
+
+
+def _roster_names(overview: dict[str, Any]) -> dict[str, str]:
+    """Extract JID → name from a chat overview's participant list."""
+    pairs = (_roster_entry(entry) for entry in _roster_entries(overview))
+    return {jid: name for jid, name in pairs if jid and name}
+
+
+def _roster_entries(overview: dict[str, Any]) -> list[Any]:
+    """The participant list, whether top-level or nested under ``_chat``."""
+    participants: Any = overview.get("participants")
+    if not isinstance(participants, list):
+        blob: Any = overview.get("_chat")
+        nested = cast(dict[str, Any], blob) if isinstance(blob, dict) else {}
+        participants = nested.get("participants")
+    return participants if isinstance(participants, list) else []
+
+
+def _roster_entry(entry: Any) -> tuple[str, str]:
+    """One participant's ``(jid, display_name)``; empty strings when absent."""
+    if not isinstance(entry, dict):
+        return "", ""
+    item: dict[str, Any] = entry
+    jid = str(item.get("id") or "")
+    name = str(
+        item.get("name") or item.get("pushname") or item.get("notifyName") or ""
+    ).strip()
+    return jid, name
 
 
 async def handle_message(
@@ -180,6 +254,7 @@ async def handle_message(
     ctx: Context | None = None,
     image: dict[str, Any] | None = None,
     settings: Settings | None = None,
+    waha: WahaClient | None = None,
 ) -> str:
     """Run the agent workflow over an incoming message event and return its reply.
 
@@ -201,7 +276,8 @@ async def handle_message(
     images = collect_images(image, settings, text)
     if images and not body:
         text = f"{tag} (image)".strip()
-    user_msg = text + reply_context_section(message_replies_to(event))
+    names = participant_names(waha, event.session, chat_id)
+    user_msg = text + reply_context_section(message_replies_to(event), names)
     image_blocks = [
         ImageBlock(
             image=img["data"],

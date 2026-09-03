@@ -223,7 +223,7 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
                 ctx = context_for(event.session, chat_id, agent)
                 with chat_trace_attributes(chat_id):
                     reply = await handle_message(
-                        event, agent, ctx=ctx, image=image, settings=settings
+                        event, agent, ctx=ctx, image=image, settings=settings, waha=waha
                     )
                 if send_tool_holder["sent"]:
                     logger.debug(
