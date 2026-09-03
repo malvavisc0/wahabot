@@ -367,9 +367,8 @@ workflow runs any requested tool automatically.
 ## Engine semantics that the design relies on
 
 These behaviors of the underlying engine were verified against the
-installed source; several fixes depend on them, and misunderstanding
-them is how the 2026-09 spam loop happened. Read this before touching
-`workflow.py` or `handlers.py`.
+installed source, and the workflow's safeguards depend on them. Read
+this before touching `workflow.py` or `handlers.py`.
 
 ### The engine is the `workflows` package, not `llama_index.core.workflow`
 
@@ -445,10 +444,10 @@ and fall back to kwargs, or it will silently see zero.
 - Workflow runs have a timeout (120 s by default), so a runaway tool
   loop cannot hang the webhook forever.
 - The tool loop is also bounded by `WAHABOT_TOOL_ROUND_LIMIT`
-  (default 50): a model that re-issues tool calls forever — observed
-  with small models at low temperature repeating the same
-  `send_message` dozens of times per run — is stopped after that many
-  LLM→tool round trips. The counter resets at every run start.
+  (default 50): a model that keeps re-issuing tool calls — small
+  models at low temperature can repeat the same call deterministically —
+  is stopped after that many LLM→tool round trips. The counter resets
+  at every run start.
 - `send_message` (and `send_image` / `forward_message`) deliver **at
   most once per run**: after a successful send, further calls return an
   error envelope instead of sending, so a looping model cannot spam
