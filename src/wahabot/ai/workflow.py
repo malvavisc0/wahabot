@@ -274,6 +274,10 @@ def load_llm(settings: Settings) -> FunctionCallingLLM:
         model=settings.llm_model,
         api_base=settings.llm_api_base,
         api_key=settings.llm_api_key,
+        timeout=settings.llm_timeout,
+        # No client retries: a hung endpoint must fail fast within the
+        # workflow timeout, not stack 60s attempts until it blows up.
+        max_retries=0,
         is_chat_model=True,
         is_function_calling_model=True,
     )

@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     llm_api_base: str
     llm_api_key: str
     llm_model: str = "gpt-4o-mini"
+    #: Per-request HTTP timeout (seconds) for LLM calls; must stay below
+    #: the workflow timeout so a hung provider fails fast and clean.
+    llm_timeout: float = 60.0
     memory_token_limit: int = 8000
     timezone: str = "UTC"
 

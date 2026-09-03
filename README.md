@@ -59,6 +59,7 @@ Key env vars:
 | Variable | Purpose | Default |
 |---|---|---|
 | `WAHABOT_LLM_MODEL` | OpenAI-compatible chat model with function calling | **required** |
+| `WAHABOT_LLM_TIMEOUT` | Per-request LLM HTTP timeout (s; client retries disabled) | `60` |
 | `WAHABOT_WEBHOOK_HMAC_KEY` | Shared secret matching WAHA's `hmac.key` | **required** |
 | `WAHABOT_HOST` / `WAHABOT_PORT` | Webhook server bind | `0.0.0.0:8080` |
 | `WAHABOT_LOG_LEVEL` | loguru level | `INFO` |
