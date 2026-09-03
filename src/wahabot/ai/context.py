@@ -189,14 +189,14 @@ def reply_context_section(
 #: at most once per TTL. Quoted messages carry no sender name (WAHA's
 #: ``replyTo._data`` has only type/kind/body), so the roster is the only
 #: way to render "Ada" instead of "000000000000000@lid".
-_roster_cache: dict[tuple[str, str], tuple[float, dict[str, str]]] = {}
-_ROSTER_TTL_S = 3600
+ROSTER_TTL_S = 3600
+roster_cache: dict[tuple[str, str], tuple[float, dict[str, str]]] = {}
 
 
 def participant_names(
     waha: WahaClient | None, session: str, chat_id: str
 ) -> dict[str, str]:
-    """JID → display name for a chat's participants,cached per chat.
+    """JID → display name for a chat's participants, cached per chat.
 
     Fails soft: any WAHA error yields an empty map and quoted senders
     fall back to their bare id. Non-group chats skip the lookup — a DM
@@ -205,8 +205,8 @@ def participant_names(
     if waha is None or not chat_id.endswith("@g.us"):
         return {}
     now = time.monotonic()
-    cached = _roster_cache.get((session, chat_id))
-    if cached and now - cached[0] < _ROSTER_TTL_S:
+    cached = roster_cache.get((session, chat_id))
+    if cached and now - cached[0] < ROSTER_TTL_S:
         return cached[1]
     try:
         overview = waha.get_chat_overview(session, chat_id)
@@ -215,18 +215,18 @@ def participant_names(
             "Participant roster fetch failed for {chat}: {exc}", chat=chat_id, exc=exc
         )
         return {}
-    names = _roster_names(overview)
-    _roster_cache[(session, chat_id)] = (now, names)
+    names = roster_names(overview)
+    roster_cache[(session, chat_id)] = (now, names)
     return names
 
 
-def _roster_names(overview: dict[str, Any]) -> dict[str, str]:
+def roster_names(overview: dict[str, Any]) -> dict[str, str]:
     """Extract JID → name from a chat overview's participant list."""
-    pairs = (_roster_entry(entry) for entry in _roster_entries(overview))
+    pairs = (roster_entry(entry) for entry in roster_entries(overview))
     return {jid: name for jid, name in pairs if jid and name}
 
 
-def _roster_entries(overview: dict[str, Any]) -> list[Any]:
+def roster_entries(overview: dict[str, Any]) -> list[Any]:
     """The participant list, whether top-level or nested under ``_chat``."""
     participants: Any = overview.get("participants")
     if not isinstance(participants, list):
@@ -236,7 +236,7 @@ def _roster_entries(overview: dict[str, Any]) -> list[Any]:
     return participants if isinstance(participants, list) else []
 
 
-def _roster_entry(entry: Any) -> tuple[str, str]:
+def roster_entry(entry: Any) -> tuple[str, str]:
     """One participant's ``(jid, display_name)``; empty strings when absent."""
     if not isinstance(entry, dict):
         return "", ""
