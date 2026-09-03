@@ -7,20 +7,20 @@ intentions. Skip explanations unless explicitly asked. Never narrate
 tool use. Answer the question; move on.
 
 ## Project
-whabot — WhatsApp bot bridge built on the WAHA HTTP API
-(https://waha.devlike.pro). A Python CLI (`whabot`) that runs a FastAPI
+wahabot — WhatsApp bot bridge built on the WAHA HTTP API
+(https://waha.devlike.pro). A Python CLI (`wahabot`) that runs a FastAPI
 webhook server to receive WAHA events (messages, session status, etc.),
 with HMAC-authenticated webhooks and a typer-based command surface for
 operational tasks.
 
 ## Stack
 - python 3.14+, uv, pyproject.toml (uv_build backend, src layout)
-- typer CLI (`whabot` entrypoint, `src/whabot/cli.py`), FastAPI webhook
-  server (`src/whabot/webhook.py`, uvicorn)
-- Pydantic models for WAHA event payloads (`src/whabot/core/models.py`)
-- HMAC webhook verification (`src/whabot/core/hmac.py`) — always
-  enforced, key in `WHABOT_WEBHOOK_HMAC_KEY`
-- loguru logging, level via `WHABOT_LOG_LEVEL`; config from `.env`
+- typer CLI (`wahabot` entrypoint, `src/wahabot/cli.py`), FastAPI webhook
+  server (`src/wahabot/webhook.py`, uvicorn)
+- Pydantic models for WAHA event payloads (`src/wahabot/core/models.py`)
+- HMAC webhook verification (`src/wahabot/core/hmac.py`) — always
+  enforced, key in `WAHABOT_WEBHOOK_HMAC_KEY`
+- loguru logging, level via `WAHABOT_LOG_LEVEL`; config from `.env`
   (pydantic-settings, real env vars win)
 - Type checker: **basedpyright** (`[tool.basedpyright]` in pyproject.toml)
 - Lint/format: **ruff** (line-length 90)
@@ -29,12 +29,12 @@ operational tasks.
 ## Commands
 ```bash
 uv sync                                # install deps
-uv run whabot serve [--port N] [--reload]   # webhook server
+uv run wahabot serve [--port N] [--reload]   # webhook server
 uv run ruff check --fix .               # lint
 uv run ruff format .                   # format
 uv run basedpyright                    # type check
 uv run radon cc src -s                 # complexity (must show no C/D/E/F blocks)
-uv run whabot --help                   # CLI surface
+uv run wahabot --help                   # CLI surface
 ```
 Run `ruff check`, `ruff format --check`, `basedpyright`, and `radon cc`
 after every change.
@@ -80,9 +80,9 @@ Clean, simple, maintainable code. Nothing else.
 Write the simplest correct solution. Delete anything that isn't needed.
 
 ## Conventions
-- CLI commands live in `src/whabot/cli.py` as typer commands; env vars
-  (`WHABOT_HOST`, `WHABOT_PORT`) override flag defaults for `serve`.
-- Shared helpers live under `src/whabot/core/` — keep the package root
+- CLI commands live in `src/wahabot/cli.py` as typer commands; env vars
+  (`WAHABOT_HOST`, `WAHABOT_PORT`) override flag defaults for `serve`.
+- Shared helpers live under `src/wahabot/core/` — keep the package root
   to entrypoints only (`cli.py`, `webhook.py`, `settings.py`).
 - Webhook handlers stay thin: parse → verify → dispatch → log. Payload
   models in `core/models.py` (`WahaEvent`, `extra="allow"` since WAHA
