@@ -121,6 +121,20 @@ def sender_tag(event: WahaEvent) -> str:
     return f"[{participant}]" if participant else ""
 
 
+def message_id_note(event: WahaEvent) -> str:
+    """The incoming message's serialized id as a prompt note.
+
+    The id is what ``send_message(reply_to=…)`` and ``react_to_message``
+    need to quote or react to *this* message — without it in the turn
+    text the model can only quote ids it fetched itself.
+    """
+    data = event.payload.get("_data", {})
+    message_id = str(data.get("id", {}).get("_serialized", "")) if data else ""
+    if not message_id:
+        message_id = str(event.payload.get("id", ""))
+    return f"\n[message id: {message_id}]" if message_id else ""
+
+
 def reply_context(
     message_reply: dict[str, Any] | None,
     participant_names: dict[str, str] | None = None,
@@ -277,7 +291,8 @@ async def handle_message(
     if images and not body:
         text = f"{tag} (image)".strip()
     names = participant_names(waha, event.session, chat_id)
-    user_msg = text + reply_context_section(message_replies_to(event), names)
+    user_msg = text + message_id_note(event)
+    user_msg += reply_context_section(message_replies_to(event), names)
     image_blocks = [
         ImageBlock(
             image=img["data"],

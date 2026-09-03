@@ -162,16 +162,21 @@ Before each run reaches the LLM, the buffered history passes through two
    **sender tag** — `[notifyName]`, falling back to the participant id —
    so the model can tell group members apart (the tag also persists in
    memory, giving history speaker identity for free);
-2. attaches a small `[quoting] Sender: "…"` note when the message is a
+2. appends the incoming message's serialized id as `[message id: …]`
+   (`message_id_note`), so the model can quote or react to the very
+   message it is answering via `send_message(reply_to=…)` /
+   `react_to_message` without fetching ids first;
+3. attaches a small `[quoting] Sender: "…"` note when the message is a
    reply to an earlier one, so the model knows what is being quoted
    (see `reply_context` / `message_replies_to`). The quoted sender
    renders as a display name: WAHA's `replyTo` snippet carries no
    `notifyName`, so `participant_names` resolves the JID against the
    group roster (cached per chat for an hour, fails soft to the bare
    id on any WAHA error);
-3. runs the workflow — `await agent.run(input=user_msg, image_blocks=..., ctx=ctx)`;
-4. returns the response text (`result.message.content`, stripped),
-   which the handler sends back to the chat through WAHA.
+4. runs the workflow — `await agent.run(input=user_msg, image_blocks=..., ctx=ctx)`;
+5. returns the response text (`result.message.content`, stripped),
+   which the handler sends back to the chat through WAHA as a
+   quote-reply to the triggering message (`reply_to`).
 
 ### Images (vision)
 

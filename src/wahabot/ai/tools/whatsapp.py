@@ -104,8 +104,10 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         description=(
             "Send a WhatsApp text message. Use this to reply in the "
             "current chat (omit chat) or to message another group or "
-            "person (pass chat). Pass reply_to with a message id to send "
-            "it as a quote-reply. Send at most once per run."
+            "person (pass chat). To answer a specific message, pass its "
+            "id as reply_to — the incoming message's own id rides the "
+            "turn as [message id: …], others come from "
+            "fetch_chat_messages. Send at most once per run."
         ),
     )
 
