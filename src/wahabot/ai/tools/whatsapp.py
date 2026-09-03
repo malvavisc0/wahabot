@@ -95,7 +95,7 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
 def react_to_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
     """Build a tool that reacts to a WhatsApp message."""
 
-    def react_to_message_fn(message_id: str, reaction: str) -> str:
+    def react_to_message_fn(message_id: str, reaction: str = "") -> str:
         """React to a message.
 
         Args:
@@ -122,8 +122,8 @@ def react_to_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         name="react_to_message",
         description=(
             "React with an emoji to a WhatsApp message. Provide the "
-            "message's serialized id. Pass an empty reaction to remove "
-            "the bot's reaction."
+            "message's serialized id (use fetch_chat_messages to find "
+            "ids). Pass an empty reaction to remove the bot's reaction."
         ),
     )
 
@@ -254,8 +254,8 @@ def get_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         fn_schema=GetChatSchema,
         name="get_chat",
         description=(
-            "Get metadata (name, participants count, picture, etc.) "
-            "about a WhatsApp chat. Omit chat for the current chat."
+            "Get metadata (name, participants count, group flags, unread "
+            "count) about a WhatsApp chat. Omit chat for the current chat."
         ),
     )
 

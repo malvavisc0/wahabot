@@ -122,8 +122,8 @@ The agent workflow lives under `src/wahabot/ai/` as a set of focused modules:
 | `tools/whatsapp.py` | The seven WhatsApp tools |
 | `tools/external.py` | Web, finance, YouTube & (opt-in) shell tool builders |
 | `tools/schemas.py` | Pydantic parameter schemas for every tool |
-| `web_search.py` / `visit_url.py` / `url_images.py` / `shell.py` | Web lookup, image-URL & shell tool functions |
-| `finance.py` / `youtube.py` | Market data and transcript tools |
+| `tools/web_search.py` / `tools/visit_url.py` / `tools/url_images.py` / `tools/shell.py` | Web lookup, image-URL & shell tool functions |
+| `tools/finance.py` / `tools/youtube.py` | Market data and transcript tools |
 | `observability.py` | Langfuse export |
 
 Before every LLM call, the chat history passes through two hygiene steps: **repair** (fixes dangling tool calls, orphan messages, trailing user turns that would make the API reject the payload) and **trim** (keeps the newest tail that fits the token budget, treating tool-call groups as atomic).

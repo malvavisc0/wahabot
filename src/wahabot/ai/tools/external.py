@@ -8,8 +8,7 @@ the "return a status string, never raise" contract.
 
 from llama_index.core.tools import BaseTool, FunctionTool
 
-from wahabot.ai.finance import fetch_current_stock_price
-from wahabot.ai.shell import shell_command
+from wahabot.ai.tools.finance import fetch_current_stock_price
 from wahabot.ai.tools.schemas import (
     FetchStockPriceSchema,
     GetYoutubeTranscriptSchema,
@@ -17,9 +16,10 @@ from wahabot.ai.tools.schemas import (
     VisitUrlSchema,
     WebSearchSchema,
 )
-from wahabot.ai.visit_url import visit_url
-from wahabot.ai.web_search import web_search
-from wahabot.ai.youtube import get_youtube_transcript
+from wahabot.ai.tools.shell import shell_command
+from wahabot.ai.tools.visit_url import visit_url
+from wahabot.ai.tools.web_search import web_search
+from wahabot.ai.tools.youtube import get_youtube_transcript
 from wahabot.settings import Settings
 
 __all__ = [
@@ -49,9 +49,9 @@ def web_search_builder(settings: Settings) -> BaseTool:
         fn_schema=WebSearchSchema,
         name="web_search",
         description=(
-            "Search the web via the webserp metasearch CLI and return "
-            "normalised results (title, url, snippet, engine). Use to "
-            "answer questions needing up-to-date or external information."
+            "Search the web and return results (title, url, snippet, "
+            "engine). Use to answer questions needing up-to-date or "
+            "external information."
         ),
     )
 
@@ -67,9 +67,13 @@ def shell_builder(settings: Settings) -> BaseTool:
         fn_schema=ShellCommandSchema,
         name="run_shell_command",
         description=(
-            "Run a shell command on the host and return its output (bounded by "
-            "settings, capped timeout). Use for filesystem/process/system "
-            "operations the other tools cannot do. Enable only via WAHABOT_SHELL_TOOL."
+            "Run a shell command on the host machine (bash; pipes, redirection "
+            "and usual shell features work) and return its exit code plus "
+            "stdout/stderr. Use for anything the other tools cannot do: "
+            "filesystem, processes, system state, installing or running "
+            "utilities. Commands time out after "
+            f"{int(settings.shell_timeout)}s and output is truncated past "
+            f"{settings.shell_max_output} chars — keep them quick and quiet."
         ),
     )
 
@@ -102,9 +106,8 @@ def visit_url_builder(settings: Settings) -> BaseTool:
         fn_schema=VisitUrlSchema,
         name="visit_url",
         description=(
-            "Fetch a web page and return its visible text. Uses a real "
-            "Chrome browser TLS fingerprint (curl_cffi) to avoid being "
-            "blocked. Use to read the content of a specific URL."
+            "Fetch a web page and return its visible text. Use to read "
+            "the content of a specific URL."
         ),
     )
 

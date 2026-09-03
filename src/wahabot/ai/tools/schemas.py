@@ -159,7 +159,8 @@ class ShellCommandSchema(BaseModel):
 
     command: str = Field(
         description=(
-            "The shell command line to execute (e.g. `ls -la`). Supports pipes, "
-            "redirection and the usual shell features."
+            "The shell command line to execute (e.g. `ls -la`). Runs through "
+            "bash, so pipes, redirection and the usual shell features work. "
+            "stdin is closed — the command must not wait for input."
         ),
     )

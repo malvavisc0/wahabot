@@ -26,9 +26,9 @@ The AI code is split into focused modules under `src/wahabot/ai/`:
 | `tools/whatsapp.py` | The bundled WhatsApp tools |
 | `tools/external.py` | Web, finance, YouTube & (opt-in) shell tool builders |
 | `tools/schemas.py` | Explicit Pydantic parameter schemas for every tool |
-| `web_search.py` / `visit_url.py` | Web lookup tools (webserp CLI, curl_cffi page fetch) |
-| `url_images.py` | Image-URL sniffing from message text (curl_cffi fetch, Content-Type check) |
-| `finance.py` / `youtube.py` | Market data (yfinance) and YouTube transcript tools |
+| `tools/web_search.py` / `tools/visit_url.py` | Web lookup tools (webserp CLI, curl_cffi page fetch) |
+| `tools/url_images.py` | Image-URL sniffing from message text (curl_cffi fetch, Content-Type check) |
+| `tools/finance.py` / `tools/youtube.py` | Market data (yfinance) and YouTube transcript tools |
 | `observability.py` | Opt-in Langfuse trace export (see below) |
 
 ## How the workflow works
@@ -188,7 +188,7 @@ a download fails, the turn degrades to text-only.
 
 A bare link in the text ("look at this
 `https://host/path/pic.png/revision/latest`") is not a media message, so
-`wahabot.ai.url_images` sniffs image URLs out of the body: any path
+`wahabot.ai.tools.url_images` sniffs image URLs out of the body: any path
 segment ending in an image extension qualifies (wikia-style derivative
 paths included), up to `WAHABOT_MAX_URL_IMAGES` per message. Each URL is
 streamed with the same Chrome TLS impersonation `visit_url` uses —

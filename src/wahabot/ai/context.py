@@ -9,7 +9,7 @@ from llama_index.core.workflow import Context
 from loguru import logger
 
 from wahabot.ai.messages import message_replies_to
-from wahabot.ai.url_images import fetch_url_images, image_urls
+from wahabot.ai.tools.url_images import fetch_url_images, image_urls
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.models import WahaEvent
 from wahabot.settings import Settings
@@ -155,7 +155,7 @@ async def handle_message(
     no megabyte payloads accumulate in the rolling buffer.
 
     With ``settings.vision`` enabled, image URLs sniffed from the
-    message text are fetched too (see ``wahabot.ai.url_images``), so a
+    message text are fetched too (see ``wahabot.ai.tools.url_images``), so a
     bare link like "look at this https://host/pic.png" shows the model
     the picture as well.
     """
