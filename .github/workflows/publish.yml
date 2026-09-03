@@ -59,8 +59,16 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          # No provenance/SBOM attestations: they show up on the GHCR
+          # package page as stray "unknown/unknown" artifacts.
+          provenance: false
+          sbom: false
           tags: |
             ${{ steps.image.outputs.image }}:latest
             ${{ steps.image.outputs.image }}:${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.description=WhatsApp bot bridge on the WAHA HTTP API
           cache-from: type=gha
           cache-to: type=gha,mode=max
