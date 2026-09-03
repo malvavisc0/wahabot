@@ -11,7 +11,7 @@ StartEvent ──► prepare_chat_history ──► InputEvent
                                      handle_llm_input
                                              │
                    ┌─────────────────────────┴──────────┐
-                   │  no tool calls                    │  tool calls
+                   │  no tool calls                     │  tool calls
                    ▼                                    ▼
                StopEvent                        handle_tool_calls
                   │                                    │
