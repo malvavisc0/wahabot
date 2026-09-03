@@ -1,33 +1,51 @@
 # wahabot webhook server image; meant to be run via docker compose.
-# Slim Debian with the pinned Python (see .python-version) and uv preinstalled.
-FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+FROM astral/uv:python3.14-trixie
 
-ENV UV_COMPILE_BYTECODE=1 \
-    # venv and cache live inside the image/container; hardlinks can't span
-    # filesystems, so always copy.
+# Default shell for RUN and exec; the Debian base ships /bin/bash.
+SHELL ["/bin/bash", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    # The base image already ships the pinned Python; never download another.
     UV_PYTHON_DOWNLOADS=never \
-    # webserp is spawned as a subprocess, so the venv must be on PATH.
     PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
 
-# Unprivileged runtime user; uid 1000 matches the typical host user so the
-# bind-mounted data dir stays writable for them.
-RUN useradd --uid 1000 --create-home wahabot \
-    && install -d -o wahabot -g wahabot /app
-USER wahabot
+# System tooling in a single apt layer (one update, one install pass):
+#  media/PDF/OCR : ffmpeg, poppler, ImageMagick + Ghostscript, exiftool, webp, fonts
+#  docs/convert  : pandoc, qpdf
+#  archive/util  : zip, unzip, 7-zip, xz, file, ripgrep, jq, sqlite3, git, curl
+#  toolchain     : build-essential, cmake, ninja, pkg-config, gdb
+#  node          : nodejs + npm (trixie LTS)
+RUN --mount=type=cache,target=/var/cache/apt,uid=0,gid=0 \
+    --mount=type=cache,target=/var/lib/apt,uid=0,gid=0 \
+    apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        poppler-utils \
+        imagemagick ghostscript \
+        pandoc qpdf \
+        tesseract-ocr tesseract-ocr-eng \
+        webp libimage-exiftool-perl \
+        fonts-liberation fonts-noto-core \
+        zip unzip p7zip-full xz-utils \
+        file ripgrep jq git sqlite3 curl ca-certificates \
+        build-essential cmake ninja-build pkg-config gdb \
+        nodejs npm \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Dependency layer: only invalidated when the lockfile changes.
-COPY --chown=wahabot:wahabot pyproject.toml uv.lock .python-version ./
-RUN --mount=type=cache,target=/home/wahabot/.cache/uv,uid=1000,gid=1000 \
+COPY pyproject.toml uv.lock .python-version ./
+RUN --mount=type=cache,target=/root/.cache/uv,uid=0,gid=0 \
     uv sync --frozen --no-install-project --no-dev
 
 # Project layer: install wahabot itself.
-COPY --chown=wahabot:wahabot src ./src
-COPY --chown=wahabot:wahabot README.md LICENSE ./
-RUN --mount=type=cache,target=/home/wahabot/.cache/uv,uid=1000,gid=1000 \
+COPY src ./src
+COPY README.md LICENSE ./
+RUN --mount=type=cache,target=/root/.cache/uv,uid=0,gid=0 \
     uv sync --frozen --no-dev
 
 EXPOSE 8080

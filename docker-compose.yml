@@ -1,12 +1,7 @@
 # wahabot deployment, run by Coolify.
 #
-# Coolify pulls ghcr.io/malvavisc0/wahabot:latest (published by the
-# "Publish image" GitHub Action on every v* tag) and provides the env
-# vars below via its UI. Required vars must be set or compose refuses
-# to start; optional ones default to the values shown.
-#
 # The session config ${WAHABOT_DATA_DIR}/sessions/${WAHABOT_SESSION}.json
-# (with its system_prompt) must exist in the wahabot-data volume.
+# (with its system_prompt) must exist in the data volume.
 services:
   wahabot:
     image: ghcr.io/malvavisc0/wahabot:latest
@@ -40,7 +35,7 @@ services:
     ports:
       - "${WAHABOT_PORT:-8080}:8080"
     volumes:
-      - wahabot-data:/app/data
+      - data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
       interval: 30s
@@ -49,4 +44,4 @@ services:
       start_period: 10s
 
 volumes:
-  wahabot-data:
+  data:
