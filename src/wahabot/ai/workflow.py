@@ -32,7 +32,11 @@ from llama_index.llms.openai_like import OpenAILike
 from loguru import logger
 
 from wahabot.ai.events import InputEvent, ToolCallEvent
-from wahabot.ai.history import sanitize_chat_history, trim_to_budget
+from wahabot.ai.history import (
+    MAX_TOOL_RESULT_TOKENS,
+    sanitize_chat_history,
+    trim_to_budget,
+)
 from wahabot.settings import Settings
 
 __all__ = [
@@ -65,7 +69,10 @@ async def run_tool_call(
 
     Tool functions are sync and do network I/O (WAHA, web), so they run
     in a worker thread via ``asyncio.to_thread`` to keep the event loop
-    responsive.
+    responsive. Outputs are capped at ``MAX_TOOL_RESULT_TOKENS`` chars:
+    list tools embed WAHA's raw ``_data`` blobs (15 messages ≈ 58k
+    chars), and a tool group that large evicts the user turn from the
+    prompt when the buffer's real tokenizer re-trims.
     """
     tool = tools_by_name.get(tool_call.tool_name)
     kwargs = {"tool_call_id": tool_call.tool_id, "name": tool_call.tool_name}
@@ -78,6 +85,8 @@ async def run_tool_call(
             content = called.content
         except Exception as exc:
             content = f"Encountered error in tool call: {exc}"
+    if len(content) > MAX_TOOL_RESULT_TOKENS:
+        content = content[:MAX_TOOL_RESULT_TOKENS] + "… (truncated)"
     return ChatMessage(role="tool", content=content, additional_kwargs=kwargs)
 
 

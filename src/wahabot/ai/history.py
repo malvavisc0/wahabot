@@ -43,6 +43,18 @@ __all__ = [
     "trim_to_budget",
 ]
 
+#: Cap for one tool-result message, in estimated tokens (chars).
+#: ``fetch_chat_messages``/``search_messages`` embed WAHA's raw
+#: ``_data`` blobs — 15 messages ≈ 58k chars — and a group that large
+#: breaks the budget twice over: ``trim_to_budget`` keeps it ("a single
+#: group larger than the budget is kept"), then ``ChatMemoryBuffer.get``
+#: re-trims with the real tokenizer, finds only that group, and drops
+#: everything but the tool message — the LLM request goes out with no
+#: user turn ("No user query found in messages"). Capping the payload
+#: at the source keeps any tool group small enough to coexist with the
+#: conversation around it.
+MAX_TOOL_RESULT_TOKENS = 2000
+
 
 def _message_tool_call_count(msg: ChatMessage) -> int:
     """The number of tool calls advertised by an assistant message.
@@ -237,9 +249,8 @@ def trim_to_budget(
        atomic — a trim never leaves a dangling tool call or an orphan
        tool reply.
     2. The returned list must start with a ``user`` message.
-    3. The trailing ``user → assistant`` pair is kept even when it
-       pushes the tail over the budget, so the newest user turn is
-       never silently lost.
+    3. The newest user turn is never silently lost: if nothing else
+       fits, the result is the last user-led group alone.
 
     A single group larger than the budget is kept so nothing
     disappears.
@@ -260,12 +271,16 @@ def trim_to_budget(
 
 
 def _last_user_turn(groups: list[list[ChatMessage]]) -> list[ChatMessage]:
-    """Return the last user-led group plus the one that follows it.
+    """Return the last user-led group alone.
 
     Fallback for :func:`trim_to_budget` when the budget is so small that
-    only non-user groups fit. Guarantees at least one turn survives.
+    only non-user groups fit. Only the user group is returned: appending
+    the group that follows it can re-add an oversized tool group, and
+    ``ChatMemoryBuffer.get`` — trimming with the real tokenizer — would
+    then drop everything but that tool message, sending the LLM a
+    request with no user turn ("No user query found in messages").
     """
-    for i in range(len(groups) - 1, -1, -1):
-        if groups[i][0].role == MessageRole.USER:
-            return [m for group in groups[i : i + 2] for m in group]
+    for group in reversed(groups):
+        if group[0].role == MessageRole.USER:
+            return list(group)
     return groups[-1] if groups else []

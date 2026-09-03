@@ -19,6 +19,7 @@ dependencies = [
     "typer",
     "uvicorn[standard]",
     "curl-cffi",
+    "pillow",
     "webserp",
     "yfinance",
     "youtube-transcript-api",

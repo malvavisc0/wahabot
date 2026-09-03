@@ -45,11 +45,12 @@ def extract_text(event: WahaEvent) -> str | None:
 def image_media(event: WahaEvent) -> dict[str, Any] | None:
     """The media dict of an image message, or None.
 
-    Only ``image`` messages qualify — stickers, videos and documents
-    carry media too, but the vision model only accepts images. The dict
+    ``image`` messages and ``sticker`` messages qualify — a sticker is
+    a (possibly animated) webp image, and the vision model can comment
+    on its first frame. Videos and documents are excluded. The dict
     holds ``url``, ``mimetype`` and optionally ``filename``.
     """
-    if message_kind(event) != "image":
+    if message_kind(event) not in ("image", "sticker"):
         return None
     media = event.payload.get("media") or _data_media(event.payload)
     if not isinstance(media, dict):

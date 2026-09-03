@@ -181,18 +181,21 @@ Before each run reaches the LLM, the buffered history passes through two
 ### Images (vision)
 
 When `WAHABOT_VISION` is `true` (default) and the model is vision-capable,
-the handler downloads photo messages via `WahaClient.download_media`
-(`image_media(event)` gates on `_data.type == "image"` — stickers/videos/
-documents are ignored), streaming with a `WAHABOT_MAX_IMAGE_BYTES` cap so
-an oversized image is skipped instead of buffered. The download happens
-after the group-participation check, so unaddressed group images cost
-nothing. The bytes pass through as `image`, the workflow carries them on
-the run as `image_blocks`, and `_with_image` injects them into a **copy**
-of the newest user message for the first LLM call only — memory stays
-text-only, so no megabyte payloads enter the rolling buffer and a
-tool-call loop never resends the picture. The turn's text side is the
-caption, or `(image)` when there is none. When `WAHABOT_VISION=false`, or
-a download fails, the turn degrades to text-only.
+the handler downloads photo and sticker messages via
+`WahaClient.download_media` (`image_media(event)` gates on
+`_data.type in ("image", "sticker")` — videos/documents are ignored),
+streaming with a `WAHABOT_MAX_IMAGE_BYTES` cap so an oversized image is
+skipped instead of buffered. WebP payloads (stickers are animated webp)
+are normalized to a static PNG first frame (`first_frame_png`) — vision
+models take stills, not animations. The download happens after the
+group-participation check, so unaddressed group images cost nothing. The
+bytes pass through as `image`, the workflow carries them on the run as
+`image_blocks`, and `_with_image` injects them into a **copy** of the
+newest user message for the first LLM call only — memory stays text-only,
+so no megabyte payloads enter the rolling buffer and a tool-call loop
+never resends the picture. The turn's text side is the caption, or
+`(image)` when there is none. When `WAHABOT_VISION=false`, or a download
+fails, the turn degrades to text-only.
 
 ### Image URLs in text (vision)
 

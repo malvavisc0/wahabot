@@ -1,11 +1,13 @@
 """Message handler connecting the webhook to the LlamaIndex agent."""
 
 import asyncio
+import io
 import time
 from typing import Any
 
 from llama_index.core.workflow import Context
 from loguru import logger
+from PIL import Image
 
 from wahabot.ai.context import handle_message, render_system_prompt
 from wahabot.ai.messages import (
@@ -119,7 +121,32 @@ def download_image(
         return None
     mimetype = str(media.get("mimetype") or "image/jpeg")
     logger.info("Downloaded image ({mime}, {size} B)", mime=mimetype, size=len(data))
+    if mimetype == "image/webp":
+        try:
+            data = first_frame_png(data)
+            mimetype = "image/png"
+        except Exception as exc:
+            logger.warning(
+                "WebP first-frame conversion failed for {id}: {exc}",
+                id=message_id,
+                exc=exc,
+            )
+            return None
     return {"data": data, "mimetype": mimetype}
+
+
+def first_frame_png(data: bytes) -> bytes:
+    """The first frame of an animated image (webp/gif) as PNG bytes.
+
+    Vision models accept stills, not animations — a 23-frame sticker
+    webp would be rejected or misread. Callers decide by mimetype
+    whether to convert; static webp converts losslessly too.
+    """
+    with Image.open(io.BytesIO(data)) as img:
+        img.seek(0)
+        buffer = io.BytesIO()
+        img.convert("RGB").save(buffer, format="PNG")
+        return buffer.getvalue()
 
 
 def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
