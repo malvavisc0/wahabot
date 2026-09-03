@@ -40,12 +40,19 @@ class WahaClient:
             headers["X-Api-Key"] = api_key
         self._client = httpx.Client(base_url=base_url, headers=headers, timeout=10)
 
-    def send_text(self, session: str, chat_id: str, text: str) -> None:
-        """Send a text message, raising for HTTP errors."""
-        response = self._client.post(
-            f"{API_PREFIX}/sendText",
-            json={"session": session, "chatId": chat_id, "text": text},
-        )
+    def send_text(
+        self, session: str, chat_id: str, text: str, reply_to: str | None = None
+    ) -> None:
+        """Send a text message, raising for HTTP errors.
+
+        ``reply_to`` (a serialized message id) sends the text as a native
+        quote-reply to that message — the WAHA ``reply_to`` field, which
+        replaced the deprecated ``POST /api/reply`` endpoint.
+        """
+        body: dict[str, Any] = {"session": session, "chatId": chat_id, "text": text}
+        if reply_to:
+            body["reply_to"] = reply_to
+        response = self._client.post(f"{API_PREFIX}/sendText", json=body)
         response.raise_for_status()
         logger.info(
             "Sent text to {chat_id} in session {session}",

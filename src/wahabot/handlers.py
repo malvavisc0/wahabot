@@ -235,7 +235,9 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
                 logger.debug("Agent chose to stay silent in {chat_id}", chat_id=chat_id)
                 return
             logger.info("Replying to {chat_id}", chat_id=chat_id)
-            await asyncio.to_thread(waha.send_text, event.session, chat_id, reply)
+            await asyncio.to_thread(
+                waha.send_text, event.session, chat_id, reply, message_id
+            )
         except Exception:
             # Allow WAHA's redelivery of this message to be reprocessed.
             forget_seen(message_id)

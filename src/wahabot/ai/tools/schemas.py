@@ -32,6 +32,15 @@ class SendMessageSchema(BaseModel):
         default="",
         description="The text to send. Must be non-empty.",
     )
+    reply_to: str | None = Field(
+        default=None,
+        description=(
+            "Optional serialized id of a message to quote (e.g. "
+            "`false_11111111111@c.us_AAAAAAAAAAAAAAAAAAAA`). The text is sent "
+            "as a native quote-reply with that message attached. Use ids from "
+            "fetch_chat_messages."
+        ),
+    )
 
 
 class StaySilentSchema(BaseModel):

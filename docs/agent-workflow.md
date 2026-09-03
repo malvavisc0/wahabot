@@ -264,7 +264,7 @@ JID to reach another group or person (e.g. `1234567890@g.us`,
 
 | Tool | Params | WAHA endpoint | Purpose |
 |---|---|---|---|
-| `send_message` | `chat?`, `text` | `POST /api/sendText` | Send a text (current chat or elsewhere); once per run |
+| `send_message` | `chat?`, `text`, `reply_to?` | `POST /api/sendText` | Send a text (current chat or elsewhere); `reply_to` quotes a message; once per run |
 | `stay_silent` | — | — | End the run with no reply at all |
 | `react_to_message` | `message_id`, `reaction` | `PUT /api/reaction` | Emoji-react to a message (empty = remove) |
 | `send_image` | `url`, `caption?`, `chat?` | `POST /api/sendImage` | Send an image from a URL |
@@ -282,12 +282,13 @@ subsections below.
 
 | Tool | Purpose |
 |---|---|
-| `send_message(text, chat=None)` | Send a text — current chat (omit `chat`) or another group/person |
+| `send_message(text, chat=None, reply_to=None)` | Send a text — current chat (omit `chat`) or another group/person; `reply_to` (a serialized message id) sends it as a native quote-reply |
 | `send_image(url, caption="", chat=None)` | Send an image from a public URL (mimetype inferred from the URL extension), with an optional caption |
 | `forward_message(message_id, chat=None)` | Forward an existing message (by serialized id) to a chat |
 
 ```python
 send_message(text="Just replying here")  # current chat
+send_message(text="exactly this", reply_to="false_1111@c.us_ABC")  # quote-reply
 send_message(chat="1234567890@g.us", text="Hello team!")  # to a group
 send_image(url="https://example.com/plot.png", caption="Q3 chart")
 forward_message(message_id="false_1111@c.us_ABC")

@@ -69,7 +69,9 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
     most one message per incoming event.
     """
 
-    def send_message_fn(chat: str | None = None, text: str = "") -> str:
+    def send_message_fn(
+        chat: str | None = None, text: str = "", reply_to: str | None = None
+    ) -> str:
         """Send a WhatsApp text message.
 
         Args:
@@ -77,6 +79,9 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
                 `1234567890@g.us` or `9876543210@c.us`). Omit to reply
                 in the current conversation.
             text: The text to send.
+            reply_to: Optional serialized message id to quote — the
+                text goes out as a native quote-reply with that message
+                attached.
         """
         if not text.strip():
             return error("empty message text")
@@ -88,7 +93,7 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         chat_id = chat or target.get("chat_id", "")
         if not session or not chat_id:
             return error("no active conversation context")
-        waha.send_text(session, chat_id, text)
+        waha.send_text(session, chat_id, text, reply_to=reply_to)
         target["sent"] = chat_id
         return ok(chat=chat_id, text=text)
 
@@ -99,7 +104,8 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         description=(
             "Send a WhatsApp text message. Use this to reply in the "
             "current chat (omit chat) or to message another group or "
-            "person (pass chat). Send at most once per run."
+            "person (pass chat). Pass reply_to with a message id to send "
+            "it as a quote-reply. Send at most once per run."
         ),
     )
 
