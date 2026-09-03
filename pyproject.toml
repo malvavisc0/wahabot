@@ -1,6 +1,6 @@
 [project]
 name = "wahabot"
-version = "0.0.1"
+version = "0.0.2"
 description = "wahabot command-line interface"
 readme = "README.md"
 authors = [
