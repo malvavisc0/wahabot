@@ -21,7 +21,7 @@ Example:
 
 ```json
 {
-  "whitelist": ["120363012345678901@g.us"],
+  "whitelist": ["<group-jid>@g.us"],
   "blacklist": [],
   "system_prompt": "You are Kai, a friend in this WhatsApp group... Today is {{date}}. Current time {{time}} ({{tz}}).",
   "bot_name": "Kai",
