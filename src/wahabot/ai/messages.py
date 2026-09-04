@@ -8,6 +8,21 @@ from wahabot.core.models import WahaEvent
 NON_REPLYABLE_SUFFIXES = ("@broadcast", "@newsletter")
 
 
+def jid_string(value: Any) -> str:
+    """A JID field as a plain ``user@server`` string.
+
+    WAHA carries JIDs in two shapes: plain strings (``"@lid``/``@c.us``
+    entries in ``mentionedJidList`` on some engines) or objects with a
+    ``_serialized`` field (LID groups, ``replyTo.participant``).
+    Stringifying the object blindly (``str(dict)``) never matches
+    anything, so mentions and quotes from LID groups were invisible.
+    """
+    if isinstance(value, dict):
+        entry: dict[str, Any] = value
+        return str(entry.get("_serialized") or "")
+    return str(value or "")
+
+
 def is_replyable(event: WahaEvent) -> bool:
     """Check whether the message comes from a chat the bot can answer.
 
@@ -121,7 +136,7 @@ def bot_mentioned(
     payload = event.payload
     me_ids = bot_jids(event)
     mentioned = payload.get("_data", {}).get("mentionedJidList", [])
-    if me_ids & {str(jid) for jid in mentioned}:
+    if me_ids & {jid_string(jid) for jid in mentioned}:
         return True
     pattern = bot_mention_pattern(bot_name, bot_mention_regex)
     body = str(payload.get("body", ""))
@@ -178,4 +193,7 @@ def replies_to_bot(
     if bot_mentioned(event, bot_name, bot_mention_regex):
         return True
     quoted = message_replies_to(event)
-    return bool(quoted and str(quoted.get("participant", "")) in bot_jids(event))
+    if not quoted:
+        return False
+    reply: dict[str, Any] = quoted
+    return bool(jid_string(reply.get("participant")) in bot_jids(event))

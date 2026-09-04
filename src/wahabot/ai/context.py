@@ -11,7 +11,7 @@ from llama_index.core.base.llms.types import ChatMessage, ImageBlock
 from llama_index.core.workflow import Context
 from loguru import logger
 
-from wahabot.ai.messages import message_replies_to
+from wahabot.ai.messages import jid_string, message_replies_to
 from wahabot.ai.tools.url_images import fetch_url_images, image_urls
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.models import WahaEvent
@@ -202,10 +202,13 @@ def quoted_participant(
     Prefers the quoted message's own ``_data.notifyName``, then the
     chat's participant roster (*participant_names*), then the raw
     participant/author id stripped of its ``@…`` domain — a bare number
-    reads like an id, a full JID reads like noise.
+    reads like an id, a full JID reads like noise. The participant
+    field may be a JID object (LID groups), so it is normalized via
+    :func:`jid_string` before use.
     """
     data = message_reply.get("_data", {})
-    jid = str(message_reply.get("participant") or data.get("author") or "")
+    participant = message_reply.get("participant") or data.get("author") or ""
+    jid = jid_string(participant)
     name = str(data.get("notifyName") or "").strip()
     if not name and jid and participant_names:
         name = participant_names.get(jid, "")
