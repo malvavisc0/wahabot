@@ -17,17 +17,18 @@ Every tool returns the shared JSON envelope (see
 
 from pydantic import BaseModel, Field
 
+#: Shared ``chat`` parameter description: a bare JID, never a message id.
+CHAT_DESCRIPTION = (
+    "Optional chat id — a bare JID like `1234567890@g.us` or "
+    "`9876543210@c.us`, never a `false_...` message id. Omit for the "
+    "current chat."
+)
+
 
 class SendMessageSchema(BaseModel):
     """Send a WhatsApp text message."""
 
-    chat: str | None = Field(
-        default=None,
-        description=(
-            "Optional chat id (group or person JID, e.g. `1234567890@g.us` or "
-            "`9876543210@c.us`). Omit to reply in the current conversation."
-        ),
-    )
+    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
     text: str = Field(
         default="",
         description="The text to send. Must be non-empty.",
@@ -88,19 +89,13 @@ class SendImageSchema(BaseModel):
         default="",
         description="Optional caption text.",
     )
-    chat: str | None = Field(
-        default=None,
-        description="Optional chat id. Omit to send to the current chat.",
-    )
+    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
 
 
 class FetchChatMessagesSchema(BaseModel):
     """Fetch the most recent messages of a chat as a JSON envelope."""
 
-    chat: str | None = Field(
-        default=None,
-        description="Optional chat id. Omit to fetch from the current chat.",
-    )
+    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
     limit: int = Field(
         default=20,
         description="Max messages to return (default 20).",
@@ -110,10 +105,7 @@ class FetchChatMessagesSchema(BaseModel):
 class GetChatSchema(BaseModel):
     """Get metadata (name, participants, ...) about a WhatsApp chat."""
 
-    chat: str | None = Field(
-        default=None,
-        description="Optional chat id. Omit for the current chat.",
-    )
+    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
 
 
 class SearchMessagesSchema(BaseModel):
@@ -122,12 +114,7 @@ class SearchMessagesSchema(BaseModel):
     query: str = Field(
         description="The text to look for in message body, media filename or mimetype.",
     )
-    chat: str | None = Field(
-        default=None,
-        description=(
-            "Optional chat id to scope the search. Omit to search the current chat."
-        ),
-    )
+    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
     limit: int = Field(
         default=20,
         description="Max matches to return (default 20).",
@@ -140,10 +127,7 @@ class ForwardMessageSchema(BaseModel):
     message_id: str = Field(
         description="The serialized id of the message to forward.",
     )
-    chat: str | None = Field(
-        default=None,
-        description="Optional chat id to forward into. Defaults to current.",
-    )
+    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
 
 
 class WebSearchSchema(BaseModel):
