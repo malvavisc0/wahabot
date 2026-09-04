@@ -4,12 +4,14 @@ import json
 import platform
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
+from typing import Any
 
 import httpx
 import typer
 import uvicorn
 from loguru import logger
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -157,6 +159,9 @@ def session_view(
     raw: bool = typer.Option(
         False, "--raw", help="Show the system prompt without variable expansion."
     ),
+    plain: bool = typer.Option(
+        False, "--plain", help="Print the prompt as plain text, not markdown."
+    ),
 ) -> None:
     """Show a session's config, with the system prompt rendered."""
     settings = get_settings()
@@ -182,7 +187,8 @@ def session_view(
     table.add_row("goal", _dash(config.goal))
     Console().print(table)
     title = "system_prompt" if raw else "system_prompt (rendered)"
-    Console().print(Panel(prompt, title=title, expand=False))
+    body: Any = prompt if plain else Markdown(prompt)
+    Console().print(Panel(body, title=title, expand=False))
 
 
 def _format_list(values: set[str]) -> Text:
