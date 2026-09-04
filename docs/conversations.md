@@ -157,7 +157,7 @@ either says something real or says nothing at all.
 | `react_to_message` | Emoji reaction to a message id. |
 | `fetch_chat_messages` | Recent history of any chat as JSON (ids, senders, texts) — the model's window into conversations, including ones it just "woke up" in. |
 | `search_messages` | Text search over a chat's recent history. |
-| `get_chat` | Chat metadata and, for small chats, the participant list with JIDs and names — the source for mention ids. |
+| `get_chat` | Chat metadata and, for small chats, the participant list with JIDs and names — the source for mention ids. Names are read from the chat's recent messages (rosters in LID groups carry bare JIDs only), so the call costs one extra history fetch. |
 | `forward_message` | Forwards a message to another chat. |
 | `send_image` | Sends an image from a public URL. |
 | `web_search`, `visit_url`, `fetch_current_stock_price`, `get_youtube_transcript` | The outside world: metasearch, page reads, tickers, video transcripts. |
@@ -197,8 +197,11 @@ WhatsApp matches the two up. JIDs and names come from `get_chat`'s
 participant list or from message history (`participant` fields).
 Typing `@name` alone in the text is *not* a mention — no highlight,
 no notification — which is why the tool description and the system
-prompt both spell the pairing out for the model. The bot mentions
-sparingly: only when directing something at a specific person.
+prompt both spell the pairing out for the model. When the model
+passes `mentions` without any `@` in the text, the tool still sends
+but returns a `warning` in its envelope saying nobody was notified,
+so the model can correct itself. The bot mentions sparingly: only
+when directing something at a specific person.
 
 ### Reactions
 
@@ -252,4 +255,8 @@ the last good config (and logs it) rather than crashing the bot.
   the model rebuilds context via `fetch_chat_messages` or acts fresh.
 - **Mention didn't notify**: missing `mentions` JIDs or a name in text
   that doesn't match the JID's owner — check the tool call arguments
-  in the trace.
+  in the trace. A send whose text had no `@` at all comes back with a
+  `warning` field in the tool envelope.
+- **Participant list shows bare JIDs, no names**: the name lookup
+  (recent-message `notifyName`s) failed — the chat history was
+  unreadable; the debug log says why. The roster itself is fine.
