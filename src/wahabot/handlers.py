@@ -38,12 +38,21 @@ _agent_lock = asyncio.Lock()
 _MAX_MESSAGE_AGE_S = 300
 
 
+#: Seen-id cache hard cap; past it the oldest entries are evicted.
+_MAX_SEEN_IDS = 10_000
+
+
 def seen_recently(message_id: str) -> bool:
     """Return True if this message id was already handled in the last TTL.
 
     The id is marked seen on first sight, so a duplicate redelivery
     racing the in-flight run is also deduplicated. A run that later
     fails must call :func:`forget_seen` to allow a retry.
+
+    The cache never wipes wholesale: at the cap the oldest entries are
+    evicted one by one (the insertion order of ``dict`` is oldest
+    first), so a redelivery stays deduplicated even while the cache
+    turns over.
     """
     if not message_id:
         return False
@@ -52,8 +61,8 @@ def seen_recently(message_id: str) -> bool:
         if now - _seen_ids[message_id] < _SEE_TTL_S:
             return True
         del _seen_ids[message_id]
-    if len(_seen_ids) >= 10_000:
-        _seen_ids.clear()
+    while len(_seen_ids) >= _MAX_SEEN_IDS:
+        del _seen_ids[next(iter(_seen_ids))]
     _seen_ids[message_id] = now
     return False
 

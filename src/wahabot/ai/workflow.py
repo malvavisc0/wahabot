@@ -483,9 +483,14 @@ def load_llm(settings: Settings) -> FunctionCallingLLM:
     Sampling options follow the model card (see ``Settings``): near-
     greedy decoding (the library default, temperature 0.1) makes small
     models repeat one tool call forever and narrate it, so temperature
-    is passed as the first-class field and the rest ride
-    ``additional_kwargs``, which merges straight into the API request
-    body.
+    is passed as the first-class field. ``top_p``/``presence_penalty``
+    ride ``additional_kwargs``, which merges straight into the API
+    request body. ``top_k``/``min_p``/``repetition_penalty`` are not
+    OpenAI SDK parameters — the client's typed ``create()`` signature
+    rejects them with a TypeError before any request is sent — so they
+    must ride ``extra_body``, which the openai SDK forwards verbatim
+    in the JSON body for OpenAI-compatible providers that do accept
+    them.
     """
     return ObservableOpenAILike(
         model=settings.llm_model,
@@ -495,10 +500,12 @@ def load_llm(settings: Settings) -> FunctionCallingLLM:
         temperature=settings.llm_temperature,
         additional_kwargs={
             "top_p": settings.llm_top_p,
-            "top_k": settings.llm_top_k,
-            "min_p": settings.llm_min_p,
             "presence_penalty": settings.llm_presence_penalty,
-            "repetition_penalty": settings.llm_repetition_penalty,
+            "extra_body": {
+                "top_k": settings.llm_top_k,
+                "min_p": settings.llm_min_p,
+                "repetition_penalty": settings.llm_repetition_penalty,
+            },
         },
         # No client retries: a hung endpoint must fail fast within the
         # workflow timeout, not stack 60s attempts until it blows up.

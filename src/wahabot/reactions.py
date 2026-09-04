@@ -3,7 +3,6 @@
 import asyncio
 from typing import Any
 
-import httpx
 from loguru import logger
 
 from wahabot.core.models import WahaEvent
@@ -37,10 +36,15 @@ def register_reaction_handler(waha: WahaClient) -> None:
 
 
 def fetch_target(waha: WahaClient, session: str, target_id: str) -> dict[str, Any] | None:
-    """Fetch the reacted-to message, or None if it cannot be retrieved."""
+    """Fetch the reacted-to message, or None if it cannot be retrieved.
+
+    Fail-soft on every error: reaction logging is best-effort, and an
+    exception here would 500 the webhook (WAHA would then redeliver
+    the reaction event forever).
+    """
     try:
         return waha.get_message(session, chat_id_from_message_id(target_id), target_id)
-    except httpx.HTTPError as exc:
+    except Exception as exc:
         logger.warning(
             "Could not fetch message reacted to {target}: {exc}",
             target=target_id,
