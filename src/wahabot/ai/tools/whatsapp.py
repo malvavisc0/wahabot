@@ -8,6 +8,7 @@ tool functions here return the shared JSON envelope instead, so a
 failure feeds back to the model rather than crashing the workflow.
 """
 
+import json
 import mimetypes
 from pathlib import PurePosixPath
 from typing import Any
@@ -242,16 +243,55 @@ def infer_image_mimetype(url: str) -> str:
     return guessed if guessed and guessed.startswith("image/") else "image/jpeg"
 
 
-def slim_message(message: dict[str, Any]) -> dict[str, Any]:
+def slim_message(message: dict[str, Any], max_body: int = 200) -> dict[str, Any]:
     """The model-relevant fields of a WAHA message, without the noise.
 
     WAHA messages carry a raw ``_data`` blob (messageSecret,
     reportingToken, engine flags — ~90% of the payload) that is useless
     to the model and inflates every tool result. Slimmed messages keep
-    valid JSON and stay small enough for the memory budget.
+    valid JSON and stay small enough for the memory budget. Message
+    bodies are capped at *max_body* chars — a huge paste cannot push
+    one message past the whole result budget.
     """
     keys = ("id", "timestamp", "from", "fromMe", "participant", "body", "hasMedia", "ack")
-    return {key: message[key] for key in keys if message.get(key) is not None}
+    slimmed = {key: message[key] for key in keys if message.get(key) is not None}
+    body = slimmed.get("body")
+    if isinstance(body, str) and len(body) > max_body:
+        slimmed["body"] = body[:max_body] + "…"
+        slimmed["body_truncated"] = True
+    return slimmed
+
+
+#: Whole-message budget for list-tool envelopes, in serialized chars.
+#: Kept under ``MAX_TOOL_RESULT_TOKENS`` (2000) so the workflow-level
+#: hard cap never mangles the envelope: list results are trimmed to
+#: whole messages *before* serialization and stay parseable JSON.
+_LIST_ENVELOPE_BUDGET = 1800
+
+
+def fit_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """The most recent whole messages that fit the envelope budget.
+
+    Newest messages are the most useful, so the list keeps the tail.
+    ``count`` stays the total fetched (the model should know how much
+    exists); ``returned`` is what actually fits, and ``truncated``
+    flags the cut. The envelope is always valid JSON.
+    """
+    kept: list[dict[str, Any]] = []
+    used = 0
+    for message in reversed(messages):
+        item = json.dumps(message, ensure_ascii=False)
+        if kept and used + len(item) > _LIST_ENVELOPE_BUDGET:
+            break
+        kept.append(message)
+        used += len(item)
+    kept.reverse()
+    return {
+        "messages": kept,
+        "count": len(messages),
+        "returned": len(kept),
+        "truncated": len(kept) < len(messages),
+    }
 
 
 def fetch_chat_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
@@ -269,8 +309,7 @@ def fetch_chat_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         if not session or not chat_id:
             return error("no active conversation context")
         messages = waha.fetch_chat_messages(session, chat_id, limit=limit)
-        slimmed = [slim_message(m) for m in messages]
-        return ok(chat=chat_id, count=len(slimmed), messages=slimmed)
+        return ok(chat=chat_id, **fit_messages([slim_message(m) for m in messages]))
 
     return FunctionTool.from_defaults(
         fn=fetch_chat_messages_fn,
@@ -279,9 +318,12 @@ def fetch_chat_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         description=(
             "Fetch the most recent messages of a chat. Returns a JSON "
             "envelope with `messages` (each carrying its serialized `id`, "
-            "`body`, sender and media info). Use to read the current or "
-            "another chat; the ids let you forward or react to a message. "
-            "limit caps the number of messages."
+            "`body`, sender and media info): `count` is how many were "
+            "found, `returned` how many fit (oldest are dropped when "
+            "`truncated` is true — raise limit to look further back). "
+            "Use to read the current or another chat; the ids let you "
+            "forward or react to a message. limit caps the number of "
+            "messages fetched."
         ),
     )
 
@@ -413,8 +455,7 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         return ok(
             chat=chat_id,
             query=query,
-            count=len(messages),
-            messages=[slim_message(m) for m in messages],
+            **fit_messages([slim_message(m) for m in messages]),
         )
 
     return FunctionTool.from_defaults(
@@ -422,10 +463,12 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         fn_schema=SearchMessagesSchema,
         name="search_messages",
         description=(
-            "Search a chat's recent messages for a text substring in body, "
-            "media filename or mimetype. Returns a JSON envelope with "
-            "matching `messages`. Pass chat to search another chat, else "
-            "the current one."
+            "Search a chat's recent messages for a text substring in "
+            "body, media filename or mimetype. Returns a JSON envelope "
+            "with matching `messages`: `count` is how many matched, "
+            "`returned` how many fit (oldest are dropped when "
+            "`truncated` is true). Pass chat to search another chat, "
+            "else the current one."
         ),
     )
 
