@@ -32,6 +32,7 @@ from wahabot.ai.tools.schemas import (
 from wahabot.core.waha import WahaClient
 
 __all__ = [
+    "chat_jid",
     "fetch_chat_messages",
     "forward_message",
     "get_chat",
@@ -63,6 +64,22 @@ _IMAGE_MIME_BY_EXT: dict[str, str] = {
     ".svg": "image/svg+xml",
     ".avif": "image/avif",
 }
+
+
+def chat_jid(chat: str | None, target: dict[str, str]) -> str:
+    """The chat JID to act on: *chat*, else the current conversation.
+
+    Models sometimes pass a serialized message id (``false_<jid>_…``,
+    scraped from a ``[message id: …]`` annotation) instead of a bare
+    JID — strip the ``false_``/``true_`` sender prefix and anything
+    after the JID so the call still lands in the right chat.
+    """
+    value = chat or target.get("chat_id", "")
+    for prefix in ("false_", "true_"):
+        if value.startswith(prefix):
+            value = value[len(prefix) :]
+            break
+    return value.split("_")[0] if "@" in value.split("_")[0] else value
 
 
 def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
@@ -103,7 +120,7 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
                 f"message already sent this run (to {target['sent']}); do not send again"
             )
         session = target.get("session", "")
-        chat_id = chat or target.get("chat_id", "")
+        chat_id = chat_jid(chat, target)
         if not session or not chat_id:
             return error("no active conversation context")
         waha.send_text(session, chat_id, text, reply_to=reply_to, mentions=mentions)
@@ -223,7 +240,7 @@ def send_image(waha: WahaClient, target: dict[str, str]) -> BaseTool:
                 f"message already sent this run (to {target['sent']}); do not send again"
             )
         session = target.get("session", "")
-        chat_id = chat or target.get("chat_id", "")
+        chat_id = chat_jid(chat, target)
         if not session or not chat_id:
             return error("no active conversation context")
         if not url:
@@ -328,7 +345,7 @@ def fetch_chat_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             limit: Max messages to return (default 20).
         """
         session = target.get("session", "")
-        chat_id = chat or target.get("chat_id", "")
+        chat_id = chat_jid(chat, target)
         if not session or not chat_id:
             return error("no active conversation context")
         messages = waha.fetch_chat_messages(session, chat_id, limit=limit)
@@ -361,7 +378,7 @@ def get_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             chat: Optional chat id. Omit for the current chat.
         """
         session = target.get("session", "")
-        chat_id = chat or target.get("chat_id", "")
+        chat_id = chat_jid(chat, target)
         if not session or not chat_id:
             return error("no active conversation context")
         overview = waha.get_chat_overview(session, chat_id)
@@ -521,7 +538,7 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             limit: Max matches to return (default 20).
         """
         session = target.get("session", "")
-        chat_id = chat or target.get("chat_id", "")
+        chat_id = chat_jid(chat, target)
         if not session or not chat_id:
             return error("no active conversation context")
         if not query.strip():
@@ -563,7 +580,7 @@ def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
                 f"message already sent this run (to {target['sent']}); do not send again"
             )
         session = target.get("session", "")
-        chat_id = chat or target.get("chat_id", "")
+        chat_id = chat_jid(chat, target)
         if not session or not chat_id:
             return error("no active conversation context")
         if not message_id:
