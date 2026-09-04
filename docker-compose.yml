@@ -1,10 +1,10 @@
-# The session config data/sessions/${WAHABOT_SESSION}.json
-# (with its system_prompt) must exist in the bind-mounted data dir.
+name: wahabot
+
 services:
-  cli:
+  worker:
     image: ghcr.io/malvavisc0/wahabot:latest
     restart: unless-stopped
-    container_name: cli
+    container_name: worker
     hostname: wahabot
     environment:
       # Required.
