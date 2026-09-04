@@ -41,17 +41,27 @@ class WahaClient:
         self._client = httpx.Client(base_url=base_url, headers=headers, timeout=10)
 
     def send_text(
-        self, session: str, chat_id: str, text: str, reply_to: str | None = None
+        self,
+        session: str,
+        chat_id: str,
+        text: str,
+        reply_to: str | None = None,
+        mentions: list[str] | None = None,
     ) -> None:
         """Send a text message, raising for HTTP errors.
 
         ``reply_to`` (a serialized message id) sends the text as a native
         quote-reply to that message — the WAHA ``reply_to`` field, which
         replaced the deprecated ``POST /api/reply`` endpoint.
+        ``mentions`` is a list of JIDs whose display names appear in
+        *text* as ``@<name>``; WhatsApp highlights them and notifies the
+        mentioned people.
         """
         body: dict[str, Any] = {"session": session, "chatId": chat_id, "text": text}
         if reply_to:
             body["reply_to"] = reply_to
+        if mentions:
+            body["mentions"] = mentions
         response = self._client.post(f"{API_PREFIX}/sendText", json=body)
         response.raise_for_status()
         logger.info(
