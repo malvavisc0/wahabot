@@ -97,9 +97,13 @@ def _log_startup_banner(
 def config() -> None:
     """Show the loaded configuration (secrets redacted)."""
     settings = get_settings()
+    table = Table(box=None, show_header=False, pad_edge=False)
+    table.add_column(style="bold cyan", justify="right")
+    table.add_column(overflow="fold")
     for key, value in settings.model_dump().items():
-        shown = "***" if _redact_key(key) else value
-        typer.echo(f"{key}={shown}")
+        shown = Text("***", style="dim") if _redact_key(key) else _dash(str(value))
+        table.add_row(key, shown)
+    Console().print(table)
 
 
 #: Template written by ``init-session``; edit the placeholders after generating.
@@ -135,7 +139,9 @@ def session_init(
         raise typer.BadParameter(f"{path} already exists; pass --force to overwrite")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(_SESSION_TEMPLATE, indent=2) + "\n")
-    typer.echo(f"Wrote {path} — edit system_prompt (and goal/bot_name) before serving.")
+    Console().print(
+        f"Wrote [bold]{path}[/] — edit system_prompt (and goal/bot_name) before serving."
+    )
 
 
 @sessions_app.command("list")
@@ -147,8 +153,13 @@ def session_list() -> None:
     if not configs:
         typer.echo(f"No session configs in {sessions_dir}")
         return
+    table = Table(box=None, show_header=False, pad_edge=False)
+    table.add_column(style="bold cyan", justify="right")
+    table.add_column(overflow="fold")
     for path in configs:
-        typer.echo(path.stem)
+        config = load_session_config(path)
+        table.add_row(path.stem, _dash(config.bot_name))
+    Console().print(table)
 
 
 @sessions_app.command("view")
