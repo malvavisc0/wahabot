@@ -120,7 +120,7 @@ The `system_prompt` is the bot's entire personality. Write it like you're descri
 uv run wahabot version                                   # show the version
 uv run wahabot config                                    # show WAHABOT_* env (secrets redacted)
 uv run wahabot sessions list                             # list session configs
-uv run wahabot sessions view [--name N] [--raw]          # show a config, prompt rendered
+uv run wahabot sessions view [--name N] [--raw] [--plain] # show a config, prompt rendered
 uv run wahabot serve [--host H] [--port P] [--reload]    # webhook server
 ```
 
