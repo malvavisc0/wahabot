@@ -115,6 +115,11 @@ Per chat, the bot keeps a rolling conversation in memory:
   demand with the `fetch_chat_messages` tool (see §4). Chats evicted
   from the LRU (the least recently used of 1000 chats) also restart
   blank.
+- Messages the **operator sends from the bot's own WhatsApp account**
+  (typing in the app, `fromMe` events) are folded into memory as
+  assistant turns — the account's voice is the bot's voice, so the
+  model treats them as things it said. They never wake the agent:
+  memory-only, no run, no reply, no self-loop.
 
 This is a deliberate trade-off: privacy (nothing about group members
 is persisted beyond the raw event journal) over long-term continuity.

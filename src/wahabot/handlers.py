@@ -3,8 +3,11 @@
 import asyncio
 import io
 import time
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
+from llama_index.core.base.llms.types import ChatMessage, MessageRole
+from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.workflow import Context
 from loguru import logger
 from PIL import Image
@@ -89,6 +92,36 @@ def context_for(
         oldest = next(iter(contexts))
         del contexts[oldest]
     return ctx
+
+
+async def remember_own_message(
+    event: WahaEvent,
+    agent: FunctionCallingAgentWorkflow,
+    body: str | None,
+) -> None:
+    """Fold a ``fromMe`` message into the chat's memory as an assistant turn.
+
+    Messages sent from the bot account by its human operator (typing in
+    the WhatsApp app) are the bot's own voice as far as the chat is
+    concerned — storing them as assistant messages keeps the model's
+    self-history coherent (it "said" them). Memory-only: no agent run,
+    so the bot can never wake on its own output and loop on itself.
+    """
+    if not body:
+        return
+    chat_id = str(event.payload.get("from", ""))
+    if not chat_id:
+        return
+    ctx = context_for(event.session, chat_id, agent)
+    memory = await ctx.store.get("memory", default=None)
+    if memory is None:
+        from_defaults = cast(
+            Callable[..., ChatMemoryBuffer], ChatMemoryBuffer.from_defaults
+        )
+        memory = from_defaults(token_limit=agent.memory_token_limit, llm=agent.llm)
+    await memory.aput(ChatMessage(role=MessageRole.ASSISTANT, content=body))
+    await ctx.store.set("memory", memory)
+    logger.debug("Remembered own outbound message {id}", id=event.payload.get("id"))
 
 
 def is_stale(event: WahaEvent, started_at: float) -> bool:
@@ -214,9 +247,6 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
                 ts=event.payload.get("timestamp"),
             )
             return
-        if event.payload.get("fromMe"):
-            logger.debug("Ignoring own outbound message {id}", id=message_id)
-            return
         if not is_replyable(event):
             logger.debug(
                 "Ignoring non-replyable message from {sender}",
@@ -231,6 +261,10 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
         ):
             return
         body = extract_text(event)
+        if event.payload.get("fromMe"):
+            async with _agent_lock:
+                await remember_own_message(event, agent, body)
+            return
         image = image_media(event) if settings.vision else None
         if body is None and image is None:
             logger.debug("Skipping media/album message {id}", id=event.payload.get("id"))
