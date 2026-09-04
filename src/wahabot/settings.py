@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     llm_min_p: float = 0.0
     llm_presence_penalty: float = 0.0
     llm_repetition_penalty: float = 1.0
+    #: Reasoning effort for thinking models ("low", "medium", "high");
+    #: empty omits the parameter and lets the provider default decide.
+    llm_reasoning_effort: str = ""
     #: Per-request HTTP timeout (seconds) for LLM calls; must stay below
     #: the workflow timeout so a hung provider fails fast and clean.
     llm_timeout: float = 60.0

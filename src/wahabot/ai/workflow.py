@@ -492,21 +492,24 @@ def load_llm(settings: Settings) -> FunctionCallingLLM:
     in the JSON body for OpenAI-compatible providers that do accept
     them.
     """
+    kwargs: dict[str, Any] = {
+        "top_p": settings.llm_top_p,
+        "presence_penalty": settings.llm_presence_penalty,
+        "extra_body": {
+            "top_k": settings.llm_top_k,
+            "min_p": settings.llm_min_p,
+            "repetition_penalty": settings.llm_repetition_penalty,
+        },
+    }
+    if settings.llm_reasoning_effort:
+        kwargs["reasoning_effort"] = settings.llm_reasoning_effort
     return ObservableOpenAILike(
         model=settings.llm_model,
         api_base=settings.llm_api_base,
         api_key=settings.llm_api_key,
         timeout=settings.llm_timeout,
         temperature=settings.llm_temperature,
-        additional_kwargs={
-            "top_p": settings.llm_top_p,
-            "presence_penalty": settings.llm_presence_penalty,
-            "extra_body": {
-                "top_k": settings.llm_top_k,
-                "min_p": settings.llm_min_p,
-                "repetition_penalty": settings.llm_repetition_penalty,
-            },
-        },
+        additional_kwargs=kwargs,
         # No client retries: a hung endpoint must fail fast within the
         # workflow timeout, not stack 60s attempts until it blows up.
         max_retries=0,
