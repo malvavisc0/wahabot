@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from llama_index.core.tools import BaseTool, FunctionTool
+from loguru import logger
 
 from wahabot.ai.messages import jid_string
 from wahabot.ai.tools.envelope import error, ok
@@ -34,12 +35,16 @@ __all__ = [
     "fetch_chat_messages",
     "forward_message",
     "get_chat",
+    "participant_jid",
     "react_to_message",
+    "roster_entries",
     "search_messages",
     "send_image",
     "send_message",
+    "sender_names",
     "slim_message",
     "stay_silent",
+    "summarize_chat",
 ]
 
 
@@ -103,7 +108,17 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             return error("no active conversation context")
         waha.send_text(session, chat_id, text, reply_to=reply_to, mentions=mentions)
         target["sent"] = chat_id
-        return ok(chat=chat_id, text=text, mentions=mentions or [])
+        fields: dict[str, Any] = {
+            "chat": chat_id,
+            "text": text,
+            "mentions": mentions or [],
+        }
+        if mentions and "@" not in text:
+            fields["warning"] = (
+                "no `@name` in the text — WhatsApp pairs each mention JID "
+                "with an `@<name>` token, so nobody was notified"
+            )
+        return ok(**fields)
 
     return FunctionTool.from_defaults(
         fn=send_message_fn,
@@ -352,7 +367,8 @@ def get_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         overview = waha.get_chat_overview(session, chat_id)
         if not overview:
             return error(f"no metadata found for {chat_id}")
-        return ok(**summarize_chat(chat_id, overview, waha=waha, session=session))
+        names = sender_names(waha, session, chat_id)
+        return ok(**summarize_chat(chat_id, overview, names))
 
     return FunctionTool.from_defaults(
         fn=get_chat_fn,
@@ -372,29 +388,27 @@ def get_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
 def summarize_chat(
     chat_id: str,
     overview: dict[str, Any],
-    waha: WahaClient | None = None,
-    session: str = "default",
+    names: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build a compact, model-friendly summary of a chat overview dict.
 
-    Extracts the stable scalar fields and the participant JIDs, skipping
-    nested blobs like ``lastMessage`` and ``picture`` that carry no
-    useful metadata for the model. With *waha*, participants that
-    carry no name in the roster are enriched from the chat's recent
-    messages (``notifyName``) — the roster in LID groups holds bare
-    JIDs, and names are the only way the model can pair a JID with a
-    person for mentions. Returns a dict ready for the envelope.
+    Extracts the stable scalar fields and the participant roster,
+    skipping nested blobs like ``lastMessage`` and ``picture`` that
+    carry no useful metadata for the model. *names* (JID → display
+    name, see :func:`sender_names`) enriches roster entries: the
+    roster in LID groups holds bare JIDs, and names are the only way
+    the model can pair a JID with a person for mentions. Returns a
+    dict ready for the envelope.
     """
-    scalar = _chat_scalars(overview)
-    names = _recent_sender_names(waha, session, chat_id) if waha else {}
-    _add_participant_summary(scalar, overview, names)
-    if _needs_raw_fallback(scalar):
+    scalar = chat_scalars(overview)
+    add_participant_summary(scalar, overview, names or {})
+    if not scalar or all(key == "id" for key in scalar):
         scalar["chat_id"] = chat_id
         scalar["_raw"] = str(overview)[:1000]
     return scalar
 
 
-def _recent_sender_names(
+def sender_names(
     waha: WahaClient, session: str, chat_id: str, limit: int = 100
 ) -> dict[str, str]:
     """JID → display name for a chat's recent senders.
@@ -406,7 +420,10 @@ def _recent_sender_names(
     """
     try:
         messages = waha.fetch_chat_messages(session, chat_id, limit=limit)
-    except Exception:
+    except Exception as exc:
+        logger.debug(
+            "sender names unavailable for {chat_id}: {exc}", chat_id=chat_id, exc=exc
+        )
         return {}
     names: dict[str, str] = {}
     for message in messages:
@@ -417,7 +434,7 @@ def _recent_sender_names(
     return names
 
 
-def _chat_scalars(overview: dict[str, Any]) -> dict[str, Any]:
+def chat_scalars(overview: dict[str, Any]) -> dict[str, Any]:
     """Stable scalar chat fields, skipping empty/absent values."""
     return {
         key: overview[key]
@@ -435,10 +452,10 @@ def _chat_scalars(overview: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _add_participant_summary(
+def add_participant_summary(
     scalar: dict[str, Any],
     overview: dict[str, Any],
-    names: dict[str, str] | None = None,
+    names: dict[str, str],
 ) -> None:
     """Add the participant count and (when small) id/name pairs.
 
@@ -449,10 +466,9 @@ def _add_participant_summary(
     if not isinstance(participants, list):
         return
     scalar["participants"] = len(participants)
-    known = names or {}
     pairs = [
-        {"id": jid, "name": known[jid]} if jid in known else {"id": jid}
-        for jid in (_participant_jid(p) for p in participants)
+        {"id": jid, "name": names[jid]} if jid in names else {"id": jid}
+        for jid in (participant_jid(p) for p in participants)
         if jid
     ]
     if 0 < len(pairs) <= 20:
@@ -466,33 +482,24 @@ def roster_entries(overview: dict[str, Any]) -> list[Any] | None:
     inside ``_chat.groupMetadata.participants``; entries are plain JID
     strings or ``{"id": {...}}`` objects.
     """
+    blob = overview.get("_chat")
+    chat_blob: dict[str, Any] = blob if isinstance(blob, dict) else {}
     for candidates in (
         overview.get("participants"),
-        _chat_blob(overview).get("participants"),
-        _chat_blob(overview).get("groupMetadata", {}).get("participants"),
+        chat_blob.get("participants"),
+        chat_blob.get("groupMetadata", {}).get("participants"),
     ):
         if isinstance(candidates, list):
             return candidates
     return None
 
 
-def _chat_blob(overview: dict[str, Any]) -> dict[str, Any]:
-    """The overview's ``_chat`` dict, or an empty dict when absent."""
-    blob: Any = overview.get("_chat")
-    return blob if isinstance(blob, dict) else {}
-
-
-def _participant_jid(participant: Any) -> str:
+def participant_jid(participant: Any) -> str:
     """The JID of one participant entry (string, ``{"id": ...}``, or JID object)."""
     if isinstance(participant, dict):
         entry: dict[str, Any] = participant
         return jid_string(entry.get("id"))
     return jid_string(participant)
-
-
-def _needs_raw_fallback(scalar: dict[str, Any]) -> bool:
-    """True when the overview yielded almost nothing useful."""
-    return not scalar or all(key == "id" for key in scalar)
 
 
 def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:

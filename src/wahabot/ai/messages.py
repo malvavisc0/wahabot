@@ -11,15 +11,20 @@ NON_REPLYABLE_SUFFIXES = ("@broadcast", "@newsletter")
 def jid_string(value: Any) -> str:
     """A JID field as a plain ``user@server`` string.
 
-    WAHA carries JIDs in two shapes: plain strings (``"@lid``/``@c.us``
+    WAHA carries JIDs in two shapes: plain strings (``@lid``/``@c.us``
     entries in ``mentionedJidList`` on some engines) or objects with a
     ``_serialized`` field (LID groups, ``replyTo.participant``).
     Stringifying the object blindly (``str(dict)``) never matches
     anything, so mentions and quotes from LID groups were invisible.
+    A dict without ``_serialized`` falls back to joining its ``user``
+    and ``server`` fields; anything else unknown yields "".
     """
     if isinstance(value, dict):
         entry: dict[str, Any] = value
-        return str(entry.get("_serialized") or "")
+        if entry.get("_serialized"):
+            return str(entry["_serialized"])
+        user, server = entry.get("user"), entry.get("server")
+        return f"{user}@{server}" if user and server else ""
     return str(value or "")
 
 
