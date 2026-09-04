@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     langfuse_public_key: str = Field(default="", alias="LANGFUSE_PUBLIC_KEY")
     langfuse_secret_key: str = Field(default="", alias="LANGFUSE_SECRET_KEY")
     langfuse_base_url: str = Field(default="", alias="LANGFUSE_BASE_URL")
+    #: Trace environment label shown in Langfuse ("production", "staging"...);
+    #: the SDK's own conventional name, empty keeps Langfuse's "default".
+    langfuse_tracing_environment: str = Field(
+        default="", alias="LANGFUSE_TRACING_ENVIRONMENT"
+    )
 
     #: Only download and attach image messages when the model supports vision.
     vision: bool = True

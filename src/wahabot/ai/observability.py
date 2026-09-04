@@ -64,6 +64,7 @@ def enable_langfuse(settings: Settings) -> bool:
     if not public_key or not secret_key:
         return False
     base_url = settings.langfuse_base_url.strip() or None
+    environment = settings.langfuse_tracing_environment.strip() or None
     try:
         from langfuse import Langfuse as Client
         from opentelemetry.instrumentation.llamaindex import (
@@ -74,6 +75,7 @@ def enable_langfuse(settings: Settings) -> bool:
             public_key=public_key,
             secret_key=secret_key,
             base_url=base_url,
+            environment=environment,
             mask_otel_spans=mask_otel_spans,
         )
         LlamaIndexInstrumentor().instrument()
