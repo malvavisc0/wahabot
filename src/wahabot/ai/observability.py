@@ -65,11 +65,15 @@ def enable_langfuse(settings: Settings) -> bool:
         return False
     base_url = settings.langfuse_base_url.strip() or None
     environment = settings.langfuse_tracing_environment.strip() or None
+    from langfuse import Langfuse as Client
+    from opentelemetry.instrumentation.llamaindex import LlamaIndexInstrumentor
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.trace import set_tracer_provider
+
     try:
-        from langfuse import Langfuse as Client
-        from opentelemetry.instrumentation.llamaindex import (
-            LlamaIndexInstrumentor,
-        )
+        provider = TracerProvider(resource=Resource.create({"service.name": "wahabot"}))
+        set_tracer_provider(provider)
 
         _client = Client(
             public_key=public_key,
