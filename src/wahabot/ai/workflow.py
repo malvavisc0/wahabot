@@ -355,7 +355,11 @@ class FunctionCallingAgentWorkflow(Workflow):
         """
         rounds = await self.next_round(ctx)
         chat_history = await self.populated_history(ctx, ev)
-        response = await self.llm.achat_with_tools(self.tools, chat_history=chat_history)
+        response = await self.llm.achat_with_tools(
+            self.tools,
+            chat_history=chat_history,
+            allow_parallel_tool_calls=True,
+        )
         tool_calls = self.llm.get_tool_calls_from_response(
             response, error_on_no_tool_call=False
         )

@@ -695,6 +695,7 @@ def resolve_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
     substring — and returns up to ``_RESOLVE_CHAT_CANDIDATES`` matches
     for the model to pick from.
     """
+
     def resolve_chat_fn(name: str = "") -> str:
         """Resolve a person or group name to chat JIDs.
 
