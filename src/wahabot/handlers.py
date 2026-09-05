@@ -36,6 +36,7 @@ from wahabot.core.models import WahaEvent
 from wahabot.core.transcribe import transcribe_voice_note
 from wahabot.core.waha import MediaTooLargeError, WahaClient
 from wahabot.settings import Settings
+from wahabot.status import session_healthy
 from wahabot.webhook import on_message
 
 _seen_ids: dict[str, float] = {}
@@ -52,7 +53,9 @@ _SEE_TTL_S = _MAX_MESSAGE_AGE_S
 #: chats are evicted (their conversation memory is dropped).
 _MAX_CONTEXTS = 1000
 contexts: dict[tuple[str, str], Context] = {}
-_agent_lock = asyncio.Lock()
+#: Serializes all agent runs (chat turns and commands): the workflow is
+#: not reentrant per context and the shared send holder must not race.
+agent_lock = asyncio.Lock()
 
 
 #: Seen-id cache hard cap; past it the oldest entries are evicted.
@@ -108,6 +111,54 @@ def context_for(
     return ctx
 
 
+async def append_to_memory(
+    session: str,
+    chat_id: str,
+    agent: FunctionCallingAgentWorkflow | None,
+    message: ChatMessage,
+) -> None:
+    """Append one message to a chat's memory buffer, no agent run.
+
+    Shared fold-in path for out-of-band turns (operator-typed ``fromMe``
+    messages, reaction notes): the model's self-history should reflect
+    them, but a fold must never wake the LLM. *agent* may be None when
+    the chat already has a context with a memory buffer (the reaction
+    path — the chat only gets reactions to messages the bot sent there,
+    so a buffer always exists).
+    """
+    ctx = context_for(session, chat_id, agent) if agent is not None else None
+    if ctx is None:
+        ctx = contexts.get((session, chat_id))
+        if ctx is None:
+            return
+    memory = await ctx.store.get("memory", default=None)
+    if memory is None:
+        if agent is None:
+            return
+        from_defaults = cast(
+            Callable[..., ChatMemoryBuffer], ChatMemoryBuffer.from_defaults
+        )
+        memory = from_defaults(token_limit=agent.memory_token_limit, llm=agent.llm)
+    await memory.aput(message)
+    await ctx.store.set("memory", memory)
+
+
+def log_final_text(chat_id: str, reply: str) -> None:
+    """Log a dropped post-delivery final text, when there is one.
+
+    After a delivery tool fired, the run's final text is dropped (the
+    reply already went out); it is usually the model narrating what it
+    just did, but it can carry real content — log it so nothing the
+    model "said" vanishes without a trace.
+    """
+    if reply and reply.strip():
+        logger.info(
+            "Dropped post-delivery final text in {chat_id}: {reply}",
+            chat_id=chat_id,
+            reply=reply[:500],
+        )
+
+
 async def remember_own_message(
     event: WahaEvent,
     agent: FunctionCallingAgentWorkflow,
@@ -126,15 +177,12 @@ async def remember_own_message(
     chat_id = str(event.payload.get("from", ""))
     if not chat_id:
         return
-    ctx = context_for(event.session, chat_id, agent)
-    memory = await ctx.store.get("memory", default=None)
-    if memory is None:
-        from_defaults = cast(
-            Callable[..., ChatMemoryBuffer], ChatMemoryBuffer.from_defaults
-        )
-        memory = from_defaults(token_limit=agent.memory_token_limit, llm=agent.llm)
-    await memory.aput(ChatMessage(role=MessageRole.ASSISTANT, content=body))
-    await ctx.store.set("memory", memory)
+    await append_to_memory(
+        event.session,
+        chat_id,
+        agent,
+        ChatMessage(role=MessageRole.ASSISTANT, content=body),
+    )
     logger.debug("Remembered own outbound message {id}", id=event.payload.get("id"))
 
 
@@ -205,8 +253,15 @@ def first_frame_png(data: bytes) -> bytes:
         return buffer.getvalue()
 
 
-def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
-    """Build the agent and register the reply handler."""
+def register_agent_handler(
+    settings: Settings, waha: WahaClient
+) -> tuple[FunctionCallingAgentWorkflow, SessionConfigReloader]:
+    """Build the agent and register the reply handler.
+
+    Returns the built agent and the config reloader so other handlers
+    (the command channel) share the exact same agent and hot-reloaded
+    config instead of building their own.
+    """
     send_tool_holder: dict[str, str] = {}
     config = load_session_config(settings.access_config)
     config_reloader = SessionConfigReloader(settings.access_config)
@@ -258,7 +313,7 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
         if not downloaded:
             logger.debug("Album in {chat_id} yielded no usable images", chat_id=chat_id)
             return
-        async with _agent_lock:
+        async with agent_lock:
             send_tool_holder["session"] = event.session
             send_tool_holder["chat_id"] = chat_id
             send_tool_holder["sent"] = ""
@@ -269,9 +324,14 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
                     event, agent, ctx=ctx, images=downloaded, settings=settings, waha=waha
                 )
             if send_tool_holder["sent"] or send_tool_holder["reacted"]:
+                log_final_text(chat_id, reply)
                 return
         if reply and reply.strip():
-            logger.info("Replying to album in {chat_id}", chat_id=chat_id)
+            logger.info(
+                "Replying to album in {chat_id}: {reply}",
+                chat_id=chat_id,
+                reply=reply[:500],
+            )
             await asyncio.to_thread(
                 waha.send_text,
                 event.session,
@@ -319,6 +379,13 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
                 chat_id=event.payload.get("from"),
             )
             return
+        if not session_healthy():
+            # Before seen_recently: a muted message must not be marked
+            # seen, so WAHA's redelivery retries it after recovery.
+            logger.info(
+                "Muting message {id} while WAHA session is not WORKING", id=message_id
+            )
+            return
         # Hot-path config: picks up whitelist/prompt/mode edits per event.
         config = config_reloader.current_config()
         if seen_recently(message_id):
@@ -346,7 +413,7 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
             return
         body = extract_text(event)
         if event.payload.get("fromMe"):
-            async with _agent_lock:
+            async with agent_lock:
                 await remember_own_message(event, agent, body)
             return
         if is_album_container(event):
@@ -379,8 +446,8 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
                 image = await asyncio.to_thread(
                     download_image, waha, image, message_id, settings.max_image_bytes
                 )
-            async with _agent_lock:
-                # Holder writes live inside the lock, and _agent_lock
+            async with agent_lock:
+                # Holder writes live inside the lock, and agent_lock
                 # serializes all agent runs, so a concurrent webhook post
                 # can no longer overwrite this run's chat target.
                 send_tool_holder["session"] = event.session
@@ -397,11 +464,14 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
                         "Agent already delivered its reply in {chat_id}",
                         chat_id=chat_id,
                     )
+                    log_final_text(chat_id, reply)
                     return
             if not reply or not reply.strip():
                 logger.debug("Agent chose to stay silent in {chat_id}", chat_id=chat_id)
                 return
-            logger.info("Replying to {chat_id}", chat_id=chat_id)
+            logger.info(
+                "Replying to {chat_id}: {reply}", chat_id=chat_id, reply=reply[:500]
+            )
             await asyncio.to_thread(
                 waha.send_text, event.session, chat_id, reply, message_id
             )
@@ -415,3 +485,5 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
                 detail="(seen marker dropped; a WAHA redelivery will retry)",
             )
             return
+
+    return agent, config_reloader

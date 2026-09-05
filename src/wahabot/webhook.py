@@ -14,6 +14,8 @@ app = FastAPI(title="wahabot webhook server")
 Handler = Callable[[WahaEvent], Awaitable[None]]
 _message_handlers: list[Handler] = []
 _reaction_handlers: list[Handler] = []
+_command_handlers: list[Handler] = []
+_session_status_handlers: list[Handler] = []
 
 
 def on_message(handler: Handler) -> None:
@@ -26,6 +28,16 @@ def on_reaction(handler: Handler) -> None:
     _reaction_handlers.append(handler)
 
 
+def on_command(handler: Handler) -> None:
+    """Register a coroutine invoked for every incoming `command` event."""
+    _command_handlers.append(handler)
+
+
+def on_session_status(handler: Handler) -> None:
+    """Register a coroutine invoked for every incoming `session.status` event."""
+    _session_status_handlers.append(handler)
+
+
 async def dispatch(event: WahaEvent) -> None:
     """Run all registered message handlers for the event."""
     for handler in _message_handlers:
@@ -35,6 +47,18 @@ async def dispatch(event: WahaEvent) -> None:
 async def dispatch_reaction(event: WahaEvent) -> None:
     """Run all registered reaction handlers for the event."""
     for handler in _reaction_handlers:
+        await handler(event)
+
+
+async def dispatch_command(event: WahaEvent) -> None:
+    """Run all registered command handlers for the event."""
+    for handler in _command_handlers:
+        await handler(event)
+
+
+async def dispatch_session_status(event: WahaEvent) -> None:
+    """Run all registered session-status handlers for the event."""
+    for handler in _session_status_handlers:
         await handler(event)
 
 
@@ -57,8 +81,12 @@ async def waha_webhook(
     save_event(settings.journal_dir, session, body)
     event = parse_event(session, body)
     log_event(event)
-    if event.event == "message.reaction":
+    if event.event == "command":
+        await dispatch_command(event)
+    elif event.event == "message.reaction":
         await dispatch_reaction(event)
+    elif event.event == "session.status":
+        await dispatch_session_status(event)
     elif event.event.startswith("message"):
         await dispatch(event)
     return event
