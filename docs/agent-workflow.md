@@ -238,6 +238,29 @@ redeliveries cannot trigger a retry storm. A bare note in a `mentioned`
 group is skipped before any download. Empty `WAHABOT_TRANSCRIBE_URL`
 disables the whole path.
 
+## Beyond the chat turn: commands, reactions, session health
+
+Three event flows sit outside the plain message → reply pipeline:
+
+- **Operator commands** (`command` events from `wahabot tell`) run the
+  same agent on a **fresh `Context`** — no chat memory, no whitelist,
+  no group gating. The turn is prefixed `[operator command]`; the
+  session prompt keys on it (deliver with `send_message(chat=…)` to
+  the named target, resolve names with `resolve_chat`). The shared
+  send holder points at the event's `from` ("operator"), so a bare
+  `send_message` behaves like a DM. Full reference:
+  `docs/plans/operator-commands-and-events.md`.
+- **Reactions** (`message.reaction` events) to the bot's own messages
+  are folded into that chat's memory as `[reaction 👍 from Sender to
+  your message: "…"]` notes — context for the next turn, never an
+  agent run. The `true_`/`false_` id prefix decides ownership before
+  any WAHA fetch; one note per target message, latest wins.
+- **Session health** (`session.status` events): only `WORKING` is
+  healthy. `status.py` seeds the flag from `GET /api/sessions/{session}`
+  at startup, mutes message/command handling while unhealthy (before
+  the seen-marker, so WAHA redelivery retries after recovery), and
+  notifies the operator's own WhatsApp on transitions.
+
 ## LLM observability (Langfuse)
 
 `wahabot.ai.observability` exports every agent run's LLM calls —
@@ -307,6 +330,7 @@ JID to reach another group or person (e.g. `1234567890@g.us`,
 | `get_chat` | `chat?` | `POST /api/{session}/chats/overview` | Chat metadata (name, participants, …) |
 | `search_messages` | `query`, `chat?`, `limit?` | `GET /api/messages` (local filter) | Find recent messages by text / media |
 | `forward_message` | `message_id`, `chat?` | `POST /api/forwardMessage` | Forward a message to a chat; once per run (shared latch) |
+| `resolve_chat` | `name` | `GET /api/{session}/chats`, `GET /api/contacts/all` | Resolve a person/group name to chat JIDs (exact match first, then substring; ≤5 candidates) |
 
 All tool implementations live under `src/wahabot/ai/tools/` (WhatsApp
 tools in `whatsapp.py`, external tools in `external.py`); the
@@ -354,11 +378,13 @@ Underneath it calls WAHA `PUT /api/reaction` (see
 | `fetch_chat_messages(chat=None, limit=20)` | Recent messages as a JSON `messages` list, each entry carrying its serialized `id` (for react/forward), body, sender and media info |
 | `get_chat(chat=None)` | Chat metadata summary (name, participant count + JIDs, …) via `/chats/overview` |
 | `search_messages(query, chat=None, limit=20)` | Find recent messages containing a text substring |
+| `resolve_chat(name)` | Resolve a person/group name to chat JIDs — chats first, contacts as fallback; the answer to "send it to *Familia*" |
 
 ```python
 fetch_chat_messages(limit=10)  # read the current conversation
 get_chat(chat="1234567890@g.us")  # group metadata
 search_messages(query="invoice", chat="1234567890@g.us")
+resolve_chat(name="Familia")  # → matches: [{id, name}, …]
 ```
 
 > WAHA's `GET /api/messages` requires a `chatId`, so `search_messages`
@@ -505,8 +531,8 @@ and fall back to kwargs, or it will silently see zero.
   tool-free wrap-up call (logged with its trigger: the round limit, or
   a non-delivery round after a completed delivery). The counter resets
   at every run start.
-- `send_message`, `send_image`, and `forward_message` share a single
-  delivery latch and collectively deliver **at most once per run**:
+- `send_message`, `send_image`, `send_file`, and `forward_message` share a
+  single delivery latch and collectively deliver **at most once per run**:
   after a successful send, further calls return an error envelope
   instead of sending, so a looping model cannot spam the chat even
   below the round limit. `react_to_message` is likewise bounded to one

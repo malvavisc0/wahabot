@@ -107,3 +107,8 @@ Practical uses:
 - Whitelist a **participant JID** → answer one person wherever they
   write (subject to their chat also being allowed).
 - Blacklist a **participant JID** → silence one person everywhere.
+
+Access control gates *chat participants*. **Operator commands**
+(`wahabot tell`) bypass it by design — the HMAC key is the operator
+credential, and a command names its own targets; see
+`docs/agent-workflow.md` → "Beyond the chat turn".
