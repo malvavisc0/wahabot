@@ -522,7 +522,8 @@ and fall back to kwargs, or it will silently see zero.
   function calling (`is_chat_model=True`, `is_function_calling_model=True`
   in `load_llm`); the workflow constructor fails loudly if function
   calling is missing.
-- Workflow runs have a timeout (120 s by default), so a runaway tool
+- Workflow runs have a timeout (`WAHABOT_RUN_TIMEOUT`, 120 s by
+  default; 0 disables it), so a runaway tool
   loop cannot hang the webhook forever.
 - The tool loop is also bounded by `WAHABOT_TOOL_ROUND_LIMIT`
   (default 50): a model that keeps re-issuing tool calls — small
