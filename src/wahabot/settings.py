@@ -99,6 +99,12 @@ class Settings(BaseSettings):
     web_search_timeout: float = 30.0
     web_search_proxy: str | None = None
 
+    #: Client-side timeout (s) for ``wahabot tell`` waiting on the
+    #: webhook HTTP response. The server runs the whole agent turn
+    #: before replying, so long research runs need this generous; 0
+    #: waits forever.
+    tell_timeout: float = 30.0
+
     #: Shell tool (off by default): lets the agent run arbitrary host
     #: commands. Best run unprivileged and sandboxed; caps guard output
     #: size and runtime so a runaway command can't hang the webhook.

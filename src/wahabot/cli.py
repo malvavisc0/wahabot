@@ -382,7 +382,7 @@ def tell(
                 "Content-Type": "application/json",
                 "X-Webhook-Hmac": signature,
             },
-            timeout=30,
+            timeout=settings.tell_timeout or None,
         )
         response.raise_for_status()
     except httpx.HTTPError as exc:
