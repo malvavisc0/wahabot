@@ -33,6 +33,7 @@ from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
 from wahabot.core.access import SessionConfigReloader, load_session_config
 from wahabot.core.filters import chat_allowed, jid_alias_lookup
 from wahabot.core.models import WahaEvent
+from wahabot.core.transcribe import transcribe_voice_note
 from wahabot.core.waha import MediaTooLargeError, WahaClient
 from wahabot.settings import Settings
 from wahabot.webhook import on_message
@@ -354,9 +355,6 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
         if message_kind(event) in ("image", "sticker") and add_album_image(event):
             return
         image = image_media(event) if settings.vision else None
-        if body is None and image is None:
-            logger.debug("Skipping media/album message {id}", id=event.payload.get("id"))
-            return
         if not is_group_addressed(
             event,
             bot_name=config.bot_name,
@@ -366,6 +364,14 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
             logger.debug(
                 "Ignoring unaddressed group message {id}", id=event.payload.get("id")
             )
+            return
+        if message_kind(event) == "audio" and settings.transcribe_url:
+            transcript = await transcribe_voice_note(event, waha, settings)
+            if transcript:
+                event.payload["body"] = f"[voice note] {transcript}"
+                body = event.payload["body"]
+        if body is None and image is None:
+            logger.debug("Skipping media/album message {id}", id=event.payload.get("id"))
             return
         chat_id = str(event.payload["from"])
         try:

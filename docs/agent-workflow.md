@@ -220,6 +220,24 @@ Fetched images join the WhatsApp-attached ones as additional
 `image_blocks` on the same first-LLM-call injection; failures are
 logged and skipped, never fatal for the turn.
 
+## Voice notes
+
+When `WAHABOT_TRANSCRIBE_URL` points at a WhisperX service, voice notes
+are transcribed to text **before** the agent run, so a note behaves
+exactly like typed input (gating, memory, reply, silence filters all
+apply unchanged). `message_kind` maps the WEBJS voice-note type `ptt`
+(and the audio-file type `audio`) to `audio`; `core/transcribe.py`
+downloads the `media.url` bytes (capped by `WAHABOT_MAX_AUDIO_BYTES`),
+POSTs them to `{transcribe_url}/transcribe` and joins the returned
+segments. The empty `body` is replaced by `[voice note] <transcript>` —
+handle_message just re-reads the body, so no agent signature changes.
+The `[voice note]` prefix flags the text as imperfect ASR. Notes transcribe
+outside `_agent_lock` (in parallel); transcription/download failures log a
+warning and drop the message, keeping the seen marker so WAHA
+redeliveries cannot trigger a retry storm. A bare note in a `mentioned`
+group is skipped before any download. Empty `WAHABOT_TRANSCRIBE_URL`
+disables the whole path.
+
 ## LLM observability (Langfuse)
 
 `wahabot.ai.observability` exports every agent run's LLM calls —

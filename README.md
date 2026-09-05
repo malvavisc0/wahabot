@@ -37,6 +37,7 @@ The agent isn't blind. With `WAHABOT_VISION=true` (default) and a vision-capable
 - **Media albums** ("multi-image posts") arrive as a container + N individual images. The handler buffers the images announced by the container's `expectedImageCount` and runs the agent once with all of them attached.
 - **Bare links** to pages are fetchable by the agent itself via the `visit_url` tool.
 - Oversized images (> 10 MB) are skipped gracefully. Download failures degrade to a text-only turn.
+- **Voice notes** are transcribed via a WhisperX service (`WAHABOT_TRANSCRIBE_URL`) and reach the agent as `[voice note] <transcript>` — the bot hears what was said without being asked. Opt-in; off when the URL is empty.
 
 ## Staying out of the way
 
@@ -74,6 +75,10 @@ Key env vars:
 | `WAHABOT_VISION` | Enable image understanding | `true` |
 | `WAHABOT_MAX_IMAGE_BYTES` | Per-image download cap | `10485760` |
 | `WAHABOT_MAX_URL_IMAGES` | Max image-URLs to fetch per message | `2` |
+| `WAHABOT_TRANSCRIBE_URL` | WhisperX base URL for voice-note transcription (empty = off) | — |
+| `WAHABOT_TRANSCRIBE_TIMEOUT` | Per-request transcription timeout (s) | `300` |
+| `WAHABOT_MAX_AUDIO_BYTES` | Per-voice-note download cap | `26214400` |
+| `WAHABOT_TRANSCRIBE_LANGUAGE` | Language passed to /transcribe (`auto` = detect) | `auto` |
 | `WAHABOT_WEB_SEARCH_MAX_RESULTS` | Default web search results | `5` |
 | `WAHABOT_WEB_SEARCH_TIMEOUT` | webserp subprocess timeout (s) | `30` |
 | `WAHABOT_WEB_SEARCH_PROXY` | Optional proxy for webserp | — |

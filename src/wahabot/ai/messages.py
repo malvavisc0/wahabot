@@ -41,6 +41,8 @@ def is_replyable(event: WahaEvent) -> bool:
 def message_kind(event: WahaEvent) -> str:
     """Classify an incoming message: text, image, video, audio, sticker, ..."""
     kind = event.payload.get("_data", {}).get("type")
+    if kind == "ptt":
+        return "audio"
     if kind in ("image", "video", "ptv", "audio", "sticker", "document"):
         return kind
     if kind == "album":

@@ -78,6 +78,19 @@ class Settings(BaseSettings):
     #: How many image URLs sniffed from a message's text to download.
     max_url_images: int = 2
 
+    #: WhisperX transcription service (base URL, e.g. http://host:9191).
+    #: Empty disables voice-note transcription entirely (the feature is
+    #: on only when the URL is set).
+    transcribe_url: str = ""
+    #: Per-request HTTP timeout (s) for the transcription call; covers a
+    #: ~15 min note plus headroom for a model cold-load.
+    transcribe_timeout: float = 300.0
+    #: Cap on voice-note audio bytes; larger notes are skipped.
+    max_audio_bytes: int = 25 * 1024 * 1024
+    #: Language passed to the service's /transcribe endpoint ("auto" lets
+    #: it detect).
+    transcribe_language: str = "auto"
+
     web_search_max_results: int = 5
     web_search_timeout: float = 30.0
     web_search_proxy: str | None = None
