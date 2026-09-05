@@ -122,6 +122,18 @@ class InterceptHandler(logging.Handler):
         logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
 
 
+class HealthCheckFilter(logging.Filter):
+    """Drop access-log records for liveness probes (GET /health).
+
+    Docker's healthcheck polls /health every 30s; each poll would
+    otherwise log an access line and bury real traffic in noise.
+    """
+
+    @override
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "GET /health" not in record.getMessage()
+
+
 def setup_logging(settings: Settings) -> None:
     """Configure loguru sinks and route stdlib logging (uvicorn) through it."""
     logger.remove()
@@ -132,3 +144,4 @@ def setup_logging(settings: Settings) -> None:
         std_logger.handlers = []
         std_logger.propagate = True
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.access").addFilter(HealthCheckFilter())

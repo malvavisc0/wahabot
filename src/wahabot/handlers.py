@@ -218,7 +218,26 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
         done at arrival); each buffered image contributes its bytes.
         Runs under the same agent lock as single messages so the shared
         send holder and per-chat context stay consistent.
+
+        Fire-and-forget from the album buffer, so failures must be
+        caught here or they would die silently in an unretrieved task:
+        the exception is logged with traceback and every buffered
+        message's seen marker is dropped so WAHA's redelivery can
+        retry the album, mirroring the single-message path.
         """
+        try:
+            await deliver_album_reply(buffer)
+        except Exception:
+            for image_event in buffer.images:
+                forget_seen(str(image_event.payload.get("id", "")))
+            forget_seen(str(buffer.container.payload.get("id", "")))
+            logger.exception(
+                "Failed to handle album in {chat_id}",
+                chat_id=str(buffer.container.payload.get("from", "")),
+            )
+
+    async def deliver_album_reply(buffer: AlbumBuffer) -> None:
+        """Download an album's images, run the agent once, send its reply."""
         event = buffer.container
         chat_id = str(event.payload.get("from", ""))
         downloaded: list[dict[str, Any]] = []
@@ -383,5 +402,10 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
         except Exception:
             # Allow WAHA's redelivery of this message to be reprocessed.
             forget_seen(message_id)
-            logger.exception("Failed to handle message {id}", id=message_id)
+            logger.exception(
+                "Failed to handle message {id} in {chat_id} {detail}",
+                id=message_id,
+                chat_id=chat_id,
+                detail="(seen marker dropped; a WAHA redelivery will retry)",
+            )
             return
