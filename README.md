@@ -38,17 +38,7 @@ The agent isn't blind, and it isn't deaf:
 - **Bare image links** in text are sniffed out, fetched, and shown to the model too.
 - **Reactions** to the bot's own messages are folded into memory as context — a 👍 lands quietly, visible on the next turn, never waking the agent.
 
-## A guest, not a loudspeaker
-
-The bot is selective about when it speaks:
-
-- **Backlog filter** — anything sent before startup, or older than 5 minutes, is dropped as replay noise.
-- **Group participation**, per session: `never`, `mentioned` (default — only when @-mentioned or quoted), or `judicious` (reads everything, speaks when it's worth it).
-- **Statuses & newsletters** are rejected before reaching the agent — no replies to Instagram cross-posts.
-- **Access control** — per-session whitelist/blacklist; blacklist always wins, both empty means answer everybody.
-- **Session health gate** — if the WAHA session leaves `WORKING`, the bot mutes itself instead of burning LLM tokens on replies that can't be delivered, and pings the operator's own WhatsApp. Recovery is automatic.
-
-## Talking to the bot yourself
+## Talking to the bot
 
 `wahabot tell` gives the operator a direct line — not a chat message, a command:
 
