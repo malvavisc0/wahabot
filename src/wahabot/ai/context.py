@@ -347,6 +347,11 @@ async def handle_message(
         )
         for img in all_images
     ]
+    # Wire-level evidence: Langfuse traces never show image blocks (the
+    # OTel instrumentor serializes only the text-only `content`
+    # property), so this log is the authoritative count of what rides
+    # the first LLM call.
+    logger.info("Attaching {n} image block(s) to agent run", n=len(image_blocks))
     result = await agent.run(input=user_msg, image_blocks=image_blocks, ctx=ctx)
     return final_reply(result)
 
