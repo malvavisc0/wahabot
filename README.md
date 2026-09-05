@@ -1,8 +1,8 @@
 # wahabot
 
-A WhatsApp agent that *actually thinks*. Built on the [WAHA](https://waha.devlike.pro) HTTP API, it runs a LlamaIndex function-calling workflow behind a FastAPI webhook and gives your bot the ability to search the web, check stock prices, pull YouTube transcripts, send images, react to messages, and more — all from a group chat, without the user saying "use a tool."
+A WhatsApp bot that answers chats with an LLM agent — one that *actually thinks*. It reads the conversation, decides what it needs, calls tools, reads the results, and only then replies. Built on the [WAHA](https://waha.devlike.pro) HTTP API behind a small FastAPI webhook.
 
-The bot loops: it reads the conversation, decides whether it needs more information, calls a tool, gets the result, thinks again, and only then replies. No hand-rolled orchestration. Just a clean event-driven pipeline with three steps.
+It hears voice notes. It sees photos. It searches the web, checks stock prices, pulls YouTube transcripts, sends documents, reacts with emoji, and stays quiet when it has nothing to add — all without anyone saying "use a tool."
 
 ```
 StartEvent ──► prepare_chat_history ──► InputEvent
@@ -13,40 +13,51 @@ StartEvent ──► prepare_chat_history ──► InputEvent
                    ┌─────────────────────────┴──────────┐
                    │  no tool calls                     │  tool calls
                    ▼                                    ▼
-               StopEvent                        handle_tool_calls
-                  │                                    │
-                  │                                    └──► InputEvent (loop)
-                  ▼
-            reply text for the chat
+                StopEvent                        handle_tool_calls
+                   │                                    │
+                   │                                    └──► InputEvent (loop)
+                   ▼
+             reply text for the chat
 ```
 
-## Why not just a simple LLM wrapper?
+## Giving the model hands
 
-Because the interesting part isn't calling an LLM — it's giving it *hands*.
+The interesting part isn't calling an LLM — it's what the LLM can *do*.
 
-wahabot ships **11 tools by default, 12 with the optional shell tool enabled** — seven WhatsApp tools (send text, send image, react, forward, read recent messages, get chat metadata, search messages) plus four external research tools (web search via `webserp`, page fetch with Chrome TLS fingerprinting, stock prices via `yfinance`, YouTube transcripts) and an optional host shell tool (off unless `WAHABOT_SHELL_TOOL=true`). The model picks which tool to call, the workflow executes it, feeds the result back, and lets the model decide if it needs more. It stops when the model is content.
+wahabot ships **14 tools**: nine WhatsApp tools (send text, send images, send files, react, forward, read recent messages, chat metadata, message search, resolve a name to a chat) plus five external ones (web search, page fetch with Chrome TLS fingerprinting, stock prices, YouTube transcripts, and an opt-in host shell). The model picks the tool, the workflow executes it, feeds the result back, and the model decides whether it needs another round. It stops when it's done — never when a script says so.
 
-Every tool returns a compact JSON envelope — `{"ok": true, ...payload}` on success, `{"ok": false, "error": "..."}` on failure — and never raises; a failed lookup just feeds an error envelope back to the model so it can adapt. The whole run is capped at 120 s so a pathological loop can't hold the webhook hostage.
+Every tool answers with a compact JSON envelope — `{"ok": true, ...}` or `{"ok": false, "error": "..."}` — and never raises: a failed lookup comes back as data the model can shrug off or retry. The whole run is capped at 120 s, so a pathological loop can't hold the webhook hostage.
 
-## What it can see
+## What it can see and hear
 
-The agent isn't blind. With `WAHABOT_VISION=true` (default) and a vision-capable model:
+The agent isn't blind, and it isn't deaf:
 
-- **Photo messages** are downloaded from WAHA, attached to the LLM call as image blocks for that turn only, then discarded. Chat memory stays text-only — no megabyte payloads polluting your rolling buffer.
-- **Bare image URLs in text** (e.g. a wikia derivative link) are sniffed out, fetched with `curl_cffi`'s Chrome TLS impersonation, and included as additional image blocks. The Content-Type header decides if it's actually an image.
-- **Media albums** ("multi-image posts") arrive as a container + N individual images. The handler buffers the images announced by the container's `expectedImageCount` and runs the agent once with all of them attached.
-- **Bare links** to pages are fetchable by the agent itself via the `visit_url` tool.
-- Oversized images (> 10 MB) are skipped gracefully. Download failures degrade to a text-only turn.
-- **Voice notes** are transcribed via a WhisperX service (`WAHABOT_TRANSCRIBE_URL`) and reach the agent as `[voice note] <transcript>` — the bot hears what was said without being asked. Opt-in; off when the URL is empty.
+- **Photos** are downloaded, attached to that turn's LLM call, then discarded — chat memory stays text-only, no megabyte payloads rotting in the rolling buffer.
+- **Voice notes** are transcribed by a WhisperX service (`WAHABOT_TRANSCRIBE_URL`) and arrive as `[voice note] <transcript>` — the bot hears what was said without being asked. Off when the URL is empty.
+- **Albums** arrive as a container plus N images; the handler buffers them and runs the agent once, all images attached.
+- **Bare image links** in text are sniffed out, fetched, and shown to the model too.
+- **Reactions** to the bot's own messages are folded into memory as context — a 👍 lands quietly, visible on the next turn, never waking the agent.
 
-## Staying out of the way
+## A guest, not a loudspeaker
 
-The bot is selective about what it replies to:
+The bot is selective about when it speaks:
 
-- **Backlog filter** — messages sent before the server started, or older than 5 min, are dropped as WhatsApp replay backlog.
-- **Group participation** — configurable per session: `never` (bot is silent in groups), `mentioned` (default — only when @-mentioned or replying to the bot), or `judicious` (agent runs on every group message but may return empty to stay silent).
-- **Status & newsletters** — events from `status@broadcast` and `@newsletter` JIDs are rejected before reaching the agent. No nonsensical replies to Instagram cross-posted statuses.
-- **Access control** — per-session whitelist/blacklist in `data/sessions/<session>.json`. Blacklist always wins. Both empty = answer everybody.
+- **Backlog filter** — anything sent before startup, or older than 5 minutes, is dropped as replay noise.
+- **Group participation**, per session: `never`, `mentioned` (default — only when @-mentioned or quoted), or `judicious` (reads everything, speaks when it's worth it).
+- **Statuses & newsletters** are rejected before reaching the agent — no replies to Instagram cross-posts.
+- **Access control** — per-session whitelist/blacklist; blacklist always wins, both empty means answer everybody.
+- **Session health gate** — if the WAHA session leaves `WORKING`, the bot mutes itself instead of burning LLM tokens on replies that can't be delivered, and pings the operator's own WhatsApp. Recovery is automatic.
+
+## Talking to the bot yourself
+
+`wahabot tell` gives the operator a direct line — not a chat message, a command:
+
+```bash
+uv run wahabot tell "send a message to Ana: the deploy is done"
+uv run wahabot tell "search the latest news about elon musk and send a summary to the group Familia"
+```
+
+The agent runs the instruction with its full toolset on a fresh context. No whitelist applies, no chat history is touched, and names resolve to the right person or group automatically. The result lands in WhatsApp, not in your terminal.
 
 ## Setup
 
@@ -100,7 +111,7 @@ uv run wahabot serve                  # start the webhook server
 Point WAHA at the webhook in your session config:
 
 ```json
-{"url": "http://host:8080/api/webhook", "events": ["message"], "hmac": {"key": "your-secret-key"}}
+{"url": "http://host:8080/api/webhook", "events": ["message", "message.reaction", "session.status"], "hmac": {"key": "your-secret-key"}}
 ```
 
 `wahabot sessions init` writes a starter `data/sessions/default.json` — edit it
@@ -123,31 +134,32 @@ The `system_prompt` is the bot's entire personality. Write it like you're descri
 ### Other commands
 
 ```bash
-uv run wahabot version                                   # show the version
-uv run wahabot config                                    # show WAHABOT_* env (secrets redacted)
-uv run wahabot sessions list                             # list session configs
+uv run wahabot version                                  # show the version
+uv run wahabot config                                   # show WAHABOT_* env (secrets redacted)
+uv run wahabot sessions list                            # list session configs
 uv run wahabot sessions view [--name N] [--raw] [--plain] # show a config, prompt rendered
-uv run wahabot serve [--host H] [--port P] [--reload]    # webhook server
+uv run wahabot tell "<instruction>" [--session S]       # operator command to the agent
+uv run wahabot serve [--host H] [--port P] [--reload]   # webhook server
 ```
 
 ## Startup logs
 
 `wahabot serve` prints a short banner so one glance tells you what's running:
 version + Python, session name, LLM model/endpoint, memory token ceiling, and
-enabled features (vision / shell / langfuse). It then logs the WAHA session's
-live identity, the loaded session config summary, tracing status, and the tools
-the agent was built with:
+enabled features (vision / shell / transcription / langfuse). It then logs the
+WAHA session's live identity, the loaded session config summary, tracing status,
+and the tools the agent was built with:
 
 ```
-Info: wahabot 0.0.4 (Python 3.14.6)
+Info: wahabot 0.2.9 (Python 3.14.6)
 Info: Session: default
 Info: LLM: gpt-4o-mini @ https://api.openai.com/v1
 Info: Memory: 8000 token ceiling
-Info: Features: vision, no-shell
+Info: Features: vision, no-shell, no-transcribe
 Info: Webhook: http://0.0.0.0:8080/api/webhook/default
 Info: WAHA session default is live as My Name (4917...@c.us)
 Info: Loaded session config from data/sessions/default.json: 0 whitelisted, 0 blacklisted, group_participation=mentioned
-Info: Agent ready with 11 tools: fetch_chat_messages, forward_message, ...
+Info: Agent ready with 14 tools: fetch_chat_messages, forward_message, ...
 ```
 
 For a machine-readable dump of every `WAHABOT_*` value (secrets redacted) use
@@ -170,7 +182,7 @@ The agent workflow lives under `src/wahabot/ai/` as a set of focused modules:
 | `context.py` | Sender tagging, reply-context rendering, `handle_message` entrypoint |
 | `messages.py` | Message classification, `extract_text`, `image_media`, `is_replyable` |
 | `history.py` | `sanitize_chat_history` (repair) + `trim_to_budget` (token budget) |
-| `tools/whatsapp.py` | The seven WhatsApp tools |
+| `tools/whatsapp.py` | The nine WhatsApp tools |
 | `tools/external.py` | Web, finance, YouTube & (opt-in) shell tool builders |
 | `tools/schemas.py` | Pydantic parameter schemas for every tool |
 | `tools/envelope.py` | The unified JSON envelope (`ok` / `error`) every tool returns |
@@ -189,6 +201,7 @@ uv run ruff check --fix .      # lint
 uv run ruff format .           # format
 uv run basedpyright            # type check
 uv run radon cc src -s         # complexity (no C+ blocks allowed)
+uv run python scripts/smoke_test.py   # end-to-end smoke suite
 ```
 
 ## Docs

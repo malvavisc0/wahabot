@@ -1,7 +1,7 @@
 [project]
 name = "wahabot"
 version = "0.2.9"
-description = "wahabot command-line interface"
+description = "A WhatsApp bot that answers chats with an LLM agent"
 readme = "README.md"
 authors = [
     { name = "Malvavisc0", email = "207609879+malvavisc0@users.noreply.github.com" }

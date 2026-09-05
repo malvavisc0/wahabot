@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import platform
+from collections.abc import Sequence
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
 from typing import Any
@@ -29,7 +30,7 @@ from wahabot.status import register_session_status_handler, seed_health
 
 app = typer.Typer(
     name="wahabot",
-    help="wahabot command-line interface.",
+    help="A WhatsApp bot that answers chats with an LLM agent.",
     no_args_is_help=True,
     add_completion=True,
 )
@@ -40,11 +41,13 @@ sessions_app = typer.Typer(
 )
 app.add_typer(sessions_app, name="sessions")
 
+console = Console()
+
 
 @app.command()
 def version() -> None:
     """Show the wahabot version."""
-    typer.echo(get_version("wahabot"))
+    console.print(get_version("wahabot"))
 
 
 def _redact_key(key: str) -> bool:
@@ -58,6 +61,7 @@ def _feature_flags(settings: Settings) -> list[str]:
     flags = [
         "vision" if settings.vision else "no-vision",
         "shell" if settings.shell_tool else "no-shell",
+        "transcribe" if settings.transcribe_url else "no-transcribe",
     ]
     if settings.langfuse_public_key and settings.langfuse_secret_key:
         flags.append("langfuse")
@@ -97,20 +101,45 @@ def _log_startup_banner(
     logger.info("──────────────────────────────────────────────")
 
 
+def _kv_table(rows: Sequence[tuple[str, Text | str]]) -> Table:
+    """A borderless key→value table — the CLI's one output style."""
+    table = Table(box=None, show_header=False, pad_edge=False)
+    table.add_column(style="bold cyan", justify="right")
+    table.add_column(overflow="fold")
+    for key, value in rows:
+        table.add_row(key, value)
+    return table
+
+
+def _dash(value: str | None) -> Text:
+    """A config value as escaped rich text, or a dim dash when unset."""
+    if not value:
+        return Text("-", style="dim")
+    return Text(value)
+
+
+def _format_list(values: set[str]) -> Text:
+    """A config list as a comma-separated line, or a dim dash when empty."""
+    return Text(", ".join(sorted(values))) if values else _dash(None)
+
+
+def _ok(message: str) -> None:
+    """A success line, styled like every other CLI confirmation."""
+    console.print(f"[green]✓[/] {message}")
+
+
 @app.command()
 def config() -> None:
     """Show the loaded configuration (secrets redacted)."""
     settings = get_settings()
-    table = Table(box=None, show_header=False, pad_edge=False)
-    table.add_column(style="bold cyan", justify="right")
-    table.add_column(overflow="fold")
+    rows: list[tuple[str, Text | str]] = []
     for key, value in settings.model_dump().items():
         shown = Text("***", style="dim") if _redact_key(key) else _dash(str(value))
-        table.add_row(key, shown)
-    Console().print(table)
+        rows.append((key, shown))
+    console.print(_kv_table(rows))
 
 
-#: Template written by ``init-session``; edit the placeholders after generating.
+#: Template written by ``sessions init``; edit the placeholders after generating.
 _SESSION_TEMPLATE: dict[str, object] = {
     "whitelist": [],
     "blacklist": [],
@@ -144,8 +173,8 @@ _SESSION_TEMPLATE: dict[str, object] = {
         "Documents (PDFs etc.) go via `send_file` — from a URL, or a "
         "local file you created."
     ),
-    "bot_name": "kAI",
-    "bot_mention_regex": "(?i)(?<![a-z@])@?k[aā]i(?![a-z])",
+    "bot_name": None,
+    "bot_mention_regex": None,
     "group_participation": "mentioned",
 }
 
@@ -168,9 +197,7 @@ def session_init(
         raise typer.BadParameter(f"{path} already exists; pass --force to overwrite")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(_SESSION_TEMPLATE, indent=2) + "\n")
-    Console().print(
-        f"Wrote [bold]{path}[/] — edit system_prompt (and goal/bot_name) before serving."
-    )
+    _ok(f"Wrote [bold]{path}[/] — edit system_prompt (and goal/bot_name) before serving.")
 
 
 @sessions_app.command("list")
@@ -180,15 +207,10 @@ def session_list() -> None:
     sessions_dir = settings.access_config.parent
     configs = sorted(sessions_dir.glob("*.json")) if sessions_dir.is_dir() else []
     if not configs:
-        typer.echo(f"No session configs in {sessions_dir}")
+        console.print(f"[dim]No session configs in {sessions_dir}[/]")
         return
-    table = Table(box=None, show_header=False, pad_edge=False)
-    table.add_column(style="bold cyan", justify="right")
-    table.add_column(overflow="fold")
-    for path in configs:
-        config = load_session_config(path)
-        table.add_row(path.stem, _dash(config.bot_name))
-    Console().print(table)
+    rows = [(path.stem, _dash(load_session_config(path).bot_name)) for path in configs]
+    console.print(_kv_table(rows))
 
 
 @sessions_app.command("view")
@@ -215,32 +237,22 @@ def session_view(
         prompt = render_system_prompt(
             prompt, settings.timezone, config.bot_name, config.goal
         )
-    table = Table(box=None, show_header=False, pad_edge=False)
-    table.add_column(style="bold cyan", justify="right")
-    table.add_column(overflow="fold")
-    table.add_row("session", settings.session)
-    table.add_row("group_participation", config.group_participation)
-    table.add_row("bot_name", _dash(config.bot_name))
-    table.add_row("bot_mention_regex", _dash(config.bot_mention_regex))
-    table.add_row("whitelist", _format_list(config.whitelist))
-    table.add_row("blacklist", _format_list(config.blacklist))
-    table.add_row("goal", _dash(config.goal))
-    Console().print(table)
+    console.print(
+        _kv_table(
+            [
+                ("session", settings.session),
+                ("group_participation", config.group_participation),
+                ("bot_name", _dash(config.bot_name)),
+                ("bot_mention_regex", _dash(config.bot_mention_regex)),
+                ("whitelist", _format_list(config.whitelist)),
+                ("blacklist", _format_list(config.blacklist)),
+                ("goal", _dash(config.goal)),
+            ]
+        )
+    )
     title = "system_prompt" if raw else "system_prompt (rendered)"
     body: Any = prompt if plain else Markdown(prompt)
-    Console().print(Panel(body, title=title, expand=False))
-
-
-def _format_list(values: set[str]) -> Text:
-    """Render a config list as a comma-separated line, or a dash when empty."""
-    return Text(", ".join(sorted(values))) if values else _dash(None)
-
-
-def _dash(value: str | None) -> Text:
-    """A config value as escaped rich text, or a dim dash when unset."""
-    if not value:
-        return Text("-", style="dim")
-    return Text(value)
+    console.print(Panel(body, title=title, expand=False))
 
 
 def ensure_session_live(waha: WahaClient, settings: Settings) -> None:
@@ -274,7 +286,7 @@ def serve(
     ),
     reload: bool = typer.Option(False, "--reload", help="Enable auto-reload."),
 ) -> None:
-    """Run the webhook server for WAHA events."""
+    """Run the webhook server: WAHA events in, agent replies out."""
     settings = get_settings()
     if session:
         settings.session = session
@@ -314,7 +326,7 @@ def serve(
 @app.command()
 def tell(
     text: str = typer.Argument(
-        help="Instruction the agent executes as an operator command."
+        help='Instruction for the agent, e.g. "send a summary to the group Familia".'
     ),
     host: str = typer.Option(
         None, "--host", "-h", help="Webhook host. [default: WAHABOT_HOST]"
@@ -328,13 +340,12 @@ def tell(
 ) -> None:
     """Send an operator command to the running agent.
 
-    Posts a signed ``command`` event to the local webhook — the
-    operator channel: not a chat turn, so whitelist/group gating do not
-    apply and no chat's memory is touched. The agent runs with its full
-    toolset on a fresh context and delivers results wherever the
-    instruction says (use `resolve_chat` by name, e.g. "send a summary
-    to the group Familia"). Fire-and-forget: the result lands in
-    WhatsApp, not in this terminal.
+    The agent runs the instruction with its full toolset on a fresh
+    context — not a chat turn, so whitelist and group gating do not
+    apply and no chat's memory is touched. Results are delivered to
+    whatever chats the instruction names (people and groups by name,
+    resolved via the bot's contact list). Fire-and-forget: the result
+    lands in WhatsApp, not in this terminal.
     """
     settings = get_settings()
     if session:
@@ -360,8 +371,8 @@ def tell(
         )
         response.raise_for_status()
     except httpx.HTTPError as exc:
-        raise typer.BadParameter(f"Webhook at {url} rejected the event: {exc}") from exc
-    typer.echo("Command delivered; the result lands where the instruction sent it.")
+        raise typer.BadParameter(f"Webhook at {url} rejected the command: {exc}") from exc
+    _ok(f"Command delivered to session [bold]{settings.session}[/]")
 
 
 def main() -> None:
