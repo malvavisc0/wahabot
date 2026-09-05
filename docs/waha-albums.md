@@ -1,9 +1,9 @@
 # WAHA Album Messages
 
 How multi-image albums ("media albums") arrive via the WAHA `message`
-webhook, and how to reassemble them.
+webhook, and how wahabot reassembles them.
 
-## Delivery sequence
+## Delivery sequence (verified on NOWEB, 2026-09)
 
 An album is **not** one webhook. It is three:
 
@@ -12,37 +12,41 @@ An album is **not** one webhook. It is three:
    - `hasMedia: false`, `body: ""`
    - `_data.expectedImageCount: 2` — announces how many images follow
      (`expectedVideoCount` for videos)
-   - its own `id` is the *album key* other messages point at
 2. **One `message` webhook per image** (`_data.type == "image"`,
-   `hasMedia: true`, `media.url` set), each carrying the linkage:
-   - `_data.parentMsgKey.id` — album message's raw ID
-   - `_data.parentMsgKey.$1` — album's full serialized `id`
-   - `_data.associationType` / `_data.viewMode` == `"MEDIA_ALBUM"`
+   `hasMedia: true`, `media.url` set), arriving back-to-back right
+   after the container.
 
-The images point at the album, **not** vice-versa. Images can lag the
-container by ~1s and may arrive in any order.
+**There is no linkage field on NOWEB**: the images arrive with
+`parentMsgId: null` and no `parentMsgKey` (those are WEBJS internals —
+see the engine caveat). The container's `expectedImageCount` plus
+arrival order is the only grouping signal this engine provides.
 
-## Reassembly
+Containers/images sent *from the bot's own account* (`fromMe`) never
+emit webhook events at all — own outbound media does not echo.
 
-```python
-def album_key(payload: dict) -> str | None:
-    parent = payload.get("_data", {}).get("parentMsgKey")
-    return parent["$1"] if parent else None
-```
+## Reassembly (implemented in `src/wahabot/ai/albums.py`)
 
-- Group incoming `message` events by `album_key(event.payload)` matching
-  the album container's `payload["id"]`.
-- Buffer images per album until `expectedImageCount` is reached, or a
-  timeout fires — the count is not a guarantee, just a hint.
-- An image **without** `parentMsgKey` is a standalone photo: handle it
-  directly, no album involved.
+- The container opens a per-chat buffer holding its
+  `expectedImageCount`.
+- The next `expected` image events **in the same chat** fill the buffer
+  in arrival order — WhatsApp delivers an album's images back-to-back,
+  so order is the reliable key when no parent link exists.
+- The buffer completes when the count is reached, or after a 3s
+  timeout (the count is a hint, not a guarantee — a dropped image must
+  not hang the album forever).
+- A completed album runs the agent **once**, with every image attached
+  as `image_blocks` on a single turn — never one run per image.
+- An image with no open album buffer is a standalone photo: handled
+  directly, unchanged.
 
 ## Engine caveat
 
-`parentMsgKey`, `associationType`, `expectedImageCount` are WEBJS
-engine internals (`_data`). The album-then-images sequence should hold
-across engines, but field names may differ — re-verify when switching
-engines (GOWS/NOWEB/WPP).
+`parentMsgKey`, `associationType`, `expectedImageCount` are documented
+as WEBJS engine internals (`_data`). On NOWEB only
+`expectedImageCount` is present; the parent linkage is not. Re-verify
+field names when switching engines (GOWS/WEBJS/WPP) — the order-based
+grouping above degrades gracefully to WEBJS too, since its albums also
+arrive back-to-back.
 
 ## Reference
 

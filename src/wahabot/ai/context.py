@@ -308,15 +308,17 @@ async def handle_message(
     agent: FunctionCallingAgentWorkflow,
     ctx: Context | None = None,
     image: dict[str, Any] | None = None,
+    images: list[dict[str, Any]] | None = None,
     settings: Settings | None = None,
     waha: WahaClient | None = None,
 ) -> str:
     """Run the agent workflow over an incoming message event and return its reply.
 
-    ``image`` carries downloaded image bytes (``data`` + ``mimetype``);
-    when present, it rides along as ``image_blocks`` on the run and is
-    injected into the first LLM call only — memory stays text-only, so
-    no megabyte payloads accumulate in the rolling buffer.
+    ``image`` (single) or ``images`` (an album, already downloaded)
+    carry image bytes (``data`` + ``mimetype``); they ride along as
+    ``image_blocks`` on the run and are injected into the first LLM
+    call only — memory stays text-only, so no megabyte payloads
+    accumulate in the rolling buffer.
 
     With ``settings.vision`` enabled, image URLs sniffed from the
     message text are fetched too (see ``wahabot.ai.tools.url_images``), so a
@@ -328,9 +330,13 @@ async def handle_message(
     logger.info("Agent handling message from {chat_id}", chat_id=chat_id)
     tag = sender_tag(event)
     text = f"{tag} {body}".strip() if tag else body
-    images = collect_images(image, settings, text)
-    if images and not body:
-        text = f"{tag} (image)".strip()
+    attached = list(images or [])
+    if image is not None:
+        attached.append(image)
+    all_images = collect_images(attached, settings, text)
+    if all_images and not body:
+        noun = "(images)" if len(attached) > 1 else "(image)"
+        text = f"{tag} {noun}".strip()
     names = participant_names(waha, event.session, chat_id)
     user_msg = text + message_id_note(event)
     user_msg += reply_context_section(message_replies_to(event), names)
@@ -339,19 +345,19 @@ async def handle_message(
             image=img["data"],
             image_mimetype=img.get("mimetype") or "image/jpeg",
         )
-        for img in images
+        for img in all_images
     ]
     result = await agent.run(input=user_msg, image_blocks=image_blocks, ctx=ctx)
     return final_reply(result)
 
 
 def collect_images(
-    image: dict[str, Any] | None,
+    attached: list[dict[str, Any]],
     settings: Settings | None,
     text: str,
 ) -> list[dict[str, Any]]:
-    """The message's images: the attached one plus sniffed URL images."""
-    images = [image] if image is not None else []
+    """The turn's images: the attached ones plus sniffed URL images."""
+    images = list(attached)
     if settings is not None and settings.vision:
         urls = image_urls(text, settings.max_url_images)
         images.extend(fetch_url_images(settings, urls))

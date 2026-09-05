@@ -34,7 +34,7 @@ The agent isn't blind. With `WAHABOT_VISION=true` (default) and a vision-capable
 
 - **Photo messages** are downloaded from WAHA, attached to the LLM call as image blocks for that turn only, then discarded. Chat memory stays text-only — no megabyte payloads polluting your rolling buffer.
 - **Bare image URLs in text** (e.g. a wikia derivative link) are sniffed out, fetched with `curl_cffi`'s Chrome TLS impersonation, and included as additional image blocks. The Content-Type header decides if it's actually an image.
-- **Media albums** ("multi-image posts") arrive as a container + N individual images via WAHA's WEBJS internals. The handler groups them by `parentMsgKey` and waits for `expectedImageCount` before processing.
+- **Media albums** ("multi-image posts") arrive as a container + N individual images. The handler buffers the images announced by the container's `expectedImageCount` and runs the agent once with all of them attached.
 - **Bare links** to pages are fetchable by the agent itself via the `visit_url` tool.
 - Oversized images (> 10 MB) are skipped gracefully. Download failures degrade to a text-only turn.
 

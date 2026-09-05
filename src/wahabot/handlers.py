@@ -12,12 +12,20 @@ from llama_index.core.workflow import Context
 from loguru import logger
 from PIL import Image
 
+from wahabot.ai.albums import (
+    AlbumBuffer,
+    add_album_image,
+    is_album_container,
+    set_completion_handler,
+    start_album,
+)
 from wahabot.ai.context import handle_message, render_system_prompt
 from wahabot.ai.messages import (
     extract_text,
     image_media,
     is_group_addressed,
     is_replyable,
+    message_kind,
 )
 from wahabot.ai.observability import chat_trace_attributes, enable_langfuse
 from wahabot.ai.tools import build_default_tools
@@ -198,6 +206,57 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
     config_reloader = SessionConfigReloader(settings.access_config)
     enable_langfuse(settings)
 
+    async def run_album(buffer: AlbumBuffer) -> None:
+        """Run the agent once over a completed album, all images attached.
+
+        The container event drives the turn (sender tag, gating already
+        done at arrival); each buffered image contributes its bytes.
+        Runs under the same agent lock as single messages so the shared
+        send holder and per-chat context stay consistent.
+        """
+        event = buffer.container
+        chat_id = str(event.payload.get("from", ""))
+        downloaded: list[dict[str, Any]] = []
+        for image_event in buffer.images:
+            media = image_media(image_event)
+            if media is None:
+                continue
+            image = await asyncio.to_thread(
+                download_image,
+                waha,
+                media,
+                str(image_event.payload.get("id", "")),
+                settings.max_image_bytes,
+            )
+            if image is not None:
+                downloaded.append(image)
+        if not downloaded:
+            logger.debug("Album in {chat_id} yielded no usable images", chat_id=chat_id)
+            return
+        async with _agent_lock:
+            send_tool_holder["session"] = event.session
+            send_tool_holder["chat_id"] = chat_id
+            send_tool_holder["sent"] = ""
+            send_tool_holder["reacted"] = ""
+            ctx = context_for(event.session, chat_id, agent)
+            with chat_trace_attributes(chat_id):
+                reply = await handle_message(
+                    event, agent, ctx=ctx, images=downloaded, settings=settings, waha=waha
+                )
+            if send_tool_holder["sent"] or send_tool_holder["reacted"]:
+                return
+        if reply and reply.strip():
+            logger.info("Replying to album in {chat_id}", chat_id=chat_id)
+            await asyncio.to_thread(
+                waha.send_text,
+                event.session,
+                chat_id,
+                reply,
+                str(event.payload.get("id", "")),
+            )
+
+    set_completion_handler(run_album)
+
     def render_prompt() -> str:
         """Re-render ``{{date}}``/``{{time}}`` and pick up config edits.
 
@@ -264,6 +323,11 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> None:
         if event.payload.get("fromMe"):
             async with _agent_lock:
                 await remember_own_message(event, agent, body)
+            return
+        if is_album_container(event):
+            start_album(event)
+            return
+        if message_kind(event) in ("image", "sticker") and add_album_image(event):
             return
         image = image_media(event) if settings.vision else None
         if body is None and image is None:
