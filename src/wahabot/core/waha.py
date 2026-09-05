@@ -165,6 +165,25 @@ class WahaClient:
             body["caption"] = caption
         self._client.post(f"{API_PREFIX}/sendImage", json=body).raise_for_status()
 
+    def send_file(
+        self,
+        session: str,
+        chat_id: str,
+        file: dict[str, Any],
+        caption: str | None = None,
+    ) -> None:
+        """Send a document from a url or base64 payload, raising for HTTP errors.
+
+        ``file`` is a WAHA ``RemoteFile`` (``{mimetype, url,
+        filename?}`` — WAHA downloads it) or ``BinaryFile``
+        (``{mimetype, data, filename?}`` — base64 bytes ride the
+        request), per ``POST /api/sendFile``.
+        """
+        body: dict[str, Any] = {"session": session, "chatId": chat_id, "file": file}
+        if caption:
+            body["caption"] = caption
+        self._client.post(f"{API_PREFIX}/sendFile", json=body).raise_for_status()
+
     def fetch_chat_messages(
         self,
         session: str,

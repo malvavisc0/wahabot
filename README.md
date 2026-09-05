@@ -75,6 +75,7 @@ Key env vars:
 | `WAHABOT_VISION` | Enable image understanding | `true` |
 | `WAHABOT_MAX_IMAGE_BYTES` | Per-image download cap | `10485760` |
 | `WAHABOT_MAX_URL_IMAGES` | Max image-URLs to fetch per message | `2` |
+| `WAHABOT_MAX_FILE_BYTES` | Local-file cap for the `send_file` tool | `16777216` |
 | `WAHABOT_TRANSCRIBE_URL` | WhisperX base URL for voice-note transcription (empty = off) | — |
 | `WAHABOT_TRANSCRIBE_TIMEOUT` | Per-request transcription timeout (s) | `300` |
 | `WAHABOT_MAX_AUDIO_BYTES` | Per-voice-note download cap | `26214400` |

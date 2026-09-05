@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     max_image_bytes: int = 10 * 1024 * 1024
     #: How many image URLs sniffed from a message's text to download.
     max_url_images: int = 2
+    #: Local files larger than this are rejected by the send_file tool
+    #: (base64 inflates ~4/3x and the whole file rides one JSON request);
+    #: 16 MB matches WhatsApp's own document limit.
+    max_file_bytes: int = 16 * 1024 * 1024
 
     #: WhisperX transcription service (base URL, e.g. http://host:9191).
     #: Empty disables voice-note transcription entirely (the feature is

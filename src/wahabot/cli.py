@@ -140,7 +140,9 @@ _SESSION_TEMPLATE: dict[str, object] = {
         "\n"
         "You can reach chats beyond the current one: resolve a person or "
         "group name with `resolve_chat`, then pass the JID as `chat` to "
-        "`send_message`, `send_image` or `forward_message`."
+        "`send_message`, `send_image`, `send_file` or `forward_message`. "
+        "Documents (PDFs etc.) go via `send_file` — from a URL, or a "
+        "local file you created."
     ),
     "bot_name": "kAI",
     "bot_mention_regex": "(?i)(?<![a-z@])@?k[aā]i(?![a-z])",

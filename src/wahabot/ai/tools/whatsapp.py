@@ -8,9 +8,10 @@ tool functions here return the shared JSON envelope instead, so a
 failure feeds back to the model rather than crashing the workflow.
 """
 
+import base64
 import json
 import mimetypes
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -26,6 +27,7 @@ from wahabot.ai.tools.schemas import (
     ReactToMessageSchema,
     ResolveChatSchema,
     SearchMessagesSchema,
+    SendFileSchema,
     SendImageSchema,
     SendMessageSchema,
     StaySilentSchema,
@@ -37,12 +39,14 @@ __all__ = [
     "fetch_chat_messages",
     "forward_message",
     "get_chat",
+    "infer_mimetype",
     "participant_jid",
     "react_to_message",
     "resolve_chat",
     "roster_entries",
     "search_matches",
     "search_messages",
+    "send_file",
     "send_image",
     "send_message",
     "sender_names",
@@ -66,6 +70,17 @@ _IMAGE_MIME_BY_EXT: dict[str, str] = {
     ".tiff": "image/tiff",
     ".svg": "image/svg+xml",
     ".avif": "image/avif",
+}
+
+#: Extension → MIME mapping for documents. A wrong/absent mimetype makes
+#: the receiving client render a generic blob instead of a PDF preview.
+_DOC_MIME_BY_EXT: dict[str, str] = {
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".csv": "text/csv",
+    ".zip": "application/zip",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
 
 
@@ -271,19 +286,122 @@ def send_image(waha: WahaClient, target: dict[str, str]) -> BaseTool:
 
 
 def infer_image_mimetype(url: str) -> str:
-    """Best-effort image mimetype from a URL's path extension.
+    """Best-effort image mimetype from a URL's path extension."""
+    return infer_mimetype(url, _IMAGE_MIME_BY_EXT, "image/jpeg")
 
-    Prefers a curated extension→MIME map (avoids unregistered types such
-    as ``image/jpg`` and ``image/tif``), then ``mimetypes``, then falls
-    back to ``image/jpeg`` when nothing is known.
+
+def infer_mimetype(name_or_url: str, curated: dict[str, str], default: str) -> str:
+    """Best-effort mimetype from a filename's or URL's extension.
+
+    Prefers the curated extension→MIME map (avoids unregistered types
+    such as ``image/jpg`` and ``image/tif``, which WAHA/WhatsApp
+    reject), then ``mimetypes``, then *default* when nothing is known.
     """
-    path = PurePosixPath(urlsplit(url).path)
+    path = PurePosixPath(urlsplit(name_or_url).path)
     ext = path.suffix.lower()
-    mapped = _IMAGE_MIME_BY_EXT.get(ext)
+    mapped = curated.get(ext)
     if mapped:
         return mapped
     guessed = mimetypes.guess_type(path.name or "")[0]
-    return guessed if guessed and guessed.startswith("image/") else "image/jpeg"
+    if guessed and default.split("/")[0] == "image" and not guessed.startswith("image/"):
+        return default
+    return guessed or default
+
+
+def send_file(waha: WahaClient, target: dict[str, str], max_file_bytes: int) -> BaseTool:
+    """Build a tool that sends a document (PDF, etc.) to a chat.
+
+    Two sources, matching WAHA's ``sendFile`` file shapes: a public
+    ``url`` (``RemoteFile`` — WAHA downloads it) or a local ``path``
+    (``BinaryFile`` — the tool reads, caps at *max_file_bytes* and
+    base64-encodes it; for files the agent created, e.g. shell-tool
+    output).
+    """
+
+    def send_file_fn(
+        url: str | None = None,
+        path: str | None = None,
+        caption: str = "",
+        filename: str | None = None,
+        chat: str | None = None,
+    ) -> str:
+        """Send a document (PDF, etc.) to a WhatsApp chat.
+
+        Args:
+            url: Public URL of the document to send (WAHA downloads it).
+            path: Local path of a file you created (e.g. with the shell
+                tool); read and sent as base64.
+            caption: Optional caption text.
+            filename: Optional file name shown to the recipient;
+                defaults to the URL/path basename.
+            chat: Optional chat id. Omit to send to the current chat.
+        """
+        if target.get("sent"):
+            return error(
+                f"message already sent this run (to {target['sent']}); do not send again"
+            )
+        session = target.get("session", "")
+        chat_id = chat_jid(chat, target)
+        if not session or not chat_id:
+            return error("no active conversation context")
+        if bool(url) == bool(path):
+            return error("pass exactly one of url or path")
+        file = remote_file(str(url)) if url else local_file(str(path), max_file_bytes)
+        if isinstance(file, str):
+            return error(file)
+        if filename:
+            file["filename"] = filename
+        waha.send_file(session, chat_id, file=file, caption=caption or None)
+        target["sent"] = chat_id
+        return ok(
+            chat=chat_id,
+            mimetype=file["mimetype"],
+            filename=file.get("filename") or "",
+            caption=caption,
+        )
+
+    return FunctionTool.from_defaults(
+        fn=send_file_fn,
+        fn_schema=SendFileSchema,
+        name="send_file",
+        description=(
+            "Send a document (PDF, etc.) to a WhatsApp chat — from a "
+            "public url, or a local path for files you created. Pass "
+            "chat to reach another group/person, else sends to the "
+            "current chat. caption and filename are optional. Send at "
+            "most once per run."
+        ),
+    )
+
+
+def remote_file(url: str) -> dict[str, Any]:
+    """A WAHA RemoteFile for a document URL."""
+    name = PurePosixPath(urlsplit(url).path).name
+    file: dict[str, Any] = {
+        "mimetype": infer_mimetype(url, _DOC_MIME_BY_EXT, "application/octet-stream"),
+        "url": url,
+    }
+    if name:
+        file["filename"] = name
+    return file
+
+
+def local_file(path: str, max_file_bytes: int) -> dict[str, Any] | str:
+    """A WAHA BinaryFile for a local path, or an error message string."""
+    local = Path(path)
+    try:
+        data = local.read_bytes()
+    except OSError as exc:
+        return f"cannot read {path}: {exc}"
+    if len(data) > max_file_bytes:
+        return f"file is {len(data)} B, over the {max_file_bytes} B cap"
+    return {
+        "mimetype": infer_mimetype(
+            local.name, _DOC_MIME_BY_EXT, "application/octet-stream"
+        ),
+        "filename": local.name,
+        "data": base64.b64encode(data).decode(),
+    }
 
 
 def slim_message(message: dict[str, Any], max_body: int = 200) -> dict[str, Any]:

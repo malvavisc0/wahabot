@@ -141,6 +141,27 @@ class ResolveChatSchema(BaseModel):
     )
 
 
+class SendFileSchema(BaseModel):
+    """Send a document (PDF, etc.) to a WhatsApp chat."""
+
+    url: str | None = Field(
+        default=None,
+        description="Public URL of the document (WAHA downloads it). Pass url XOR path.",
+    )
+    path: str | None = Field(
+        default=None,
+        description=(
+            "Local path of a file you created (sent as base64). Pass path XOR url."
+        ),
+    )
+    caption: str = Field(default="", description="Optional caption text.")
+    filename: str | None = Field(
+        default=None,
+        description="File name shown to the recipient (default: the url/path basename).",
+    )
+    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
+
+
 class WebSearchSchema(BaseModel):
     """Search the web via the webserp metasearch CLI."""
 

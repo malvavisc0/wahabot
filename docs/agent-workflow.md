@@ -302,6 +302,7 @@ JID to reach another group or person (e.g. `1234567890@g.us`,
 | `stay_silent` | — | — | End the run with no reply at all (terminal: the workflow stops before executing it) |
 | `react_to_message` | `message_id`, `reaction` | `PUT /api/reaction` | Emoji-react to a message (empty = remove); once per run |
 | `send_image` | `url`, `caption?`, `chat?` | `POST /api/sendImage` | Send an image from a URL; once per run (shared latch) |
+| `send_file` | `url?`, `path?`, `caption?`, `filename?`, `chat?` | `POST /api/sendFile` | Send a document (PDF, etc.) from a URL or a local file; once per run (shared latch) |
 | `fetch_chat_messages` | `chat?`, `limit?` | `GET /api/{session}/chats/{chatId}/messages` | Read recent chat messages (JSON `messages` list) |
 | `get_chat` | `chat?` | `POST /api/{session}/chats/overview` | Chat metadata (name, participants, …) |
 | `search_messages` | `query`, `chat?`, `limit?` | `GET /api/messages` (local filter) | Find recent messages by text / media |
@@ -318,6 +319,7 @@ subsections below.
 |---|---|
 | `send_message(text, chat=None, reply_to=None)` | Send a text — current chat (omit `chat`) or another group/person; `reply_to` (a serialized message id) sends it as a native quote-reply |
 | `send_image(url, caption="", chat=None)` | Send an image from a public URL (mimetype inferred from the URL extension), with an optional caption |
+| `send_file(url=None, path=None, caption="", filename=None, chat=None)` | Send a document (PDF, etc.) — from a public `url` (WAHA downloads it) or a local `path` for files the agent created (base64, capped at `WAHABOT_MAX_FILE_BYTES`); mimetype and filename inferred from the extension |
 | `forward_message(message_id, chat=None)` | Forward an existing message (by serialized id) to a chat |
 
 ```python
@@ -325,6 +327,8 @@ send_message(text="Just replying here")  # current chat
 send_message(text="exactly this", reply_to="false_1111@c.us_ABC")  # quote-reply
 send_message(chat="1234567890@g.us", text="Hello team!")  # to a group
 send_image(url="https://example.com/plot.png", caption="Q3 chart")
+send_file(url="https://example.com/paper.pdf", caption="the paper")
+send_file(path="/tmp/report.pdf", chat="1234567890@g.us")  # a file it created
 forward_message(message_id="false_1111@c.us_ABC")
 ```
 

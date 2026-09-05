@@ -1,7 +1,7 @@
 """Bundled tools for the function calling agent.
 
-``whatsapp`` holds the seven WhatsApp tools (send/react/image/history/
-metadata/search/forward), ``external`` the research and host tools
+``whatsapp`` holds the WhatsApp tools (send/react/image/file/history/
+metadata/search/forward/resolve), ``external`` the research and host tools
 (web search, page fetch, stock prices, YouTube transcripts, shell),
 ``schemas`` the Pydantic parameter schemas for all of them, and
 ``envelope`` the unified JSON envelope (``ok`` / ``error``) every tool
@@ -24,6 +24,7 @@ from wahabot.ai.tools.whatsapp import (
     react_to_message,
     resolve_chat,
     search_messages,
+    send_file,
     send_image,
     send_message,
     stay_silent,
@@ -49,6 +50,7 @@ def build_default_tools(
         stay_silent(),
         react_to_message(waha, target),
         send_image(waha, target),
+        send_file(waha, target, settings.max_file_bytes),
         fetch_chat_messages(waha, target),
         get_chat(waha, target),
         search_messages(waha, target),
