@@ -38,15 +38,20 @@ from wahabot.settings import Settings
 from wahabot.webhook import on_message
 
 _seen_ids: dict[str, float] = {}
-_SEE_TTL_S = 120
+#: Messages older than this many seconds are stale backlog, not live turns.
+_MAX_MESSAGE_AGE_S = 300
+#: Dedup window for redelivered message ids. Must meet or exceed
+#: ``_MAX_MESSAGE_AGE_S`` so the two guards overlap seamlessly: a
+#: redelivery inside this window is dropped by the seen cache, past it
+#: by the staleness check — between a shorter TTL and the age bound
+#: (120 < age < 300) a redelivered message would slip through both
+#: and be answered twice.
+_SEE_TTL_S = _MAX_MESSAGE_AGE_S
 #: Keep at most this many per-chat agent contexts; least recently used
 #: chats are evicted (their conversation memory is dropped).
 _MAX_CONTEXTS = 1000
 contexts: dict[tuple[str, str], Context] = {}
 _agent_lock = asyncio.Lock()
-
-#: Messages older than this many seconds are stale backlog, not live turns.
-_MAX_MESSAGE_AGE_S = 300
 
 
 #: Seen-id cache hard cap; past it the oldest entries are evicted.

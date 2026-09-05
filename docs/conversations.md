@@ -36,7 +36,10 @@ Before the agent ever wakes up, the message passes through, in order:
    restarts, our own webhook 500s). Every message id is remembered for
    the redelivery window; duplicates are dropped silently. At the
    cache cap the oldest entries are evicted one by one — a redelivery
-   racing a cache turnover is still deduplicated.
+   racing a cache turnover is still deduplicated. The window meets the
+   staleness bound (300 s) so the two guards overlap with no gap: a
+   redelivery inside the window is dropped here, past it by
+   staleness — never answered twice.
 2. **Staleness.** Messages timestamped before the bot process started
    are backlog (history resyncs, container restarts), not fresh chat;
    they are skipped so the bot never wakes up hours late and answers
