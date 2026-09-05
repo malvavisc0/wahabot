@@ -8,6 +8,7 @@ back in ``StopEvent.result``.
 """
 
 import asyncio
+import json
 from collections.abc import Callable
 from functools import partial
 from typing import Any, cast, override
@@ -108,6 +109,68 @@ async def run_tool_call(
     if len(content) > MAX_TOOL_RESULT_TOKENS:
         content = content[:MAX_TOOL_RESULT_TOKENS] + "… (truncated)"
     return ChatMessage(role="tool", content=content, additional_kwargs=kwargs)
+
+
+def tool_call_names(message: ChatMessage) -> list[str]:
+    """Names of the tools an assistant message called (empty for plain text).
+
+    In-memory llama-index carries calls as ``ToolCallBlock`` blocks; the
+    OpenAI wire shape (``additional_kwargs["tool_calls"]``) appears in
+    serialized histories. Both are read.
+    """
+    names = [b.tool_name for b in message.blocks if isinstance(b, ToolCallBlock)]
+    calls: Any = message.additional_kwargs.get("tool_calls") or []
+    for call in calls:
+        if isinstance(call, dict):
+            entry: dict[str, Any] = call
+            names.append(str(entry.get("function", {}).get("name")))
+    return names
+
+
+def delivered_text(message: ChatMessage) -> str:
+    """The sent text of an ``ok`` send_message tool result, else "".
+
+    A failed send left nothing in the chat, so its pair stays as the
+    model's record of what went wrong — only a delivered text collapses.
+    """
+    if message.role != MessageRole.TOOL:
+        return ""
+    try:
+        envelope = json.loads(str(message.content or "{}"))
+    except json.JSONDecodeError:
+        return ""
+    if envelope.get("ok") and envelope.get("text"):
+        return str(envelope["text"])
+    return ""
+
+
+def send_group_bounds(messages: list[ChatMessage]) -> tuple[int, str] | None:
+    """The index and text of the last ``send_message`` tool group, if any.
+
+    A group is an assistant message calling ``send_message`` followed by
+    its ``tool`` result message.
+    """
+    for i in range(len(messages) - 2, -1, -1):
+        if "send_message" not in tool_call_names(messages[i]):
+            continue
+        text = delivered_text(messages[i + 1])
+        if text:
+            return i, text
+    return None
+
+
+def collapse_send_group(messages: list[ChatMessage]) -> list[ChatMessage] | None:
+    """*messages* with the last send group replaced by a plain assistant text.
+
+    Returns None when there is nothing to collapse.
+    """
+    bounds = send_group_bounds(messages)
+    if bounds is None:
+        return None
+    i, text = bounds
+    collapsed = list(messages)
+    collapsed[i : i + 2] = [ChatMessage(role=MessageRole.ASSISTANT, content=text)]
+    return collapsed
 
 
 def token_count(msg: ChatMessage) -> int:
@@ -304,6 +367,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         if not tool_calls:
             response = self.drop_post_delivery_text(response)
             await self.remember(ctx, response, tool_calls)
+            await self.collapse_delivery(ctx)
             return StopEvent(result=response)
         if self.delivery_complete(tool_calls) or rounds >= self.tool_round_limit:
             # Do not store calls which will not be executed: the chat API
@@ -313,7 +377,9 @@ class FunctionCallingAgentWorkflow(Workflow):
                 if self.delivery_complete(tool_calls)
                 else f"round limit {self.tool_round_limit}"
             )
-            return StopEvent(result=await self.wrap_up_response(ctx, reason))
+            result = await self.wrap_up_response(ctx, reason)
+            await self.collapse_delivery(ctx)
+            return StopEvent(result=result)
         await self.remember(ctx, response, tool_calls)
         return ToolCallEvent(tool_calls=tool_calls)
 
@@ -386,6 +452,26 @@ class FunctionCallingAgentWorkflow(Workflow):
         if tool_calls or str(response.message.content or "").strip():
             await memory.aput(response.message)
         await ctx.store.set("memory", memory)
+
+    async def collapse_delivery(self, ctx: Context) -> None:
+        """Replace a delivered ``send_message`` tool group with plain text.
+
+        A delivered reply sits in memory as an empty assistant tool-call
+        plus its tool-result envelope — scaffolding the chat API needs
+        mid-loop, but dead weight afterwards (two messages, zero content
+        beyond the text itself). At run end the pair is swapped for one
+        plain assistant message holding the sent text, so the retained
+        history reads like the chat it mirrors (and matches how
+        operator-sent ``fromMe`` messages are stored). The whole group
+        is replaced atomically: a dangling tool call without its result
+        is exactly what :func:`repair_memory` must never find.
+        """
+        memory = await ctx.store.get("memory")
+        messages = await memory.aget_all()
+        collapsed = collapse_send_group(messages)
+        if collapsed is not None:
+            await memory.aset(collapsed)
+            await ctx.store.set("memory", memory)
 
     @staticmethod
     def stopped_response() -> StopEvent:
