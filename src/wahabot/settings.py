@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     #: before replying, so long research runs need this generous; 0
     #: waits forever.
     tell_timeout: float = 30.0
+    #: Server-side cap on a single agent run (s); must stay above the
+    #: per-request LLM timeout, else a slow provider kills the run as
+    #: the model is still generating. 0 disables the timeout.
+    run_timeout: int = 120
 
     #: Shell tool (off by default): lets the agent run arbitrary host
     #: commands. Best run unprivileged and sandboxed; caps guard output

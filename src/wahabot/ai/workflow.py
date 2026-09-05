@@ -609,7 +609,6 @@ def build_agent(
     tools: list[BaseTool] | None = None,
     system_prompt: str = "",
     prompt_renderer: Callable[[], str] | None = None,
-    timeout: int = 120,
 ) -> FunctionCallingAgentWorkflow:
     """Build the function calling agent workflow with the configured LLM.
 
@@ -624,7 +623,7 @@ def build_agent(
         tools=tools or [],
         system_prompt=system_prompt,
         prompt_renderer=prompt_renderer,
-        timeout=timeout,
+        timeout=settings.run_timeout or None,
         memory_token_limit=settings.memory_token_limit,
         tool_round_limit=settings.tool_round_limit,
     )
