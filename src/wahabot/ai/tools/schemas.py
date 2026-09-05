@@ -130,6 +130,17 @@ class ForwardMessageSchema(BaseModel):
     chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
 
 
+class ResolveChatSchema(BaseModel):
+    """Resolve a person/group name to WhatsApp chat JIDs."""
+
+    name: str = Field(
+        description=(
+            "The person or group name to resolve, e.g. `Familia` or `Ana`. "
+            "Matched case-insensitively against chat and contact names."
+        ),
+    )
+
+
 class WebSearchSchema(BaseModel):
     """Search the web via the webserp metasearch CLI."""
 

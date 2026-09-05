@@ -24,6 +24,7 @@ from wahabot.ai.tools.schemas import (
     ForwardMessageSchema,
     GetChatSchema,
     ReactToMessageSchema,
+    ResolveChatSchema,
     SearchMessagesSchema,
     SendImageSchema,
     SendMessageSchema,
@@ -38,7 +39,9 @@ __all__ = [
     "get_chat",
     "participant_jid",
     "react_to_message",
+    "resolve_chat",
     "roster_entries",
+    "search_matches",
     "search_messages",
     "send_image",
     "send_message",
@@ -563,6 +566,77 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             "else the current one."
         ),
     )
+
+
+def resolve_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+    """Build a tool that resolves a person/group name to chat JIDs.
+
+    The model knows chats by name ("send it to the group Familia") but
+    WAHA speaks JIDs. Fetches the chat list (contacts only when no chat
+    matches), matches case-insensitively — exact name first, then
+    substring — and returns up to ``_RESOLVE_CHAT_CANDIDATES`` matches
+    for the model to pick from.
+    """
+    session = target.get("session", "")
+
+    def resolve_chat_fn(name: str = "") -> str:
+        """Resolve a person or group name to chat JIDs.
+
+        Args:
+            name: The person or group name to look up.
+        """
+        if not session:
+            return error("no active conversation context")
+        if not name.strip():
+            return error("name is required")
+        matches: list[dict[str, Any]] = []
+        try:
+            chats = waha.list_chats(session)
+            matches = search_matches(chats, name)
+            if not matches:
+                contacts = waha.list_contacts(session)
+                matches = search_matches(contacts, name)
+        except Exception as exc:
+            return error(f"could not search chats: {exc}")
+        if not matches:
+            return error(f"no chat or contact named like {name!r}")
+        return ok(name=name, matches=matches)
+
+    return FunctionTool.from_defaults(
+        fn=resolve_chat_fn,
+        fn_schema=ResolveChatSchema,
+        name="resolve_chat",
+        description=(
+            "Resolve a person or group NAME to WhatsApp chat JIDs. "
+            "Returns a JSON envelope with `matches` (up to 5, each "
+            "`{id, name}`): exact names rank first, then substring "
+            "matches. Pick the right JID and pass it as `chat` to "
+            "send_message/send_image/forward_message. When several "
+            "match, choose the closest and mention which you picked."
+        ),
+    )
+
+
+#: How many name candidates the tool returns, to keep the envelope small.
+_RESOLVE_CHAT_CANDIDATES = 5
+
+
+def search_matches(entries: list[dict[str, Any]], name: str) -> list[dict[str, Any]]:
+    """Chat/contact entries whose name matches *name*, best first.
+
+    Exact (case-insensitive) name matches come first, then substring
+    matches; each keeps only its ``id`` and ``name``. The list is capped
+    at ``_RESOLVE_CHAT_CANDIDATES``.
+    """
+    needle = name.casefold()
+    pairs = [
+        {"id": str(e.get("id", "")), "name": str(e.get("name", ""))}
+        for e in entries
+        if e.get("id")
+    ]
+    exact = [p for p in pairs if p["name"].casefold() == needle]
+    partial = [p for p in pairs if needle in p["name"].casefold() and p not in exact]
+    return (exact + partial)[:_RESOLVE_CHAT_CANDIDATES]
 
 
 def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:

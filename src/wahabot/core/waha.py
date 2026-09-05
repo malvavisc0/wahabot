@@ -76,6 +76,38 @@ class WahaClient:
         response.raise_for_status()
         return response.json()
 
+    def get_session(self, session: str) -> dict[str, Any]:
+        """Fetch session info including its status — GET /api/sessions/{session}.
+
+        The status field is the WAHA ``SessionStatus`` enum (``STOPPED``,
+        ``STARTING``, ``SCAN_QR_CODE``, ``PASSKEY_REQUIRED``,
+        ``PASSKEY_CONFIRMATION_REQUIRED``, ``WORKING``, ``FAILED``); only
+        ``WORKING`` means the session can send and receive.
+        """
+        response = self._client.get(f"{API_PREFIX}/sessions/{session}")
+        response.raise_for_status()
+        return response.json()
+
+    def list_chats(self, session: str, limit: int = 200) -> list[dict[str, Any]]:
+        """All chats (id + name), newest conversation first.
+
+        WAHA ``GET /api/{session}/chats``; sorted by conversation
+        timestamp descending (the endpoint default), capped at *limit*.
+        """
+        response = self._client.get(
+            f"{API_PREFIX}/{session}/chats", params={"limit": limit}
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def list_contacts(self, session: str, limit: int = 500) -> list[dict[str, Any]]:
+        """All contacts (id + name) — WAHA ``GET /api/contacts/all``."""
+        response = self._client.get(
+            f"{API_PREFIX}/contacts/all", params={"session": session, "limit": limit}
+        )
+        response.raise_for_status()
+        return response.json()
+
     def get_message(self, session: str, chat_id: str, message_id: str) -> dict[str, Any]:
         """Fetch a single message by its serialized id, raising for HTTP errors."""
         segment = quote(chat_id, safe="")

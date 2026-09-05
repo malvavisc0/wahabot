@@ -1,5 +1,7 @@
 """CLI entrypoints and commands for wahabot."""
 
+import hashlib
+import hmac
 import json
 import platform
 from importlib.metadata import PackageNotFoundError
@@ -17,11 +19,13 @@ from rich.table import Table
 from rich.text import Text
 
 from wahabot.ai.context import render_system_prompt
+from wahabot.commands import build_command_event, register_command_handler
 from wahabot.core.access import load_session_config
 from wahabot.core.waha import WahaClient
-from wahabot.handlers import register_agent_handler
+from wahabot.handlers import agent_lock, append_to_memory, register_agent_handler
 from wahabot.reactions import register_reaction_handler
 from wahabot.settings import Settings, get_settings, setup_logging
+from wahabot.status import register_session_status_handler, seed_health
 
 app = typer.Typer(
     name="wahabot",
@@ -110,13 +114,36 @@ def config() -> None:
 _SESSION_TEMPLATE: dict[str, object] = {
     "whitelist": [],
     "blacklist": [],
-    "goal": "",
+    "goal": "Be a helpful, concise, and friendly assistant in WhatsApp chats.",
     "system_prompt": (
         "You are {{bot_name}}, texting on WhatsApp. "
-        "Today is {{date}}. Current time {{time}} ({{tz}})."
+        "Today is {{date}}. Current time {{time}} ({{tz}}).\n"
+        "\n"
+        "Each message arrives as `[Sender] text`, plus bracketed "
+        "metadata — never repeat it in replies. "
+        '`[reaction X from Sender to your message: "..."]` means '
+        "someone reacted to something you said: context only, never "
+        "answer it directly.\n"
+        "\n"
+        "## Operator commands\n"
+        "\n"
+        "Turns starting with `[operator command]` come from the bot's "
+        "operator, not from a chat participant. Rules change:\n"
+        "\n"
+        "- Do what the instruction says — that IS the task; the usual "
+        "stay_silent restraint does not apply.\n"
+        "- The run has no chat of its own: deliver results with "
+        "`send_message(chat=…)` to the target the instruction names.\n"
+        "- Resolve people/group names to JIDs with `resolve_chat`; if it "
+        "returns several candidates, pick the closest and say which you "
+        "picked.\n"
+        "\n"
+        "You can reach chats beyond the current one: resolve a person or "
+        "group name with `resolve_chat`, then pass the JID as `chat` to "
+        "`send_message`, `send_image` or `forward_message`."
     ),
-    "bot_name": None,
-    "bot_mention_regex": None,
+    "bot_name": "kAI",
+    "bot_mention_regex": "(?i)(?<![a-z@])@?k[aā]i(?![a-z])",
     "group_participation": "mentioned",
 }
 
@@ -261,8 +288,16 @@ def serve(
         raise typer.BadParameter(message)
     waha = WahaClient(base_url=settings.waha_url, api_key=settings.waha_api_key)
     ensure_session_live(waha, settings)
-    register_agent_handler(settings, waha=waha)
-    register_reaction_handler(waha=waha)
+    seed_health(waha, settings.session)
+    agent, _config_reloader = register_agent_handler(settings, waha=waha)
+    register_reaction_handler(waha=waha, remember=append_to_memory)
+    register_command_handler(
+        settings,
+        waha,
+        agent,
+        agent_lock,
+    )
+    register_session_status_handler(waha, settings.session)
     (settings.journal_dir / settings.session).mkdir(parents=True, exist_ok=True)
     uvicorn.run(
         "wahabot.webhook:app",
@@ -272,6 +307,59 @@ def serve(
         log_config=None,
         http="wahabot.core.protocol:LoggingH11Protocol",
     )
+
+
+@app.command()
+def tell(
+    text: str = typer.Argument(
+        help="Instruction the agent executes as an operator command."
+    ),
+    host: str = typer.Option(
+        None, "--host", "-h", help="Webhook host. [default: WAHABOT_HOST]"
+    ),
+    port: int = typer.Option(
+        None, "--port", "-p", help="Webhook port. [default: WAHABOT_PORT]"
+    ),
+    session: str = typer.Option(
+        None, "--session", "-s", help="WAHA session name. [default: WAHABOT_SESSION]"
+    ),
+) -> None:
+    """Send an operator command to the running agent.
+
+    Posts a signed ``command`` event to the local webhook — the
+    operator channel: not a chat turn, so whitelist/group gating do not
+    apply and no chat's memory is touched. The agent runs with its full
+    toolset on a fresh context and delivers results wherever the
+    instruction says (use `resolve_chat` by name, e.g. "send a summary
+    to the group Familia"). Fire-and-forget: the result lands in
+    WhatsApp, not in this terminal.
+    """
+    settings = get_settings()
+    if session:
+        settings.session = session
+    event = build_command_event(settings.session, text)
+    body = json.dumps(event).encode()
+    signature = hmac.new(
+        settings.webhook_hmac_key.encode(), body, hashlib.sha512
+    ).hexdigest()
+    url = (
+        f"http://{host or settings.host}:{port or settings.port}"
+        f"/api/webhook/{settings.session}"
+    )
+    try:
+        response = httpx.post(
+            url,
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Webhook-Hmac": signature,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise typer.BadParameter(f"Webhook at {url} rejected the event: {exc}") from exc
+    typer.echo("Command delivered; the result lands where the instruction sent it.")
 
 
 def main() -> None:
