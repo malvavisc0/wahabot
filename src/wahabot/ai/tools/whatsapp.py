@@ -748,7 +748,7 @@ def search_matches(entries: list[dict[str, Any]], name: str) -> list[dict[str, A
     """
     needle = name.casefold()
     pairs = [
-        {"id": str(e.get("id", "")), "name": str(e.get("name", ""))}
+        {"id": jid_string(e.get("id", "")), "name": str(e.get("name", ""))}
         for e in entries
         if e.get("id")
     ]
