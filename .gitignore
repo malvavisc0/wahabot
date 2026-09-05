@@ -27,3 +27,7 @@ data/
 
 # OS
 .DS_Store
+
+# Local working files (not for the repo)
+docs/plans/
+scripts/
