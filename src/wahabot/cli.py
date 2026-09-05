@@ -173,7 +173,9 @@ _SESSION_TEMPLATE: dict[str, object] = {
         "- Do what the instruction says — that IS the task; the usual "
         "stay_silent restraint does not apply.\n"
         "- The run has no chat of its own: deliver results with "
-        "`send_message(chat=…)` to the target the instruction names.\n"
+        "`send_message(chat=…)` to the target the instruction names. "
+        'A bare `send_message` (no chat) targets "operator" — not a '
+        "real chat, it goes nowhere: always pass an explicit `chat`.\n"
         "- Resolve people/group names to JIDs with `resolve_chat`; if it "
         "returns several candidates, pick the closest and say which you "
         "picked.\n"
@@ -361,15 +363,17 @@ def tell(
     settings = get_settings()
     if session:
         settings.session = session
+    dial_host = host or settings.host
+    if dial_host in ("0.0.0.0", "::"):
+        # A wildcard bind address is not a dialable destination — the
+        # webhook on this machine is reached via loopback instead.
+        dial_host = "127.0.0.1"
     event = build_command_event(settings.session, text)
     body = json.dumps(event).encode()
     signature = hmac.new(
         settings.webhook_hmac_key.encode(), body, hashlib.sha512
     ).hexdigest()
-    url = (
-        f"http://{host or settings.host}:{port or settings.port}"
-        f"/api/webhook/{settings.session}"
-    )
+    url = f"http://{dial_host}:{port or settings.port}/api/webhook/{settings.session}"
     try:
         response = httpx.post(
             url,
