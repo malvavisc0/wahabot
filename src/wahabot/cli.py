@@ -57,14 +57,23 @@ def _redact_key(key: str) -> bool:
 
 
 def _feature_flags(settings: Settings) -> list[str]:
-    """Human-readable toggles derived from the loaded settings."""
+    """Human-readable feature toggles derived from the loaded settings.
+
+    Enabled features carry their key parameter; disabled ones are named
+    ``no-<feature>`` so the banner answers "is X on?" at one glance.
+    """
     flags = [
         "vision" if settings.vision else "no-vision",
         "shell" if settings.shell_tool else "no-shell",
-        "transcribe" if settings.transcribe_url else "no-transcribe",
+        (
+            f"transcribe({settings.transcribe_language})"
+            if settings.transcribe_url
+            else "no-transcribe"
+        ),
+        "langfuse"
+        if settings.langfuse_public_key and settings.langfuse_secret_key
+        else "no-langfuse",
     ]
-    if settings.langfuse_public_key and settings.langfuse_secret_key:
-        flags.append("langfuse")
     return flags
 
 
@@ -92,6 +101,8 @@ def _log_startup_banner(
         "Features: {features}",
         features=", ".join(_feature_flags(settings)),
     )
+    if settings.transcribe_url:
+        logger.info("Transcription: {url}", url=settings.transcribe_url)
     logger.info(
         "Webhook: http://{host}:{port}/api/webhook/{session}",
         host=host or settings.host,
