@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 from typing import Any, cast
 
+import openai
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.workflow import Context
@@ -474,6 +475,18 @@ def register_agent_handler(
             )
             await asyncio.to_thread(
                 waha.send_text, event.session, chat_id, reply, message_id
+            )
+        except openai.APIConnectionError as exc:
+            # Provider unreachable — a transient outage, not a bug. The
+            # seen marker is dropped so WAHA's redelivery retries, but
+            # there's nothing to debug: log a one-line warning.
+            forget_seen(message_id)
+            logger.warning(
+                "LLM endpoint unreachable for message {id} in {chat_id}; dropping "
+                "seen marker so redelivery retries: {exc}",
+                id=message_id,
+                chat_id=chat_id,
+                exc=exc,
             )
         except Exception:
             # Allow WAHA's redelivery of this message to be reprocessed.
