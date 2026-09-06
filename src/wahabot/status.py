@@ -10,6 +10,7 @@ session is down, and notifies the operator once per transition.
 """
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
@@ -21,19 +22,26 @@ from wahabot.webhook import on_session_status
 #: ``WORKING`` (and nothing else) is healthy.
 HEALTHY_STATUS = "WORKING"
 
-_session_healthy: bool = True
-_notification_target: dict[str, str] = {}
+
+@dataclass
+class SessionState:
+    """Runtime health of the WAHA session and the operator alert target."""
+
+    healthy: bool = True
+    operator_jid: str = ""
+
+
+state = SessionState()
 
 
 def session_healthy() -> bool:
     """True while the WAHA session is WORKING."""
-    return _session_healthy
+    return state.healthy
 
 
 def set_session_health(status: str) -> None:
     """Update the health flag from a session status string."""
-    global _session_healthy
-    _session_healthy = status == HEALTHY_STATUS
+    state.healthy = status == HEALTHY_STATUS
 
 
 def seed_health(waha: WahaClient, session: str) -> str:
@@ -57,17 +65,17 @@ def seed_health(waha: WahaClient, session: str) -> str:
         return HEALTHY_STATUS
     status = str(info.get("status") or HEALTHY_STATUS)
     set_session_health(status)
-    if not _session_healthy:
+    if not state.healthy:
         logger.warning(
             "WAHA session {session} starts in {status} — bot muted",
             session=session,
             status=status,
         )
-    _capture_operator_target(waha, session)
+    capture_operator_target(waha, session)
     return status
 
 
-def _capture_operator_target(waha: WahaClient, session: str) -> None:
+def capture_operator_target(waha: WahaClient, session: str) -> None:
     """Remember the bot's own JID as the operator-notification target."""
     try:
         me = waha.get_me(session)
@@ -76,7 +84,7 @@ def _capture_operator_target(waha: WahaClient, session: str) -> None:
         return
     own = str(me.get("id") or "")
     if own:
-        _notification_target["me"] = own
+        state.operator_jid = own
 
 
 def register_session_status_handler(waha: WahaClient, session: str) -> None:
@@ -113,7 +121,7 @@ async def notify_operator(
     the session may be dead — the very thing being reported — so a
     failed send is logged and swallowed; the loud log line is the floor.
     """
-    me = _notification_target.get("me")
+    me = state.operator_jid
     if not me:
         return
     icon = "🔵" if kind == "up" else "🟠"

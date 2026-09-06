@@ -482,8 +482,7 @@ def register_agent_handler(
             # there's nothing to debug: log a one-line warning.
             forget_seen(message_id)
             logger.warning(
-                "LLM endpoint unreachable for message {id} in {chat_id}; dropping "
-                "seen marker so redelivery retries: {exc}",
+                "LLM endpoint unreachable for {id} in {chat_id}; dropped marker: {exc}",
                 id=message_id,
                 chat_id=chat_id,
                 exc=exc,

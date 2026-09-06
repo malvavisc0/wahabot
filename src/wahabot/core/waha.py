@@ -32,6 +32,26 @@ def message_matches(message: dict[str, Any], needle: str) -> bool:
     return any(needle in field.casefold() for field in message_fields(message))
 
 
+def response_json(response: httpx.Response) -> Any:
+    """The response JSON, or a clean HTTPError on an empty/non-JSON body.
+
+    Some WAHA endpoints answer certain conditions (a dead session)
+    with HTTP 200 and an empty body instead of an error status, so
+    ``response.json()`` alone would raise a raw ``JSONDecodeError``
+    that callers (e.g. ``ensure_session_live``) don't expect. Normalize
+    that to the same ``httpx.HTTPError`` callers already handle.
+    """
+    try:
+        return response.json()
+    except (json.JSONDecodeError, ValueError) as exc:
+        err = httpx.HTTPStatusError(
+            message=f"Empty or non-JSON response from {response.url}",
+            request=response.request,
+            response=response,
+        )
+        raise err from exc
+
+
 class WahaClient:
     """Minimal WAHA API client (see https://waha.devlike.pro/docs/how-to/send-messages)."""
 
@@ -40,26 +60,6 @@ class WahaClient:
         if api_key:
             headers["X-Api-Key"] = api_key
         self._client = httpx.Client(base_url=base_url, headers=headers, timeout=10)
-
-    @staticmethod
-    def _json(response: httpx.Response) -> Any:
-        """The response JSON as a dict, or a clean HTTPError on an empty body.
-
-        Some WAHA endpoints answer certain conditions (a dead session)
-        with HTTP 200 and an empty body instead of an error status, so
-        ``response.json()`` alone would raise a raw ``JSONDecodeError``
-        that callers (e.g. ``ensure_session_live``) don't expect. Normalize
-        that to the same ``httpx.HTTPError`` callers already handle.
-        """
-        try:
-            return response.json()
-        except (json.JSONDecodeError, ValueError) as exc:
-            err = httpx.HTTPStatusError(
-                message=f"Empty or non-JSON response from {response.url}",
-                request=response.request,
-                response=response,
-            )
-            raise err from exc
 
     def send_text(
         self,
@@ -95,7 +95,7 @@ class WahaClient:
         """Fetch the logged-in user's info; 404s when the session is dead."""
         response = self._client.get(f"{API_PREFIX}/sessions/{session}/me")
         response.raise_for_status()
-        return self._json(response)
+        return response_json(response)
 
     def get_session(self, session: str) -> dict[str, Any]:
         """Fetch session info including its status — GET /api/sessions/{session}.
@@ -107,7 +107,7 @@ class WahaClient:
         """
         response = self._client.get(f"{API_PREFIX}/sessions/{session}")
         response.raise_for_status()
-        return self._json(response)
+        return response_json(response)
 
     def list_chats(self, session: str, limit: int = 200) -> list[dict[str, Any]]:
         """All chats (id + name), newest conversation first.
@@ -119,7 +119,7 @@ class WahaClient:
             f"{API_PREFIX}/{session}/chats", params={"limit": limit}
         )
         response.raise_for_status()
-        return self._json(response)
+        return response_json(response)
 
     def list_contacts(self, session: str, limit: int = 500) -> list[dict[str, Any]]:
         """All contacts (id + name) — WAHA ``GET /api/contacts/all``."""
@@ -127,7 +127,7 @@ class WahaClient:
             f"{API_PREFIX}/contacts/all", params={"session": session, "limit": limit}
         )
         response.raise_for_status()
-        return self._json(response)
+        return response_json(response)
 
     def get_message(self, session: str, chat_id: str, message_id: str) -> dict[str, Any]:
         """Fetch a single message by its serialized id, raising for HTTP errors."""
@@ -138,7 +138,7 @@ class WahaClient:
             params={"downloadMedia": False},
         )
         response.raise_for_status()
-        return self._json(response)
+        return response_json(response)
 
     def download_media(self, url: str, max_bytes: int | None = None) -> bytes:
         """Download a message's media file, raising for HTTP errors.
@@ -218,7 +218,7 @@ class WahaClient:
             params={"limit": limit, "downloadMedia": False},
         )
         response.raise_for_status()
-        return self._json(response)
+        return response_json(response)
 
     def get_chat_overview(
         self,
@@ -232,7 +232,7 @@ class WahaClient:
         }
         response = self._client.post(f"{API_PREFIX}/{session}/chats/overview", json=body)
         response.raise_for_status()
-        items = self._json(response)
+        items = response_json(response)
         return items[0] if isinstance(items, list) and items else {}
 
     def search_messages(
@@ -256,7 +256,7 @@ class WahaClient:
         }
         response = self._client.get(f"{API_PREFIX}/messages", params=params)
         response.raise_for_status()
-        messages = self._json(response)
+        messages = response_json(response)
         needle = query.casefold()
         return [m for m in messages if message_matches(m, needle)]
 
