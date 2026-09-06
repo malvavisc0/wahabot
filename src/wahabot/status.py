@@ -92,16 +92,21 @@ def register_session_status_handler(waha: WahaClient, session: str) -> None:
         if status == HEALTHY_STATUS:
             if not was:
                 logger.info("WAHA session recovered")
-                await notify_operator(waha, session, "recovered — back online")
+                await notify_operator(waha, session, "recovered — back online", kind="up")
             return
         if was:
             logger.warning("WAHA session status: {status}", status=status)
             await notify_operator(
-                waha, session, f"session is {status} — bot muted, re-link the phone."
+                waha,
+                session,
+                f"session is {status} — bot muted, re-link the phone.",
+                kind="down",
             )
 
 
-async def notify_operator(waha: WahaClient, session: str, message: str) -> None:
+async def notify_operator(
+    waha: WahaClient, session: str, message: str, kind: str = "down"
+) -> None:
     """Best-effort WhatsApp message to the bot's own account.
 
     The operator reads it in the "Message yourself" chat. Fails soft:
@@ -111,7 +116,8 @@ async def notify_operator(waha: WahaClient, session: str, message: str) -> None:
     me = _notification_target.get("me")
     if not me:
         return
-    text = f"⚠️ wahabot: WAHA session '{session}' {message}"
+    icon = "🔵" if kind == "up" else "🟠"
+    text = f"{icon} wahabot: WAHA session '{session}' {message}"
     try:
         await asyncio.to_thread(waha.send_text, session, me, text)
     except Exception as exc:
