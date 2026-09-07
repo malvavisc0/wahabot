@@ -340,8 +340,9 @@ async def handle_message(
     if image is not None:
         attached.append(image)
     all_images = collect_images(attached, settings, text)
-    if all_images and not body:
-        text = f"{tag} {image_noun([image_caption(img) for img in all_images])}".strip()
+    if all_images:
+        marker = image_noun([image_caption(img) for img in all_images])
+        text = f"{text} {marker}".strip()
     names = participant_names(waha, event.session, chat_id)
     user_msg = text + message_id_note(event)
     user_msg += reply_context_section(message_replies_to(event), names)

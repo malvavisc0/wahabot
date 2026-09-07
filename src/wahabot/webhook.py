@@ -90,8 +90,8 @@ async def waha_webhook(
 
     body = await request.body()
     verify_hmac(settings, body, x_webhook_hmac, x_webhook_hmac_algorithm)
-    save_event(settings.journal_dir, session, body)
     event = parse_event(session, body)
+    save_event(settings.journal_dir, session, body)
     log_event(event)
     if event.event == "command":
         await dispatch_command(event)
