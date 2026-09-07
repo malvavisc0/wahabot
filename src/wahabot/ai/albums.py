@@ -10,7 +10,6 @@ image never hangs the album (or leaks the buffer) forever.
 """
 
 import asyncio
-import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,7 +30,6 @@ class AlbumBuffer:
     container: WahaEvent
     expected: int
     images: list[WahaEvent] = field(default_factory=list)
-    opened_at: float = field(default_factory=time.monotonic)
 
 
 #: Open album buffers, keyed by (session, chat_id) — one album per chat
@@ -116,11 +114,6 @@ def add_album_image(event: WahaEvent) -> bool:
         _albums.pop(album_chat_key(event), None)
         _complete(buffer)
     return True
-
-
-def pending_album(event: WahaEvent) -> bool:
-    """True when this event's chat has an open album buffer."""
-    return album_chat_key(event) in _albums
 
 
 async def _flush_later(key: tuple[str, str]) -> None:
