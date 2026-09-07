@@ -105,9 +105,10 @@ Per chat, the bot keeps a rolling conversation in memory:
   their results, and what the bot ultimately said — is stored in a
   per-chat buffer, trimmed to the oldest-free token budget
   (`WAHABOT_MEMORY_TOKEN_LIMIT`, default 8000 tokens). A delivered
-  `send_message` pair (empty assistant tool-call + result envelope) is
+  delivery-tool pair (empty assistant tool-call + result envelope) is
   collapsed at run end into one plain assistant message holding the
-  sent text — the retained history reads like the chat, not like the
+  delivered content (sent text, reaction emoji, or a media/forward
+  marker) — the retained history reads like the chat, not like the
   API scaffolding that produced it.
 - The **system prompt is never in the buffer** — it is re-rendered
   from the session config at the start of every run (goal, role,

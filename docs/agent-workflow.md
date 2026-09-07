@@ -565,12 +565,15 @@ and fall back to kwargs, or it will silently see zero.
   defense, `handle_message` drops replies that merely narrate a silence
   (`is_silence_narration`).
 - A final text produced *after* a delivery tool succeeded is dropped,
-  not stored or returned: small models pattern-complete their own last
-  assistant text at low temperature, so the "answer" after
-  `send_message` **or `react_to_message`** is usually a stale repeat,
-  not a new reply. The wrap-up call after a completed delivery is
-  subject to the same drop. Research runs (no delivery tool) keep
-  their final answer.
+  not stored or returned: it never reached the chat (the one-delivery
+  latch already fired), and memory mirrors the chat. What the chat did
+  see is preserved by collapsing the delivery tool group into one plain
+  assistant message holding the delivered content — the sent text for
+  `send_message`, the emoji for `react_to_message`, a bracketed marker
+  (with caption) for `send_image`/`send_file`/`forward_message` — so the
+  model keeps sight of what it already said instead of re-answering.
+  The wrap-up call after a completed delivery is subject to the same
+  drop. Research runs (no delivery tool) keep their final answer.
 - Two structural loop breaks bound a degenerate run before the round
   limit: **a repeated identical tool call ends the run immediately**
   (consecutive rounds re-issuing the same call name+arguments mean the

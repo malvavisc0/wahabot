@@ -17,6 +17,7 @@ from llama_index.core.base.llms.types import (
     ChatMessage,
     ChatResponse,
     MessageRole,
+    TextBlock,
     ToolCallBlock,
 )
 from llama_index.core.llms.function_calling import FunctionCallingLLM
@@ -116,22 +117,33 @@ def tool_call_names(message: ChatMessage) -> list[str]:
 
     In-memory llama-index carries calls as ``ToolCallBlock`` blocks; the
     OpenAI wire shape (``additional_kwargs["tool_calls"]``) appears in
-    serialized histories. Both are read.
+    serialized histories. Blocks take precedence — the kwargs list is
+    only consulted when no blocks are present, mirroring llama-index's
+    own serialization.
     """
-    names = [b.tool_name for b in message.blocks if isinstance(b, ToolCallBlock)]
+    if names := [b.tool_name for b in message.blocks if isinstance(b, ToolCallBlock)]:
+        return names
     calls: Any = message.additional_kwargs.get("tool_calls") or []
-    for call in calls:
-        if isinstance(call, dict):
-            entry: dict[str, Any] = call
-            names.append(str(entry.get("function", {}).get("name")))
-    return names
+    return [name for call in calls if (name := wire_call_name(call))]
+
+
+def wire_call_name(call: Any) -> str:
+    """The function name of a wire-shaped tool call dict, else ""."""
+    if not isinstance(call, dict):
+        return ""
+    entry = cast(dict[str, Any], call)
+    function = entry.get("function")
+    if not isinstance(function, dict):
+        return ""
+    return str(cast(dict[str, Any], function).get("name", ""))
 
 
 def delivered_text(message: ChatMessage) -> str:
-    """The sent text of an ``ok`` send_message tool result, else "".
+    """The delivered content of an ``ok`` delivery tool result, else "".
 
-    A failed send left nothing in the chat, so its pair stays as the
-    model's record of what went wrong — only a delivered text collapses.
+    A failed delivery left nothing in the chat, so its pair stays as
+    the model's record of what went wrong — only a delivered result
+    collapses.
     """
     if message.role != MessageRole.TOOL:
         return ""
@@ -139,38 +151,196 @@ def delivered_text(message: ChatMessage) -> str:
         envelope = json.loads(str(message.content or "{}"))
     except json.JSONDecodeError:
         return ""
-    if envelope.get("ok") and envelope.get("text"):
-        return str(envelope["text"])
+    if not envelope.get("ok"):
+        return ""
+    return delivery_content(envelope)
+
+
+def delivery_content(envelope: dict[str, Any]) -> str:
+    """The chat-visible content of a delivered tool envelope, else "".
+
+    Text sends keep their full text; media/file sends and forwards keep
+    a short bracketed marker (with the caption when present); reactions
+    keep their emoji.
+    """
+    if text := envelope.get("text"):
+        return str(text)
+    if "reaction" in envelope:
+        return (
+            f"[removed reaction from {envelope.get('message_id')}]"
+            if envelope.get("removed")
+            else str(envelope["reaction"])
+        )
+    caption = str(envelope.get("caption") or "").strip()
+    if url := envelope.get("url"):
+        return f"[media: {url}] {caption}".strip()
+    if mimetype := envelope.get("mimetype"):
+        return f"[file: {mimetype}] {caption}".strip()
+    if message_id := envelope.get("message_id"):
+        return f"[forwarded {message_id}]"
     return ""
 
 
-def send_group_bounds(messages: list[ChatMessage]) -> tuple[int, str] | None:
-    """The index and text of the last ``send_message`` tool group, if any.
+def tool_call_ids(message: ChatMessage) -> list[str]:
+    """All tool-call ids of an assistant message (both carriers).
 
-    A group is an assistant message calling ``send_message`` followed by
-    its ``tool`` result message.
+    Blocks (modern path) take precedence over
+    ``additional_kwargs["tool_calls"]`` (legacy/streaming path), mirroring
+    :func:`tool_call_names` and llama-index's wire serialization.
     """
-    for i in range(len(messages) - 2, -1, -1):
-        if "send_message" not in tool_call_names(messages[i]):
+    if blocks := [block for block in message.blocks if isinstance(block, ToolCallBlock)]:
+        return [str(block.tool_call_id) for block in blocks]
+    return [
+        call_id
+        for call in message.additional_kwargs.get("tool_calls") or []
+        if (call_id := wire_call_id(call))
+    ]
+
+
+def delivery_call_ids(message: ChatMessage) -> list[str]:
+    """Tool-call ids of an assistant message's delivery calls only."""
+    delivery = set(tool_call_names(message)) & DELIVERY_TOOLS
+    if blocks := [
+        block
+        for block in message.blocks
+        if isinstance(block, ToolCallBlock) and block.tool_name in delivery
+    ]:
+        return [str(block.tool_call_id) for block in blocks]
+    return [
+        call_id
+        for call in message.additional_kwargs.get("tool_calls") or []
+        if wire_call_name(call) in delivery and (call_id := wire_call_id(call))
+    ]
+
+
+def wire_call_id(call: Any) -> str:
+    """The id of a wire-shaped tool call dict, else ""."""
+    if not isinstance(call, dict):
+        return ""
+    return str(cast(dict[str, Any], call).get("id", ""))
+
+
+def tool_result_indices(messages: list[ChatMessage]) -> dict[str, int]:
+    """Tool-call id → index of its result message, across the whole history."""
+    return {
+        str(message.additional_kwargs.get("tool_call_id", "")): j
+        for j, message in enumerate(messages)
+        if message.role == MessageRole.TOOL
+    }
+
+
+def batch_closes_history(all_ids: list[str], results: dict[str, int], total: int) -> bool:
+    """True when every call's result exists and together they end the history.
+
+    A batch with unfulfilled calls is left for
+    :func:`sanitize_chat_history` to drop as a unit; a batch followed by
+    more conversation belongs to an earlier run, already collapsed at
+    that run's end.
+    """
+    indices = sorted(results[call_id] for call_id in all_ids if call_id in results)
+    return len(indices) == len(all_ids) and indices == list(
+        range(total - len(indices), total)
+    )
+
+
+def delivered_texts(
+    call_ids: list[str], results: dict[str, int], messages: list[ChatMessage]
+) -> list[str]:
+    """The delivered texts of *call_ids*' results (skipping failures)."""
+    return [
+        text
+        for call_id in call_ids
+        if call_id in results and (text := delivered_text(messages[results[call_id]]))
+    ]
+
+
+def delivery_group_bounds(
+    messages: list[ChatMessage],
+) -> tuple[int, list[int], str] | None:
+    """(assistant index, result indices, delivered text) of the last delivery group.
+
+    A group is an assistant message whose tool calls include a delivery
+    plus the ``tool`` result messages of its *delivery* calls — located
+    by tool-call id, not position, so a parallel batch mixing delivery
+    and research calls collapses correctly (research calls and their
+    results stay). Only a group whose *whole* tool batch closes the
+    message list qualifies.
+    """
+    results = tool_result_indices(messages)
+    for i in range(len(messages) - 1, -1, -1):
+        all_ids = tool_call_ids(messages[i])
+        if not all_ids or not set(tool_call_names(messages[i])) & DELIVERY_TOOLS:
             continue
-        text = delivered_text(messages[i + 1])
-        if text:
-            return i, text
+        if not batch_closes_history(all_ids, results, len(messages)):
+            return None
+        call_ids = delivery_call_ids(messages[i])
+        texts = delivered_texts(call_ids, results, messages)
+        if not texts:
+            return None
+        indices = sorted(results[c] for c in call_ids if c in results)
+        return i, indices, " ".join(texts)
     return None
 
 
 def collapse_send_group(messages: list[ChatMessage]) -> list[ChatMessage] | None:
-    """*messages* with the last send group replaced by a plain assistant text.
+    """*messages* with the last delivery group folded into the assistant turn.
 
-    Returns None when there is nothing to collapse.
+    The delivery calls are stripped from the assistant message and their
+    results removed; the delivered text becomes the message's content,
+    so the model's self-history records what the chat saw. A parallel
+    batch keeps its research calls (on the same message, so the history
+    stays API-valid and dedup-safe). Returns None when there is nothing
+    to collapse.
     """
-    bounds = send_group_bounds(messages)
+    bounds = delivery_group_bounds(messages)
     if bounds is None:
         return None
-    i, text = bounds
-    collapsed = list(messages)
-    collapsed[i : i + 2] = [ChatMessage(role=MessageRole.ASSISTANT, content=text)]
+    i, result_indices, text = bounds
+    collapsed = [m for j, m in enumerate(messages) if j not in {i, *result_indices}]
+    collapsed.insert(i, strip_delivery_calls(messages[i], text))
     return collapsed
+
+
+def strip_delivery_calls(message: ChatMessage, text: str) -> ChatMessage:
+    """*message* without its delivery calls, carrying the delivered text.
+
+    A parallel batch keeps its research calls (blocks or kwargs, whichever
+    the message carries) with the delivered text as content; a
+    delivery-only message becomes the plain assistant text.
+    """
+    if any(isinstance(block, ToolCallBlock) for block in message.blocks):
+        return strip_delivery_blocks(message, text)
+    return strip_delivery_kwargs(message, text)
+
+
+def strip_delivery_blocks(message: ChatMessage, text: str) -> ChatMessage:
+    """Block-carried *message* without its delivery ``ToolCallBlock``s."""
+    remaining = [
+        block
+        for block in message.blocks
+        if isinstance(block, ToolCallBlock) and block.tool_name not in DELIVERY_TOOLS
+    ]
+    if not remaining:
+        return ChatMessage(role=MessageRole.ASSISTANT, content=text)
+    return ChatMessage(
+        role=MessageRole.ASSISTANT, blocks=[TextBlock(text=text), *remaining]
+    )
+
+
+def strip_delivery_kwargs(message: ChatMessage, text: str) -> ChatMessage:
+    """Kwargs-carried *message* without its delivery ``tool_calls``."""
+    remaining = [
+        call
+        for call in message.additional_kwargs.get("tool_calls") or []
+        if wire_call_name(call) and wire_call_name(call) not in DELIVERY_TOOLS
+    ]
+    if not remaining:
+        return ChatMessage(role=MessageRole.ASSISTANT, content=text)
+    return ChatMessage(
+        role=MessageRole.ASSISTANT,
+        content=text,
+        additional_kwargs={**message.additional_kwargs, "tool_calls": remaining},
+    )
 
 
 def token_count(msg: ChatMessage) -> int:
@@ -345,13 +515,14 @@ class FunctionCallingAgentWorkflow(Workflow):
         never carries empty ``assistant`` turns that some
         OpenAI-compatible providers reject outright.
 
-        A final text produced *after* a delivery tool succeeded is
-        usually the model repeating an earlier reply (small models
-        pattern-complete their own last assistant text at low
-        temperature) rather than a new answer: the reply already went
-        out via the tool. Such a text is neither stored nor returned —
-        the run closes empty. Research runs (no delivery tool
-        involved) keep their final answer untouched.
+        A final text produced *after* a delivery tool succeeded never
+        reached the chat (the one-delivery latch already fired), so it
+        is dropped — neither stored nor returned. What the chat did see
+        (the sent text, the reaction) is preserved by collapsing the
+        delivery tool group into a plain assistant message, so the
+        model's self-history mirrors the chat and it can see what it
+        already said. Research runs (no delivery tool involved) keep
+        their final answer untouched.
         """
         rounds = await self.next_round(ctx)
         chat_history = await self.populated_history(ctx, ev)
@@ -369,10 +540,10 @@ class FunctionCallingAgentWorkflow(Workflow):
         if tool_calls and await self.repeats_tool_call(ctx, tool_calls):
             return self.stopped_response()
         if not tool_calls:
-            response = self.drop_post_delivery_text(response)
-            await self.remember(ctx, response, tool_calls)
+            delivered = self.any_delivery()
+            await self.remember(ctx, response, tool_calls, skip_text=delivered)
             await self.collapse_delivery(ctx)
-            return StopEvent(result=response)
+            return StopEvent(result=self.drop_post_delivery_text(response))
         if self.delivery_complete(tool_calls) or rounds >= self.tool_round_limit:
             # Do not store calls which will not be executed: the chat API
             # requires every advertised call to have a tool response.
@@ -449,26 +620,39 @@ class FunctionCallingAgentWorkflow(Workflow):
         return True
 
     async def remember(
-        self, ctx: Context, response: ChatResponse, tool_calls: list[ToolSelection]
+        self,
+        ctx: Context,
+        response: ChatResponse,
+        tool_calls: list[ToolSelection],
+        *,
+        skip_text: bool = False,
     ) -> None:
-        """Store an assistant response in memory, unless it is empty chatter."""
+        """Store an assistant response in memory, unless it is empty chatter.
+
+        *skip_text* drops a post-delivery final text: it was never sent
+        to the chat, and memory mirrors the chat — storing it would
+        record words nobody saw.
+        """
         memory = await ctx.store.get("memory")
-        if tool_calls or str(response.message.content or "").strip():
+        has_text = bool(str(response.message.content or "").strip())
+        if tool_calls or (has_text and not skip_text):
             await memory.aput(response.message)
         await ctx.store.set("memory", memory)
 
     async def collapse_delivery(self, ctx: Context) -> None:
-        """Replace a delivered ``send_message`` tool group with plain text.
+        """Replace the last delivered tool group with plain assistant text.
 
-        A delivered reply sits in memory as an empty assistant tool-call
-        plus its tool-result envelope — scaffolding the chat API needs
-        mid-loop, but dead weight afterwards (two messages, zero content
-        beyond the text itself). At run end the pair is swapped for one
-        plain assistant message holding the sent text, so the retained
-        history reads like the chat it mirrors (and matches how
-        operator-sent ``fromMe`` messages are stored). The whole group
-        is replaced atomically: a dangling tool call without its result
-        is exactly what :func:`repair_memory` must never find.
+        A delivered reply (or reaction) sits in memory as an empty
+        assistant tool-call plus its tool-result envelope — scaffolding
+        the chat API needs mid-loop, but dead weight afterwards (two
+        messages, zero content beyond the delivery itself). At run end
+        the pair is swapped for one plain assistant message holding the
+        delivered content — the sent text, or a short marker for media,
+        forwards and reactions — so the retained history reads like the
+        chat it mirrors (and matches how operator-sent ``fromMe``
+        messages are stored). The whole group is replaced atomically: a
+        dangling tool call without its result is exactly what
+        :func:`repair_memory` must never find.
         """
         memory = await ctx.store.get("memory")
         messages = await memory.aget_all()
@@ -508,12 +692,13 @@ class FunctionCallingAgentWorkflow(Workflow):
         """Empty *response* when a delivery tool already fired this run.
 
         A final text after ``send_message``/``send_image``/
-        ``forward_message``/``react_to_message`` succeeded is the model
-        repeating an earlier reply (small models pattern-complete their
-        last assistant text at low temperature), not a new answer —
-        dropping it keeps the duplicate out of memory and out of the
-        chat. Research runs (no delivery) keep their final answer; the
-        holder is absent in tests, where nothing was provably delivered.
+        ``forward_message``/``react_to_message`` succeeded was never
+        sent to the chat — the one-delivery latch already fired — so it
+        must not be returned (the handler would send it as a second
+        reply) nor stored in memory (memory mirrors the chat; the
+        delivered text is preserved by ``collapse_delivery`` instead).
+        Research runs (no delivery) pass through untouched; the holder
+        is absent in tests, where nothing was provably delivered.
         """
         if not self.any_delivery() or not str(response.message.content or "").strip():
             return response
