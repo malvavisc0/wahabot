@@ -6,31 +6,30 @@ It hears voice notes. It sees photos and videos. It searches the web, checks sto
 
 ```
 StartEvent ──► prepare_chat_history ──► InputEvent
-                                             │
-                                             ▼
-                                     handle_llm_input
-                                             │
-                   ┌─────────────────────────┴──────────┐
-                   │  no tool calls                     │  tool calls
-                   ▼                                    ▼
-                StopEvent                        handle_tool_calls
-                   │                                    │
-                   │                                    └──► InputEvent (loop)
-                   ▼
-             reply text for the chat
+  user turn into memory,                   │
+  frames stashed for call #1               ▼
+                                   handle_llm_input
+                                           │
+                 ┌─────────────────────────┴──────────┐
+                 │  no tool calls                     │  tool calls
+                 ▼                                    ▼
+              StopEvent ──► reply for the chat   handle_tool_calls ──► InputEvent (next round)
 ```
+
+Brakes on the loop: `stay_silent` ends the run quietly, a repeated tool
+call is never executed, a round limit force-wraps the run, and a hard
+timeout keeps the webhook free. A final text produced after a delivery
+tool already fired is dropped — the chat saw it once, not twice.
 
 ## Giving the model hands
 
-The interesting part isn't calling an LLM — it's what the LLM can *do*.
+An LLM by itself can only talk. wahabot gives it the chat: it can send messages, images and files, react with emoji, forward posts, read back through history, search old messages, and resolve a name to the right person or group. Beyond WhatsApp it searches the web, fetches pages with a real Chrome TLS fingerprint (most sites answer as if a browser asked), looks up stock prices, pulls YouTube transcripts, and — if you opt in — runs shell commands on the host.
 
-wahabot ships **14 tools**: nine WhatsApp tools (send text, send images, send files, react, forward, read recent messages, chat metadata, message search, resolve a name to a chat) plus five external ones (web search, page fetch with Chrome TLS fingerprinting, stock prices, YouTube transcripts, and an opt-in host shell). The model picks the tool, the workflow executes it, feeds the result back, and the model decides whether it needs another round. It stops when it's done — never when a script says so.
+The model picks the tool, the workflow executes it, feeds the result back, and the model decides whether it needs another round. It stops when it's done, not when a script says so.
 
-Every tool answers with a compact JSON envelope — `{"ok": true, ...}` or `{"ok": false, "error": "..."}` — and never raises: a failed lookup comes back as data the model can shrug off or retry. The whole run is capped at 120 s, so a pathological loop can't hold the webhook hostage.
+Every tool answers with a small JSON envelope — `{"ok": true, ...}` or `{"ok": false, "error": "..."}` — and never raises: a failed lookup comes back as data the model can shrug off or retry. The whole run is capped at 120 s, so a pathological loop can't hold the webhook hostage.
 
 ## What it can see and hear
-
-The agent isn't blind, and it isn't deaf:
 
 - **Photos** are downloaded, attached to that turn's LLM call, then discarded — chat memory stays text-only, no megabyte payloads rotting in the rolling buffer.
 - **Voice notes** are transcribed by a WhisperX service (`WAHABOT_TRANSCRIBE_URL`) and arrive as `[voice note] <transcript>` — the bot hears what was said without being asked. Off when the URL is empty.
@@ -65,9 +64,9 @@ quick start, and CLI commands.
 
 `wahabot serve` prints a short banner so one glance tells you what's running:
 version + Python, session name, LLM model/endpoint, memory token ceiling, and
-enabled features (vision / shell / transcription / langfuse). It then logs the
-WAHA session's live identity, the loaded session config summary, tracing status,
-and the tools the agent was built with:
+enabled features (vision / video / shell / transcription / langfuse). It then
+logs the WAHA session's live identity, the loaded session config summary,
+tracing status, and the toolset the agent was built with:
 
 ```
 Info: wahabot 0.2.9 (Python 3.14.6)
@@ -82,9 +81,10 @@ Info: Agent ready with 14 tools: fetch_chat_messages, forward_message, ...
 ```
 
 For a machine-readable dump of every `WAHABOT_*` value (secrets redacted) use
-`uv run wahabot config`. A shell tool and Langfuse only show up when
-`WAHABOT_SHELL_TOOL=true` / `LANGFUSE_*` keys are configured. The `Agent ready`
-line lists every tool the model can call this session.
+`uv run wahabot config`. The shell tool shows up only with
+`WAHABOT_SHELL_TOOL=true`, Langfuse tracing only when the `LANGFUSE_*` keys
+are set, and the `Agent ready` line lists exactly what the model can call
+this session.
 
 ## Observability
 
@@ -101,7 +101,7 @@ The agent workflow lives under `src/wahabot/ai/` as a set of focused modules:
 | `context.py` | Sender tagging, reply-context rendering, `handle_message` entrypoint |
 | `messages.py` | Message classification, `extract_text`, `image_media`, `video_media`, `is_replyable` |
 | `history.py` | `sanitize_chat_history` (repair) + `trim_to_budget` (token budget) |
-| `tools/whatsapp.py` | The nine WhatsApp tools |
+| `tools/whatsapp.py` | WhatsApp actions: send, react, forward, search, resolve chats |
 | `tools/external.py` | Web, finance, YouTube & (opt-in) shell tool builders |
 | `tools/schemas.py` | Pydantic parameter schemas for every tool |
 | `tools/envelope.py` | The unified JSON envelope (`ok` / `error`) every tool returns |
@@ -112,7 +112,7 @@ The agent workflow lives under `src/wahabot/ai/` as a set of focused modules:
 
 Before every LLM call, the chat history passes through two hygiene steps: **repair** (fixes dangling tool calls, orphan messages, trailing user turns that would make the API reject the payload) and **trim** (keeps the newest tail that fits the token budget, treating tool-call groups as atomic).
 
-Memory is keyed by `(session, chat_id)` — each WhatsApp conversation gets its own continuous context. Tool results are stored as `role="tool"` messages so the model can reference them across the loop. Memory is **persisted** to `data/memory/<session>/<chat>.json` at the end of every run, so it survives restarts and LRU evictions; `wahabot forget <chat>` wipes one chat (see `docs/plans/persistent-memory.md`).
+Memory is keyed by `(session, chat_id)` — each WhatsApp conversation gets its own continuous context. Tool results are stored as `role="tool"` messages so the model can reference them across the loop. Memory is **persisted** to `data/memory/<session>/<chat>.json` at the end of every run, so it survives restarts and LRU evictions; `wahabot forget <chat>` wipes one chat.
 
 ## Development
 
