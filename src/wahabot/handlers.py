@@ -649,14 +649,14 @@ def register_agent_handler(
                     )
                 await persist_memory(settings, event.session, chat_id, ctx)
                 if send_tool_holder["sent"] or send_tool_holder["reacted"]:
-                    logger.debug(
-                        "Agent already delivered its reply in {chat_id}",
+                    logger.info(
+                        "Agent decision for {chat_id}: delivered via tool",
                         chat_id=chat_id,
                     )
                     log_final_text(chat_id, reply)
                     return
             if not reply or not reply.strip():
-                logger.debug("Agent chose to stay silent in {chat_id}", chat_id=chat_id)
+                logger.info("Agent decision for {chat_id}: stay silent", chat_id=chat_id)
                 return
             logger.info(
                 "Replying to {chat_id}: {reply}", chat_id=chat_id, reply=reply[:500]

@@ -95,20 +95,39 @@ async def run_tool_call(
     list tools embed WAHA's raw ``_data`` blobs (15 messages ≈ 58k
     chars), and a tool group that large evicts the user turn from the
     prompt when the buffer's real tokenizer re-trims.
+
+    Each call is logged: one INFO line with its outcome (completed,
+    unknown, truncation noted), or WARNING with the exception when the
+    tool raised — tool failures are what gets grepped for, so they
+    carry the error detail.
     """
     tool = tools_by_name.get(tool_call.tool_name)
     kwargs = {"tool_call_id": tool_call.tool_id, "name": tool_call.tool_name}
+    failure: Exception | None = None
     if tool is None:
         content = f"Tool {tool_call.tool_name} does not exist"
+        outcome = "unknown"
     else:
         try:
             fn = partial(tool, **tool_call.tool_kwargs)
             called = await asyncio.to_thread(fn)
             content = called.content
+            outcome = "completed"
         except Exception as exc:
             content = f"Encountered error in tool call: {exc}"
+            outcome = "failed"
+            failure = exc
     if len(content) > MAX_TOOL_RESULT_TOKENS:
         content = content[:MAX_TOOL_RESULT_TOKENS] + "… (truncated)"
+        outcome = f"{outcome}, result truncated"
+    if failure is not None:
+        logger.warning(
+            "Tool call {tool} failed: {exc}", tool=tool_call.tool_name, exc=failure
+        )
+    else:
+        logger.info(
+            "Tool call {tool}: {outcome}", tool=tool_call.tool_name, outcome=outcome
+        )
     return ChatMessage(role="tool", content=content, additional_kwargs=kwargs)
 
 
@@ -712,7 +731,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         """
         if not self.any_delivery() or not str(response.message.content or "").strip():
             return response
-        logger.debug(
+        logger.info(
             "Dropping post-delivery final text (reply already delivered via tool)"
         )
         return ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content=""))
