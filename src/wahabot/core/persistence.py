@@ -118,6 +118,10 @@ def save_memory(
     marker and WAHA's redelivery would retry the run into the same
     failure forever). A non-persistable chat id (path separators,
     traversal segments) never touches the disk.
+
+    A successful write logs one INFO line mirroring the restore log
+    ("Saved memory for …"), so both halves of the persistence round
+    trip are visible in the journal.
     """
     if not persistable(chat_id):
         logger.warning("Not persisting memory for bad chat id {id!r}", id=chat_id)
@@ -136,6 +140,11 @@ def save_memory(
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(envelope), encoding="utf-8")
         os.replace(tmp, path)
+        logger.info(
+            "Saved memory for {chat_id}: {count} messages",
+            chat_id=chat_id,
+            count=len(memory.get_all()),
+        )
     except Exception as exc:
         logger.warning("Failed to save memory to {path}: {exc}", path=path, exc=exc)
 
