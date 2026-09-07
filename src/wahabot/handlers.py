@@ -222,6 +222,17 @@ async def remember_own_message(
     chat_id = str(event.payload.get("from", ""))
     if not chat_id:
         return None
+    if (event.session, chat_id) not in contexts:
+        # No conversation to attach the words to: an assistant-only
+        # buffer is invalid for the chat API (history must start with a
+        # user turn), so sanitize would drop it on the next run — fold
+        # nothing, say why, and skip the pointless memory-file write.
+        logger.info(
+            "Skipping fromMe message {id} in {chat_id}: no conversation yet",
+            id=event.payload.get("id"),
+            chat_id=chat_id,
+        )
+        return None
     ctx = await append_to_memory(
         event.session,
         chat_id,

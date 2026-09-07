@@ -129,8 +129,11 @@ Per chat, the bot keeps a rolling conversation in memory:
 - Messages the **operator sends from the bot's own WhatsApp account**
   (typing in the app, `fromMe` events) are folded into memory as
   assistant turns — the account's voice is the bot's voice, so the
-  model treats them as things it said. They never wake the agent:
-  memory-only, no run, no reply, no self-loop.
+  model treats them as things it said (a `[operator message]` marker
+  tells the model who typed it without changing whose voice it
+  carries). They never wake the agent: memory-only, no run, no reply,
+  no self-loop. A fromMe message for a chat with no prior
+  conversation is skipped — there is nothing to attach the words to.
 
 ### Wiping memory
 

@@ -97,6 +97,12 @@ def register_reaction_handler(
         )
 
 
+#: Key carrying the reaction target id on a folded note message; the
+#: superseded-note removal filters on it, so a note survives merging
+#: with a neighboring turn (content equality would miss it there).
+_REACTION_TARGET_KWARG = "reaction_target_id"
+
+
 async def remember_reaction_note(
     session: str,
     chat_id: str,
@@ -114,33 +120,54 @@ async def remember_reaction_note(
     key = (session, chat_id, target_id)
     previous = _last_reaction_notes.get(key)
     if previous:
-        await forget_memory_message(session, chat_id, previous, agent, settings)
+        await forget_reaction_notes(session, chat_id, target_id, agent, settings)
     _last_reaction_notes[key] = note
     ctx = await append_to_memory(
         session,
         chat_id,
         agent,
         settings,
-        ChatMessage(role=MessageRole.USER, content=note),
+        ChatMessage(
+            role=MessageRole.USER,
+            content=note,
+            additional_kwargs={_REACTION_TARGET_KWARG: target_id},
+        ),
     )
     await persist_memory(settings, session, chat_id, ctx)
 
 
-async def forget_memory_message(
+async def forget_reaction_notes(
     session: str,
     chat_id: str,
-    content: str,
+    target_id: str,
     agent: FunctionCallingAgentWorkflow,
     settings: Settings,
 ) -> None:
-    """Remove the superseded reaction note from the chat's memory."""
+    """Remove every note reacting to *target_id* from the chat's memory.
+
+    The buffer may hold one note for the target or — once a run's
+    sanitize pass has merged it into a neighboring user turn — a
+    message whose content merely contains the note text. Filtering on
+    the tagged kwarg instead of content equality removes both shapes
+    without ever touching words around them.
+    """
     ctx = await context_for(session, chat_id, agent, settings)
     memory = await ctx.store.get("memory", default=None)
     if memory is None:
         return
     messages = await memory.aget_all()
-    kept = [m for m in messages if str(m.content) != content]
+
+    def targets(msg: ChatMessage) -> Any:
+        return msg.additional_kwargs.get(_REACTION_TARGET_KWARG)
+
+    kept = [m for m in messages if targets(m) != target_id]
     if len(kept) != len(messages):
+        if not kept or kept[0].role != MessageRole.USER:
+            # Dropping the note left a history that no longer starts
+            # with a user turn; sanitize would drop the leading
+            # messages on the next run anyway — better to keep the
+            # superseded note than to orphan everything after it.
+            return
         await memory.aset(kept)
 
 

@@ -109,11 +109,17 @@ def _deduplicate_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
 
 
 def _merge_pair(first: ChatMessage, second: ChatMessage) -> ChatMessage:
-    """Two same-role messages as one, every word of both kept."""
+    """Two same-role messages as one, every word and kwarg of both kept.
+
+    Kwargs merge left-to-right (``second`` wins collisions) so a tag
+    carried by the first message — a reaction note's
+    ``reaction_target_id`` — survives into the merged turn; the
+    superseded-note removal filters on that tag.
+    """
     return ChatMessage(
         role=first.role,
         content=f"{first.content or ''}\n{second.content or ''}",
-        additional_kwargs={**second.additional_kwargs},
+        additional_kwargs={**first.additional_kwargs, **second.additional_kwargs},
     )
 
 
