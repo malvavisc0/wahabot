@@ -56,6 +56,9 @@ uv run radon cc src -s | grep -E '\-\s(C|D|E|F)\s'   # must be empty
 ## Priority
 Clean, simple, maintainable code. Nothing else.
 
+## Commits
+One-line messages only. No body, no trailers.
+
 ## Rules
 - DRY, KISS
 - No unnecessary complexity
