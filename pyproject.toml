@@ -1,6 +1,6 @@
 [project]
 name = "wahabot"
-version = "0.4.4"
+version = "0.4.5"
 description = "A WhatsApp bot that answers chats with an LLM agent"
 readme = "README.md"
 authors = [
