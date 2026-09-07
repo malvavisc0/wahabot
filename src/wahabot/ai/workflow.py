@@ -521,8 +521,13 @@ class FunctionCallingAgentWorkflow(Workflow):
         (the sent text, the reaction) is preserved by collapsing the
         delivery tool group into a plain assistant message, so the
         model's self-history mirrors the chat and it can see what it
-        already said. Research runs (no delivery tool involved) keep
-        their final answer untouched.
+        already said. The collapse runs on every run-end path that
+        follows a delivery — including the early-stop paths (chosen
+        silence, repeated tool call): the delivery already happened, so
+        its group must never survive raw into the retained history
+        (persistence would otherwise snapshot the scaffolding to
+        disk). Research runs (no delivery tool involved) keep their
+        final answer untouched.
         """
         rounds = await self.next_round(ctx)
         chat_history = await self.populated_history(ctx, ev)
@@ -536,8 +541,10 @@ class FunctionCallingAgentWorkflow(Workflow):
         )
         if any(call.tool_name == SILENCE_TOOL for call in tool_calls):
             logger.debug("Stopping run: model chose stay_silent")
+            await self.collapse_delivery(ctx)
             return self.stopped_response()
         if tool_calls and await self.repeats_tool_call(ctx, tool_calls):
+            await self.collapse_delivery(ctx)
             return self.stopped_response()
         if not tool_calls:
             delivered = self.any_delivery()
@@ -652,7 +659,10 @@ class FunctionCallingAgentWorkflow(Workflow):
         chat it mirrors (and matches how operator-sent ``fromMe``
         messages are stored). The whole group is replaced atomically: a
         dangling tool call without its result is exactly what
-        :func:`repair_memory` must never find.
+        :func:`repair_memory` must never find. Called on every run-end
+        path that follows a delivery (no-op when nothing was
+        delivered); with persistence, skipping it anywhere would write
+        the raw scaffolding to disk.
         """
         memory = await ctx.store.get("memory")
         messages = await memory.aget_all()
