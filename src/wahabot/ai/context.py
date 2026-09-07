@@ -13,6 +13,7 @@ from loguru import logger
 
 from wahabot.ai.messages import jid_string, message_replies_to
 from wahabot.ai.tools.url_images import fetch_url_images, image_urls
+from wahabot.ai.vision import image_caption, image_noun
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.models import WahaEvent
 from wahabot.core.waha import WahaClient
@@ -318,7 +319,12 @@ async def handle_message(
     carry image bytes (``data`` + ``mimetype``); they ride along as
     ``image_blocks`` on the run and are injected into the first LLM
     call only — memory stays text-only, so no megabyte payloads
-    accumulate in the rolling buffer.
+    accumulate in the rolling buffer. Downloaded images also carry a
+    one-line ``caption`` (set by the download path, outside the agent
+    lock — see ``wahabot.ai.vision``); it goes *into* the user message
+    text — ``(image shows: beer glass with bear foam)`` — so later
+    rounds and later turns keep a text anchor once the pixels are
+    gone; a missing caption falls back to the bare ``(image)`` marker.
 
     With ``settings.vision`` enabled, image URLs sniffed from the
     message text are fetched too (see ``wahabot.ai.tools.url_images``), so a
@@ -335,8 +341,7 @@ async def handle_message(
         attached.append(image)
     all_images = collect_images(attached, settings, text)
     if all_images and not body:
-        noun = "(images)" if len(attached) > 1 else "(image)"
-        text = f"{tag} {noun}".strip()
+        text = f"{tag} {image_noun([image_caption(img) for img in all_images])}".strip()
     names = participant_names(waha, event.session, chat_id)
     user_msg = text + message_id_note(event)
     user_msg += reply_context_section(message_replies_to(event), names)

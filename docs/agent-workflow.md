@@ -201,8 +201,24 @@ bytes pass through as `image`, the workflow carries them on the run as
 `image_blocks`, and `with_image` injects them into a **copy** of the
 newest user message for the first LLM call only — memory stays text-only,
 so no megabyte payloads enter the rolling buffer and a tool-call loop
-never resends the picture. The turn's text side is the caption, or
-`(image)` when there is none. When `WAHABOT_VISION=false`, or a download
+never resends the picture.
+
+Because the pixels are one-shot, every downloaded image is also
+**captioned up front** (`ai/vision.py`): one small vision call per
+image returns a single sentence ("beer glass, foam shaped like a
+bear"), stored as `image["caption"]`. The captioning happens at the
+download sites in `handlers.py` — *before* `agent_lock` is taken — so
+the extra LLM call never extends the serialized agent-run section.
+`handle_message` weaves the caption into the user message text —
+`(image shows: beer glass, foam shaped like a bear)`; the `shows`
+framing keeps an instruction-like caption reading as a description of
+pixels, not as sender text. The caption lives in the rolling buffer
+like any other chat line, so round 2+ of the same run and later turns
+referring back to the picture keep a concrete text anchor instead of
+the model confabulating about an image it can no longer see. A failed
+caption degrades to the bare `(image)` marker and never sinks the turn.
+The turn's text side is the sender's caption, or the `(image…)` marker
+when there is none. When `WAHABOT_VISION=false`, or a download
 fails, the turn degrades to text-only.
 
 ### Image URLs in text (vision)

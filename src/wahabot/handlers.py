@@ -30,6 +30,7 @@ from wahabot.ai.messages import (
 )
 from wahabot.ai.observability import chat_trace_attributes, enable_langfuse
 from wahabot.ai.tools import build_default_tools
+from wahabot.ai.vision import caption_images
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
 from wahabot.core.access import SessionConfigReloader, load_session_config
 from wahabot.core.filters import chat_allowed, jid_alias_lookup
@@ -314,6 +315,12 @@ def register_agent_handler(
         if not downloaded:
             logger.debug("Album in {chat_id} yielded no usable images", chat_id=chat_id)
             return
+        # Caption before the lock: the vision call must not extend the
+        # serialized agent-run section.
+        for image, caption in zip(
+            downloaded, await caption_images(agent.llm, downloaded), strict=True
+        ):
+            image["caption"] = caption
         async with agent_lock:
             send_tool_holder["session"] = event.session
             send_tool_holder["chat_id"] = chat_id
@@ -447,6 +454,11 @@ def register_agent_handler(
                 image = await asyncio.to_thread(
                     download_image, waha, image, message_id, settings.max_image_bytes
                 )
+                if image is not None:
+                    # Caption before the lock: the vision call must not
+                    # extend the serialized agent-run section.
+                    captions = await caption_images(agent.llm, [image])
+                    image["caption"] = captions[0]
             async with agent_lock:
                 # Holder writes live inside the lock, and agent_lock
                 # serializes all agent runs, so a concurrent webhook post
