@@ -180,13 +180,23 @@ either says something real or says nothing at all.
 | `send_message` | Sends a text (optionally quoting a message via `reply_to`, optionally @-mentioning people via `mentions`). One per run. |
 | `stay_silent` | Ends the run without sending. |
 | `react_to_message` | Emoji reaction to a message id. |
-| `fetch_chat_messages` | Recent history of any chat as JSON (ids, senders, texts) — the model's window into conversations, including ones it just "woke up" in. |
-| `search_messages` | Text search over a chat's recent history. |
-| `get_chat` | Chat metadata and, for small chats, the participant list with JIDs and names — the source for mention ids. Names are read from the chat's recent messages (rosters in LID groups carry bare JIDs only), so the call costs one extra history fetch. |
-| `forward_message` | Forwards a message to another chat. |
+| `fetch_chat_messages` | Recent history of the current chat as JSON (ids, senders, texts) — the model's window into the conversation it is replying in. |
+| `search_messages` | Text search over the current chat's recent history. |
+| `get_chat` | Metadata of the current chat and, for small chats, the participant list with JIDs and names — the source for mention ids. Names are read from the chat's recent messages (rosters in LID groups carry bare JIDs only), so the call costs one extra history fetch. |
+| `forward_message` | Forwards a message to the current chat. |
 | `send_image` | Sends an image from a public URL. |
 | `web_search`, `visit_url`, `fetch_current_stock_price`, `get_youtube_transcript` | The outside world: metasearch, page reads, tickers, video transcripts. |
 | `run_shell_command` | Host shell (disabled by default; opt-in per deployment). |
+
+Every WhatsApp tool that accepts a `chat` argument, a serialized
+message id (`reply_to`, `react_to_message`, `forward_message`), or a
+name to resolve (`resolve_chat`) is fenced on chat-triggered runs:
+the current conversation is the only target allowed. Cross-chat reach
+— messaging, forwarding to, or reading another person or group — is
+reserved for operator commands (`wahabot tell`), whose instructions
+are the one trusted source of cross-chat intent. A participant asking
+the bot to deliver or snoop outside the chat gets a tool refusal
+envelope, and a refusal never produces a delivery.
 
 Tool results come back as JSON envelopes — `{"ok": true, …}` or
 `{"ok": false, "error": "…"}` — never as raised exceptions; failures

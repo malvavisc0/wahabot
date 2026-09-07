@@ -361,15 +361,34 @@ no tool hand-rolls JSON). A failed call never crashes the workflow; it
 just feeds an `error` envelope back to the model.
 
 Most tools take an optional `chat` argument: omit it to act on the
-**current chat** (the one the incoming message came from), or pass a
+**current chat** (the one the incoming message came from). Passing a
 JID to reach another group or person (e.g. `1234567890@g.us`,
-`9876543210@c.us`).
+`9876543210@c.us`) is **operator commands only** — every WhatsApp
+tool runs through the `fenced_chat` gate (`whatsapp.py`), which
+refuses a cross-chat target on any run that a chat message woke.
+A chat participant asking the bot to DM, forward to, or read someone
+outside the conversation gets an `error` envelope (logged at WARNING),
+never a delivery. The fence opens for exactly one trusted channel:
+`wahabot tell` commands (HMAC-signed, operator-only), where the
+instruction itself names the target — and `resolve_chat` (the contact
+roster) refuses to run at all outside operator runs.
+
+Serialized message ids carry their chat's JID (`false_<jid>_<hash>`),
+so ids are a second way to aim a tool elsewhere:
+`fenced_message_id` (`whatsapp.py`) applies the same rule to
+`react_to_message`, `send_message`'s `reply_to` and
+`forward_message`'s source id — an id embedding any chat but the
+current one is refused on chat runs (ids without a recognizable JID
+pass through; WAHA validates those server-side). A malformed `chat`
+value (no `@`, so neither the current chat nor a resolvable JID) gets
+its own `not a valid chat id` error rather than the cross-chat
+refusal.
 
 ### Tool inventory
 
 | Tool | Params | WAHA endpoint | Purpose |
 |---|---|---|---|
-| `send_message` | `chat?`, `text`, `reply_to?`, `mentions?` | `POST /api/sendText` | Send a text (current chat or elsewhere); `reply_to` quotes a message; `mentions` tags contacts; once per run (shared latch) |
+| `send_message` | `chat?`, `text`, `reply_to?`, `mentions?` | `POST /api/sendText` | Send a text (current chat, or operator-named target); `reply_to` quotes a message; `mentions` tags contacts; once per run (shared latch) |
 | `stay_silent` | — | — | End the run with no reply at all (terminal: the workflow stops before executing it) |
 | `react_to_message` | `message_id`, `reaction` | `PUT /api/reaction` | Emoji-react to a message (empty = remove); once per run |
 | `send_image` | `url`, `caption?`, `chat?` | `POST /api/sendImage` | Send an image from a URL; once per run (shared latch) |
@@ -378,7 +397,7 @@ JID to reach another group or person (e.g. `1234567890@g.us`,
 | `get_chat` | `chat?` | `POST /api/{session}/chats/overview` | Chat metadata (name, participants, …) |
 | `search_messages` | `query`, `chat?`, `limit?` | `GET /api/messages` (local filter) | Find recent messages by text / media |
 | `forward_message` | `message_id`, `chat?` | `POST /api/forwardMessage` | Forward a message to a chat; once per run (shared latch) |
-| `resolve_chat` | `name` | `GET /api/{session}/chats`, `GET /api/contacts/all` | Resolve a person/group name to chat JIDs (exact match first, then substring; ≤5 candidates) |
+| `resolve_chat` | `name` | `GET /api/{session}/chats`, `GET /api/contacts/all` | Operator-only: resolve a person/group name to chat JIDs (exact match first, then substring; ≤5 candidates) |
 
 All tool implementations live under `src/wahabot/ai/tools/` (WhatsApp
 tools in `whatsapp.py`, external tools in `external.py`); the
@@ -389,10 +408,15 @@ subsections below.
 
 | Tool | Purpose |
 |---|---|
-| `send_message(text, chat=None, reply_to=None)` | Send a text — current chat (omit `chat`) or another group/person; `reply_to` (a serialized message id) sends it as a native quote-reply |
+| `send_message(text, chat=None, reply_to=None)` | Send a text — current chat, or the operator-named target (`reply_to`, a serialized message id, sends it as a native quote-reply) |
 | `send_image(url, caption="", chat=None)` | Send an image from a public URL (mimetype inferred from the URL extension), with an optional caption |
 | `send_file(url=None, path=None, caption="", filename=None, chat=None)` | Send a document (PDF, etc.) — from a public `url` (WAHA downloads it) or a local `path` for files the agent created (base64, capped at `WAHABOT_MAX_FILE_BYTES`); mimetype and filename inferred from the extension |
 | `forward_message(message_id, chat=None)` | Forward an existing message (by serialized id) to a chat |
+
+In all four, `chat` is operator-commands-only; on chat runs the fence
+refuses any target other than the current conversation. `reply_to` and
+`message_id` are id-fenced the same way: an id from another chat is
+refused (operator runs excepted).
 
 ```python
 send_message(text="Just replying here")  # current chat
@@ -408,7 +432,7 @@ forward_message(message_id="false_1111@c.us_ABC")
 
 | Tool | Purpose |
 |---|---|
-| `react_to_message(message_id, reaction)` | React with an emoji; empty `reaction` removes the bot's reaction |
+| `react_to_message(message_id, reaction)` | React with an emoji; empty `reaction` removes the bot's reaction. The id is fence-checked: on chat runs it must belong to the current conversation |
 
 ```python
 react_to_message(message_id="false_1111@c.us_ABC", reaction="👍")

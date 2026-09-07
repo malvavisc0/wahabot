@@ -23,7 +23,7 @@ tool already fired is dropped — the chat saw it once, not twice.
 
 ## Giving the model hands
 
-An LLM by itself can only talk. wahabot gives it the chat: it can send messages, images and files, react with emoji, forward posts, read back through history, search old messages, and resolve a name to the right person or group. Beyond WhatsApp it searches the web, fetches pages with a real Chrome TLS fingerprint (most sites answer as if a browser asked), looks up stock prices, pulls YouTube transcripts, and — if you opt in — runs shell commands on the host.
+An LLM by itself can only talk. wahabot gives it the chat: it can send messages, images and files, react with emoji, forward posts, read back through history, and search old messages. Beyond WhatsApp it searches the web, fetches pages with a real Chrome TLS fingerprint (most sites answer as if a browser asked), looks up stock prices, pulls YouTube transcripts, and — if you opt in — runs shell commands on the host. Reaching *other* chats — messaging or reading a person or group outside the conversation that woke the bot — is reserved for operator commands; chat runs are fenced to the current conversation (message ids included), so no participant can make the bot DM or spy on anyone.
 
 The model picks the tool, the workflow executes it, feeds the result back, and the model decides whether it needs another round. It stops when it's done, not when a script says so.
 
@@ -48,6 +48,8 @@ uv run wahabot tell "search the latest news about elon musk and send a summary t
 ```
 
 The agent runs the instruction with its full toolset on a fresh context. No whitelist applies, no chat history is touched, and names resolve to the right person or group automatically. The result lands in WhatsApp, not in your terminal.
+
+Operator commands are also the **only** runs with cross-chat reach: tools refuse to send, forward, react to, quote or read outside the current conversation on any chat-triggered run — `chat` JIDs and serialized message ids alike — so a group participant can never make the bot DM or spy on someone else. `resolve_chat` (the contact roster) refuses to run at all outside operator commands.
 
 `wahabot forget <chat-id>` wipes one chat's persistent memory in the running bot (live context and disk file, under the agent lock):
 
