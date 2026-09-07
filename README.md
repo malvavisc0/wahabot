@@ -65,8 +65,8 @@ quick start, and CLI commands.
 `wahabot serve` prints a short banner so one glance tells you what's running:
 version + Python, session name, LLM model/endpoint, memory token ceiling, and
 enabled features (vision / video / shell / transcription / langfuse). It then
-logs the WAHA session's live identity, the loaded session config summary,
-tracing status, and the toolset the agent was built with:
+logs the WAHA session's live identity, the loaded session config summary, and
+the toolset the agent was built with:
 
 ```
 Info: wahabot 0.2.9 (Python 3.14.6)
@@ -77,7 +77,7 @@ Info: Features: vision, video, no-shell, no-transcribe
 Info: Webhook: http://0.0.0.0:8080/api/webhook/default
 Info: WAHA session default is live as My Name (4917...@c.us)
 Info: Loaded session config from data/sessions/default.json: 0 whitelisted, 0 blacklisted, group_participation=mentioned
-Info: Agent ready with 14 tools: fetch_chat_messages, forward_message, ...
+Info: Agent ready: fetch_chat_messages, forward_message, ...
 ```
 
 For a machine-readable dump of every `WAHABOT_*` value (secrets redacted) use

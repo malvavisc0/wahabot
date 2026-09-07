@@ -526,8 +526,7 @@ def register_agent_handler(
     # fired this run (post-delivery final texts are dropped, not sent).
     agent.send_holder = send_tool_holder
     logger.info(
-        "Agent ready with {count} tools: {tools}",
-        count=len(agent.tools),
+        "Agent ready: {tools}",
         tools=", ".join(sorted(tool.metadata.get_name() for tool in agent.tools)),
     )
     started_at = time.time()
