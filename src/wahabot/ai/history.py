@@ -80,25 +80,41 @@ def _is_tool_message(msg: ChatMessage) -> bool:
 
 
 def _deduplicate_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
-    """Step 1: Collapse consecutive duplicate roles (keep last of each run).
+    """Step 1: Merge consecutive duplicate-role messages (keep every word).
 
-    Never collapse tool messages or assistant-with-tool-call messages.
+    Out-of-band folds create consecutive same-role turns the chat API
+    rejects (the operator's ``fromMe`` text after the model's reply; a
+    reaction note before the next user message). The old keep-last
+    collapse silently deleted the earlier message — for the model's own
+    reply that resurrected the 0.4.3 self-history bug, made durable by
+    persistence. Merging keeps everything the chat actually saw.
+
+    Never merges tool messages or assistant-with-tool-call messages.
     """
-    deduplicated: list[ChatMessage] = []
+    merged: list[ChatMessage] = []
     for msg in messages:
-        prev = deduplicated[-1] if deduplicated else None
-        can_collapse = (
+        prev = merged[-1] if merged else None
+        can_merge = (
             prev is not None
             and prev.role == msg.role
             and not _is_tool_message(msg)
             and _message_tool_call_count(prev) == 0
             and _message_tool_call_count(msg) == 0
         )
-        if can_collapse:
-            deduplicated[-1] = msg
+        if prev is not None and can_merge:
+            merged[-1] = _merge_pair(prev, msg)
         else:
-            deduplicated.append(msg)
-    return deduplicated
+            merged.append(msg)
+    return merged
+
+
+def _merge_pair(first: ChatMessage, second: ChatMessage) -> ChatMessage:
+    """Two same-role messages as one, every word of both kept."""
+    return ChatMessage(
+        role=first.role,
+        content=f"{first.content or ''}\n{second.content or ''}",
+        additional_kwargs={**second.additional_kwargs},
+    )
 
 
 def _validate_tool_groups(messages: list[ChatMessage]) -> list[ChatMessage]:
@@ -144,7 +160,10 @@ def _trim_history(
 
     Drop leading messages until history starts with user.
     Drop trailing assistant with unfulfilled tool calls.
-    Drop trailing user when drop_trailing_user is True.
+    Drop trailing user only when it is the run-scoped about-to-be-replaced
+    turn: a real out-of-band fold (a reaction note, an operator ``fromMe``
+    text) must survive — it is conversation, not scaffolding, and the
+    alternation it would break is fixed by the merge in step 1 instead.
     """
     trimmed = list(messages)
 
@@ -154,13 +173,30 @@ def _trim_history(
     while trimmed:
         last = trimmed[-1]
         if _message_tool_call_count(last) > 0 or (
-            drop_trailing_user and last.role == MessageRole.USER
+            drop_trailing_user and last.role == MessageRole.USER and _is_run_scoped(last)
         ):
             trimmed.pop()
         else:
             break
 
     return trimmed
+
+
+#: Prefix of out-of-band reaction notes (see ``reactions.py``); turns
+#: starting with it are folds, not run-scoped inbound turns.
+REACTION_NOTE_PREFIX = "[reaction "
+
+
+def _is_run_scoped(msg: ChatMessage) -> bool:
+    """True when *msg* is the run-scoped turn a new user message replaces.
+
+    ``repair_memory`` runs at the start of the next run with the buffer
+    exactly as the previous run left it, so its trailing user message is
+    always the just-processed inbound turn. An out-of-band reaction fold
+    leaves the buffer ending with a *different* user message — a
+    bracketed reaction note — which the next run must keep.
+    """
+    return not str(msg.content or "").startswith(REACTION_NOTE_PREFIX)
 
 
 def sanitize_chat_history(
