@@ -25,6 +25,7 @@ operational tasks.
 - Type checker: **basedpyright** (`[tool.basedpyright]` in pyproject.toml)
 - Lint/format: **ruff** (line-length 90)
 - Complexity: **radon**
+- Dead code: **vulture**
 
 ## Commands
 ```bash
@@ -34,10 +35,11 @@ uv run ruff check --fix .               # lint
 uv run ruff format .                   # format
 uv run basedpyright ./src/wahabot       # type check
 uv run radon cc ./src/wahabot -s        # complexity (must show no C/D/E/F blocks)
+uvx --python 3.14 vulture src/ --min-confidence 60   # dead code
 uv run wahabot --help                   # CLI surface
 ```
-Run `ruff check`, `ruff format --check`, `basedpyright`, and `radon cc`
-after every change.
+Run `ruff check`, `ruff format --check`, `basedpyright`, `radon cc`,
+and `vulture` after every change.
 
 ## Complexity budget
 `radon cc` (cyclomatic complexity) must report **no block ranked C or
@@ -52,6 +54,18 @@ blocks in the same pass. Verify with:
 ```bash
 uv run radon cc src -s | grep -E '\-\s(C|D|E|F)\s'   # must be empty
 ```
+
+## Dead code
+Rules say "no dead code"; vulture enforces it. It must run on a 3.14
+parser (`uvx --python 3.14`) — the code uses PEP 758 parenthesis-free
+`except A, B`, which older parsers silently skip (unparsed files look
+clean). Hits are **suspects, not verdicts**: workflow `@step` methods,
+typer commands, FastAPI routes, `register_*` closure callbacks,
+pydantic members and dotted-string references
+(`uvicorn http="wahabot.core.protocol:LoggingH11Protocol"`) are
+framework registrations it cannot see. Check for a registration site
+before deleting; real dead code (never-read fields, zero-call-site
+functions) goes out in the same pass.
 
 ## Priority
 Clean, simple, maintainable code. Nothing else.
