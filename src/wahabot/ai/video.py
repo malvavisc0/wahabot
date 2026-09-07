@@ -54,25 +54,22 @@ VIDEO_CAPTION_PROMPT = (
 )
 
 
-def probe_duration(data: bytes) -> float:
+def probe_duration(path: str) -> float:
     """Video duration in seconds via ffprobe; raises on any failure."""
-    with tempfile.NamedTemporaryFile(suffix=".mp4") as handle:
-        handle.write(data)
-        handle.flush()
-        result = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-print_format",
-                "json",
-                "-show_format",
-                handle.name,
-            ],
-            capture_output=True,
-            check=True,
-            timeout=30,
-        )
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            path,
+        ],
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
     info = json.loads(result.stdout)
     return float(info["format"]["duration"])
 
@@ -80,18 +77,14 @@ def probe_duration(data: bytes) -> float:
 def extract_frames(data: bytes, count: int, timeout: float = 30.0) -> list[bytes]:
     """*count* evenly spaced frames as JPEG bytes, or [] on any failure.
 
-    One ffmpeg pass: duration from :func:`probe_duration`, then
-    ``-vf fps=<count>/<duration>,scale=min(512,iw):-2`` writing
+    One temp file, two tool passes: duration from :func:`probe_duration`,
+    then ``-vf fps=<count>/<duration>,scale=min(512,iw):-2`` writing
     ``frame_%d.jpg`` into a temp dir. Short clips yield fewer frames
     than requested — the caption call takes what exists. A dead
-    ffmpeg or an unreadable file returns [] (fail-soft: the marker
-    degrades to the transcript part alone).
+    ffmpeg/ffprobe, an unreadable file or a zero/negative duration
+    returns [] (fail-soft: the marker degrades to the transcript part
+    alone).
     """
-    try:
-        duration = probe_duration(data)
-    except Exception as exc:
-        logger.warning("Video probe failed (frames dropped): {exc}", exc=exc)
-        return []
     with (
         tempfile.NamedTemporaryFile(suffix=".mp4") as handle,
         tempfile.TemporaryDirectory() as outdir,
@@ -99,6 +92,9 @@ def extract_frames(data: bytes, count: int, timeout: float = 30.0) -> list[bytes
         handle.write(data)
         handle.flush()
         try:
+            duration = probe_duration(handle.name)
+            if duration <= 0:
+                raise ValueError(f"non-positive duration: {duration}")
             subprocess.run(
                 [
                     "ffmpeg",
@@ -160,7 +156,9 @@ def video_marker(caption: str, transcript: str) -> str:
     if caption:
         parts.append(f"(video shows: {caption})")
     if transcript:
-        trimmed = transcript[:MAX_TRANSCRIPT_CHARS].rstrip()
+        # Single quotes inside the double-quoted anchor: a stray "
+        # from the transcript must not break the quoting for the model.
+        trimmed = transcript[:MAX_TRANSCRIPT_CHARS].rstrip().replace('"', "'")
         suffix = "…" if len(transcript) > MAX_TRANSCRIPT_CHARS else ""
         parts.append(f'[audio: "{trimmed}{suffix}"]')
     if not parts:

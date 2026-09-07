@@ -104,6 +104,9 @@ def _log_startup_banner(
         "Features: {features}",
         features=", ".join(_feature_flags(settings)),
     )
+    if settings.video and not settings.vision:
+        message = "Video is on but vision is off — videos fall back to text-only"
+        logger.warning("{message} (frames ride the vision path).", message=message)
     if settings.transcribe_url:
         logger.info("Transcription: {url}", url=settings.transcribe_url)
     logger.info(
