@@ -66,6 +66,7 @@ def _feature_flags(settings: Settings) -> list[str]:
     """
     flags = [
         "vision" if settings.vision else "no-vision",
+        "video" if settings.video else "no-video",
         "shell" if settings.shell_tool else "no-shell",
         (
             f"transcribe({settings.transcribe_language})"

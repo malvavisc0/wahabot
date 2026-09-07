@@ -83,6 +83,23 @@ def image_media(event: WahaEvent) -> dict[str, Any] | None:
     return media_dict
 
 
+def video_media(event: WahaEvent) -> dict[str, Any] | None:
+    """The media dict of a video message (kinds ``video``/``ptv``), or None.
+
+    Like :func:`image_media` but for moving pictures; only entries with
+    a URL qualify — the download path checks the mimetype/size caps.
+    """
+    if message_kind(event) not in ("video", "ptv"):
+        return None
+    media = event.payload.get("media") or _data_media(event.payload)
+    if not isinstance(media, dict):
+        return None
+    media_dict: dict[str, Any] = media
+    if not media_dict.get("url"):
+        return None
+    return media_dict
+
+
 def _data_media(payload: dict[str, Any]) -> Any:
     """The ``_data.media`` blob of a payload, when present."""
     data = payload.get("_data")

@@ -81,6 +81,20 @@ class Settings(BaseSettings):
     max_image_bytes: int = 10 * 1024 * 1024
     #: How many image URLs sniffed from a message's text to download.
     max_url_images: int = 2
+    #: Understand video messages (frames + transcript) via the vision
+    #: and WhisperX services. Off → videos fall back to today's behavior
+    #: (text-only for captioned clips, silence for bare ones). Implies
+    #: ``vision``: frames ride the image path, so an endpoint that
+    #: rejects image inputs gets no video prep either. Needs ffmpeg on
+    #: PATH (the Docker image ships it).
+    video: bool = True
+    #: Videos larger than this many bytes are skipped (they are far
+    #: larger than photos; the transcription upload alone justifies a cap).
+    max_video_bytes: int = 64 * 1024 * 1024
+    #: Frames sampled per video for the caption call (1-12). More
+    #: frames read on-screen text more faithfully (see the plan's
+    #: evidence table) at ~192 image tokens each.
+    video_frames: int = Field(default=6, ge=1, le=12)
     #: Local files larger than this are rejected by the send_file tool
     #: (base64 inflates ~4/3x and the whole file rides one JSON request);
     #: 16 MB matches WhatsApp's own document limit.

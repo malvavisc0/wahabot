@@ -31,7 +31,14 @@ from llama_index.core.base.llms.types import (
 from llama_index.core.llms.function_calling import FunctionCallingLLM
 from loguru import logger
 
-__all__ = ["caption_image", "caption_images", "image_caption", "image_noun"]
+__all__ = [
+    "MAX_CAPTION_CHARS",
+    "caption_image",
+    "caption_images",
+    "clamp_caption_line",
+    "image_caption",
+    "image_noun",
+]
 
 #: One sentence, no preamble: the caption is embedded verbatim into the
 #: user message text, so anything chatty ("This image shows…") would
@@ -46,6 +53,22 @@ _CAPTION_PROMPT = (
 #: the ``(image: …)`` marker in the user message, so a rambling model
 #: must not inflate the rolling buffer.
 MAX_CAPTION_CHARS = 200
+
+
+def clamp_caption_line(text: str) -> str:
+    """A caption answer reduced to one clamped line, "" when empty.
+
+    Captions are embedded verbatim into the user message text, so
+    anything chatty ("This image shows…") would read as the sender's
+    words, a multi-line answer would break the message layout, and a
+    rambling model must not inflate the rolling buffer. Shared by the
+    image and video captioners.
+    """
+    caption = text.strip()
+    caption = caption.splitlines()[0].strip() if caption else ""
+    if len(caption) > MAX_CAPTION_CHARS:
+        caption = caption[:MAX_CAPTION_CHARS].rstrip() + "…"
+    return caption
 
 
 async def caption_image(
@@ -72,11 +95,7 @@ async def caption_image(
     except Exception as exc:  # any failure degrades to the bare (image) marker
         logger.warning("Image caption failed (turn stays text-anchored): {exc}", exc=exc)
         return ""
-    caption = str(response.message.content or "").strip()
-    # One line only; a multi-line answer would break the message layout.
-    caption = caption.splitlines()[0].strip() if caption else ""
-    if len(caption) > MAX_CAPTION_CHARS:
-        caption = caption[:MAX_CAPTION_CHARS].rstrip() + "…"
+    caption = clamp_caption_line(str(response.message.content or ""))
     logger.info("Image caption: {caption!r}", caption=caption)
     return caption
 

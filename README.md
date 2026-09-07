@@ -2,7 +2,7 @@
 
 A WhatsApp bot that answers chats with an LLM agent — one that *actually thinks*. It reads the conversation, decides what it needs, calls tools, reads the results, and only then replies. Built on the [WAHA](https://waha.devlike.pro) HTTP API behind a small FastAPI webhook.
 
-It hears voice notes. It sees photos. It searches the web, checks stock prices, pulls YouTube transcripts, sends documents, reacts with emoji, and stays quiet when it has nothing to add — all without anyone saying "use a tool."
+It hears voice notes. It sees photos and videos. It searches the web, checks stock prices, pulls YouTube transcripts, sends documents, reacts with emoji, and stays quiet when it has nothing to add — all without anyone saying "use a tool."
 
 ```
 StartEvent ──► prepare_chat_history ──► InputEvent
@@ -34,6 +34,7 @@ The agent isn't blind, and it isn't deaf:
 
 - **Photos** are downloaded, attached to that turn's LLM call, then discarded — chat memory stays text-only, no megabyte payloads rotting in the rolling buffer.
 - **Voice notes** are transcribed by a WhisperX service (`WAHABOT_TRANSCRIBE_URL`) and arrive as `[voice note] <transcript>` — the bot hears what was said without being asked. Off when the URL is empty.
+- **Videos** are understood as frames + spoken track (`WAHABOT_VIDEO`): evenly spaced stills are captioned by the vision model, the audio goes to WhisperX, and the turn carries `(video shows: …) [audio: "…"]` as a durable text anchor. The frames ride the first LLM call only; needs ffmpeg on PATH (the Docker image ships it).
 - **Albums** arrive as a container plus N images; the handler buffers them and runs the agent once, all images attached.
 - **Bare image links** in text are sniffed out, fetched, and shown to the model too.
 - **Reactions** to the bot's own messages are folded into memory as context — a 👍 lands quietly, visible on the next turn, never waking the agent.
@@ -73,7 +74,7 @@ Info: wahabot 0.2.9 (Python 3.14.6)
 Info: Session: default
 Info: LLM: gpt-4o-mini @ https://api.openai.com/v1
 Info: Memory: 8000 token ceiling
-Info: Features: vision, no-shell, no-transcribe
+Info: Features: vision, video, no-shell, no-transcribe
 Info: Webhook: http://0.0.0.0:8080/api/webhook/default
 Info: WAHA session default is live as My Name (4917...@c.us)
 Info: Loaded session config from data/sessions/default.json: 0 whitelisted, 0 blacklisted, group_participation=mentioned
@@ -98,7 +99,7 @@ The agent workflow lives under `src/wahabot/ai/` as a set of focused modules:
 | `workflow.py` | The three-step `FunctionCallingAgentWorkflow`, `load_llm`, `build_agent` |
 | `events.py` | `InputEvent` / `ToolCallEvent` |
 | `context.py` | Sender tagging, reply-context rendering, `handle_message` entrypoint |
-| `messages.py` | Message classification, `extract_text`, `image_media`, `is_replyable` |
+| `messages.py` | Message classification, `extract_text`, `image_media`, `video_media`, `is_replyable` |
 | `history.py` | `sanitize_chat_history` (repair) + `trim_to_budget` (token budget) |
 | `tools/whatsapp.py` | The nine WhatsApp tools |
 | `tools/external.py` | Web, finance, YouTube & (opt-in) shell tool builders |
@@ -106,6 +107,7 @@ The agent workflow lives under `src/wahabot/ai/` as a set of focused modules:
 | `tools/envelope.py` | The unified JSON envelope (`ok` / `error`) every tool returns |
 | `tools/web_search.py` / `tools/visit_url.py` / `tools/url_images.py` / `tools/shell.py` | Web lookup, image-URL & shell tool functions |
 | `tools/finance.py` / `tools/youtube.py` | Market data and transcript tools |
+| `video.py` / `vision.py` | Video frame extraction + anchor; image captions |
 | `observability.py` | Langfuse export |
 
 Before every LLM call, the chat history passes through two hygiene steps: **repair** (fixes dangling tool calls, orphan messages, trailing user turns that would make the API reject the payload) and **trim** (keeps the newest tail that fits the token budget, treating tool-call groups as atomic).

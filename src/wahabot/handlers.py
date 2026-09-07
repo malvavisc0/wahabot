@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import openai
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
+from llama_index.core.llms.function_calling import FunctionCallingLLM
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.workflow import Context
 from loguru import logger
@@ -27,16 +28,18 @@ from wahabot.ai.messages import (
     is_group_addressed,
     is_replyable,
     message_kind,
+    video_media,
 )
 from wahabot.ai.observability import chat_trace_attributes, enable_langfuse
 from wahabot.ai.tools import build_default_tools
+from wahabot.ai.video import caption_video, extract_frames, join_anchor, video_marker
 from wahabot.ai.vision import caption_images
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
 from wahabot.core.access import SessionConfigReloader, load_session_config
 from wahabot.core.filters import chat_allowed, jid_alias_lookup
 from wahabot.core.models import WahaEvent
 from wahabot.core.persistence import forget_memory, load_memory, save_memory
-from wahabot.core.transcribe import transcribe_voice_note
+from wahabot.core.transcribe import fetch_transcript, transcribe_voice_note
 from wahabot.core.waha import MediaTooLargeError, WahaClient
 from wahabot.settings import Settings
 from wahabot.status import session_healthy
@@ -311,6 +314,75 @@ def first_frame_png(data: bytes) -> bytes:
         return buffer.getvalue()
 
 
+async def video_transcript(settings: Settings, data: bytes, filename: str) -> str:
+    """The video's spoken track via WhisperX, or "" when unavailable.
+
+    Posts the whole video file — the service demuxes audio itself
+    (verified in the plan's evidence table), so this deliberately
+    bypasses ``is_transcribable_mimetype``: that gate exists for the
+    voice-note path. Audio-less videos (loops, screen recordings) get
+    a 500 from the service every time — expected traffic, not an
+    error, hence the debug log — and any other failure drops the
+    transcript part of the marker.
+    """
+    if not settings.transcribe_url:
+        return ""
+    try:
+        transcript = await asyncio.to_thread(fetch_transcript, settings, data, filename)
+    except Exception as exc:
+        logger.debug("Video transcript unavailable: {exc}", exc=exc)
+        return ""
+    return transcript.strip()
+
+
+async def prepare_video(
+    event: WahaEvent,
+    waha: WahaClient,
+    settings: Settings,
+    llm: FunctionCallingLLM,
+) -> dict[str, Any] | None:
+    """Download + frames + caption + transcript for a video turn.
+
+    Returns ``{"frames": [...], "marker": "(video shows: …) …"}``, or
+    None when the download failed (the turn degrades exactly like a
+    failed image download: sender text runs, a bare video stays
+    silent). Every stage is fail-soft — a dead ffmpeg, a failed
+    caption call or a failed transcription each drop their marker
+    part and the turn still runs. Runs before ``agent_lock`` so no
+    network or vision call extends the serialized agent-run section.
+    """
+    media = video_media(event)
+    if media is None:
+        return None
+    url = str(media["url"])
+    message_id = str(event.payload.get("id", ""))
+    try:
+        data = await asyncio.to_thread(waha.download_media, url, settings.max_video_bytes)
+    except MediaTooLargeError:
+        logger.info(
+            "Skipping video over {max} B in message {id}",
+            max=settings.max_video_bytes,
+            id=message_id,
+        )
+        return None
+    except Exception as exc:
+        logger.warning(
+            "Video download failed for message {id}: {exc}", id=message_id, exc=exc
+        )
+        return None
+    logger.info(
+        "Downloaded video ({size} B) from message {id}", size=len(data), id=message_id
+    )
+    frames = await asyncio.to_thread(extract_frames, data, settings.video_frames)
+    caption = await caption_video(llm, frames) if frames else ""
+    filename = str(media.get("filename") or "") or "video.mp4"
+    transcript = await video_transcript(settings, data, filename)
+    return {
+        "frames": [{"data": frame, "mimetype": "image/jpeg"} for frame in frames],
+        "marker": video_marker(caption, transcript),
+    }
+
+
 def register_forget_handler(settings: Settings) -> None:
     """Register the ``forget`` webhook handler that wipes a chat's memory.
 
@@ -532,7 +604,18 @@ def register_agent_handler(
             if transcript:
                 event.payload["body"] = f"[voice note] {transcript}"
                 body = event.payload["body"]
-        if body is None and image is None:
+        video = None
+        if message_kind(event) in ("video", "ptv") and settings.video:
+            # Frames ride the vision path, so an endpoint that rejects
+            # image inputs (settings.vision=false) gets no video prep
+            # either — the whole download+ffmpeg+caption pass would be
+            # wasted work before a doomed caption call.
+            if settings.vision:
+                video = await prepare_video(event, waha, settings, agent.llm)
+            if video is not None:
+                event.payload["body"] = join_anchor(body or "", video["marker"])
+                body = event.payload["body"]
+        if body is None and image is None and video is None:
             logger.debug("Skipping media/album message {id}", id=event.payload.get("id"))
             return
         chat_id = str(event.payload["from"])
@@ -557,7 +640,13 @@ def register_agent_handler(
                 ctx = await context_for(event.session, chat_id, agent, settings)
                 with chat_trace_attributes(chat_id):
                     reply = await handle_message(
-                        event, agent, ctx=ctx, image=image, settings=settings, waha=waha
+                        event,
+                        agent,
+                        ctx=ctx,
+                        image=image,
+                        images=video["frames"] if video is not None else None,
+                        settings=settings,
+                        waha=waha,
                     )
                 await persist_memory(settings, event.session, chat_id, ctx)
                 if send_tool_holder["sent"] or send_tool_holder["reacted"]:
