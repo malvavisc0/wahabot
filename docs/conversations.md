@@ -60,9 +60,9 @@ Before the agent ever wakes up, the message passes through, in order:
    
    The config's `group_participation` mode loosens or tightens this:
    `mentioned` (default) requires one of the three above;
-   `judicious` also runs the agent on plain messages in whitelisted
-   groups and lets it decide for itself whether to speak (see §3,
-   staying silent).
+   `judicious` also runs the agent on plain group messages — any group
+   that already passed the whitelist/blacklist gate — and lets it
+   decide for itself whether to speak (see §3, staying silent).
 
    Direct messages skip the address check entirely — the person chose
    to talk to the bot, so it answers.
@@ -123,9 +123,8 @@ Per chat, the bot keeps a rolling conversation in memory:
   so a chat's history survives restarts, deploys and LRU evictions. A
   restart reloads a chat's memory lazily on its next message; an
   LRU-evicted chat (past 1000 live contexts) reloads from disk instead of
-  starting blank. The full design, save points and failure handling live
-  in [`docs/plans/persistent-memory.md`](plans/persistent-memory.md) —
-  the source of truth; this section only summarizes.
+  starting blank. The load/save/restore implementation lives in
+  `wahabot.core.persistence`; this section summarizes its behavior.
 - Messages the **operator sends from the bot's own WhatsApp account**
   (typing in the app, `fromMe` events) are folded into memory as
   assistant turns — the account's voice is the bot's voice, so the
@@ -280,8 +279,8 @@ the last good config (and logs it) rather than crashing the bot.
   dedup window that closed (see the journal for the double event).
 - **Bot forgot the conversation**: memory now persists to
   `data/memory/`; a missing or corrupt file degrades to a blank start
-  (see the failure table in [`persistent-memory.md`](plans/persistent-memory.md)).
-  Wipe with `wahabot forget <chat-id>` if it should genuinely reset.
+  (the corrupt file is quarantined as `.bad` alongside). Wipe with
+  `wahabot forget <chat-id>` if it should genuinely reset.
 - **Mention didn't notify**: missing `mentions` JIDs or a name in text
   that doesn't match the JID's owner — check the tool call arguments
   in the trace. A send whose text had no `@` at all comes back with a

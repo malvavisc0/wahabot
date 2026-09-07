@@ -15,20 +15,28 @@ Key env vars:
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `WAHABOT_LLM_MODEL` | OpenAI-compatible chat model with function calling | **required** |
+| `WAHABOT_LLM_API_BASE` | OpenAI-compatible endpoint URL | **required** |
+| `WAHABOT_LLM_API_KEY` | API key for that endpoint | **required** |
+| `WAHABOT_LLM_MODEL` | Chat model with function calling | `gpt-4o-mini` |
 | `WAHABOT_LLM_TEMPERATURE` | Sampling temperature (model-card default; don't lower it) | `1.0` |
 | `WAHABOT_LLM_TOP_P` | Nucleus sampling cutoff | `0.95` |
 | `WAHABOT_LLM_TOP_K` | Top-k sampling candidates | `20` |
 | `WAHABOT_LLM_MIN_P` | Min-p sampling floor | `0.0` |
 | `WAHABOT_LLM_PRESENCE_PENALTY` | Presence penalty (raise toward 2 if the model ever repeats itself) | `0.0` |
 | `WAHABOT_LLM_REPETITION_PENALTY` | Repetition penalty | `1.0` |
+| `WAHABOT_LLM_REASONING_EFFORT` | Reasoning effort for thinking models (`low`/`medium`/`high`; empty = provider default) | — |
 | `WAHABOT_LLM_TIMEOUT` | Per-request LLM HTTP timeout (s; client retries disabled) | `60` |
 | `WAHABOT_RUN_TIMEOUT` | Server-side cap on one agent run (s; 0 = unlimited) | `120` |
+| `WAHABOT_TOOL_ROUND_LIMIT` | Max LLM→tool round trips per run (one final tool-free call past the limit) | `50` |
 | `WAHABOT_TELL_TIMEOUT` | How long `wahabot tell` waits for the run to finish (s; 0 = forever) | `30` |
 | `WAHABOT_WEBHOOK_HMAC_KEY` | Shared secret matching WAHA's `hmac.key` | **required** |
+| `WAHABOT_WAHA_URL` | WAHA HTTP API base URL | **required** |
+| `WAHABOT_WAHA_API_KEY` | WAHA API key | **required** |
 | `WAHABOT_HOST` / `WAHABOT_PORT` | Webhook server bind | `0.0.0.0:8080` |
 | `WAHABOT_LOG_LEVEL` | loguru level | `INFO` |
 | `WAHABOT_SESSION` | WAHA session name | `default` |
+| `WAHABOT_DATA_DIR` | Root for session configs, memory and the event journal | `data` |
+| `WAHABOT_TIMEZONE` | TZ for the prompt's date/time placeholders | `UTC` |
 | `WAHABOT_MEMORY_TOKEN_LIMIT` | Per-chat rolling memory budget | `8000` |
 | `WAHABOT_MEMORY_PERSIST` | Persist per-chat memory to `data/memory/` (survives restarts/LRU evictions) | `true` |
 | `WAHABOT_VISION` | Enable image understanding | `true` |
@@ -43,7 +51,7 @@ Key env vars:
 | `WAHABOT_MAX_AUDIO_BYTES` | Per-voice-note download cap | `26214400` |
 | `WAHABOT_TRANSCRIBE_LANGUAGE` | Language passed to /transcribe (`auto` = detect) | `auto` |
 | `WAHABOT_WEB_SEARCH_MAX_RESULTS` | Default web search results | `5` |
-| `WAHABOT_WEB_SEARCH_TIMEOUT` | webserp subprocess timeout (s) | `30` |
+| `WAHABOT_WEB_SEARCH_TIMEOUT` | webserp subprocess and `visit_url` fetch timeout (s) | `30` |
 | `WAHABOT_WEB_SEARCH_PROXY` | Optional proxy for webserp | — |
 | `WAHABOT_SHELL_TOOL` | Enable shell tool (off by default; run unprivileged/sandboxed) | `false` |
 | `WAHABOT_SHELL_TIMEOUT` | Shell command timeout (s) | `30` |
@@ -62,7 +70,7 @@ uv run wahabot serve                  # start the webhook server
 Point WAHA at the webhook in your session config:
 
 ```json
-{"url": "http://host:8080/api/webhook", "events": ["message", "message.reaction", "session.status"], "hmac": {"key": "your-secret-key"}}
+{"url": "http://host:8080/api/webhook/default", "events": ["message", "message.reaction", "session.status"], "hmac": {"key": "your-secret-key"}}
 ```
 
 `wahabot sessions init` writes a starter `data/sessions/default.json` — edit it

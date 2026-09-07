@@ -1,13 +1,12 @@
 """Frame extraction and the text anchor for video messages.
 
-The LLM endpoint accepts images, not videos (see
-``docs/plans/video-understanding.md``), so a video becomes: a handful
-of evenly spaced JPEG frames for one caption call, plus the spoken
-track from the WhisperX service, folded into the user message as the
-durable text anchor — ``(video shows: …)`` and ``[audio: "…"]`` — the
-same trick ``ai/vision.py`` uses for photos. The frames ride the first
-LLM call of the run only (``workflow.with_image``); the anchor rides
-every later turn for free.
+The LLM endpoint accepts images, not videos, so a video becomes: a
+handful of evenly spaced JPEG frames for one caption call, plus the
+spoken track from the WhisperX service, folded into the user message
+as the durable text anchor — ``(video shows: …)`` and
+``[audio: "…"]`` — the same trick ``ai/vision.py`` uses for photos.
+The frames ride the first LLM call of the run only
+(``workflow.with_image``); the anchor rides every later turn for free.
 """
 
 import asyncio
@@ -39,7 +38,7 @@ __all__ = [
 
 #: Longest edge of an extracted frame. Vision detail beyond this is
 #: token cost, not information: 512 px recognizes subject, action and
-#: setting (measured against real clips in the plan's evidence table).
+#: setting on real clips.
 FRAME_MAX_SIDE = 512
 
 #: Transcript chars kept in the anchor; a long clip must not inflate

@@ -28,8 +28,10 @@ The AI code is split into focused modules under `src/wahabot/ai/`:
 | `tools/schemas.py` | Explicit Pydantic parameter schemas for every tool |
 | `tools/envelope.py` | The unified JSON envelope (`ok` / `error`) every tool returns |
 | `tools/web_search.py` / `tools/visit_url.py` | Web lookup tools (webserp CLI, curl_cffi page fetch) |
-| `tools/url_images.py` | Image-URL sniffing from message text (curl_cffi fetch, Content-Type check) |
+| `tools/url_images.py` / `tools/shell.py` | Image-URL sniffing (curl_cffi fetch) and the opt-in host shell |
 | `tools/finance.py` / `tools/youtube.py` | Market data (yfinance) and YouTube transcript tools |
+| `albums.py` | Album reassembly: container + images buffered into one agent turn |
+| `video.py` / `vision.py` | Video frame extraction + turn anchor; image captions |
 | `observability.py` | Opt-in Langfuse trace export (see below) |
 
 ## How the workflow works
@@ -146,8 +148,10 @@ memory survives restarts and LRU evictions. The save points are:
 Each load/save holds `agent_lock`; a restore on a context miss
 (`context_for`) is lazy — a chat reloads from disk on its first message
 after a restart, and an LRU-evicted chat reloads instead of starting
-blank. Full decisions, failure handling and the `wahabot forget` wipe
-path: [`docs/plans/persistent-memory.md`](./plans/persistent-memory.md).
+blank. The load/save/restore implementation lives in
+`wahabot.core.persistence`; `wahabot forget` wipes one chat's live
+context and disk file together, under `agent_lock` so no in-flight run
+can resurrect it.
 
 ### Backlog filter
 
@@ -186,7 +190,7 @@ Before each run reaches the LLM, the buffered history passes through two
 
 ## The entrypoint
 
-`handle_message(event, agent, ctx=None, image=None, settings=None, waha=None)` in
+`handle_message(event, agent, ctx=None, image=None, images=None, settings=None, waha=None)` in
 `wahabot.ai.context` is the single function the handlers call. It:
 
 1. reads the message body from `event.payload["body"]` and prefixes a
@@ -287,8 +291,9 @@ Three event flows sit outside the plain message → reply pipeline:
   session prompt keys on it (deliver with `send_message(chat=…)` to
   the named target, resolve names with `resolve_chat`). The shared
   send holder points at the event's `from` ("operator"), so a bare
-  `send_message` behaves like a DM. Full reference:
-  `docs/plans/operator-commands-and-events.md`.
+  `send_message` behaves like a DM. The event is built by
+  `wahabot.commands.build_command_event` and posted to the webhook
+  signed with the same HMAC as real WAHA traffic.
 - **Reactions** (`message.reaction` events) to the bot's own messages
   are folded into that chat's memory as `[reaction 👍 from Sender to
   your message: "…"]` notes — context for the next turn, never an
@@ -364,7 +369,7 @@ JID to reach another group or person (e.g. `1234567890@g.us`,
 
 | Tool | Params | WAHA endpoint | Purpose |
 |---|---|---|---|
-| `send_message` | `chat?`, `text`, `reply_to?` | `POST /api/sendText` | Send a text (current chat or elsewhere); `reply_to` quotes a message; once per run (shared latch) |
+| `send_message` | `chat?`, `text`, `reply_to?`, `mentions?` | `POST /api/sendText` | Send a text (current chat or elsewhere); `reply_to` quotes a message; `mentions` tags contacts; once per run (shared latch) |
 | `stay_silent` | — | — | End the run with no reply at all (terminal: the workflow stops before executing it) |
 | `react_to_message` | `message_id`, `reaction` | `PUT /api/reaction` | Emoji-react to a message (empty = remove); once per run |
 | `send_image` | `url`, `caption?`, `chat?` | `POST /api/sendImage` | Send an image from a URL; once per run (shared latch) |
@@ -575,12 +580,17 @@ and fall back to kwargs, or it will silently see zero.
   tool-free wrap-up call (logged with its trigger: the round limit, or
   a non-delivery round after a completed delivery). The counter resets
   at every run start.
-- `send_message`, `send_image`, `send_file`, and `forward_message` share a
-  single delivery latch and collectively deliver **at most once per run**:
-  after a successful send, further calls return an error envelope
-  instead of sending, so a looping model cannot spam the chat even
-  below the round limit. `react_to_message` is likewise bounded to one
-  reaction per run.
+- The workflow's delivery set (`DELIVERY_TOOLS` in `workflow.py`) is
+  `send_message`, `send_image`, `forward_message`, and `react_to_message`.
+  They share a single delivery latch and collectively deliver **at most
+  once per run**: after a successful send, further delivery calls return
+  an error envelope instead of sending, so a looping model cannot spam
+  the chat even below the round limit. `react_to_message` is likewise
+  bounded to one reaction per run. `send_file` is **not** part of this
+  set: it enforces its own once-per-run latch in the shared send holder
+  (a second call errors out), but the workflow treats its result as an
+  ordinary tool result — no delivery gate, no collapse, no
+  post-delivery text drop.
 - `stay_silent` is the explicit exit for "no reply": the system prompt
   tells the model to call it instead of writing an empty string (which
   small models tend to replace with narration like "I'll stay silent
@@ -597,7 +607,7 @@ and fall back to kwargs, or it will silently see zero.
   see is preserved by collapsing the delivery tool group into one plain
   assistant message holding the delivered content — the sent text for
   `send_message`, the emoji for `react_to_message`, a bracketed marker
-  (with caption) for `send_image`/`send_file`/`forward_message` — so the
+  (with caption) for `send_image`/`forward_message` — so the
   model keeps sight of what it already said instead of re-answering.
   The wrap-up call after a completed delivery is subject to the same
   drop. Research runs (no delivery tool) keep their final answer.

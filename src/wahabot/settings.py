@@ -92,8 +92,8 @@ class Settings(BaseSettings):
     #: larger than photos; the transcription upload alone justifies a cap).
     max_video_bytes: int = 64 * 1024 * 1024
     #: Frames sampled per video for the caption call (1-12). More
-    #: frames read on-screen text more faithfully (see the plan's
-    #: evidence table) at ~192 image tokens each.
+    #: frames read on-screen text more faithfully at ~192 image
+    #: tokens each.
     video_frames: int = Field(default=6, ge=1, le=12)
     #: Local files larger than this are rejected by the send_file tool
     #: (base64 inflates ~4/3x and the whole file rides one JSON request);

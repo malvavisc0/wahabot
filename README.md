@@ -69,7 +69,7 @@ logs the WAHA session's live identity, the loaded session config summary, and
 the toolset the agent was built with:
 
 ```
-Info: wahabot 0.2.9 (Python 3.14.6)
+Info: wahabot 0.4.8 (Python 3.14.6)
 Info: Session: default
 Info: LLM: gpt-4o-mini @ https://api.openai.com/v1
 Info: Memory: 8000 token ceiling
@@ -100,6 +100,7 @@ The agent workflow lives under `src/wahabot/ai/` as a set of focused modules:
 | `events.py` | `InputEvent` / `ToolCallEvent` |
 | `context.py` | Sender tagging, reply-context rendering, `handle_message` entrypoint |
 | `messages.py` | Message classification, `extract_text`, `image_media`, `video_media`, `is_replyable` |
+| `albums.py` | Album reassembly: container + images buffered into one agent turn |
 | `history.py` | `sanitize_chat_history` (repair) + `trim_to_budget` (token budget) |
 | `tools/whatsapp.py` | WhatsApp actions: send, react, forward, search, resolve chats |
 | `tools/external.py` | Web, finance, YouTube & (opt-in) shell tool builders |
@@ -128,7 +129,9 @@ uv run python scripts/smoke_test.py   # end-to-end smoke suite
 
 - [Installation — setup, env vars, quick start](docs/install.md)
 - [Agent workflow — full pipeline explanation](docs/agent-workflow.md)
+- [How conversations work — contexts, memory, group participation](docs/conversations.md)
 - [Session config — fields, group participation, access control](docs/session-config.md)
 - [WAHA identity fields — `from` / `participant` / `to` semantics](docs/waha-identity-fields.md)
 - [WAHA albums — multi-image reassembly](docs/waha-albums.md)
 - [WAHA broadcast sources — status/newsletter handling](docs/waha-broadcast-sources.md)
+- [Coding standard — the house rules the codebase follows](docs/coding-standard.md)
