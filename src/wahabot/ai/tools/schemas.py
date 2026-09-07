@@ -18,10 +18,13 @@ Every tool returns the shared JSON envelope (see
 from pydantic import BaseModel, Field
 
 #: Shared ``chat`` parameter description: a bare JID, never a message id.
+#: Cross-chat reach is an operator-command capability; chat runs must
+#: omit the parameter (the tools refuse it — see ``fenced_chat``).
 CHAT_DESCRIPTION = (
     "Optional chat id — a bare JID like `1234567890@g.us` or "
-    "`9876543210@c.us`, never a `false_...` message id. Omit for the "
-    "current chat."
+    "`9876543210@c.us`, never a `false_...` message id. Operator "
+    "commands only: reach the target the instruction names. Chat runs "
+    "must omit it (current conversation only)."
 )
 
 

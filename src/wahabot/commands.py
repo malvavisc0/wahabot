@@ -21,6 +21,7 @@ from loguru import logger
 
 from wahabot.ai.context import handle_message
 from wahabot.ai.observability import chat_trace_attributes
+from wahabot.ai.tools.whatsapp import OPERATOR_KEY
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.models import WahaEvent
 from wahabot.core.waha import WahaClient
@@ -65,6 +66,9 @@ async def run_command(
         holder["chat_id"] = str(event.payload.get("from", ""))
         holder["sent"] = ""
         holder["reacted"] = ""
+        # Operator commands are the one trusted cross-chat channel: the
+        # fence in the WhatsApp tools opens for this run alone.
+        holder[OPERATOR_KEY] = "1"
     ctx = Context(agent)
     with chat_trace_attributes("operator-command"):
         reply = await handle_message(event, agent, ctx=ctx, settings=settings, waha=waha)

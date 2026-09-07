@@ -32,6 +32,7 @@ from wahabot.ai.messages import (
 )
 from wahabot.ai.observability import chat_trace_attributes, enable_langfuse
 from wahabot.ai.tools import build_default_tools
+from wahabot.ai.tools.whatsapp import OPERATOR_KEY
 from wahabot.ai.video import caption_video, extract_frames, join_anchor, video_marker
 from wahabot.ai.vision import caption_images
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
@@ -480,6 +481,9 @@ def register_agent_handler(
             send_tool_holder["chat_id"] = chat_id
             send_tool_holder["sent"] = ""
             send_tool_holder["reacted"] = ""
+            # Chat runs never carry cross-chat reach: clear the operator
+            # flag a `wahabot tell` run may have left.
+            send_tool_holder[OPERATOR_KEY] = ""
             ctx = await context_for(event.session, chat_id, agent, settings)
             with chat_trace_attributes(chat_id):
                 reply = await handle_message(
@@ -636,6 +640,9 @@ def register_agent_handler(
                 send_tool_holder["chat_id"] = chat_id
                 send_tool_holder["sent"] = ""
                 send_tool_holder["reacted"] = ""
+                # Chat runs never carry cross-chat reach: clear the
+                # operator flag a `wahabot tell` run may have left.
+                send_tool_holder[OPERATOR_KEY] = ""
                 ctx = await context_for(event.session, chat_id, agent, settings)
                 with chat_trace_attributes(chat_id):
                     reply = await handle_message(

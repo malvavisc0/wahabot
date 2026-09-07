@@ -6,6 +6,11 @@ handler before every agent run with the current ``session`` and default
 being handled. Tools calling a WAHA endpoint raise on HTTP errors; the
 tool functions here return the shared JSON envelope instead, so a
 failure feeds back to the model rather than crashing the workflow.
+
+Cross-chat reach is fenced (see :func:`fenced_chat`): only operator
+``wahabot tell`` runs may aim the tools at a chat other than the one
+that woke the agent. Chat participants asking the bot to DM or read a
+stranger get a refusal envelope, not a delivery.
 """
 
 import base64
@@ -36,10 +41,13 @@ from wahabot.core.waha import WahaClient
 
 __all__ = [
     "chat_jid",
+    "fenced_chat",
+    "fenced_message_id",
     "fetch_chat_messages",
     "forward_message",
     "get_chat",
     "infer_mimetype",
+    "operator_run",
     "participant_jid",
     "react_to_message",
     "resolve_chat",
@@ -100,11 +108,110 @@ def chat_jid(chat: str | None, target: dict[str, str]) -> str:
     return value.split("_")[0] if "@" in value.split("_")[0] else value
 
 
+#: Holder key set (only) on operator-command runs; empty on chat runs.
+OPERATOR_KEY = "operator"
+
+
+def operator_run(target: dict[str, str]) -> bool:
+    """True when the current run is a trusted ``wahabot tell`` command.
+
+    Chat participants cannot be allowed to point the bot's tools at
+    chats they are not in: "tell everyone in <group> that …" from a
+    group, or worse, a request to read or DM a stranger, must not
+    exfiltrate or deliver anything outside the current conversation.
+    The HMAC-signed operator channel is the only trusted source of
+    cross-chat intent, so the fence opens for it alone.
+    """
+    return bool(target.get(OPERATOR_KEY))
+
+
+#: The refusal envelope text for a chat run aiming outside its chat.
+#: Model-facing: tells the model what it may do instead of guessing.
+_FENCE_ERROR = (
+    "cross-chat reach is reserved for operator commands; this run may "
+    "only act on the current conversation"
+)
+
+
+def fenced_chat(
+    chat: str | None, target: dict[str, str]
+) -> tuple[str | None, str | None]:
+    """The ``(jid, error)`` a tool call may act on — exactly one is set.
+
+    Every WhatsApp tool that takes a ``chat`` parameter runs through
+    here instead of calling :func:`chat_jid` directly. Non-operator
+    runs (a chat message woke the agent) may only ever act on the
+    conversation that produced them: an explicit ``chat`` pointing
+    anywhere else — a different group, someone's DM, the bot's own
+    "message yourself" JID — is refused. Operator-command runs pass
+    through :func:`chat_jid` unchanged (the instruction *names* the
+    target chat; that reach is their documented purpose).
+
+    The error half keeps the tools honest: a caller must surface it as
+    an envelope, never silently fall back to the current chat — a
+    misdirected "send" must fail loudly, not deliver to the wrong
+    room. Refusals log at WARNING: they are the audit trail of a
+    participant (or an injected instruction) trying to make the bot
+    act outside its conversation.
+    """
+    if operator_run(target):
+        return chat_jid(chat, target), None
+    current = target.get("chat_id", "")
+    if not chat:
+        return current, None
+    resolved = chat_jid(chat, target)
+    if resolved == current:
+        return current, None
+    if "@" not in resolved:
+        logger.warning(
+            "Refused malformed chat id {chat} in chat run in {current}",
+            chat=chat,
+            current=current,
+        )
+        return None, f"not a valid chat id: {chat!r}"
+    logger.warning(
+        "Refused cross-chat tool call to {chat} from chat run in {current}",
+        chat=chat,
+        current=current,
+    )
+    return None, _FENCE_ERROR
+
+
+def fenced_message_id(message_id: str, target: dict[str, str]) -> str | None:
+    """*message_id* when its chat is the current one, else None.
+
+    A serialized WhatsApp id embeds its chat's JID as the second
+    segment (``false_<jid>_<msgid>``); reads, reactions, quotes and
+    forwards all act on that chat, so the id is another way to point
+    a tool outside the conversation. On non-operator runs an id from
+    any chat but the current one is refused (operator runs pass
+    through). Ids that carry no recognizable JID — ``true_``-less
+    foreign formats, engine quirks — are allowed through: WAHA
+    validates ids server-side, and refusing unknown shapes would fence
+    the current chat's own messages too.
+    """
+    if operator_run(target):
+        return message_id
+    embedded = chat_jid(message_id, {"chat_id": ""})
+    if not embedded or "@" not in embedded:
+        return message_id
+    if embedded == target.get("chat_id", ""):
+        return message_id
+    logger.warning(
+        "Refused cross-chat message id {id} from chat run in {current}",
+        id=message_id,
+        current=target.get("chat_id", ""),
+    )
+    return None
+
+
 def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
     """Build a tool that sends a WhatsApp text message.
 
-    Sends to the current chat by default; the model may pass an explicit
-    ``chat`` (a group or a person's JID) to reach a different target.
+    Sends to the current chat by default; an operator-command run may
+    pass an explicit ``chat`` (a group or a person's JID) to reach a
+    different target — a normal chat run cannot (the fence refuses,
+    see :func:`fenced_chat`).
 
     One message per run: once a send succeeds, further calls fail with
     an error envelope instead of sending again. A looping model (the
@@ -122,8 +229,9 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
 
         Args:
             chat: Optional chat id (group or person JID, e.g.
-                `1234567890@g.us` or `9876543210@c.us`). Omit to reply
-                in the current conversation.
+                `1234567890@g.us` or `9876543210@c.us`). Operator
+                commands only: reach the target the instruction names.
+                Chat runs must omit it (current conversation only).
             text: The text to send.
             reply_to: Optional serialized message id to quote — the
                 text goes out as a native quote-reply with that message
@@ -137,10 +245,14 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             return error(
                 f"message already sent this run (to {target['sent']}); do not send again"
             )
+        chat_id, fence_error = fenced_chat(chat, target)
+        if fence_error:
+            return error(fence_error)
         session = target.get("session", "")
-        chat_id = chat_jid(chat, target)
         if not session or not chat_id:
             return error("no active conversation context")
+        if reply_to and fenced_message_id(reply_to, target) is None:
+            return error(_FENCE_ERROR)
         waha.send_text(session, chat_id, text, reply_to=reply_to, mentions=mentions)
         target["sent"] = chat_id
         fields: dict[str, Any] = {
@@ -160,14 +272,14 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         fn_schema=SendMessageSchema,
         name="send_message",
         description=(
-            "Send a WhatsApp text message. Use this to reply in the "
-            "current chat (omit chat) or to message another group or "
-            "person (pass chat). To answer a specific message, pass its "
-            "id as reply_to — the incoming message's own id rides the "
-            "turn as [message id: …], others come from "
-            "fetch_chat_messages. To @-mention someone (real highlight "
-            "+ notification), pass their JID in mentions and write "
-            "@<their name> in the text. Send at most once per run."
+            "Send a WhatsApp text message to the current chat. To answer "
+            "a specific message, pass its id as reply_to — the incoming "
+            "message's own id rides the turn as [message id: …], others "
+            "come from fetch_chat_messages. To @-mention someone (real "
+            "highlight + notification), pass their JID in mentions and "
+            "write @<their name> in the text. Operator commands may pass "
+            "chat to reach the target the instruction names; chat runs "
+            "must omit it. Send at most once per run."
         ),
     )
 
@@ -221,6 +333,8 @@ def react_to_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             return error("no active conversation context")
         if not message_id:
             return error("message_id is required")
+        if fenced_message_id(message_id, target) is None:
+            return error(_FENCE_ERROR)
         waha.send_reaction(session, message_id, reaction)
         target["reacted"] = message_id
         return ok(message_id=message_id, reaction=reaction, removed=not reaction)
@@ -251,14 +365,17 @@ def send_image(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         Args:
             url: Public URL of the image to send.
             caption: Optional caption text.
-            chat: Optional chat id. Omit to send to the current chat.
+            chat: Optional chat id; operator commands only. Omit to
+                send to the current chat.
         """
         if target.get("sent"):
             return error(
                 f"message already sent this run (to {target['sent']}); do not send again"
             )
+        chat_id, fence_error = fenced_chat(chat, target)
+        if fence_error:
+            return error(fence_error)
         session = target.get("session", "")
-        chat_id = chat_jid(chat, target)
         if not session or not chat_id:
             return error("no active conversation context")
         if not url:
@@ -278,9 +395,10 @@ def send_image(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         fn_schema=SendImageSchema,
         name="send_image",
         description=(
-            "Send an image to a WhatsApp chat from a public URL. "
-            "Pass chat to reach another group/person, else sends to the "
-            "current chat. caption is optional."
+            "Send an image to the current WhatsApp chat from a public "
+            "URL. caption is optional. Operator commands may pass chat "
+            "to reach the target the instruction names; chat runs must "
+            "omit it."
         ),
     )
 
@@ -334,14 +452,17 @@ def send_file(waha: WahaClient, target: dict[str, str], max_file_bytes: int) -> 
             caption: Optional caption text.
             filename: Optional file name shown to the recipient;
                 defaults to the URL/path basename.
-            chat: Optional chat id. Omit to send to the current chat.
+            chat: Optional chat id; operator commands only. Omit to
+                send to the current chat.
         """
         if target.get("sent"):
             return error(
                 f"message already sent this run (to {target['sent']}); do not send again"
             )
+        chat_id, fence_error = fenced_chat(chat, target)
+        if fence_error:
+            return error(fence_error)
         session = target.get("session", "")
-        chat_id = chat_jid(chat, target)
         if not session or not chat_id:
             return error("no active conversation context")
         if bool(url) == bool(path):
@@ -365,11 +486,11 @@ def send_file(waha: WahaClient, target: dict[str, str], max_file_bytes: int) -> 
         fn_schema=SendFileSchema,
         name="send_file",
         description=(
-            "Send a document (PDF, etc.) to a WhatsApp chat — from a "
-            "public url, or a local path for files you created. Pass "
-            "chat to reach another group/person, else sends to the "
-            "current chat. caption and filename are optional. Send at "
-            "most once per run."
+            "Send a document (PDF, etc.) to the current WhatsApp chat — "
+            "from a public url, or a local path for files you created. "
+            "caption and filename are optional. Operator commands may "
+            "pass chat to reach the target the instruction names; chat "
+            "runs must omit it. Send at most once per run."
         ),
     )
 
@@ -462,11 +583,14 @@ def fetch_chat_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         """Fetch recent messages from a chat.
 
         Args:
-            chat: Optional chat id. Omit to fetch from the current chat.
+            chat: Optional chat id; operator commands only. Omit to
+                fetch from the current chat.
             limit: Max messages to return (default 20).
         """
+        chat_id, fence_error = fenced_chat(chat, target)
+        if fence_error:
+            return error(fence_error)
         session = target.get("session", "")
-        chat_id = chat_jid(chat, target)
         if not session or not chat_id:
             return error("no active conversation context")
         messages = waha.fetch_chat_messages(session, chat_id, limit=limit)
@@ -477,14 +601,15 @@ def fetch_chat_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         fn_schema=FetchChatMessagesSchema,
         name="fetch_chat_messages",
         description=(
-            "Fetch the most recent messages of a chat. Returns a JSON "
-            "envelope with `messages` (each carrying its serialized `id`, "
-            "`body`, sender and media info): `count` is how many were "
-            "found, `returned` how many fit (oldest are dropped when "
-            "`truncated` is true — raise limit to look further back). "
-            "Use to read the current or another chat; the ids let you "
-            "forward or react to a message. limit caps the number of "
-            "messages fetched."
+            "Fetch the most recent messages of the current chat. "
+            "Returns a JSON envelope with `messages` (each carrying its "
+            "serialized `id`, `body`, sender and media info): `count` is "
+            "how many were found, `returned` how many fit (oldest are "
+            "dropped when `truncated` is true — raise limit to look "
+            "further back). The ids let you forward or react to a "
+            "message. limit caps the number of messages fetched. "
+            "Operator commands may pass chat to read the target the "
+            "instruction names; chat runs must omit it."
         ),
     )
 
@@ -496,10 +621,13 @@ def get_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         """Get metadata about a chat (name, participants count, ...).
 
         Args:
-            chat: Optional chat id. Omit for the current chat.
+            chat: Optional chat id; operator commands only. Omit for
+                the current chat.
         """
+        chat_id, fence_error = fenced_chat(chat, target)
+        if fence_error:
+            return error(fence_error)
         session = target.get("session", "")
-        chat_id = chat_jid(chat, target)
         if not session or not chat_id:
             return error("no active conversation context")
         overview = waha.get_chat_overview(session, chat_id)
@@ -514,11 +642,12 @@ def get_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         name="get_chat",
         description=(
             "Get metadata (name, participant count, group flags, unread "
-            "count) about a WhatsApp chat as a JSON envelope. For small "
-            "chats it includes `participant_list`: the JID of each "
-            "member, with `name` where known — use those JIDs for the "
-            "`mentions` parameter of send_message. Omit chat for the "
-            "current chat."
+            "count) about the current WhatsApp chat as a JSON envelope. "
+            "For small chats it includes `participant_list`: the JID of "
+            "each member, with `name` where known — use those JIDs for "
+            "the `mentions` parameter of send_message. Operator "
+            "commands may pass chat for the target the instruction "
+            "names; chat runs must omit it."
         ),
     )
 
@@ -654,16 +783,18 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
 
         Args:
             query: The text to look for.
-            chat: Optional chat id to scope the search. Omit to search
-                the current chat.
+            chat: Optional chat id to scope the search; operator
+                commands only. Omit to search the current chat.
             limit: Max matches to return (default 20).
         """
-        session = target.get("session", "")
-        chat_id = chat_jid(chat, target)
-        if not session or not chat_id:
-            return error("no active conversation context")
         if not query.strip():
             return error("query is required")
+        chat_id, fence_error = fenced_chat(chat, target)
+        if fence_error:
+            return error(fence_error)
+        session = target.get("session", "")
+        if not session or not chat_id:
+            return error("no active conversation context")
         messages = waha.search_messages(session, query, chat_id, limit=limit)
         return ok(
             chat=chat_id,
@@ -676,12 +807,13 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         fn_schema=SearchMessagesSchema,
         name="search_messages",
         description=(
-            "Search a chat's recent messages for a text substring in "
-            "body, media filename or mimetype. Returns a JSON envelope "
-            "with matching `messages`: `count` is how many matched, "
-            "`returned` how many fit (oldest are dropped when "
-            "`truncated` is true). Pass chat to search another chat, "
-            "else the current one."
+            "Search the current chat's recent messages for a text "
+            "substring in body, media filename or mimetype. Returns a "
+            "JSON envelope with matching `messages`: `count` is how "
+            "many matched, `returned` how many fit (oldest are dropped "
+            "when `truncated` is true). Operator commands may pass chat "
+            "to search the target the instruction names; chat runs "
+            "must omit it."
         ),
     )
 
@@ -694,6 +826,11 @@ def resolve_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
     matches), matches case-insensitively — exact name first, then
     substring — and returns up to ``_RESOLVE_CHAT_CANDIDATES`` matches
     for the model to pick from.
+
+    Operator commands only: the roster is the operator's contact list,
+    and the only legitimate use of a resolved JID is aiming a cross-chat
+    tool call — which chat runs cannot make anyway. A chat participant
+    gets a refusal, not the bot's contact book.
     """
 
     def resolve_chat_fn(name: str = "") -> str:
@@ -702,6 +839,8 @@ def resolve_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         Args:
             name: The person or group name to look up.
         """
+        if not operator_run(target):
+            return error(_FENCE_ERROR)
         session = target.get("session", "")
         if not session:
             return error("no active conversation context")
@@ -725,12 +864,13 @@ def resolve_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         fn_schema=ResolveChatSchema,
         name="resolve_chat",
         description=(
-            "Resolve a person or group NAME to WhatsApp chat JIDs. "
-            "Returns a JSON envelope with `matches` (up to 5, each "
-            "`{id, name}`): exact names rank first, then substring "
-            "matches. Pick the right JID and pass it as `chat` to "
-            "send_message/send_image/forward_message. When several "
-            "match, choose the closest and mention which you picked."
+            "Operator commands only: resolve a person or group NAME to "
+            "WhatsApp chat JIDs. Returns a JSON envelope with `matches` "
+            "(up to 5, each `{id, name}`): exact names rank first, then "
+            "substring matches. Pick the right JID and pass it as "
+            "`chat` to send_message/send_image/send_file/"
+            "forward_message. When several match, choose the closest "
+            "and mention which you picked."
         ),
     )
 
@@ -765,18 +905,23 @@ def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
 
         Args:
             message_id: The serialized id of the message to forward.
-            chat: Optional chat id to forward into. Defaults to current.
+            chat: Optional chat id to forward into; operator commands
+                only. Defaults to the current chat.
         """
         if target.get("sent"):
             return error(
                 f"message already sent this run (to {target['sent']}); do not send again"
             )
+        chat_id, fence_error = fenced_chat(chat, target)
+        if fence_error:
+            return error(fence_error)
         session = target.get("session", "")
-        chat_id = chat_jid(chat, target)
         if not session or not chat_id:
             return error("no active conversation context")
         if not message_id:
             return error("message_id is required")
+        if fenced_message_id(message_id, target) is None:
+            return error(_FENCE_ERROR)
         waha.forward_message(session, chat_id, message_id)
         target["sent"] = chat_id
         return ok(message_id=message_id, chat=chat_id)
@@ -786,7 +931,8 @@ def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         fn_schema=ForwardMessageSchema,
         name="forward_message",
         description=(
-            "Forward an existing WhatsApp message (by its serialized id) "
-            "to a chat. Pass chat to choose the destination, else current."
+            "Forward an existing WhatsApp message (by its serialized "
+            "id) to the current chat. Operator commands may pass chat "
+            "to choose the destination; chat runs must omit it."
         ),
     )
