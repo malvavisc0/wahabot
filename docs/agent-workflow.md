@@ -126,6 +126,29 @@ only one session can be active; the `(session, chat)` key simply makes
 the memory indirection correct and future-proof if multiple sessions are
 ever served.
 
+### Persistence
+
+The per-chat buffer is not just process-local: at the end of every agent
+run (and after every memory-only fold) `handlers.persist_memory` writes
+the run-end buffer to `data/memory/<session>/<chat-id>.json`, so a chat's
+memory survives restarts and LRU evictions. The save points are:
+
+1. **Message run end** — in `reply_with_agent`, right after
+   `handle_message` returns and *before* the delivery early-return (a
+   delivered reply exits inside the lock, so a save placed after would
+   never run).
+2. **Album run end** — in `deliver_album_reply`, same position.
+3. **fromMe fold** — after `remember_own_message` in its locked block.
+4. **Reaction fold** — after the note replacement in `reactions.py`,
+   which now holds the agent lock (the WAHA fetch of the reacted-to
+   message stays outside it).
+
+Each load/save holds `agent_lock`; a restore on a context miss
+(`context_for`) is lazy — a chat reloads from disk on its first message
+after a restart, and an LRU-evicted chat reloads instead of starting
+blank. Full decisions, failure handling and the `wahabot forget` wipe
+path: [`docs/plans/persistent-memory.md`](./plans/persistent-memory.md).
+
 ### Backlog filter
 
 WhatsApp redelivers undelivered messages when the WAHA session or the
@@ -270,7 +293,11 @@ Three event flows sit outside the plain message → reply pipeline:
   are folded into that chat's memory as `[reaction 👍 from Sender to
   your message: "…"]` notes — context for the next turn, never an
   agent run. The `true_`/`false_` id prefix decides ownership before
-  any WAHA fetch; one note per target message, latest wins.
+  any WAHA fetch; one note per target message, latest wins. The
+  memory fold holds the agent lock (the WAHA fetch stays outside
+  it) and is persisted to the chat's memory file like any other
+  fold — so a reaction to a bot message in an LRU-evicted chat
+  reloads from disk instead of being dropped.
 - **Session health** (`session.status` events): only `WORKING` is
   healthy. `status.py` seeds the flag from `GET /api/sessions/{session}`
   at startup, mutes message/command handling while unhealthy (before

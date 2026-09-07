@@ -49,6 +49,12 @@ uv run wahabot tell "search the latest news about elon musk and send a summary t
 
 The agent runs the instruction with its full toolset on a fresh context. No whitelist applies, no chat history is touched, and names resolve to the right person or group automatically. The result lands in WhatsApp, not in your terminal.
 
+`wahabot forget <chat-id>` wipes one chat's persistent memory in the running bot (live context and disk file, under the agent lock):
+
+```bash
+uv run wahabot forget "1234567890-1234567890@g.us"
+```
+
 ## Install
 
 See [Installation guide](docs/install.md) — setup, the full env var reference,
@@ -104,7 +110,7 @@ The agent workflow lives under `src/wahabot/ai/` as a set of focused modules:
 
 Before every LLM call, the chat history passes through two hygiene steps: **repair** (fixes dangling tool calls, orphan messages, trailing user turns that would make the API reject the payload) and **trim** (keeps the newest tail that fits the token budget, treating tool-call groups as atomic).
 
-Memory is keyed by `(session, chat_id)` — each WhatsApp conversation gets its own continuous context. Tool results are stored as `role="tool"` messages so the model can reference them across the loop.
+Memory is keyed by `(session, chat_id)` — each WhatsApp conversation gets its own continuous context. Tool results are stored as `role="tool"` messages so the model can reference them across the loop. Memory is **persisted** to `data/memory/<session>/<chat>.json` at the end of every run, so it survives restarts and LRU evictions; `wahabot forget <chat>` wipes one chat (see `docs/plans/persistent-memory.md`).
 
 ## Development
 

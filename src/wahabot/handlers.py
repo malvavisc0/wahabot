@@ -35,11 +35,12 @@ from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
 from wahabot.core.access import SessionConfigReloader, load_session_config
 from wahabot.core.filters import chat_allowed, jid_alias_lookup
 from wahabot.core.models import WahaEvent
+from wahabot.core.persistence import forget_memory, load_memory, save_memory
 from wahabot.core.transcribe import transcribe_voice_note
 from wahabot.core.waha import MediaTooLargeError, WahaClient
 from wahabot.settings import Settings
 from wahabot.status import session_healthy
-from wahabot.webhook import on_message
+from wahabot.webhook import on_forget, on_message
 
 _seen_ids: dict[str, float] = {}
 #: Messages older than this many seconds are stale backlog, not live turns.
@@ -94,18 +95,32 @@ def forget_seen(message_id: str) -> None:
     _seen_ids.pop(message_id, None)
 
 
-def context_for(
-    session: str, chat_id: str, agent: FunctionCallingAgentWorkflow
+async def context_for(
+    session: str,
+    chat_id: str,
+    agent: FunctionCallingAgentWorkflow,
+    settings: Settings,
 ) -> Context:
     """The per-chat agent context, evicting stale chats past the cap.
 
     Every touch moves the chat to the end (most recently used);
-    inserts past the cap drop the oldest entry.
+    inserts past the cap drop the oldest entry. On a miss the chat's
+    memory is lazily restored from disk (when persistence is on), so an
+    LRU-evicted chat reloads its history instead of starting blank.
     """
     key = (session, chat_id)
     ctx = contexts.pop(key, None)
     if ctx is None:
         ctx = Context(agent)
+        if settings.memory_persist:
+            memory = load_memory(settings.data_dir, session, chat_id)
+            if memory is not None:
+                await ctx.store.set("memory", memory)
+                logger.info(
+                    "Restored memory for {chat_id}: {count} messages",
+                    chat_id=chat_id,
+                    count=len(memory.get_all()),
+                )
     contexts[key] = ctx
     while len(contexts) > _MAX_CONTEXTS:
         oldest = next(iter(contexts))
@@ -113,36 +128,47 @@ def context_for(
     return ctx
 
 
+async def persist_memory(
+    settings: Settings, session: str, chat_id: str, ctx: Context
+) -> None:
+    """Write the chat's run-end buffer to disk; a no-op when disabled.
+
+    The buffer is the coherent snapshot of a run (sanitized, trimmed,
+    delivery groups collapsed). Write failures are logged and swallowed
+    inside ``save_memory`` so a disk problem never breaks a reply.
+    """
+    if not settings.memory_persist:
+        return
+    memory = await ctx.store.get("memory", default=None)
+    if memory is None:
+        return
+    save_memory(settings.data_dir, session, chat_id, memory)
+
+
 async def append_to_memory(
     session: str,
     chat_id: str,
-    agent: FunctionCallingAgentWorkflow | None,
+    agent: FunctionCallingAgentWorkflow,
+    settings: Settings,
     message: ChatMessage,
-) -> None:
+) -> Context:
     """Append one message to a chat's memory buffer, no agent run.
 
     Shared fold-in path for out-of-band turns (operator-typed ``fromMe``
     messages, reaction notes): the model's self-history should reflect
-    them, but a fold must never wake the LLM. *agent* may be None when
-    the chat already has a context with a memory buffer (the reaction
-    path — the chat only gets reactions to messages the bot sent there,
-    so a buffer always exists).
+    them, but a fold must never wake the LLM. Returns the chat's context
+    so the caller can persist the fold at its save point.
     """
-    ctx = context_for(session, chat_id, agent) if agent is not None else None
-    if ctx is None:
-        ctx = contexts.get((session, chat_id))
-        if ctx is None:
-            return
+    ctx = await context_for(session, chat_id, agent, settings)
     memory = await ctx.store.get("memory", default=None)
     if memory is None:
-        if agent is None:
-            return
         from_defaults = cast(
             Callable[..., ChatMemoryBuffer], ChatMemoryBuffer.from_defaults
         )
         memory = from_defaults(token_limit=agent.memory_token_limit, llm=agent.llm)
     await memory.aput(message)
     await ctx.store.set("memory", memory)
+    return ctx
 
 
 def log_final_text(chat_id: str, reply: str) -> None:
@@ -164,8 +190,9 @@ def log_final_text(chat_id: str, reply: str) -> None:
 async def remember_own_message(
     event: WahaEvent,
     agent: FunctionCallingAgentWorkflow,
+    settings: Settings,
     body: str | None,
-) -> None:
+) -> Context | None:
     """Fold a ``fromMe`` message into the chat's memory as an assistant turn.
 
     Messages sent from the bot account by its human operator (typing in
@@ -173,19 +200,24 @@ async def remember_own_message(
     concerned — storing them as assistant messages keeps the model's
     self-history coherent (it "said" them). Memory-only: no agent run,
     so the bot can never wake on its own output and loop on itself.
+
+    Returns the chat's context (or None when there was nothing to fold)
+    so the caller can persist at the fold's save point.
     """
     if not body:
-        return
+        return None
     chat_id = str(event.payload.get("from", ""))
     if not chat_id:
-        return
-    await append_to_memory(
+        return None
+    ctx = await append_to_memory(
         event.session,
         chat_id,
         agent,
+        settings,
         ChatMessage(role=MessageRole.ASSISTANT, content=body),
     )
     logger.debug("Remembered own outbound message {id}", id=event.payload.get("id"))
+    return ctx
 
 
 def is_stale(event: WahaEvent, started_at: float) -> bool:
@@ -253,6 +285,32 @@ def first_frame_png(data: bytes) -> bytes:
         buffer = io.BytesIO()
         img.convert("RGB").save(buffer, format="PNG")
         return buffer.getvalue()
+
+
+def register_forget_handler(settings: Settings) -> None:
+    """Register the ``forget`` webhook handler that wipes a chat's memory.
+
+    The ``wahabot forget`` CLI posts a signed ``forget`` event; the wipe
+    runs here, in the bot process, under the agent lock so it serializes
+    with runs: an in-flight run finishes and saves first, then the live
+    context and the memory file are dropped — no resurrection window.
+    """
+
+    @on_forget
+    async def handle_forget(event: WahaEvent) -> None:
+        chat_id = str(event.payload.get("chat_id", ""))
+        if not chat_id:
+            logger.warning("Ignoring forget event without a chat_id")
+            return
+        async with agent_lock:
+            live = contexts.pop((event.session, chat_id), None) is not None
+            removed = forget_memory(settings.data_dir, event.session, chat_id)
+            logger.info(
+                "Forgot {chat_id}: context {live}, file {removed}",
+                chat_id=chat_id,
+                live="present" if live else "absent",
+                removed="deleted" if removed else "absent",
+            )
 
 
 def register_agent_handler(
@@ -326,11 +384,12 @@ def register_agent_handler(
             send_tool_holder["chat_id"] = chat_id
             send_tool_holder["sent"] = ""
             send_tool_holder["reacted"] = ""
-            ctx = context_for(event.session, chat_id, agent)
+            ctx = await context_for(event.session, chat_id, agent, settings)
             with chat_trace_attributes(chat_id):
                 reply = await handle_message(
                     event, agent, ctx=ctx, images=downloaded, settings=settings, waha=waha
                 )
+            await persist_memory(settings, event.session, chat_id, ctx)
             if send_tool_holder["sent"] or send_tool_holder["reacted"]:
                 log_final_text(chat_id, reply)
                 return
@@ -422,7 +481,11 @@ def register_agent_handler(
         body = extract_text(event)
         if event.payload.get("fromMe"):
             async with agent_lock:
-                await remember_own_message(event, agent, body)
+                ctx = await remember_own_message(event, agent, settings, body)
+                if ctx is not None:
+                    await persist_memory(
+                        settings, event.session, str(event.payload.get("from", "")), ctx
+                    )
             return
         if is_album_container(event):
             start_album(event)
@@ -467,11 +530,12 @@ def register_agent_handler(
                 send_tool_holder["chat_id"] = chat_id
                 send_tool_holder["sent"] = ""
                 send_tool_holder["reacted"] = ""
-                ctx = context_for(event.session, chat_id, agent)
+                ctx = await context_for(event.session, chat_id, agent, settings)
                 with chat_trace_attributes(chat_id):
                     reply = await handle_message(
                         event, agent, ctx=ctx, image=image, settings=settings, waha=waha
                     )
+                await persist_memory(settings, event.session, chat_id, ctx)
                 if send_tool_holder["sent"] or send_tool_holder["reacted"]:
                     logger.debug(
                         "Agent already delivered its reply in {chat_id}",

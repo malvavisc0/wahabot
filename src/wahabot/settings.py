@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     #: the workflow timeout so a hung provider fails fast and clean.
     llm_timeout: float = 60.0
     memory_token_limit: int = 8000
+    #: Persist each chat's memory to disk (data/memory/). When false,
+    #: loads and saves are skipped — exactly the pre-persistence
+    #: blank-start behavior. The one kill switch; no TTL ships.
+    memory_persist: bool = True
     #: Max LLM→tool round trips per agent run (above LlamaIndex's
     #: default max_iterations of 20, to leave room for long research
     #: runs). Past the limit the model gets one final tool-free call

@@ -4,6 +4,8 @@ import hashlib
 import hmac
 import json
 import platform
+import time
+import uuid
 from collections.abc import Sequence
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
@@ -23,7 +25,7 @@ from wahabot.ai.context import render_system_prompt
 from wahabot.commands import build_command_event, register_command_handler
 from wahabot.core.access import load_session_config
 from wahabot.core.waha import WahaClient
-from wahabot.handlers import agent_lock, append_to_memory, register_agent_handler
+from wahabot.handlers import agent_lock, register_agent_handler, register_forget_handler
 from wahabot.reactions import register_reaction_handler
 from wahabot.settings import Settings, get_settings, setup_logging
 from wahabot.status import register_session_status_handler, seed_health
@@ -317,7 +319,7 @@ def serve(
     ensure_session_live(waha, settings)
     seed_health(waha, settings.session)
     agent, _config_reloader = register_agent_handler(settings, waha=waha)
-    register_reaction_handler(waha=waha, remember=append_to_memory)
+    register_reaction_handler(waha, agent, settings, agent_lock)
     register_command_handler(
         settings,
         waha,
@@ -325,6 +327,7 @@ def serve(
         agent_lock,
     )
     register_session_status_handler(waha, settings.session)
+    register_forget_handler(settings)
     (settings.journal_dir / settings.session).mkdir(parents=True, exist_ok=True)
     uvicorn.run(
         "wahabot.webhook:app",
@@ -334,6 +337,43 @@ def serve(
         log_config=None,
         http="wahabot.core.protocol:LoggingH11Protocol",
     )
+
+
+def post_signed_event(
+    event: dict[str, object],
+    settings: Settings,
+    host: str | None,
+    port: int | None,
+) -> None:
+    """Sign an internal event and POST it to the webhook; raise on rejection.
+
+    Shared plumbing for ``tell`` and ``forget``: possession of the HMAC
+    key is the operator credential, so both post a signed event identical
+    to how WAHA delivers one.
+    """
+    dial_host = host or settings.host
+    if dial_host in ("0.0.0.0", "::"):
+        # A wildcard bind address is not a dialable destination — the
+        # webhook on this machine is reached via loopback instead.
+        dial_host = "127.0.0.1"
+    body = json.dumps(event).encode()
+    signature = hmac.new(
+        settings.webhook_hmac_key.encode(), body, hashlib.sha512
+    ).hexdigest()
+    url = f"http://{dial_host}:{port or settings.port}/api/webhook/{settings.session}"
+    try:
+        response = httpx.post(
+            url,
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Webhook-Hmac": signature,
+            },
+            timeout=settings.tell_timeout or None,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise typer.BadParameter(f"Webhook at {url} rejected the event: {exc}") from exc
 
 
 @app.command()
@@ -363,31 +403,53 @@ def tell(
     settings = get_settings()
     if session:
         settings.session = session
-    dial_host = host or settings.host
-    if dial_host in ("0.0.0.0", "::"):
-        # A wildcard bind address is not a dialable destination — the
-        # webhook on this machine is reached via loopback instead.
-        dial_host = "127.0.0.1"
-    event = build_command_event(settings.session, text)
-    body = json.dumps(event).encode()
-    signature = hmac.new(
-        settings.webhook_hmac_key.encode(), body, hashlib.sha512
-    ).hexdigest()
-    url = f"http://{dial_host}:{port or settings.port}/api/webhook/{settings.session}"
-    try:
-        response = httpx.post(
-            url,
-            content=body,
-            headers={
-                "Content-Type": "application/json",
-                "X-Webhook-Hmac": signature,
-            },
-            timeout=settings.tell_timeout or None,
-        )
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise typer.BadParameter(f"Webhook at {url} rejected the command: {exc}") from exc
+    post_signed_event(build_command_event(settings.session, text), settings, host, port)
     _ok(f"Command delivered to session [bold]{settings.session}[/]")
+
+
+@app.command()
+def forget(
+    chat_id: str = typer.Argument(help="The chat JID whose memory to wipe."),
+    host: str = typer.Option(
+        None, "--host", "-h", help="Webhook host. [default: WAHABOT_HOST]"
+    ),
+    port: int = typer.Option(
+        None, "--port", "-p", help="Webhook port. [default: WAHABOT_PORT]"
+    ),
+    session: str = typer.Option(
+        None, "--session", "-s", help="WAHA session name. [default: WAHABOT_SESSION]"
+    ),
+) -> None:
+    """Wipe one chat's memory in the running bot.
+
+    Posts a signed ``forget`` event to the webhook; the server drops the
+    live context and the memory file under the agent lock, so there is
+    no resurrection window. The webhook must be reachable — with the bot
+    stopped, delete the file directly instead:
+    ``rm data/memory/<session>/<chat-id>.json``.
+    """
+    settings = get_settings()
+    if session:
+        settings.session = session
+    post_signed_event(build_forget_event(settings.session, chat_id), settings, host, port)
+    _ok(f"Forget delivered to session [bold]{settings.session}[/]")
+
+
+def build_forget_event(session: str, chat_id: str) -> dict[str, object]:
+    """The forget event payload ``wahabot forget`` posts to the webhook.
+
+    Shaped like the command event: a minimal envelope the webhook's
+    ``forget`` branch routes to the handler, with the target chat in
+    ``payload.chat_id``.
+    """
+    return {
+        "id": f"evt_forget_{uuid.uuid4().hex[:12]}",
+        "timestamp": int(time.time()),
+        "event": "forget",
+        "session": session,
+        "me": None,
+        "payload": {"chat_id": chat_id},
+    }
 
 
 def main() -> None:

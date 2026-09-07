@@ -13,6 +13,11 @@ the next real turn sees the reaction in its history. One note per
 (chat, target message), latest wins, so ten 👍 on one message cannot
 dilute the memory buffer. Reactions to other people's messages stay
 ignored.
+
+The memory fold runs under the agent lock (the WAHA fetch stays outside
+it) and is persisted like any other fold, so a reaction to a bot
+message in an LRU-evicted chat reloads from disk instead of being
+silently dropped.
 """
 
 import asyncio
@@ -21,8 +26,11 @@ from typing import Any
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from loguru import logger
 
+from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.models import WahaEvent
 from wahabot.core.waha import WahaClient
+from wahabot.handlers import append_to_memory, context_for, persist_memory
+from wahabot.settings import Settings
 from wahabot.webhook import on_reaction
 
 #: Latest reaction note per target message, so a second reaction to the
@@ -37,12 +45,16 @@ def is_own_message_id(message_id: str) -> bool:
 
 def register_reaction_handler(
     waha: WahaClient,
-    remember: Any,
+    agent: FunctionCallingAgentWorkflow,
+    settings: Settings,
+    agent_lock: asyncio.Lock,
 ) -> None:
     """Log reactions to the bot's messages and fold them into memory.
 
-    *remember* is ``handlers.append_to_memory`` — passed in to avoid a
-    handlers→reactions import cycle.
+    The WAHA fetch of the reacted-to message runs outside the agent
+    lock (a network call must never extend the serialized section);
+    only the memory fold locks, and the fold is persisted like any
+    other.
     """
 
     @on_reaction
@@ -73,7 +85,10 @@ def register_reaction_handler(
         )
         chat_id = chat_id_from_message_id(str(target_id))
         note = f"[reaction {emoji} from {sender} to your message: {preview}]"
-        await remember_reaction_note(event.session, chat_id, target_id, note, remember)
+        async with agent_lock:
+            await remember_reaction_note(
+                event.session, chat_id, target_id, note, agent, settings
+            )
         logger.info(
             'Reaction {emoji} to "{preview}" from {sender}',
             emoji=emoji,
@@ -87,34 +102,39 @@ async def remember_reaction_note(
     chat_id: str,
     target_id: str,
     note: str,
-    remember: Any,
+    agent: FunctionCallingAgentWorkflow,
+    settings: Settings,
 ) -> None:
     """Fold one reaction note into the chat's memory, latest per target.
 
     A prior note for the same target is dropped from the buffer first so
     ten 👍 on one message stay one note; the emoji of the latest
-    reaction wins.
+    reaction wins. The fold is persisted like any other memory change.
     """
     key = (session, chat_id, target_id)
     previous = _last_reaction_notes.get(key)
     if previous:
-        await forget_memory_message(session, chat_id, previous)
+        await forget_memory_message(session, chat_id, previous, agent, settings)
     _last_reaction_notes[key] = note
-    await remember(
+    ctx = await append_to_memory(
         session,
         chat_id,
-        agent=None,
-        message=ChatMessage(role=MessageRole.USER, content=note),
+        agent,
+        settings,
+        ChatMessage(role=MessageRole.USER, content=note),
     )
+    await persist_memory(settings, session, chat_id, ctx)
 
 
-async def forget_memory_message(session: str, chat_id: str, content: str) -> None:
+async def forget_memory_message(
+    session: str,
+    chat_id: str,
+    content: str,
+    agent: FunctionCallingAgentWorkflow,
+    settings: Settings,
+) -> None:
     """Remove the superseded reaction note from the chat's memory."""
-    from wahabot.handlers import contexts
-
-    ctx = contexts.get((session, chat_id))
-    if ctx is None:
-        return
+    ctx = await context_for(session, chat_id, agent, settings)
     memory = await ctx.store.get("memory", default=None)
     if memory is None:
         return

@@ -30,6 +30,7 @@ Key env vars:
 | `WAHABOT_LOG_LEVEL` | loguru level | `INFO` |
 | `WAHABOT_SESSION` | WAHA session name | `default` |
 | `WAHABOT_MEMORY_TOKEN_LIMIT` | Per-chat rolling memory budget | `8000` |
+| `WAHABOT_MEMORY_PERSIST` | Persist per-chat memory to `data/memory/` (survives restarts/LRU evictions) | `true` |
 | `WAHABOT_VISION` | Enable image understanding | `true` |
 | `WAHABOT_MAX_IMAGE_BYTES` | Per-image download cap | `10485760` |
 | `WAHABOT_MAX_URL_IMAGES` | Max image-URLs to fetch per message | `2` |
@@ -87,6 +88,7 @@ uv run wahabot config                                   # show WAHABOT_* env (se
 uv run wahabot sessions list                            # list session configs
 uv run wahabot sessions view [--name N] [--raw] [--plain] # show a config, prompt rendered
 uv run wahabot tell "<instruction>" [--session S]       # operator command to the agent
+uv run wahabot forget "<chat-jid>" [--session S]        # wipe one chat's persistent memory
 uv run wahabot serve [--host H] [--port P] [--reload]   # webhook server
 ```
 

@@ -15,6 +15,7 @@ Handler = Callable[[WahaEvent], Awaitable[None]]
 _message_handlers: list[Handler] = []
 _reaction_handlers: list[Handler] = []
 _command_handlers: list[Handler] = []
+_forget_handlers: list[Handler] = []
 _session_status_handlers: list[Handler] = []
 
 
@@ -31,6 +32,11 @@ def on_reaction(handler: Handler) -> None:
 def on_command(handler: Handler) -> None:
     """Register a coroutine invoked for every incoming `command` event."""
     _command_handlers.append(handler)
+
+
+def on_forget(handler: Handler) -> None:
+    """Register a coroutine invoked for every incoming `forget` event."""
+    _forget_handlers.append(handler)
 
 
 def on_session_status(handler: Handler) -> None:
@@ -53,6 +59,12 @@ async def dispatch_reaction(event: WahaEvent) -> None:
 async def dispatch_command(event: WahaEvent) -> None:
     """Run all registered command handlers for the event."""
     for handler in _command_handlers:
+        await handler(event)
+
+
+async def dispatch_forget(event: WahaEvent) -> None:
+    """Run all registered forget handlers for the event."""
+    for handler in _forget_handlers:
         await handler(event)
 
 
@@ -83,6 +95,8 @@ async def waha_webhook(
     log_event(event)
     if event.event == "command":
         await dispatch_command(event)
+    elif event.event == "forget":
+        await dispatch_forget(event)
     elif event.event == "message.reaction":
         await dispatch_reaction(event)
     elif event.event == "session.status":

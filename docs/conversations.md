@@ -117,20 +117,30 @@ Per chat, the bot keeps a rolling conversation in memory:
 - Before each run the buffer is *sanitized*: dangling tool-call groups
   from crashed runs are repaired, alternation is enforced, so the LLM
   never sees a malformed history.
-- Memory is **process-local**. A restart or a container rebuild wipes
-  it: the bot restarts each conversation blank. The group's real
-  history is still in WhatsApp, and the model can pull it back on
-  demand with the `fetch_chat_messages` tool (see §4). Chats evicted
-  from the LRU (the least recently used of 1000 chats) also restart
-  blank.
+- Memory is **persistent**: at the end of each agent run (and after every
+  memory-only fold) the per-chat buffer is written to
+  `data/memory/<session>/<chat-id>.json` — plaintext, one file per chat,
+  so a chat's history survives restarts, deploys and LRU evictions. A
+  restart reloads a chat's memory lazily on its next message; an
+  LRU-evicted chat (past 1000 live contexts) reloads from disk instead of
+  starting blank. The full design, save points and failure handling live
+  in [`docs/plans/persistent-memory.md`](plans/persistent-memory.md) —
+  the source of truth; this section only summarizes.
 - Messages the **operator sends from the bot's own WhatsApp account**
   (typing in the app, `fromMe` events) are folded into memory as
   assistant turns — the account's voice is the bot's voice, so the
   model treats them as things it said. They never wake the agent:
   memory-only, no run, no reply, no self-loop.
 
-This is a deliberate trade-off: privacy (nothing about group members
-is persisted beyond the raw event journal) over long-term continuity.
+### Wiping memory
+
+`wahabot forget <chat-id>` wipes one chat's memory — it posts a signed
+`forget` event to the running bot, which drops the live context and the
+file under the agent lock (so an in-flight run can't resurrect it). With
+the bot stopped, the equivalent is `rm data/memory/<session>/<chat-id>.json`.
+There is no retention TTL: memory is kept forever until wiped. `data/memory/`
+carries the same privacy weight as `data/events/` — back it up and
+exclude it the same way.
 
 ---
 
@@ -247,6 +257,7 @@ the model saw, message for message.
 | `group_participation` | session config | `mentioned` (address-gated) or `judicious` (reads everything, self-decides). |
 | `whitelist` / `blacklist` | session config | Which chats the bot lives in. |
 | `WAHABOT_MEMORY_TOKEN_LIMIT` | env | How much of the conversation the model sees per run. |
+| `WAHABOT_MEMORY_PERSIST` | env | Whether per-chat memory is written to disk (survives restarts/LRU evictions); `wahabot forget <chat-id>` wipes one chat. |
 | `WAHABOT_VISION` | env | Whether image messages are shown to the model. |
 | `WAHABOT_LLM_*` | env | Provider, model and sampling (temperature/top_p/top_k…). |
 
@@ -264,8 +275,10 @@ the last good config (and logs it) rather than crashing the bot.
 - **Bot answers twice**: it can't — the one-send latch blocks a second
   send per run; a duplicate reply is two runs on one message, i.e. a
   dedup window that closed (see the journal for the double event).
-- **Bot forgot the conversation**: restart wiped process-local memory;
-  the model rebuilds context via `fetch_chat_messages` or acts fresh.
+- **Bot forgot the conversation**: memory now persists to
+  `data/memory/`; a missing or corrupt file degrades to a blank start
+  (see the failure table in [`persistent-memory.md`](plans/persistent-memory.md)).
+  Wipe with `wahabot forget <chat-id>` if it should genuinely reset.
 - **Mention didn't notify**: missing `mentions` JIDs or a name in text
   that doesn't match the JID's owner — check the tool call arguments
   in the trace. A send whose text had no `@` at all comes back with a
