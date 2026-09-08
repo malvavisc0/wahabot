@@ -1,7 +1,7 @@
 """HTTP client for the WAHA WhatsApp HTTP API."""
 
 import json
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
@@ -52,6 +52,21 @@ def response_json(response: httpx.Response) -> Any:
         raise err from exc
 
 
+def sent_message_id(response: httpx.Response) -> str:
+    """The serialized id of a message a send endpoint just created.
+
+    WAHA send endpoints answer with the sent message; the id rides the
+    ``id._serialized`` field. "" when the body carries no recognizable
+    id (empty answers happen; callers fail soft on it).
+    """
+    sent = cast(dict[str, Any] | None, response_json(response))
+    if isinstance(sent, dict):
+        mid = cast(dict[str, Any] | None, sent.get("id"))
+        if isinstance(mid, dict):
+            return str(mid.get("_serialized", ""))
+    return ""
+
+
 class WahaClient:
     """Minimal WAHA API client (see https://waha.devlike.pro/docs/how-to/send-messages)."""
 
@@ -68,8 +83,8 @@ class WahaClient:
         text: str,
         reply_to: str | None = None,
         mentions: list[str] | None = None,
-    ) -> None:
-        """Send a text message, raising for HTTP errors.
+    ) -> str:
+        """Send a text message and return its serialized id ("" if unknown).
 
         ``reply_to`` (a serialized message id) sends the text as a native
         quote-reply to that message — the WAHA ``reply_to`` field, which
@@ -90,6 +105,7 @@ class WahaClient:
             chat_id=chat_id,
             session=session,
         )
+        return sent_message_id(response)
 
     def get_me(self, session: str) -> dict[str, Any]:
         """Fetch the logged-in user's info; 404s when the session is dead."""
@@ -179,12 +195,14 @@ class WahaClient:
         chat_id: str,
         file: dict[str, Any],
         caption: str | None = None,
-    ) -> None:
-        """Send an image from a url or base64 payload, raising for HTTP errors."""
+    ) -> str:
+        """Send an image from a url or base64 payload; returns its serialized id."""
         body: dict[str, Any] = {"session": session, "chatId": chat_id, "file": file}
         if caption:
             body["caption"] = caption
-        self._client.post(f"{API_PREFIX}/sendImage", json=body).raise_for_status()
+        response = self._client.post(f"{API_PREFIX}/sendImage", json=body)
+        response.raise_for_status()
+        return sent_message_id(response)
 
     def send_file(
         self,
@@ -192,8 +210,8 @@ class WahaClient:
         chat_id: str,
         file: dict[str, Any],
         caption: str | None = None,
-    ) -> None:
-        """Send a document from a url or base64 payload, raising for HTTP errors.
+    ) -> str:
+        """Send a document from a url or base64 payload; returns its serialized id.
 
         ``file`` is a WAHA ``RemoteFile`` (``{mimetype, url,
         filename?}`` — WAHA downloads it) or ``BinaryFile``
@@ -203,7 +221,9 @@ class WahaClient:
         body: dict[str, Any] = {"session": session, "chatId": chat_id, "file": file}
         if caption:
             body["caption"] = caption
-        self._client.post(f"{API_PREFIX}/sendFile", json=body).raise_for_status()
+        response = self._client.post(f"{API_PREFIX}/sendFile", json=body)
+        response.raise_for_status()
+        return sent_message_id(response)
 
     def fetch_chat_messages(
         self,
@@ -265,16 +285,18 @@ class WahaClient:
         session: str,
         chat_id: str,
         message_id: str,
-    ) -> None:
-        """Forward a message to another chat, raising for HTTP errors."""
-        self._client.post(
+    ) -> str:
+        """Forward a message to another chat; returns the new message id."""
+        response = self._client.post(
             f"{API_PREFIX}/forwardMessage",
             json={
                 "session": session,
                 "chatId": chat_id,
                 "messageId": message_id,
             },
-        ).raise_for_status()
+        )
+        response.raise_for_status()
+        return sent_message_id(response)
 
 
 class MediaTooLargeError(Exception):

@@ -167,10 +167,36 @@ def bot_mentioned(
     return bool(pattern.search(body))
 
 
+def self_command_instruction(
+    event: WahaEvent,
+    bot_name: str | None = None,
+    bot_mention_regex: str | None = None,
+) -> str | None:
+    """Extract an operator instruction addressed to the bot in self-chat.
+
+    WAHA marks messages sent from the account as ``fromMe``. Only messages
+    sent to one of the account's own JIDs qualify, so manually typed messages
+    in other chats keep their existing memory-only behavior. The mention
+    must *begin* the message: a trigger word appearing mid-text (the
+    operator quoting or discussing something) is not a command.
+    """
+    payload = event.payload
+    if not payload.get("fromMe"):
+        return None
+    if jid_string(payload.get("from")) not in bot_jids(event):
+        return None
+    body = str(payload.get("body", "")).strip()
+    match = bot_mention_pattern(bot_name, bot_mention_regex).match(body)
+    if match is None:
+        return None
+    instruction = body[match.end() :].lstrip(" \t:,-")
+    return instruction or None
+
+
 def bot_jids(event: WahaEvent) -> set[str]:
     """The bot's own JIDs — its phone id and, when known, its LID."""
     me = event.me or {}
-    return {str(me[key]) for key in ("id", "lid") if me.get(key)}
+    return {jid_string(me[key]) for key in ("id", "lid") if me.get(key)}
 
 
 def is_group_addressed(

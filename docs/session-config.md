@@ -109,6 +109,8 @@ Practical uses:
 - Blacklist a **participant JID** → silence one person everywhere.
 
 Access control gates *chat participants*. **Operator commands**
-(`wahabot tell`) bypass it by design — the HMAC key is the operator
+(`wahabot tell`, or a `fromMe` message matching `bot_mention_regex`
+sent to the bot's own self-chat) bypass it by design — the HMAC key
+and physical control of the WhatsApp account are the operator
 credential, and a command names its own targets; see
 `docs/agent-workflow.md` → "Beyond the chat turn".

@@ -18,10 +18,13 @@ from wahabot.ai.tools.external import (
     youtube_transcript_builder,
 )
 from wahabot.ai.tools.whatsapp import (
+    EscalationChannel,
+    escalate,
     fetch_chat_messages,
     forward_message,
     get_chat,
     react_to_message,
+    recent_chats,
     resolve_chat,
     search_messages,
     send_file,
@@ -39,15 +42,23 @@ def build_default_tools(
     waha: WahaClient,
     target: dict[str, str],
     settings: Settings | None = None,
+    escalation_channel: EscalationChannel | None = None,
 ) -> list[BaseTool]:
-    """Build all bundled tools bound to the shared session/chat holder."""
+    """Build all bundled tools bound to the shared session/chat holder.
+
+    ``escalation_channel`` carries the per-agent operator target and
+    cooldowns; a fresh one is created when the caller has none to share
+    (tests, one-off agents).
+    """
     if settings is None:
         from wahabot.settings import get_settings
 
         settings = get_settings()
+    channel = escalation_channel or EscalationChannel()
     tools = [
         send_message(waha, target),
         stay_silent(),
+        escalate(waha, target, channel),
         react_to_message(waha, target),
         send_image(waha, target),
         send_file(waha, target, settings.max_file_bytes),
@@ -56,6 +67,7 @@ def build_default_tools(
         search_messages(waha, target),
         forward_message(waha, target),
         resolve_chat(waha, target),
+        recent_chats(waha, target),
         web_search_builder(settings),
         stock_price_builder(),
         youtube_transcript_builder(),

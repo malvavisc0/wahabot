@@ -285,15 +285,28 @@ disables the whole path.
 
 Three event flows sit outside the plain message → reply pipeline:
 
-- **Operator commands** (`command` events from `wahabot tell`) run the
-  same agent on a **fresh `Context`** — no chat memory, no whitelist,
-  no group gating. The turn is prefixed `[operator command]`; the
-  session prompt keys on it (deliver with `send_message(chat=…)` to
-  the named target, resolve names with `resolve_chat`). The shared
+- **Operator commands** run the same agent on a **fresh `Context`** —
+  no chat memory, no whitelist, no group gating. The turn is prefixed
+  `[operator command]`; the session prompt keys on it (deliver with
+  `send_message(chat=…)` to the named target, resolve names with
+  `resolve_chat`, browse recency with `recent_chats`). The shared
   send holder points at the event's `from` ("operator"), so a bare
-  `send_message` behaves like a DM. The event is built by
-  `wahabot.commands.build_command_event` and posted to the webhook
-  signed with the same HMAC as real WAHA traffic.
+  `send_message` behaves like a DM. Two issuers reach this path:
+  `command` events posted to the webhook by `wahabot tell`
+  (`wahabot.commands.build_command_event`, signed with the same HMAC
+  as real WAHA traffic), and **self-chat mentions** — a `fromMe`
+  message in the bot's own "message yourself" chat matching
+  `bot_mention_regex` (`self_command_instruction` in `messages.py`),
+  which the message handler converts to a command event. The
+  self-chat reply is quote-sent back into that chat
+  (`send_self_reply`), and every bot-sent message that lands in the
+  self-chat — command replies, escalations, session up/down
+  notifications, tool deliveries aimed there — has its id recorded
+  in the echo cache (`core/echoes.py`), so the `fromMe` echo event
+  WhatsApp produces is never re-parsed as a fresh operator command.
+  Without that mark, a prompt-injected escalation report (or a
+  forwarded group message) reading "kAI …" would execute as a
+  trusted command with cross-chat reach.
 - **Reactions** (`message.reaction` events) to the bot's own messages
   are folded into that chat's memory as `[reaction 👍 from Sender to
   your message: "…"]` notes — context for the next turn, never an
@@ -369,9 +382,13 @@ refuses a cross-chat target on any run that a chat message woke.
 A chat participant asking the bot to DM, forward to, or read someone
 outside the conversation gets an `error` envelope (logged at WARNING),
 never a delivery. The fence opens for exactly one trusted channel:
-`wahabot tell` commands (HMAC-signed, operator-only), where the
-instruction itself names the target — and `resolve_chat` (the contact
-roster) refuses to run at all outside operator runs.
+operator commands (`wahabot tell` or a self-chat mention),
+where the instruction itself names the target — and `resolve_chat` /
+`recent_chats` (the contact roster and chat list) refuse to run at
+all outside operator runs. The one sanctioned exception for chat runs
+is `escalate`: it takes no `chat` parameter and always targets the
+bot's own self-chat (the operator's "message yourself" chat), rate-
+limited to one report per chat per hour.
 
 Serialized message ids carry their chat's JID (`false_<jid>_<hash>`),
 so ids are a second way to aim a tool elsewhere:
@@ -390,6 +407,7 @@ refusal.
 |---|---|---|---|
 | `send_message` | `chat?`, `text`, `reply_to?`, `mentions?` | `POST /api/sendText` | Send a text (current chat, or operator-named target); `reply_to` quotes a message; `mentions` tags contacts; once per run (shared latch) |
 | `stay_silent` | — | — | End the run with no reply at all (terminal: the workflow stops before executing it) |
+| `escalate` | `report` | `POST /api/sendText` (to the bot's own chat) | Forward a report to the operator's self-chat — for "I want a human" requests, complaints, reports. No `chat` parameter (target is fixed); once per chat per hour (cooldown); writes the report itself, never pastes the person's words; refused on operator runs (a command already talks to the operator) |
 | `react_to_message` | `message_id`, `reaction` | `PUT /api/reaction` | Emoji-react to a message (empty = remove); once per run |
 | `send_image` | `url`, `caption?`, `chat?` | `POST /api/sendImage` | Send an image from a URL; once per run (shared latch) |
 | `send_file` | `url?`, `path?`, `caption?`, `filename?`, `chat?` | `POST /api/sendFile` | Send a document (PDF, etc.) from a URL or a local file; once per run (shared latch) |
@@ -398,6 +416,7 @@ refusal.
 | `search_messages` | `query`, `chat?`, `limit?` | `GET /api/messages` (local filter) | Find recent messages by text / media |
 | `forward_message` | `message_id`, `chat?` | `POST /api/forwardMessage` | Forward a message to a chat; once per run (shared latch) |
 | `resolve_chat` | `name` | `GET /api/{session}/chats`, `GET /api/contacts/all` | Operator-only: resolve a person/group name to chat JIDs (exact match first, then substring; ≤5 candidates) |
+| `recent_chats` | `limit?` | `GET /api/{session}/chats` | Operator-only: list the newest conversations (each `{id, name}`), for instructions that go by recency instead of name |
 
 All tool implementations live under `src/wahabot/ai/tools/` (WhatsApp
 tools in `whatsapp.py`, external tools in `external.py`); the
@@ -450,13 +469,15 @@ Underneath it calls WAHA `PUT /api/reaction` (see
 | `fetch_chat_messages(chat=None, limit=20)` | Recent messages as a JSON `messages` list, each entry carrying its serialized `id` (for react/forward), body, sender and media info |
 | `get_chat(chat=None)` | Chat metadata summary (name, participant count + JIDs, …) via `/chats/overview` |
 | `search_messages(query, chat=None, limit=20)` | Find recent messages containing a text substring |
-| `resolve_chat(name)` | Resolve a person/group name to chat JIDs — chats first, contacts as fallback; the answer to "send it to *Familia*" |
+| `resolve_chat(name)` | Operator-only: resolve a person/group name to chat JIDs — chats first, contacts as fallback; the answer to "send it to *Familia*" |
+| `recent_chats(limit=10)` | Operator-only: the newest conversations as `{id, name}` pairs; the answer to "summarize my latest 5 chats" |
 
 ```python
 fetch_chat_messages(limit=10)  # read the current conversation
 get_chat(chat="1234567890@g.us")  # group metadata
 search_messages(query="invoice", chat="1234567890@g.us")
 resolve_chat(name="Familia")  # → matches: [{id, name}, …]
+recent_chats(limit=5)  # → chats: [{id, name}, …] newest first
 ```
 
 > WAHA's `GET /api/messages` requires a `chatId`, so `search_messages`

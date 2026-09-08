@@ -2,7 +2,7 @@
 
 A WhatsApp bot that answers chats with an LLM agent — one that *actually thinks*. It reads the conversation, decides what it needs, calls tools, reads the results, and only then replies. Built on the [WAHA](https://waha.devlike.pro) HTTP API behind a small FastAPI webhook.
 
-It hears voice notes. It sees photos and videos. It searches the web, checks stock prices, pulls YouTube transcripts, sends documents, reacts with emoji, and stays quiet when it has nothing to add — all without anyone saying "use a tool."
+It hears voice notes. It sees photos and videos. It searches the web, checks stock prices, pulls YouTube transcripts, sends documents, reacts with emoji, escalates to a human when someone asks for one, and stays quiet when it has nothing to add — all without anyone saying "use a tool."
 
 ```
 StartEvent ──► prepare_chat_history ──► InputEvent
@@ -49,7 +49,17 @@ uv run wahabot tell "search the latest news about elon musk and send a summary t
 
 The agent runs the instruction with its full toolset on a fresh context. No whitelist applies, no chat history is touched, and names resolve to the right person or group automatically. The result lands in WhatsApp, not in your terminal.
 
-Operator commands are also the **only** runs with cross-chat reach: tools refuse to send, forward, react to, quote or read outside the current conversation on any chat-triggered run — `chat` JIDs and serialized message ids alike — so a group participant can never make the bot DM or spy on someone else. `resolve_chat` (the contact roster) refuses to run at all outside operator commands.
+You can send the same kind of command from WhatsApp by messaging the bot's own account, using its configured mention pattern:
+
+```text
+kAI do this and send a message to Roy
+```
+
+Only a matching message sent to the bot's own self-chat is treated this way — the bot's reply comes back as a quote-reply in that same chat. Messages you type from the bot account in other chats remain memory-only, and the bot never re-triggers on its own replies.
+
+Chat participants have one sanctioned way to reach you: the `escalate` tool. When someone asks for a human, reports a problem, or complains about the bot, it forwards a bot-written report to your self-chat — once per chat per hour, never pasting the person's words (so hidden instructions can't ride the channel).
+
+Operator commands are also the **only** runs with cross-chat reach: tools refuse to send, forward, react to, quote or read outside the current conversation on any chat-triggered run — `chat` JIDs and serialized message ids alike — so a group participant can never make the bot DM or spy on someone else. `resolve_chat` and `recent_chats` (the contact roster and chat list) refuse to run at all outside operator commands.
 
 `wahabot forget <chat-id>` wipes one chat's persistent memory in the running bot (live context and disk file, under the agent lock):
 
@@ -104,7 +114,7 @@ The agent workflow lives under `src/wahabot/ai/` as a set of focused modules:
 | `messages.py` | Message classification, `extract_text`, `image_media`, `video_media`, `is_replyable` |
 | `albums.py` | Album reassembly: container + images buffered into one agent turn |
 | `history.py` | `sanitize_chat_history` (repair) + `trim_to_budget` (token budget) |
-| `tools/whatsapp.py` | WhatsApp actions: send, react, forward, search, resolve chats |
+| `tools/whatsapp.py` | WhatsApp actions: send, react, forward, search, resolve chats, escalate, list recent chats |
 | `tools/external.py` | Web, finance, YouTube & (opt-in) shell tool builders |
 | `tools/schemas.py` | Pydantic parameter schemas for every tool |
 | `tools/envelope.py` | The unified JSON envelope (`ok` / `error`) every tool returns |

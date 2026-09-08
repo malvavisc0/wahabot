@@ -144,6 +144,28 @@ class ResolveChatSchema(BaseModel):
     )
 
 
+class RecentChatsSchema(BaseModel):
+    """List the most recent WhatsApp conversations."""
+
+    limit: int = Field(
+        default=10,
+        description="How many conversations to return (default 10).",
+    )
+
+
+class EscalateSchema(BaseModel):
+    """Forward a report from the current chat to the bot's operator."""
+
+    report: str = Field(
+        description=(
+            "What to forward to the operator: the person's report, complaint, "
+            "or request in a few clear sentences — say who is asking (name), "
+            "which chat, and what they need. Written by the bot, not a raw "
+            "quote of the person's words."
+        ),
+    )
+
+
 class SendFileSchema(BaseModel):
     """Send a document (PDF, etc.) to a WhatsApp chat."""
 

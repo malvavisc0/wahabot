@@ -10,11 +10,13 @@ session is down, and notifies the operator once per transition.
 """
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
 
+from wahabot.core.echoes import remember_self_echo
 from wahabot.core.waha import WahaClient
 from wahabot.webhook import on_session_status
 
@@ -32,6 +34,25 @@ class SessionState:
 
 
 state = SessionState()
+
+#: Consumers of the operator JID beyond this module (the escalation
+#: channel). Registered at agent build time and notified each time the
+#: JID is (re-)captured, so a startup WAHA hiccup — or a re-linked
+#: account — cannot leave the lifeline aimed nowhere (or at a stale
+#: identity) for the process lifetime.
+_recapture_callbacks: list[Callable[[str], None]] = []
+
+
+def on_operator_recapture(callback: Callable[[str], None]) -> None:
+    """Register a callback invoked with the operator JID on every capture."""
+    _recapture_callbacks.append(callback)
+
+
+def _publish_operator_jid(own: str) -> None:
+    """Store the operator JID and fan it out to registered consumers."""
+    state.operator_jid = own
+    for callback in _recapture_callbacks:
+        callback(own)
 
 
 def session_healthy() -> bool:
@@ -76,7 +97,14 @@ def seed_health(waha: WahaClient, session: str) -> str:
 
 
 def capture_operator_target(waha: WahaClient, session: str) -> None:
-    """Remember the bot's own JID as the operator-notification target."""
+    """Remember the bot's own JID as the operator-notification target.
+
+    Called at startup and on every session recovery: the first capture
+    may fail against a restarting WAHA, and a re-linked account changes
+    the JID — without the retry the escalation lifeline (and the echo
+    tracking keyed on the same JID) would stay wedged for the process
+    lifetime.
+    """
     try:
         me = waha.get_me(session)
     except Exception as exc:
@@ -84,7 +112,7 @@ def capture_operator_target(waha: WahaClient, session: str) -> None:
         return
     own = str(me.get("id") or "")
     if own:
-        state.operator_jid = own
+        _publish_operator_jid(own)
 
 
 def register_session_status_handler(waha: WahaClient, session: str) -> None:
@@ -100,6 +128,10 @@ def register_session_status_handler(waha: WahaClient, session: str) -> None:
         if status == HEALTHY_STATUS:
             if not was:
                 logger.info("WAHA session recovered")
+                # Re-capture the operator target: the startup fetch may
+                # have failed against a dead WAHA, and a re-linked
+                # account carries a different JID.
+                capture_operator_target(waha, session)
                 await notify_operator(waha, session, "recovered — back online", kind="up")
             return
         if was:
@@ -127,6 +159,9 @@ async def notify_operator(
     icon = "🔵" if kind == "up" else "🟠"
     text = f"{icon} wahabot: WAHA session '{session}' {message}"
     try:
-        await asyncio.to_thread(waha.send_text, session, me, text)
+        sent_id = await asyncio.to_thread(waha.send_text, session, me, text)
+        # The notification lands in the self-chat; mark it so its echo
+        # event is never parsed as an operator command.
+        remember_self_echo(sent_id)
     except Exception as exc:
         logger.warning("Operator notification failed: {exc}", exc=exc)

@@ -44,10 +44,20 @@ Before the agent ever wakes up, the message passes through, in order:
    are backlog (history resyncs, container restarts), not fresh chat;
    they are skipped so the bot never wakes up hours late and answers
    a conversation that moved on.
-3. **Access control.** The chat must be whitelisted in the session
+3. **Self-chat command check.** A `fromMe` message sent to the bot's
+   own JID that matches `bot_mention_regex` is an **operator
+   command** delivered from WhatsApp (the "message yourself" chat is
+   the operator console): it bypasses the chat gates below and runs
+   on a fresh context, and the reply comes back as a quote-reply in
+   the same chat. The bot's own writes into that chat — command
+   replies, escalations, session notifications, tool deliveries —
+   are echo-tracked by id, so their `fromMe` bounce-backs never
+   re-trigger the command path (a forwarded message or injected
+   report cannot make the bot command itself).
+4. **Access control.** The chat must be whitelisted in the session
    config (`data/sessions/<session>.json`) — and not blacklisted.
    Unknown chats are ignored entirely.
-4. **Address check** (groups only). The bot is a guest in groups and
+5. **Address check** (groups only). The bot is a guest in groups and
    must be addressed to speak:
    - someone **pill-mentions** it (a real WhatsApp `@` mention of the
      bot's JID — the `mentionedJidList` on the event, checked against
@@ -133,6 +143,9 @@ Per chat, the bot keeps a rolling conversation in memory:
   carries). They never wake the agent: memory-only, no run, no reply,
   no self-loop. A fromMe message for a chat with no prior
   conversation is skipped — there is nothing to attach the words to.
+  One exception: a fromMe message in the bot's **own self-chat**
+  matching the mention pattern is an operator command (see §1), not
+  a memory fold.
 
 ### Wiping memory
 
@@ -179,6 +192,7 @@ either says something real or says nothing at all.
 |------|--------------|
 | `send_message` | Sends a text (optionally quoting a message via `reply_to`, optionally @-mentioning people via `mentions`). One per run. |
 | `stay_silent` | Ends the run without sending. |
+| `escalate` | Forwards a report to the operator's self-chat — when someone asks for a human, reports a problem, or complains. The bot writes the report itself (never pastes the person's words — hidden instructions must not reach the operator); once per chat per hour. |
 | `react_to_message` | Emoji reaction to a message id. |
 | `fetch_chat_messages` | Recent history of the current chat as JSON (ids, senders, texts) — the model's window into the conversation it is replying in. |
 | `search_messages` | Text search over the current chat's recent history. |
@@ -190,13 +204,17 @@ either says something real or says nothing at all.
 
 Every WhatsApp tool that accepts a `chat` argument, a serialized
 message id (`reply_to`, `react_to_message`, `forward_message`), or a
-name to resolve (`resolve_chat`) is fenced on chat-triggered runs:
-the current conversation is the only target allowed. Cross-chat reach
-— messaging, forwarding to, or reading another person or group — is
-reserved for operator commands (`wahabot tell`), whose instructions
-are the one trusted source of cross-chat intent. A participant asking
-the bot to deliver or snoop outside the chat gets a tool refusal
-envelope, and a refusal never produces a delivery.
+name to resolve (`resolve_chat`, `recent_chats`) is fenced on
+chat-triggered runs: the current conversation is the only target
+allowed. Cross-chat reach — messaging, forwarding to, or reading
+another person or group — is reserved for operator commands
+(`wahabot tell`, or a mention in the bot's self-chat), whose
+instructions are the one trusted source of cross-chat intent. A
+participant asking the bot to deliver or snoop outside the chat gets
+a tool refusal envelope, and a refusal never produces a delivery.
+The one exception is `escalate`, which has no aimable target at all:
+it always lands in the operator's own self-chat, at most once per
+chat per hour.
 
 Tool results come back as JSON envelopes — `{"ok": true, …}` or
 `{"ok": false, "error": "…"}` — never as raised exceptions; failures

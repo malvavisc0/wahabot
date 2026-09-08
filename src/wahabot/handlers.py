@@ -28,22 +28,24 @@ from wahabot.ai.messages import (
     is_group_addressed,
     is_replyable,
     message_kind,
+    self_command_instruction,
     video_media,
 )
 from wahabot.ai.observability import chat_trace_attributes, enable_langfuse
 from wahabot.ai.tools import build_default_tools
-from wahabot.ai.tools.whatsapp import OPERATOR_KEY
+from wahabot.ai.tools.whatsapp import OPERATOR_KEY, EscalationChannel
 from wahabot.ai.video import caption_video, extract_frames, join_anchor, video_marker
 from wahabot.ai.vision import caption_images
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
 from wahabot.core.access import SessionConfigReloader, load_session_config
+from wahabot.core.echoes import is_self_echo, remember_self_echo
 from wahabot.core.filters import chat_allowed, jid_alias_lookup
 from wahabot.core.models import WahaEvent
 from wahabot.core.persistence import forget_memory, load_memory, save_memory
 from wahabot.core.transcribe import fetch_transcript, transcribe_voice_note
 from wahabot.core.waha import MediaTooLargeError, WahaClient
 from wahabot.settings import Settings
-from wahabot.status import session_healthy
+from wahabot.status import on_operator_recapture, session_healthy
 from wahabot.webhook import on_forget, on_message
 
 _seen_ids: dict[str, float] = {}
@@ -189,6 +191,32 @@ def log_final_text(chat_id: str, reply: str) -> None:
             chat_id=chat_id,
             reply=reply[:500],
         )
+
+
+async def send_self_reply(waha: WahaClient, command: WahaEvent, reply: str) -> None:
+    """Deliver a self-chat command's final text back to the operator.
+
+    The command ran on a fresh context with no chat of its own; its
+    final reply (the part not delivered via a tool) lands in the same
+    "message yourself" chat the command came from, quote-replying the
+    command message. The sent id is remembered so the echo of our own
+    reply — which arrives as a ``fromMe`` event matching the mention
+    regex when the reply quotes the trigger — cannot re-trigger the
+    command path.
+    """
+    if not reply or not reply.strip():
+        return
+    chat_id = str(command.payload.get("reply_chat_id", ""))
+    if not chat_id:
+        return
+    sent_id = await asyncio.to_thread(
+        waha.send_text,
+        command.session,
+        chat_id,
+        reply,
+        str(command.payload.get("reply_to", "")) or None,
+    )
+    remember_self_echo(sent_id)
 
 
 #: Prefix marking an assistant turn typed by the human operator in the
@@ -520,9 +548,17 @@ def register_agent_handler(
             current.system_prompt, settings.timezone, current.bot_name, current.goal
         )
 
+    # Per-agent escalation state (operator JID + per-chat cooldowns).
+    # Registered for re-capture so a session recovery refreshes the
+    # delivery target — a startup WAHA hiccup must not wedge the
+    # lifeline (or aim it at a stale identity) for the process lifetime.
+    escalation_channel = EscalationChannel()
+    on_operator_recapture(escalation_channel.refresh)
     agent = build_agent(
         settings,
-        tools=build_default_tools(waha, send_tool_holder),
+        tools=build_default_tools(
+            waha, send_tool_holder, escalation_channel=escalation_channel
+        ),
         system_prompt=config.system_prompt,
         prompt_renderer=render_prompt,
     )
@@ -570,6 +606,53 @@ def register_agent_handler(
                 sender=event.payload.get("from"),
             )
             return
+        body = extract_text(event)
+        instruction = (
+            None
+            if is_self_echo(message_id)
+            else self_command_instruction(
+                event,
+                bot_name=config.bot_name,
+                bot_mention_regex=config.bot_mention_regex,
+            )
+        )
+        if instruction:
+            # A self-chat mention is the WhatsApp equivalent of `wahabot
+            # tell`: fresh operator context, chat gates bypassed. The
+            # reply lands in the same self-chat so the operator sees it
+            # on their phone, and its id is marked as run output so the
+            # echo event cannot re-trigger the command path.
+            from wahabot.commands import build_command_event, run_command
+
+            command = WahaEvent.model_validate(
+                build_command_event(event.session, instruction)
+            )
+            command.payload["reply_chat_id"] = str(event.payload.get("from", ""))
+            command.payload["reply_to"] = message_id
+            try:
+                async with agent_lock:
+                    reply = await run_command(command, agent, settings, waha)
+            except Exception:
+                # Same contract as the chat path: drop the seen marker
+                # so WAHA's redelivery retries the command. Accepted
+                # trade-off: a command that crashed *after* a tool
+                # delivery already went out will deliver it again on
+                # the retry (the at-most-once send latch is per-run) —
+                # the alternative, never retrying, loses the command
+                # outright.
+                forget_seen(message_id)
+                logger.exception("Failed to handle self-chat command {id}", id=message_id)
+                return
+            try:
+                await send_self_reply(waha, command, reply)
+            except Exception:
+                # The command ran — its deliveries may already be out.
+                # A redelivery would re-run it and duplicate them, so
+                # the seen marker stays; only the reply is lost.
+                logger.exception(
+                    "Failed to deliver self-chat reply for command {id}", id=message_id
+                )
+            return
         if not chat_allowed(
             event,
             config.whitelist,
@@ -577,7 +660,6 @@ def register_agent_handler(
             jid_aliases=jid_alias_lookup(event),
         ):
             return
-        body = extract_text(event)
         if event.payload.get("fromMe"):
             async with agent_lock:
                 ctx = await remember_own_message(event, agent, settings, body)

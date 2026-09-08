@@ -103,5 +103,12 @@ uv run wahabot forget "<chat-jid>" [--session S]        # wipe one chat's persis
 uv run wahabot serve [--host H] [--port P] [--reload]   # webhook server
 ```
 
+The same operator path is available from WhatsApp: send a message to the
+bot's own self-chat beginning with the configured `bot_mention_regex`, for
+example `kAI do this and send a message to Roy`. Only matching messages sent
+to the bot's own JID are treated as commands — the reply lands as a
+quote-reply in that same self-chat; other `fromMe` messages remain
+memory-only.
+
 See [Session Config](session-config.md) for the full list of CLI commands
 and every `data/sessions/<session>.json` field.

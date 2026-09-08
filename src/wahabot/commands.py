@@ -39,7 +39,7 @@ async def run_command(
     agent: FunctionCallingAgentWorkflow,
     settings: Settings,
     waha: WahaClient,
-) -> None:
+) -> str:
     """Run the agent over the command instruction, on a fresh context.
 
     No dedup (the command id is unique by construction), no staleness
@@ -53,11 +53,17 @@ async def run_command(
     (``OPERATOR_KEY``) that opens the cross-chat fence in the WhatsApp
     tools; chat-triggered runs clear it, so this run is the only one
     with cross-chat reach.
+
+    Returns the run's final text (empty when the run delivered via a
+    tool or stayed silent). A `wahabot tell` command logs it — the
+    terminal has no chat to land in — while a self-chat command has
+    the caller send it back to the operator's "message yourself" chat
+    via ``reply_chat_id``.
     """
     instruction = str(event.payload.get("body", "")).strip()
     if not instruction:
         logger.debug("Ignoring empty command {id}", id=event.payload.get("id"))
-        return
+        return ""
     logger.info(
         "Running operator command {id}: {instruction}",
         id=event.payload.get("id"),
@@ -75,14 +81,14 @@ async def run_command(
     ctx = Context(agent)
     with chat_trace_attributes("operator-command"):
         reply = await handle_message(event, agent, ctx=ctx, settings=settings, waha=waha)
-    if reply and reply.strip():
-        # A command's text reply has no chat to land in — the log (and
-        # the Langfuse trace) is the only place the operator can read it.
+    reply = (reply or "").strip()
+    if reply:
         logger.info(
             "Command {id} final reply: {reply}",
             id=event.payload.get("id"),
             reply=reply[:500],
         )
+    return reply
 
 
 def register_command_handler(
