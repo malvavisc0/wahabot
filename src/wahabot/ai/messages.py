@@ -190,17 +190,13 @@ def self_command_instruction(
 def bot_jids(event: WahaEvent) -> set[str]:
     """The bot's own JIDs — its phone id and, when known, its LID.
 
-    Read from the event's ``me`` block; events without one fall back
-    to the identities captured from ``get_me`` at startup/recovery,
-    so mention and self-chat detection keep working on thin events.
+    Read from the event's own ``me`` block only: command and mention
+    gates must authenticate per event, not inherit trust from
+    process-global state — an event without ``me`` yields no identity
+    and simply fails those gates.
     """
     me = event.me or {}
-    ids = {jid_string(me[key]) for key in ("id", "lid") if me.get(key)}
-    if ids:
-        return ids
-    from wahabot.status import state
-
-    return {jid for jid in (state.operator_jid, state.operator_lid) if jid}
+    return {jid_string(me[key]) for key in ("id", "lid") if me.get(key)}
 
 
 def is_group_addressed(

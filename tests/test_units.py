@@ -825,8 +825,8 @@ def test_self_chat_command_classification() -> None:
     assert self_command_instruction(to_other, bot_name="kai") is None
 
 
-def test_bot_jids_falls_back_to_captured_identity() -> None:
-    """Events without a ``me`` block use the startup-captured identity."""
+def test_bot_jids_ignores_captured_identity() -> None:
+    """Events without ``me`` yield no identity — gates fail closed."""
     from wahabot.status import state as status_state
 
     status_state.operator_jid = "491555000000@c.us"
@@ -844,8 +844,8 @@ def test_bot_jids_falls_back_to_captured_identity() -> None:
             "body": "kai do the thing",
         },
     )
-    assert self_command_instruction(thin, bot_name="kai") == "do the thing"
-    assert bot_jids(thin) == {"491555000000@c.us", "491555000000@lid"}
+    assert bot_jids(thin) == set()
+    assert self_command_instruction(thin, bot_name="kai") is None
 
 
 def test_echo_tracking() -> None:
