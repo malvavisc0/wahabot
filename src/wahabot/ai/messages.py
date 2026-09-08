@@ -180,6 +180,9 @@ def self_command_instruction(
     if to and to not in own:
         return None
     body = str(payload.get("body", "")).strip()
+    # A transcribed voice note arrives wrapped as "[voice note] …";
+    # the mention follows the modality marker.
+    body = body.removeprefix("[voice note]").strip()
     match = bot_mention_pattern(bot_name, bot_mention_regex).match(body)
     if match is None:
         return None

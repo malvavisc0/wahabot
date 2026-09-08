@@ -23,10 +23,12 @@ from wahabot.ai.albums import (
 )
 from wahabot.ai.context import handle_message, render_system_prompt
 from wahabot.ai.messages import (
+    bot_jids,
     extract_text,
     image_media,
     is_group_addressed,
     is_replyable,
+    jid_string,
     message_kind,
     self_command_instruction,
     video_media,
@@ -535,6 +537,24 @@ def register_agent_handler(
             )
             return
         body = extract_text(event)
+        if (
+            body is None
+            and message_kind(event) == "audio"
+            and settings.transcribe_url
+            and event.payload.get("fromMe")
+            and jid_string(event.payload.get("from")) in bot_jids(event)
+            and not is_self_echo(message_id)
+        ):
+            # The self-chat is the operator console: a voice note there
+            # can only come from the operator's own devices, so it is
+            # always worth transcribing early — it may be a spoken
+            # command ("kai do x"). Everywhere else transcription stays
+            # behind the chat gates. The transcript becomes the body;
+            # the mention check below runs on it like typed text.
+            transcript = await transcribe_voice_note(event, waha, settings)
+            if transcript:
+                event.payload["body"] = f"[voice note] {transcript}"
+                body = event.payload["body"]
         instruction = (
             None
             if is_self_echo(message_id)

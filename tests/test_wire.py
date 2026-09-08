@@ -188,6 +188,29 @@ def test_voice_note_transcription(bot: Bot) -> None:
     )
 
 
+def test_self_chat_voice_command(bot: Bot) -> None:
+    """A spoken 'kai …' in the self-chat runs as an operator command."""
+    llm = bot.stack.llm
+    voice = voice_event()
+    voice["payload"]["id"] = f"true_{ME_JID}_SELFCMDVOICE"
+    voice["payload"]["from"] = ME_JID
+    voice["payload"]["to"] = "491555000000@lid"
+    voice["payload"]["fromMe"] = True
+    with unittest.mock.patch(
+        "wahabot.handlers.transcribe_voice_note",
+        return_value="kai do the vocal thing",
+    ):
+        bot.post(voice)
+    assert _wait(lambda: len(llm.requests) >= 1)
+    turns = [
+        str(m.get("content", ""))
+        for m in llm.requests[0]["messages"]
+        if m.get("role") == "user"
+    ]
+    assert any("[operator command] do the vocal thing" in t for t in turns)
+    assert bot.waha.sent == [(SESSION, "operator", "smoke reply one", None)]
+
+
 def test_voice_note_in_mentioned_group_skipped(bot: Bot) -> None:
     group_voice = voice_event()
     group_voice["payload"]["id"] = f"false_{CHAT_ID}_GROUPVOICE"

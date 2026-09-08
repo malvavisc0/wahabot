@@ -53,7 +53,10 @@ Before the agent ever wakes up, the message passes through, in order:
    the operator console): it bypasses the chat gates below and runs
    on the shared operator context (one rolling history across
    commands), and the reply comes back as a quote-reply in
-   the same chat. The bot's own writes into that chat — command
+   the same chat. A **voice note** works too: self-chat audio is
+   transcribed before this check (the console is trusted — only the
+   operator's own devices can post there), so a spoken "kai do x"
+   runs like the typed command. The bot's own writes into that chat — command
    replies, escalations, session notifications, tool deliveries —
    are echo-tracked by id, so their `fromMe` bounce-backs never
    re-trigger the command path (a forwarded message or injected
