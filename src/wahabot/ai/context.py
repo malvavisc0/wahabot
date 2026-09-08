@@ -17,6 +17,7 @@ from wahabot.ai.tools.whatsapp import RunTarget, bind_target, reset_target
 from wahabot.ai.vision import image_caption, image_noun
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.cache import TtlCache
+from wahabot.core.host import host_context
 from wahabot.core.jid import roster_entries
 from wahabot.core.models import WahaEvent
 from wahabot.core.waha import WahaClient
@@ -108,19 +109,20 @@ def render_system_prompt(
     bot_name: str | None = None,
     goal: str = "",
 ) -> str:
-    """Substitute date/time/name placeholders in the system prompt.
+    """Substitute date/time/name/host placeholders in the system prompt.
 
     When ``goal`` is non-empty, it is prepended as a ``Goal:`` block so
     the model always starts from the bot's intended purpose.
 
-    Supported placeholders (all but ``{{bot_name}}`` use the ``tz_name``
-    timezone):
+    Placeholders (all but ``{{bot_name}}`` and ``{{host}}`` use the
+    ``tz_name`` timezone):
 
     - ``{{now}}`` / ``{{datetime}}`` — full timestamp, e.g. ``2026-09-02 14:05 UTC``
     - ``{{date}}`` — date only, e.g. ``2026-09-02``
     - ``{{time}}`` — time only, e.g. ``14:05``
     - ``{{tz}}`` — the timezone name, e.g. ``UTC``
     - ``{{bot_name}}`` — the bot's display name, e.g. ``Kai``
+    - ``{{host}}`` — a summary of the machine (OS, Python, Node, shell)
 
     Unknown/invalid timezone names fall back to UTC.
     """
@@ -137,6 +139,7 @@ def render_system_prompt(
         "{{time}}": now.strftime("%H:%M"),
         "{{tz}}": tz_name,
         "{{bot_name}}": bot_name or "the bot",
+        "{{host}}": host_context(),
     }
     for key, value in replacements.items():
         prompt = prompt.replace(key, value)

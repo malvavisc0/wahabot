@@ -20,7 +20,7 @@ placeholder expansion.
 | `whitelist` | `string[]` | `[]` | Allowed chats/participants. Empty = answer everybody. |
 | `blacklist` | `string[]` | `[]` | Denied chats/participants. Always wins over the whitelist. |
 | `goal` | `string` | `""` | Optional objective prepended to the rendered system prompt as a `Goal:` block. Supports the same placeholders as `system_prompt`. Leave empty to skip. |
-| `system_prompt` | `string` | **required** | The agent system prompt. Supports `{{date}}`, `{{time}}`, `{{now}}`, `{{tz}}`, `{{bot_name}}` variables. The server refuses to start without it. |
+| `system_prompt` | `string` | **required** | The agent system prompt. Supports `{{date}}`, `{{time}}`, `{{now}}`, `{{tz}}`, `{{bot_name}}`, `{{host}}` variables. The server refuses to start without it. |
 | `bot_name` | `string \| null` | `null` | The bot's display name (e.g. `"Kai"`). Used only as a fallback mention matcher. |
 | `bot_mention_regex` | `string \| null` | `null` | A regex detecting when the bot is addressed in a group. Defaults to a case-insensitive whole-word `@?<bot_name>`. |
 | `group_participation` | `"never" \| "mentioned" \| "judicious"` | `"mentioned"` | How the bot joins group conversations (below). |
@@ -57,6 +57,7 @@ any code-side default.
 - `{{now}}` / `{{datetime}}` — e.g. `2026-09-02 14:30 UTC`
 - `{{tz}}` — the timezone name, e.g. `America/Santiago`
 - `{{bot_name}}` — the `bot_name` field, e.g. `Kai`
+- `{{host}}` — a snapshot of the machine the bot runs on (OS, Python, Node, shell); not timezone-dependent
 
 ## Group participation
 

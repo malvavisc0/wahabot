@@ -26,6 +26,7 @@ from tests.harness import (
     SESSION,
     smoke_video_bytes,
 )
+from wahabot.ai.context import render_system_prompt
 from wahabot.ai.messages import (
     bot_mentioned,
     is_group_addressed,
@@ -64,6 +65,7 @@ from wahabot.commands import build_command_event
 from wahabot.core.cache import TtlCache
 from wahabot.core.echoes import is_self_echo, remember_self_echo
 from wahabot.core.filters import chat_allowed
+from wahabot.core.host import host_context
 from wahabot.core.models import WahaEvent
 from wahabot.core.persistence import (
     forget_memory,
@@ -797,3 +799,12 @@ def test_sender_names_reads_notify_name() -> None:
         "491555000001@c.us": "Smoke",
         "491555000003@lid": "Lidler",
     }
+
+
+def test_host_placeholder() -> None:
+    """``{{host}}`` resolves to the machine snapshot in the prompt."""
+    rendered = render_system_prompt("Host info:\n{{host}}")
+    assert "{{host}}" not in rendered
+    assert rendered == f"Host info:\n{host_context()}"
+    assert "Host: " in rendered
+    assert "- Python: " in rendered
