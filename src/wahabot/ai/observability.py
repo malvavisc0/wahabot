@@ -46,8 +46,11 @@ _client: Langfuse | None = None
 #: True once ``enable_langfuse`` succeeded; guards duplicate atexit hooks.
 _enabled = False
 
-#: WhatsApp JIDs — ``1234567890@c.us``, ``1234-567890123@g.us``, ``@broadcast``.
-_JID_RE = re.compile(r"\b\d{6,}(?:-\d+)?@(?:c|g)\.us\b|\b[\w.-]+@broadcast\b")
+#: WhatsApp JIDs — ``1234567890@c.us``, ``1234-567890123@g.us``,
+#: ``123456789012345@lid`` (the linked-device identity), ``@broadcast``.
+_JID_RE = re.compile(
+    r"\b\d{6,}(?:-\d+)?@(?:c|g)\.us\b|\b\d{6,}@lid\b|\b[\w.-]+@broadcast\b"
+)
 
 
 def enable_langfuse(settings: Settings) -> bool:
