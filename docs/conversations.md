@@ -44,8 +44,11 @@ Before the agent ever wakes up, the message passes through, in order:
    are backlog (history resyncs, container restarts), not fresh chat;
    they are skipped so the bot never wakes up hours late and answers
    a conversation that moved on.
-3. **Self-chat command check.** A `fromMe` message sent to the bot's
-   own JID that matches `bot_mention_regex` is an **operator
+3. **Self-chat command check.** A `fromMe` message where the account
+   is on both ends (`from` is one of the bot's own JIDs and `to`, when
+   present, is too — on LID-linked accounts WAHA reports the self-chat
+   as `from=<phone>@c.us, to=<lid>@lid`) and the body matches
+   `bot_mention_regex` is an **operator
    command** delivered from WhatsApp (the "message yourself" chat is
    the operator console): it bypasses the chat gates below and runs
    on the shared operator context (one rolling history across

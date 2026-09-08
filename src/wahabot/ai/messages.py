@@ -160,16 +160,24 @@ def self_command_instruction(
 ) -> str | None:
     """Extract an operator instruction addressed to the bot in self-chat.
 
-    WAHA marks messages sent from the account as ``fromMe``. Only messages
-    sent to one of the account's own JIDs qualify, so manually typed messages
-    in other chats keep their existing memory-only behavior. The mention
-    must *begin* the message: a trigger word appearing mid-text (the
+    WAHA marks messages sent from the account as ``fromMe``. A message
+    qualifies when the account is on both ends of it — ``from`` is one
+    of the account's own JIDs and ``to`` (when present) is too — so a
+    manually typed message in another chat keeps its memory-only
+    behavior. The ``to`` check matters on LID-linked accounts: WAHA
+    reports the self-chat as ``from=<phone>@c.us, to=<lid>@lid`` —
+    two different strings for one conversation. The mention must
+    *begin* the message: a trigger word appearing mid-text (the
     operator quoting or discussing something) is not a command.
     """
     payload = event.payload
     if not payload.get("fromMe"):
         return None
-    if jid_string(payload.get("from")) not in bot_jids(event):
+    own = bot_jids(event)
+    if jid_string(payload.get("from")) not in own:
+        return None
+    to = jid_string(payload.get("to"))
+    if to and to not in own:
         return None
     body = str(payload.get("body", "")).strip()
     match = bot_mention_pattern(bot_name, bot_mention_regex).match(body)

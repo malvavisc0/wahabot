@@ -794,6 +794,34 @@ def test_self_chat_command_classification() -> None:
         payload={"from": ME_JID, "fromMe": True, "body": "note: kai do the thing"},
     )
     assert self_command_instruction(mid_text, bot_name="kai") is None
+    lid_linked = WahaEvent(
+        id="sc8",
+        timestamp=1,
+        event="message",
+        session=SESSION,
+        me=self_cmd.me,
+        payload={
+            "from": ME_JID,
+            "to": "491555000000@lid",
+            "fromMe": True,
+            "body": "kai do the thing",
+        },
+    )
+    assert self_command_instruction(lid_linked, bot_name="kai") == "do the thing"
+    to_other = WahaEvent(
+        id="sc9",
+        timestamp=1,
+        event="message",
+        session=SESSION,
+        me=self_cmd.me,
+        payload={
+            "from": "491555000001@c.us",
+            "to": "491555000002@c.us",
+            "fromMe": True,
+            "body": "kai do the thing",
+        },
+    )
+    assert self_command_instruction(to_other, bot_name="kai") is None
 
 
 def test_echo_tracking() -> None:

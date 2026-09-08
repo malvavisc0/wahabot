@@ -961,6 +961,21 @@ def test_self_chat_command(bot: Bot) -> None:
     time.sleep(0.5)
     assert len(llm.requests) == 0
 
+    # LID-linked self-chat: WAHA reports from=<phone>@c.us, to=<lid>@lid.
+    llm.clear()
+    bot.waha.sent.clear()
+    llm.override = None
+    lid_event = self_event("kai lid linked command", "SELF4")
+    lid_event["payload"]["to"] = "491555000000@lid"
+    bot.post(lid_event)
+    assert _wait(lambda: len(llm.requests) >= 1)
+    lid_turns = [
+        str(m.get("content", ""))
+        for m in llm.requests[0]["messages"]
+        if m.get("role") == "user"
+    ]
+    assert any("[operator command] lid linked command" in t for t in lid_turns)
+
 
 def test_escalate_delivery(bot: Bot) -> None:
     llm = bot.stack.llm
