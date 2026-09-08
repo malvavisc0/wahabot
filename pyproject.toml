@@ -1,6 +1,6 @@
 [project]
 name = "wahabot"
-version = "0.5.7"
+version = "0.5.8"
 description = "A WhatsApp bot that answers chats with an LLM agent"
 readme = "README.md"
 authors = [
@@ -43,9 +43,13 @@ module-root = "src"
 [dependency-groups]
 dev = [
     "basedpyright",
+    "pytest",
     "radon",
     "ruff",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.basedpyright]
 reportCallInDefaultInitializer = false
@@ -64,7 +68,7 @@ reportCallIssue = false
 
 [tool.ruff]
 target-version = "py314"
-src = ["src"]
+src = ["src", "tests"]
 line-length = 90
 
 [tool.ruff.lint]

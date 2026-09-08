@@ -140,3 +140,13 @@ def _complete(buffer: AlbumBuffer) -> None:
 def is_album_container(event: WahaEvent) -> bool:
     """True for the album container event itself."""
     return message_kind(event) == "album"
+
+
+def reset() -> None:
+    """Drop all open album buffers and their flush timers.
+
+    A test-only entry point: the album registry has no other public
+    reset, and pending flush timers otherwise leak into the next test.
+    """
+    _albums.clear()
+    _tasks.clear()

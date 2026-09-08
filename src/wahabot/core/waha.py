@@ -77,11 +77,18 @@ def sent_message_id(response: httpx.Response) -> str:
 class WahaClient:
     """Minimal WAHA API client (see https://waha.devlike.pro/docs/how-to/send-messages)."""
 
-    def __init__(self, base_url: str, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str | None = None,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["X-Api-Key"] = api_key
-        self._client = httpx.Client(base_url=base_url, headers=headers, timeout=10)
+        self._client = httpx.Client(
+            base_url=base_url, headers=headers, timeout=10, transport=transport
+        )
 
     def send_text(
         self,

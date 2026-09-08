@@ -135,7 +135,7 @@ uv run ruff format .           # format
 uv run basedpyright            # type check
 uv run radon cc src -s         # complexity (no C+ blocks allowed)
 uvx --python 3.14 vulture src/ --min-confidence 60   # dead code
-uv run python scripts/smoke_test.py   # end-to-end smoke suite
+uv run pytest                          # end-to-end smoke suite
 ```
 
 ## Docs

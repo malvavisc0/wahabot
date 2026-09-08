@@ -36,6 +36,7 @@ uv run ruff format .                   # format
 uv run basedpyright ./src/wahabot       # type check
 uv run radon cc ./src/wahabot -s        # complexity (must show no C/D/E/F blocks)
 uvx --python 3.14 vulture src/ --min-confidence 60   # dead code
+uv run pytest                           # end-to-end smoke + unit suite
 uv run wahabot --help                   # CLI surface
 ```
 Run `ruff check`, `ruff format --check`, `basedpyright`, `radon cc`,
