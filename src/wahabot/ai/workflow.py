@@ -39,6 +39,7 @@ from wahabot.ai.history import (
     sanitize_chat_history,
     trim_to_budget,
 )
+from wahabot.ai.tools.whatsapp import current_target
 from wahabot.settings import Settings
 
 __all__ = [
@@ -376,11 +377,19 @@ def token_count(msg: ChatMessage) -> int:
 
 
 class FunctionCallingAgentWorkflow(Workflow):
-    """Stateful function calling agent built from plain workflow steps."""
+    """Stateful function calling agent built from plain workflow steps.
 
-    #: Run-scoped delivery holder shared with the tools and the handler;
-    #: set by ``handlers.register_agent_handler`` after ``build_agent``.
-    send_holder: dict[str, str] | None = None
+    Runs of the same workflow may execute concurrently (different
+    chats in parallel): everything a run needs — its delivery holder,
+    memory, tool-round counters — lives in its own ``Context`` or in
+    the run-scoped target binding (``bind_target``), never on the
+    workflow instance.
+    """
+
+    #: Bounds concurrent LLM calls across all runs of this workflow: a
+    #: busy group burst fans out provider cost, so runs queue here
+    #: instead of all hitting the endpoint at once.
+    llm_semaphore: asyncio.Semaphore
 
     def __init__(
         self,
@@ -391,16 +400,17 @@ class FunctionCallingAgentWorkflow(Workflow):
         prompt_renderer: Callable[[], str] | None = None,
         memory_token_limit: int = 8000,
         tool_round_limit: int = 50,
+        max_concurrent_llm: int = 4,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.send_holder = None
         self.tools = tools or []
         self.system_prompt = system_prompt
         self.prompt_renderer = prompt_renderer
         self.llm = llm or raise_missing_llm()
         self.memory_token_limit = memory_token_limit
         self.tool_round_limit = tool_round_limit
+        self.llm_semaphore = asyncio.Semaphore(max_concurrent_llm)
         assert self.llm.metadata.is_function_calling_model
 
     def rendered_system_prompt(self) -> str | None:
@@ -550,11 +560,12 @@ class FunctionCallingAgentWorkflow(Workflow):
         """
         rounds = await self.next_round(ctx)
         chat_history = await self.populated_history(ctx, ev)
-        response = await self.llm.achat_with_tools(
-            self.tools,
-            chat_history=chat_history,
-            allow_parallel_tool_calls=True,
-        )
+        async with self.llm_semaphore:
+            response = await self.llm.achat_with_tools(
+                self.tools,
+                chat_history=chat_history,
+                allow_parallel_tool_calls=True,
+            )
         tool_calls = self.llm.get_tool_calls_from_response(
             response, error_on_no_tool_call=False
         )
@@ -622,8 +633,8 @@ class FunctionCallingAgentWorkflow(Workflow):
 
     def any_delivery(self) -> bool:
         """True when any delivery tool already fired this run."""
-        holder = self.send_holder
-        return bool(holder and (holder.get("sent") or holder.get("reacted")))
+        target = current_target()
+        return bool(target.get("sent") or target.get("reacted"))
 
     def delivery_complete(self, tool_calls: list[ToolSelection]) -> bool:
         """True when a delivery already fired and this round adds none.
@@ -715,7 +726,9 @@ class FunctionCallingAgentWorkflow(Workflow):
                 content=_EARLY_STOPPING_PROMPT.format(limit=limit),
             )
         )
-        return self.drop_post_delivery_text(await self.llm.achat(messages))
+        async with self.llm_semaphore:
+            response = await self.llm.achat(messages)
+        return self.drop_post_delivery_text(response)
 
     def drop_post_delivery_text(self, response: ChatResponse) -> ChatResponse:
         """Empty *response* when a delivery tool already fired this run.

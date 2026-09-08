@@ -10,7 +10,7 @@ don't know what the image is. I made up a comment.").
 :func:`caption_image` spends one small vision call per downloaded image
 *before* the agent run and returns a single sentence ("beer glass, foam
 shaped like a bear"). The handler stores it on the image dict
-(``image["caption"]``) while downloading — outside the agent lock — and
+(``image["caption"]``) while downloading — before the chat's run lock — and
 ``handle_message`` weaves it into the user message text (``(image
 shows: beer glass, foam shaped like a bear)``), so the description
 lives in memory like any other chat line: it survives trimming, rides
@@ -72,13 +72,18 @@ def clamp_caption_line(text: str) -> str:
 
 
 async def caption_image(
-    llm: FunctionCallingLLM, image: dict[str, Any], timeout: float = 30.0
+    llm: FunctionCallingLLM,
+    image: dict[str, Any],
+    timeout: float = 30.0,
+    semaphore: asyncio.Semaphore | None = None,
 ) -> str:
     """One-sentence description of *image*, or "" on any failure.
 
     A failed caption must never sink the turn: the caller falls back to
     the plain ``(image)`` marker and the pixels still ride the first
     LLM call, so the run degrades to the pre-caption behavior.
+    *semaphore* (the workflow's LLM gate) bounds this call within the
+    run's concurrency budget.
     """
     message = ChatMessage(
         role=MessageRole.USER,
@@ -91,7 +96,11 @@ async def caption_image(
         ],
     )
     try:
-        response = await asyncio.wait_for(llm.achat([message]), timeout=timeout)
+        if semaphore is None:
+            response = await asyncio.wait_for(llm.achat([message]), timeout=timeout)
+        else:
+            async with semaphore:
+                response = await asyncio.wait_for(llm.achat([message]), timeout=timeout)
     except Exception as exc:  # any failure degrades to the bare (image) marker
         logger.warning("Image caption failed (turn stays text-anchored): {exc}", exc=exc)
         return ""
@@ -101,13 +110,23 @@ async def caption_image(
 
 
 async def caption_images(
-    llm: FunctionCallingLLM, images: list[dict[str, Any]], timeout: float = 30.0
+    llm: FunctionCallingLLM,
+    images: list[dict[str, Any]],
+    timeout: float = 30.0,
+    semaphore: asyncio.Semaphore | None = None,
 ) -> list[str]:
-    """Captions for *images*, position-aligned; failed images get ""."""
+    """Captions for *images*, position-aligned; failed images get "".
+
+    *semaphore* (the workflow's LLM gate) is acquired per caption call:
+    a burst of parallel chat runs must queue their vision calls like
+    any other LLM traffic instead of fanning out past the cap.
+    """
     if not images:
         return []
     return list(
-        await asyncio.gather(*(caption_image(llm, img, timeout) for img in images))
+        await asyncio.gather(
+            *(caption_image(llm, img, timeout, semaphore=semaphore) for img in images)
+        )
     )
 
 

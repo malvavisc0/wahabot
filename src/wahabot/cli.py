@@ -25,7 +25,7 @@ from wahabot.ai.context import render_system_prompt
 from wahabot.commands import build_command_event, register_command_handler
 from wahabot.core.access import load_session_config
 from wahabot.core.waha import WahaClient
-from wahabot.handlers import agent_lock, register_agent_handler, register_forget_handler
+from wahabot.handlers import register_agent_handler, register_forget_handler
 from wahabot.reactions import register_reaction_handler
 from wahabot.settings import Settings, get_settings, setup_logging
 from wahabot.status import register_session_status_handler, seed_health
@@ -340,13 +340,8 @@ def serve(
     ensure_session_live(waha, settings)
     seed_health(waha, settings.session)
     agent, _config_reloader = register_agent_handler(settings, waha=waha)
-    register_reaction_handler(waha, agent, settings, agent_lock)
-    register_command_handler(
-        settings,
-        waha,
-        agent,
-        agent_lock,
-    )
+    register_reaction_handler(waha, agent, settings)
+    register_command_handler(settings, waha, agent)
     register_session_status_handler(waha, settings.session)
     register_forget_handler(settings)
     (settings.journal_dir / settings.session).mkdir(parents=True, exist_ok=True)
@@ -444,7 +439,7 @@ def forget(
     """Wipe one chat's memory in the running bot.
 
     Posts a signed ``forget`` event to the webhook; the server drops the
-    live context and the memory file under the agent lock, so there is
+    live context and the memory file under that chat's run lock, so there is
     no resurrection window. The webhook must be reachable — with the bot
     stopped, delete the file directly instead:
     ``rm data/memory/<session>/<chat-id>.json``.

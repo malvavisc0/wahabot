@@ -14,6 +14,7 @@ stranger get a refusal envelope, not a delivery.
 """
 
 import base64
+import contextvars
 import json
 import mimetypes
 import time
@@ -48,6 +49,7 @@ __all__ = [
     "OPERATOR_ARMED",
     "EscalationChannel",
     "chat_jid",
+    "current_target",
     "delivered_to_self",
     "escalate",
     "fenced_chat",
@@ -180,6 +182,39 @@ def operator_run(target: dict[str, str]) -> bool:
     return target.get(OPERATOR_KEY) == OPERATOR_ARMED
 
 
+#: The current run's send-target holder, scoped by ``contextvars``:
+#: every agent run binds its own holder before the workflow starts, so
+#: concurrent runs (different chats in parallel) can never see each
+#: other's session/chat targets, delivery latches, or — critically —
+#: the operator arming flag. Tool builders ignore their ``target``
+#: parameter at call time and resolve through here instead.
+_run_target: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "wahabot_run_target", default=None
+)
+
+
+def bind_target(target: dict[str, str]) -> contextvars.Token[dict[str, str] | None]:
+    """Bind *target* as the current run's holder (called per run)."""
+    return _run_target.set(target)
+
+
+def reset_target(token: contextvars.Token[dict[str, str] | None]) -> None:
+    """Restore the previous binding after a run finishes."""
+    _run_target.reset(token)
+
+
+def current_target() -> dict[str, str]:
+    """The holder of the run executing on this task.
+
+    Raises when no run is bound — a tool firing outside a run is a
+    bug, and failing loudly beats acting on a stale target.
+    """
+    target = _run_target.get()
+    if target is None:
+        raise RuntimeError("tool called without a bound run target")
+    return target
+
+
 def delivered_to_self(chat_id: str, sent_id: str) -> None:
     """Mark a tool delivery that landed in the bot's own self-chat.
 
@@ -295,7 +330,7 @@ def fenced_message_id(
     return None, _FENCE_ERROR
 
 
-def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+def send_message(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
     """Build a tool that sends a WhatsApp text message.
 
     Sends to the current chat by default; an operator-command run may
@@ -331,6 +366,7 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         """
         if not text.strip():
             return error("empty message text")
+        target = current_target()
         if target.get("sent"):
             return error(
                 f"message already sent this run (to {target['sent']}); do not send again"
@@ -449,9 +485,7 @@ class EscalationChannel:
         self._last[chat_id] = time.monotonic()
 
 
-def escalate(
-    waha: WahaClient, target: dict[str, str], channel: EscalationChannel
-) -> BaseTool:
+def escalate(waha: WahaClient, channel: EscalationChannel) -> BaseTool:
     """Build a tool that forwards a report from the chat to the operator.
 
     The one sanctioned way a chat run reaches the operator: the target
@@ -481,6 +515,7 @@ def escalate(
         """
         if not report.strip():
             return error("empty report text")
+        target = current_target()
         chat_id = target.get("chat_id", "")
         if not chat_id or not target.get("session"):
             return error("no active conversation context")
@@ -548,7 +583,7 @@ def escalate(
     )
 
 
-def react_to_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+def react_to_message(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
     """Build a tool that reacts to a WhatsApp message.
 
     One reaction per run: like the send tools, a successful reaction
@@ -565,6 +600,7 @@ def react_to_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             reaction: The emoji to react with, or empty string to remove
                 an existing reaction.
         """
+        target = current_target()
         if target.get("reacted"):
             return error("already reacted this run; do not react again")
         session = target.get("session", "")
@@ -592,7 +628,7 @@ def react_to_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
     )
 
 
-def send_image(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+def send_image(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
     """Build a tool that sends an image to a chat."""
 
     def send_image_fn(
@@ -608,6 +644,7 @@ def send_image(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             chat: Optional chat id; operator commands only. Omit to
                 send to the current chat.
         """
+        target = current_target()
         if target.get("sent"):
             return error(
                 f"message already sent this run (to {target['sent']}); do not send again"
@@ -667,7 +704,9 @@ def infer_mimetype(name_or_url: str, curated: dict[str, str], default: str) -> s
     return guessed or default
 
 
-def send_file(waha: WahaClient, target: dict[str, str], max_file_bytes: int) -> BaseTool:
+def send_file(
+    waha: WahaClient, max_file_bytes: int, _target: dict[str, str] | None = None
+) -> BaseTool:
     """Build a tool that sends a document (PDF, etc.) to a chat.
 
     Two sources, matching WAHA's ``sendFile`` file shapes: a public
@@ -696,6 +735,7 @@ def send_file(waha: WahaClient, target: dict[str, str], max_file_bytes: int) -> 
             chat: Optional chat id; operator commands only. Omit to
                 send to the current chat.
         """
+        target = current_target()
         if target.get("sent"):
             return error(
                 f"message already sent this run (to {target['sent']}); do not send again"
@@ -818,7 +858,9 @@ def fit_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def fetch_chat_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+def fetch_chat_messages(
+    waha: WahaClient, _target: dict[str, str] | None = None
+) -> BaseTool:
     """Build a tool that fetches recent messages from a chat."""
 
     def fetch_chat_messages_fn(chat: str | None = None, limit: int = 20) -> str:
@@ -829,6 +871,7 @@ def fetch_chat_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
                 fetch from the current chat.
             limit: Max messages to return (default 20).
         """
+        target = current_target()
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
@@ -856,7 +899,7 @@ def fetch_chat_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
     )
 
 
-def get_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+def get_chat(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
     """Build a tool that returns metadata about a chat."""
 
     def get_chat_fn(chat: str | None = None) -> str:
@@ -866,6 +909,7 @@ def get_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             chat: Optional chat id; operator commands only. Omit for
                 the current chat.
         """
+        target = current_target()
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
@@ -1011,7 +1055,7 @@ def participant_jid(participant: Any) -> str:
     return jid_string(participant)
 
 
-def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+def search_messages(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
     """Build a tool that searches recent messages for text."""
 
     def search_messages_fn(
@@ -1031,6 +1075,7 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         """
         if not query.strip():
             return error("query is required")
+        target = current_target()
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
@@ -1060,7 +1105,7 @@ def search_messages(waha: WahaClient, target: dict[str, str]) -> BaseTool:
     )
 
 
-def resolve_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+def resolve_chat(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
     """Build a tool that resolves a person/group name to chat JIDs.
 
     The model knows chats by name ("send it to the group Familia") but
@@ -1081,6 +1126,7 @@ def resolve_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         Args:
             name: The person or group name to look up.
         """
+        target = current_target()
         if not operator_run(target):
             return error(_FENCE_ERROR)
         session = target.get("session", "")
@@ -1121,7 +1167,7 @@ def resolve_chat(waha: WahaClient, target: dict[str, str]) -> BaseTool:
 _RECENT_CHATS_CAP = 30
 
 
-def recent_chats(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+def recent_chats(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
     """Build a tool that lists the most recent conversations.
 
     Operator commands only, like :func:`resolve_chat` — the chat list
@@ -1136,6 +1182,7 @@ def recent_chats(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         Args:
             limit: How many conversations to return (default 10).
         """
+        target = current_target()
         if not operator_run(target):
             return error(_FENCE_ERROR)
         session = target.get("session", "")
@@ -1194,7 +1241,7 @@ def search_matches(entries: list[dict[str, Any]], name: str) -> list[dict[str, A
     return (exact + partial)[:_RESOLVE_CHAT_CANDIDATES]
 
 
-def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
+def forward_message(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
     """Build a tool that forwards a message to a chat."""
 
     def forward_message_fn(message_id: str, chat: str | None = None) -> str:
@@ -1205,6 +1252,7 @@ def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             chat: Optional chat id to forward into; operator commands
                 only. Defaults to the current chat.
         """
+        target = current_target()
         if target.get("sent"):
             return error(
                 f"message already sent this run (to {target['sent']}); do not send again"

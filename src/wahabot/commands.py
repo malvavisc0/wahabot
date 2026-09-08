@@ -12,7 +12,6 @@ instruction *names* its targets), so no chat's memory is touched and no
 gates apply.
 """
 
-import asyncio
 import time
 import uuid
 
@@ -21,7 +20,6 @@ from loguru import logger
 
 from wahabot.ai.context import handle_message
 from wahabot.ai.observability import chat_trace_attributes
-from wahabot.ai.tools.whatsapp import OPERATOR_ARMED, OPERATOR_KEY
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.models import WahaEvent
 from wahabot.core.waha import WahaClient
@@ -44,15 +42,15 @@ async def run_command(
 
     No dedup (the command id is unique by construction), no staleness
     gate (no WAHA redelivery for a command the operator just fired), no
-    chat gates. The shared send-target holder is pointed at the
-    event's ``from`` ("operator") so the run behaves like a DM: the
-    model may pass ``chat=…`` explicitly (a group or a person resolved
-    via ``resolve_chat``) or omit it, exactly as in a normal chat —
-    and a delivery latch left over from a previous turn can never
-    block this command's send. The holder also arms the operator flag
-    (``OPERATOR_KEY``) that opens the cross-chat fence in the WhatsApp
-    tools; chat-triggered runs clear it, so this run is the only one
-    with cross-chat reach.
+    chat gates. The run's delivery target is the event's ``from``
+    ("operator") so the run behaves like a DM: the model may pass
+    ``chat=…`` explicitly (a group or a person resolved via
+    ``resolve_chat``) or omit it, exactly as in a normal chat — and a
+    delivery latch from another run can never block this command's
+    send (each run binds its own target). ``armed=True`` opens the
+    cross-chat fence in the WhatsApp tools for this run alone; the
+    arming flag rides the run-scoped binding, so a concurrent chat run
+    can never inherit it.
 
     Returns the run's final text (empty when the run delivered via a
     tool or stayed silent). A `wahabot tell` command logs it — the
@@ -69,18 +67,15 @@ async def run_command(
         id=event.payload.get("id"),
         instruction=instruction[:200],
     )
-    holder = agent.send_holder
-    if holder is not None:
-        holder["session"] = event.session
-        holder["chat_id"] = str(event.payload.get("from", ""))
-        holder["sent"] = ""
-        holder["reacted"] = ""
-        # Operator commands are the one trusted cross-chat channel: the
-        # fence in the WhatsApp tools opens for this run alone.
-        holder[OPERATOR_KEY] = OPERATOR_ARMED
     ctx = Context(agent)
     with chat_trace_attributes("operator-command"):
-        reply = await handle_message(event, agent, ctx=ctx, settings=settings, waha=waha)
+        # armed=True: operator commands are the one trusted cross-chat
+        # channel; the fence in the WhatsApp tools opens for this run
+        # alone (the arming flag rides the run's own target binding,
+        # so a concurrent chat run can never inherit it).
+        reply, _target = await handle_message(
+            event, agent, ctx=ctx, settings=settings, waha=waha, armed=True
+        )
     reply = (reply or "").strip()
     if reply:
         logger.info(
@@ -95,13 +90,17 @@ def register_command_handler(
     settings: Settings,
     waha: WahaClient,
     agent: FunctionCallingAgentWorkflow,
-    agent_lock: asyncio.Lock,
 ) -> None:
-    """Register the webhook command handler around the shared agent."""
+    """Register the webhook command handler around the shared agent.
+
+    Commands run without a lock: each binds its own run target and
+    fresh ``Context``, so concurrent commands (and commands vs chat
+    runs) cannot interfere.
+    """
 
     @on_command
     async def handle_command(event: WahaEvent) -> None:
-        """Run one operator command under the shared agent lock."""
+        """Run one operator command (concurrently with chat runs)."""
         if not session_healthy():
             logger.info(
                 "Muting command {id} while WAHA session is not WORKING",
@@ -110,8 +109,7 @@ def register_command_handler(
             return
         if event.session != settings.session:
             return
-        async with agent_lock:
-            await run_command(event, agent, settings, waha)
+        await run_command(event, agent, settings, waha)
 
 
 def build_command_event(session: str, instruction: str) -> dict[str, object]:

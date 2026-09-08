@@ -142,15 +142,15 @@ memory survives restarts and LRU evictions. The save points are:
 2. **Album run end** — in `deliver_album_reply`, same position.
 3. **fromMe fold** — after `remember_own_message` in its locked block.
 4. **Reaction fold** — after the note replacement in `reactions.py`,
-   which now holds the agent lock (the WAHA fetch of the reacted-to
+   which now holds the chat's run lock (the WAHA fetch of the reacted-to
    message stays outside it).
 
-Each load/save holds `agent_lock`; a restore on a context miss
+Each load/save runs under the chat's run lock; a restore on a context miss
 (`context_for`) is lazy — a chat reloads from disk on its first message
 after a restart, and an LRU-evicted chat reloads instead of starting
 blank. The load/save/restore implementation lives in
 `wahabot.core.persistence`; `wahabot forget` wipes one chat's live
-context and disk file together, under `agent_lock` so no in-flight run
+context and disk file together, under that chat's run lock so no in-flight run
 can resurrect it.
 
 ### Backlog filter
@@ -209,9 +209,38 @@ Before each run reaches the LLM, the buffered history passes through two
    group roster (cached per chat for an hour, fails soft to the bare
    id on any WAHA error);
 4. runs the workflow — `await agent.run(input=user_msg, image_blocks=..., ctx=ctx)`;
-5. returns the response text (`result.message.content`, stripped),
-   which the handler sends back to the chat through WAHA as a
-   quote-reply to the triggering message (`reply_to`).
+5. returns `(reply, target)` — the run's final text and its run-scoped
+   delivery holder (the `sent`/`reacted` latches), so the handler can
+   tell a tool-delivered run from a text reply without touching
+   run-internal state. The handler sends the text back to the chat
+   through WAHA as a quote-reply to the triggering message
+   (`reply_to`), unless a tool already delivered.
+
+### Run concurrency and the run-scoped target
+
+Runs in **different chats proceed in parallel**; runs in the **same
+chat serialize** on that chat's run lock (`chat_lock` in
+`handlers.py` — they share one `Context` and one memory buffer).
+Operator commands run on a fresh `Context` with no chat lock, so a
+command never queues behind (or blocks) any chat.
+
+Everything a run needs — session, chat id, the once-per-run
+`sent`/`reacted` delivery latches, and the operator arming flag —
+lives in a `dict` bound for the run's duration through
+`contextvars` (`bind_target` / `current_target` in
+`ai/tools/whatsapp.py`). The workflow engine creates every step task
+(and each tool's `asyncio.to_thread` worker) inside the run's
+context, so every tool of a run resolves **its own run's** target:
+concurrent runs can never read each other's chat id, latches, or —
+critically — the operator arming flag (`operator_run`), which is
+what keeps cross-chat reach welded to the command that armed it.
+
+LLM fan-out is bounded across all parallel runs by the agent's
+`llm_semaphore` (`max_concurrent_llm`, default 4): a burst of
+simultaneous chats queues at the endpoint instead of multiplying
+provider cost without limit. The caption calls (image, album, video)
+pass the same semaphore through, so vision traffic counts inside the
+same budget.
 
 ### Images (vision)
 
@@ -234,7 +263,7 @@ Because the pixels are one-shot, every downloaded image is also
 **captioned up front** (`ai/vision.py`): one small vision call per
 image returns a single sentence ("beer glass, foam shaped like a
 bear"), stored as `image["caption"]`. The captioning happens at the
-download sites in `handlers.py` — *before* `agent_lock` is taken — so
+download sites in `handlers.py` — *before* the chat's run lock is taken — so
 the extra LLM call never extends the serialized agent-run section.
 `handle_message` weaves the caption into the user message text —
 `(image shows: beer glass, foam shaped like a bear)`; the `shows`
@@ -275,7 +304,7 @@ POSTs them to `{transcribe_url}/transcribe` and joins the returned
 segments. The empty `body` is replaced by `[voice note] <transcript>` —
 handle_message just re-reads the body, so no agent signature changes.
 The `[voice note]` prefix flags the text as imperfect ASR. Notes transcribe
-outside `_agent_lock` (in parallel); transcription/download failures log a
+outside the chat's run lock (in parallel with other chats' runs); transcription/download failures log a
 warning and drop the message, keeping the seen marker so WAHA
 redeliveries cannot trigger a retry storm. A bare note in a `mentioned`
 group is skipped before any download. Empty `WAHABOT_TRANSCRIBE_URL`
@@ -290,7 +319,7 @@ Three event flows sit outside the plain message → reply pipeline:
   `[operator command]`; the session prompt keys on it (deliver with
   `send_message(chat=…)` to the named target, resolve names with
   `resolve_chat`, browse recency with `recent_chats`). The shared
-  send holder points at the event's `from` ("operator"), so a bare
+  run-scoped target binding points at the event's `from` ("operator"), so a bare
   `send_message` behaves like a DM. Two issuers reach this path:
   `command` events posted to the webhook by `wahabot tell`
   (`wahabot.commands.build_command_event`, signed with the same HMAC
@@ -312,7 +341,7 @@ Three event flows sit outside the plain message → reply pipeline:
   your message: "…"]` notes — context for the next turn, never an
   agent run. The `true_`/`false_` id prefix decides ownership before
   any WAHA fetch; one note per target message, latest wins. The
-  memory fold holds the agent lock (the WAHA fetch stays outside
+  memory fold holds the chat's run lock (the WAHA fetch stays outside
   it) and is persisted to the chat's memory file like any other
   fold — so a reaction to a bot message in an LRU-evicted chat
   reloads from disk instead of being dropped.
@@ -554,9 +583,12 @@ next run. Two consequences:
   run over run).
 - **A shared `Context` refuses concurrent runs**
   (`ContextStateError: Cannot start a new run while context is already
-  running`). The global `_agent_lock` in `handlers.py` is what stands
-  between the bot and that exception — do not run two agent turns
-  concurrently, even for different chats, without per-chat locking.
+  running`). The per-chat run locks in `handlers.py` are what stand
+  between the bot and that exception — two turns in the SAME chat must
+  never run concurrently (they share the `Context` and its memory
+  buffer); turns in different chats hold no shared `Context` and run
+  in parallel. Commands run on a fresh `Context` each, so they never
+  contend with chat runs (or each other).
 
 The store is a `DictState` (a Pydantic model that shoves undeclared
 keys into a `_data` dict), which is why heterogenous values — a
@@ -632,7 +664,7 @@ and fall back to kwargs, or it will silently see zero.
   an error envelope instead of sending, so a looping model cannot spam
   the chat even below the round limit. `react_to_message` is likewise
   bounded to one reaction per run. `send_file` is **not** part of this
-  set: it enforces its own once-per-run latch in the shared send holder
+  set: it enforces its own once-per-run latch in the run-scoped target
   (a second call errors out), but the workflow treats its result as an
   ordinary tool result — no delivery gate, no collapse, no
   post-delivery text drop.

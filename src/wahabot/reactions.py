@@ -14,7 +14,7 @@ the next real turn sees the reaction in its history. One note per
 dilute the memory buffer. Reactions to other people's messages stay
 ignored.
 
-The memory fold runs under the agent lock (the WAHA fetch stays outside
+The memory fold runs under the chat's run lock (the WAHA fetch stays outside
 it) and is persisted like any other fold, so a reaction to a bot
 message in an LRU-evicted chat reloads from disk instead of being
 silently dropped.
@@ -29,7 +29,7 @@ from loguru import logger
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.models import WahaEvent
 from wahabot.core.waha import WahaClient
-from wahabot.handlers import append_to_memory, context_for, persist_memory
+from wahabot.handlers import append_to_memory, chat_lock, context_for, persist_memory
 from wahabot.settings import Settings
 from wahabot.webhook import on_reaction
 
@@ -47,14 +47,13 @@ def register_reaction_handler(
     waha: WahaClient,
     agent: FunctionCallingAgentWorkflow,
     settings: Settings,
-    agent_lock: asyncio.Lock,
 ) -> None:
     """Log reactions to the bot's messages and fold them into memory.
 
-    The WAHA fetch of the reacted-to message runs outside the agent
-    lock (a network call must never extend the serialized section);
-    only the memory fold locks, and the fold is persisted like any
-    other.
+    The WAHA fetch of the reacted-to message runs outside the chat's
+    run lock (a network call must never extend the serialized section);
+    only the memory fold locks (against that chat's runs), and the fold
+    is persisted like any other.
     """
 
     @on_reaction
@@ -85,7 +84,7 @@ def register_reaction_handler(
         )
         chat_id = chat_id_from_message_id(str(target_id))
         note = f"[reaction {emoji} from {sender} to your message: {preview}]"
-        async with agent_lock:
+        async with chat_lock(event.session, chat_id):
             await remember_reaction_note(
                 event.session, chat_id, target_id, note, agent, settings
             )

@@ -151,7 +151,7 @@ Per chat, the bot keeps a rolling conversation in memory:
 
 `wahabot forget <chat-id>` wipes one chat's memory — it posts a signed
 `forget` event to the running bot, which drops the live context and the
-file under the agent lock (so an in-flight run can't resurrect it). With
+file under the chat's run lock (so an in-flight run can't resurrect it). With
 the bot stopped, the equivalent is `rm data/memory/<session>/<chat-id>.json`.
 There is no retention TTL: memory is kept forever until wiped. `data/memory/`
 carries the same privacy weight as `data/events/` — back it up and

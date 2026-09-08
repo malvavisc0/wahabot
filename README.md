@@ -61,7 +61,7 @@ Chat participants have one sanctioned way to reach you: the `escalate` tool. Whe
 
 Operator commands are also the **only** runs with cross-chat reach: tools refuse to send, forward, react to, quote or read outside the current conversation on any chat-triggered run — `chat` JIDs and serialized message ids alike — so a group participant can never make the bot DM or spy on someone else. `resolve_chat` and `recent_chats` (the contact roster and chat list) refuse to run at all outside operator commands.
 
-`wahabot forget <chat-id>` wipes one chat's persistent memory in the running bot (live context and disk file, under the agent lock):
+`wahabot forget <chat-id>` wipes one chat's persistent memory in the running bot (live context and disk file, under that chat's run lock):
 
 ```bash
 uv run wahabot forget "1234567890-1234567890@g.us"

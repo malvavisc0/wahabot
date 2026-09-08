@@ -3,7 +3,8 @@
 import asyncio
 import io
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from typing import Any, cast
 
 import openai
@@ -33,7 +34,7 @@ from wahabot.ai.messages import (
 )
 from wahabot.ai.observability import chat_trace_attributes, enable_langfuse
 from wahabot.ai.tools import build_default_tools
-from wahabot.ai.tools.whatsapp import OPERATOR_KEY, EscalationChannel
+from wahabot.ai.tools.whatsapp import EscalationChannel
 from wahabot.ai.video import caption_video, extract_frames, join_anchor, video_marker
 from wahabot.ai.vision import caption_images
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
@@ -62,9 +63,55 @@ _SEE_TTL_S = _MAX_MESSAGE_AGE_S
 #: chats are evicted (their conversation memory is dropped).
 _MAX_CONTEXTS = 1000
 contexts: dict[tuple[str, str], Context] = {}
-#: Serializes all agent runs (chat turns and commands): the workflow is
-#: not reentrant per context and the shared send holder must not race.
-agent_lock = asyncio.Lock()
+
+#: Per-chat run serialization: runs in DIFFERENT chats proceed in
+#: parallel (a slow group turn never delays a DM), while two runs in
+#: the SAME chat queue — they share one memory buffer and one
+#: conversation timeline, so interleaving them would corrupt both.
+#: Keyed like ``contexts``; command runs take no chat lock at all.
+_chat_locks: dict[tuple[str, str], asyncio.Lock] = {}
+#: Acquisitions in flight per key (queued or holding). ``Lock.locked``
+#: is already False in the window between ``release()`` and the queued
+#: waiter actually resuming, so a lock with a waiter would look
+#: evictable there — the pending count is the only witness.
+_chat_lock_pending: dict[tuple[str, str], int] = {}
+_MAX_CHAT_LOCKS = 1000
+
+
+@asynccontextmanager
+async def chat_lock(session: str, chat_id: str) -> AsyncIterator[None]:
+    """Serialize agent runs for one chat (``async with chat_lock(…)``).
+
+    Eviction keeps the table bounded, idle entries going oldest-first.
+    A lock that is held or has an acquisition queued is never evicted:
+    evicting it would hand the next caller a fresh lock that runs
+    concurrently with the waiter still holding the old one (between
+    ``release()`` and the waiter resuming, ``Lock.locked()`` is
+    already False, so the pending count is the only witness). When
+    every entry is busy the table may temporarily exceed its cap
+    rather than spin — the cap is a memory bound, not an invariant.
+    """
+    key = (session, chat_id)
+    lock = _chat_locks.pop(key, None)
+    if lock is None:
+        lock = asyncio.Lock()
+    _chat_locks[key] = lock
+    _chat_lock_pending[key] = _chat_lock_pending.get(key, 0) + 1
+    for oldest in list(_chat_locks):
+        if len(_chat_locks) <= _MAX_CHAT_LOCKS:
+            break
+        if _chat_locks[oldest].locked() or _chat_lock_pending.get(oldest, 0):
+            continue
+        del _chat_locks[oldest]
+    try:
+        async with lock:
+            yield
+    finally:
+        pending = _chat_lock_pending.get(key, 0) - 1
+        if pending > 0:
+            _chat_lock_pending[key] = pending
+        else:
+            _chat_lock_pending.pop(key, None)
 
 
 #: Seen-id cache hard cap; past it the oldest entries are evicted.
@@ -369,6 +416,7 @@ async def prepare_video(
     waha: WahaClient,
     settings: Settings,
     llm: FunctionCallingLLM,
+    semaphore: asyncio.Semaphore | None = None,
 ) -> dict[str, Any] | None:
     """Download + frames + caption + transcript for a video turn.
 
@@ -377,8 +425,8 @@ async def prepare_video(
     failed image download: sender text runs, a bare video stays
     silent). Every stage is fail-soft — a dead ffmpeg, a failed
     caption call or a failed transcription each drop their marker
-    part and the turn still runs. Runs before ``agent_lock`` so no
-    network or vision call extends the serialized agent-run section.
+    part and the turn still runs. Runs before the chat's run lock so
+    no network or vision call extends the serialized agent-run section.
     """
     media = video_media(event)
     if media is None:
@@ -403,7 +451,7 @@ async def prepare_video(
         "Downloaded video ({size} B) from message {id}", size=len(data), id=message_id
     )
     frames = await asyncio.to_thread(extract_frames, data, settings.video_frames)
-    caption = await caption_video(llm, frames) if frames else ""
+    caption = await caption_video(llm, frames, semaphore=semaphore) if frames else ""
     filename = str(media.get("filename") or "") or "video.mp4"
     transcript = await video_transcript(settings, data, filename)
     return {
@@ -416,9 +464,10 @@ def register_forget_handler(settings: Settings) -> None:
     """Register the ``forget`` webhook handler that wipes a chat's memory.
 
     The ``wahabot forget`` CLI posts a signed ``forget`` event; the wipe
-    runs here, in the bot process, under the agent lock so it serializes
-    with runs: an in-flight run finishes and saves first, then the live
-    context and the memory file are dropped — no resurrection window.
+    runs here, in the bot process, under the chat's run lock so it
+    serializes with that chat's runs: an in-flight run finishes and
+    saves first, then the live context and the memory file are dropped
+    — no resurrection window.
     """
 
     @on_forget
@@ -427,7 +476,7 @@ def register_forget_handler(settings: Settings) -> None:
         if not chat_id:
             logger.warning("Ignoring forget event without a chat_id")
             return
-        async with agent_lock:
+        async with chat_lock(event.session, chat_id):
             live = contexts.pop((event.session, chat_id), None) is not None
             removed = forget_memory(settings.data_dir, event.session, chat_id)
             logger.info(
@@ -447,7 +496,6 @@ def register_agent_handler(
     (the command channel) share the exact same agent and hot-reloaded
     config instead of building their own.
     """
-    send_tool_holder: dict[str, str] = {}
     config = load_session_config(settings.access_config)
     config_reloader = SessionConfigReloader(settings.access_config)
     enable_langfuse(settings)
@@ -457,8 +505,8 @@ def register_agent_handler(
 
         The container event drives the turn (sender tag, gating already
         done at arrival); each buffered image contributes its bytes.
-        Runs under the same agent lock as single messages so the shared
-        send holder and per-chat context stay consistent.
+        Runs under the same per-chat lock as single messages so the
+        chat's memory and timeline stay consistent.
 
         Fire-and-forget from the album buffer, so failures must be
         caught here or they would die silently in an unretrieved task:
@@ -500,25 +548,19 @@ def register_agent_handler(
             return
         # Caption before the lock: the vision call must not extend the
         # serialized agent-run section.
-        for image, caption in zip(
-            downloaded, await caption_images(agent.llm, downloaded), strict=True
-        ):
+        captions = await caption_images(
+            agent.llm, downloaded, semaphore=agent.llm_semaphore
+        )
+        for image, caption in zip(downloaded, captions, strict=True):
             image["caption"] = caption
-        async with agent_lock:
-            send_tool_holder["session"] = event.session
-            send_tool_holder["chat_id"] = chat_id
-            send_tool_holder["sent"] = ""
-            send_tool_holder["reacted"] = ""
-            # Chat runs never carry cross-chat reach: clear the operator
-            # flag a `wahabot tell` run may have left.
-            send_tool_holder[OPERATOR_KEY] = ""
+        async with chat_lock(event.session, chat_id):
             ctx = await context_for(event.session, chat_id, agent, settings)
             with chat_trace_attributes(chat_id):
-                reply = await handle_message(
+                reply, target = await handle_message(
                     event, agent, ctx=ctx, images=downloaded, settings=settings, waha=waha
                 )
             await persist_memory(settings, event.session, chat_id, ctx)
-            if send_tool_holder["sent"] or send_tool_holder["reacted"]:
+            if target.get("sent") or target.get("reacted"):
                 log_final_text(chat_id, reply)
                 return
         if reply and reply.strip():
@@ -556,15 +598,10 @@ def register_agent_handler(
     on_operator_recapture(escalation_channel.refresh)
     agent = build_agent(
         settings,
-        tools=build_default_tools(
-            waha, send_tool_holder, escalation_channel=escalation_channel
-        ),
+        tools=build_default_tools(waha, escalation_channel=escalation_channel),
         system_prompt=config.system_prompt,
         prompt_renderer=render_prompt,
     )
-    # The workflow reads the holder to know a delivery tool already
-    # fired this run (post-delivery final texts are dropped, not sent).
-    agent.send_holder = send_tool_holder
     logger.info(
         "Agent ready: {tools}",
         tools=", ".join(sorted(tool.metadata.get_name() for tool in agent.tools)),
@@ -630,8 +667,7 @@ def register_agent_handler(
             command.payload["reply_chat_id"] = str(event.payload.get("from", ""))
             command.payload["reply_to"] = message_id
             try:
-                async with agent_lock:
-                    reply = await run_command(command, agent, settings, waha)
+                reply = await run_command(command, agent, settings, waha)
             except Exception:
                 # Same contract as the chat path: drop the seen marker
                 # so WAHA's redelivery retries the command. Accepted
@@ -661,7 +697,7 @@ def register_agent_handler(
         ):
             return
         if event.payload.get("fromMe"):
-            async with agent_lock:
+            async with chat_lock(event.session, str(event.payload.get("from", ""))):
                 ctx = await remember_own_message(event, agent, settings, body)
                 if ctx is not None:
                     await persist_memory(
@@ -696,7 +732,9 @@ def register_agent_handler(
             # either — the whole download+ffmpeg+caption pass would be
             # wasted work before a doomed caption call.
             if settings.vision:
-                video = await prepare_video(event, waha, settings, agent.llm)
+                video = await prepare_video(
+                    event, waha, settings, agent.llm, agent.llm_semaphore
+                )
             if video is not None:
                 event.payload["body"] = join_anchor(body or "", video["marker"])
                 body = event.payload["body"]
@@ -712,22 +750,17 @@ def register_agent_handler(
                 if image is not None:
                     # Caption before the lock: the vision call must not
                     # extend the serialized agent-run section.
-                    captions = await caption_images(agent.llm, [image])
+                    captions = await caption_images(
+                        agent.llm, [image], semaphore=agent.llm_semaphore
+                    )
                     image["caption"] = captions[0]
-            async with agent_lock:
-                # Holder writes live inside the lock, and agent_lock
-                # serializes all agent runs, so a concurrent webhook post
-                # can no longer overwrite this run's chat target.
-                send_tool_holder["session"] = event.session
-                send_tool_holder["chat_id"] = chat_id
-                send_tool_holder["sent"] = ""
-                send_tool_holder["reacted"] = ""
-                # Chat runs never carry cross-chat reach: clear the
-                # operator flag a `wahabot tell` run may have left.
-                send_tool_holder[OPERATOR_KEY] = ""
+            async with chat_lock(event.session, chat_id):
+                # Runs in the same chat serialize on its memory and
+                # timeline; runs in different chats proceed in parallel
+                # (each binds its own run target inside the workflow).
                 ctx = await context_for(event.session, chat_id, agent, settings)
                 with chat_trace_attributes(chat_id):
-                    reply = await handle_message(
+                    reply, target = await handle_message(
                         event,
                         agent,
                         ctx=ctx,
@@ -737,7 +770,7 @@ def register_agent_handler(
                         waha=waha,
                     )
                 await persist_memory(settings, event.session, chat_id, ctx)
-                if send_tool_holder["sent"] or send_tool_holder["reacted"]:
+                if target.get("sent") or target.get("reacted"):
                     logger.info(
                         "Agent decision for {chat_id}: delivered via tool",
                         chat_id=chat_id,

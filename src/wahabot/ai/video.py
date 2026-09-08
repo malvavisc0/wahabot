@@ -117,7 +117,10 @@ def extract_frames(data: bytes, count: int, timeout: float = 30.0) -> list[bytes
 
 
 async def caption_video(
-    llm: FunctionCallingLLM, frames: list[bytes], timeout: float = 30.0
+    llm: FunctionCallingLLM,
+    frames: list[bytes],
+    timeout: float = 30.0,
+    semaphore: asyncio.Semaphore | None = None,
 ) -> str:
     """One-sentence description of the video from *frames*; "" on failure.
 
@@ -125,7 +128,8 @@ async def caption_video(
     ImageBlocks + the prompt, first line clamped to
     ``vision.MAX_CAPTION_CHARS``. A failed caption degrades the marker
     to the bare ``(video)`` form while the frames still ride the first
-    LLM call.
+    LLM call. *semaphore* (the workflow's LLM gate) bounds this call
+    within the run's concurrency budget.
     """
     message = ChatMessage(
         role=MessageRole.USER,
@@ -133,7 +137,11 @@ async def caption_video(
         + [TextBlock(text=VIDEO_CAPTION_PROMPT)],
     )
     try:
-        response = await asyncio.wait_for(llm.achat([message]), timeout=timeout)
+        if semaphore is None:
+            response = await asyncio.wait_for(llm.achat([message]), timeout=timeout)
+        else:
+            async with semaphore:
+                response = await asyncio.wait_for(llm.achat([message]), timeout=timeout)
     except Exception as exc:
         logger.warning("Video caption failed (turn stays text-anchored): {exc}", exc=exc)
         return ""

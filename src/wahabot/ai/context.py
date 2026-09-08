@@ -1,5 +1,6 @@
 """Reply context rendering and the agent entrypoint."""
 
+import asyncio
 import datetime
 import json
 import re
@@ -13,6 +14,12 @@ from loguru import logger
 
 from wahabot.ai.messages import jid_string, message_replies_to
 from wahabot.ai.tools.url_images import fetch_url_images, image_urls
+from wahabot.ai.tools.whatsapp import (
+    OPERATOR_ARMED,
+    OPERATOR_KEY,
+    bind_target,
+    reset_target,
+)
 from wahabot.ai.vision import image_caption, image_noun
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.models import WahaEvent
@@ -312,8 +319,13 @@ async def handle_message(
     images: list[dict[str, Any]] | None = None,
     settings: Settings | None = None,
     waha: WahaClient | None = None,
-) -> str:
-    """Run the agent workflow over an incoming message event and return its reply.
+    armed: bool = False,
+) -> tuple[str, dict[str, str]]:
+    """Run the agent workflow over an incoming message event.
+
+    Returns ``(reply, target)``: the run's final text and its delivery
+    holder (``sent``/``reacted`` latches), so the caller can tell a
+    delivered run from a text reply without touching run-scoped state.
 
     ``image`` (single) or ``images`` (an album, already downloaded)
     carry image bytes (``data`` + ``mimetype``); they ride along as
@@ -339,11 +351,11 @@ async def handle_message(
     attached = list(images or [])
     if image is not None:
         attached.append(image)
-    all_images = collect_images(attached, settings, text)
+    all_images = await asyncio.to_thread(collect_images, attached, settings, text)
     if all_images:
         marker = image_noun([image_caption(img) for img in all_images])
         text = f"{text} {marker}".strip()
-    names = participant_names(waha, event.session, chat_id)
+    names = await asyncio.to_thread(participant_names, waha, event.session, chat_id)
     user_msg = text + message_id_note(event)
     user_msg += reply_context_section(message_replies_to(event), names)
     image_blocks = [
@@ -358,8 +370,25 @@ async def handle_message(
     # property), so this log is the authoritative count of what rides
     # the first LLM call.
     logger.info("Attaching {n} image block(s) to agent run", n=len(image_blocks))
-    result = await agent.run(input=user_msg, image_blocks=image_blocks, ctx=ctx)
-    return final_reply(result)
+    # Bind this run's delivery target around the whole run: the workflow
+    # engine schedules steps/tasks under this context, so the binding
+    # propagates to every step and tool call of THIS run — concurrent
+    # runs bind their own targets and never see each other's. The
+    # binding resets before returning, so the *target dict itself* is
+    # returned alongside the reply for the caller's latch checks.
+    target = {
+        "session": event.session,
+        "chat_id": chat_id,
+        "sent": "",
+        "reacted": "",
+        OPERATOR_KEY: OPERATOR_ARMED if armed else "",
+    }
+    token = bind_target(target)
+    try:
+        result = await agent.run(input=user_msg, image_blocks=image_blocks, ctx=ctx)
+    finally:
+        reset_target(token)
+    return final_reply(result), target
 
 
 def collect_images(

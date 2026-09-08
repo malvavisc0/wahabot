@@ -40,12 +40,14 @@ __all__ = ["build_default_tools"]
 
 def build_default_tools(
     waha: WahaClient,
-    target: dict[str, str],
     settings: Settings | None = None,
     escalation_channel: EscalationChannel | None = None,
 ) -> list[BaseTool]:
-    """Build all bundled tools bound to the shared session/chat holder.
+    """Build all bundled tools.
 
+    Tools resolve the current run's session/chat target and delivery
+    latches through the run-scoped binding (``bind_target``), so one
+    toolset safely serves concurrent runs across different chats.
     ``escalation_channel`` carries the per-agent operator target and
     cooldowns; a fresh one is created when the caller has none to share
     (tests, one-off agents).
@@ -56,18 +58,18 @@ def build_default_tools(
         settings = get_settings()
     channel = escalation_channel or EscalationChannel()
     tools = [
-        send_message(waha, target),
+        send_message(waha),
         stay_silent(),
-        escalate(waha, target, channel),
-        react_to_message(waha, target),
-        send_image(waha, target),
-        send_file(waha, target, settings.max_file_bytes),
-        fetch_chat_messages(waha, target),
-        get_chat(waha, target),
-        search_messages(waha, target),
-        forward_message(waha, target),
-        resolve_chat(waha, target),
-        recent_chats(waha, target),
+        escalate(waha, channel),
+        react_to_message(waha),
+        send_image(waha),
+        send_file(waha, settings.max_file_bytes),
+        fetch_chat_messages(waha),
+        get_chat(waha),
+        search_messages(waha),
+        forward_message(waha),
+        resolve_chat(waha),
+        recent_chats(waha),
         web_search_builder(settings),
         stock_price_builder(),
         youtube_transcript_builder(),
