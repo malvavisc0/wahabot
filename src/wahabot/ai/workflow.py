@@ -37,7 +37,9 @@ from wahabot.ai.events import InputEvent, ToolCallEvent
 from wahabot.ai.history import (
     MAX_TOOL_RESULT_TOKENS,
     sanitize_chat_history,
+    tool_calls,
     trim_to_budget,
+    wire_call,
 )
 from wahabot.ai.tools.whatsapp import current_target
 from wahabot.settings import Settings
@@ -133,29 +135,8 @@ async def run_tool_call(
 
 
 def tool_call_names(message: ChatMessage) -> list[str]:
-    """Names of the tools an assistant message called (empty for plain text).
-
-    In-memory llama-index carries calls as ``ToolCallBlock`` blocks; the
-    OpenAI wire shape (``additional_kwargs["tool_calls"]``) appears in
-    serialized histories. Blocks take precedence — the kwargs list is
-    only consulted when no blocks are present, mirroring llama-index's
-    own serialization.
-    """
-    if names := [b.tool_name for b in message.blocks if isinstance(b, ToolCallBlock)]:
-        return names
-    calls: Any = message.additional_kwargs.get("tool_calls") or []
-    return [name for call in calls if (name := wire_call_name(call))]
-
-
-def wire_call_name(call: Any) -> str:
-    """The function name of a wire-shaped tool call dict, else ""."""
-    if not isinstance(call, dict):
-        return ""
-    entry = cast(dict[str, Any], call)
-    function = entry.get("function")
-    if not isinstance(function, dict):
-        return ""
-    return str(cast(dict[str, Any], function).get("name", ""))
+    """Names of the tools an assistant message called (empty for plain text)."""
+    return [call.name for call in tool_calls(message)]
 
 
 def delivered_text(message: ChatMessage) -> str:
@@ -202,42 +183,17 @@ def delivery_content(envelope: dict[str, Any]) -> str:
 
 
 def tool_call_ids(message: ChatMessage) -> list[str]:
-    """All tool-call ids of an assistant message (both carriers).
-
-    Blocks (modern path) take precedence over
-    ``additional_kwargs["tool_calls"]`` (legacy/streaming path), mirroring
-    :func:`tool_call_names` and llama-index's wire serialization.
-    """
-    if blocks := [block for block in message.blocks if isinstance(block, ToolCallBlock)]:
-        return [str(block.tool_call_id) for block in blocks]
-    return [
-        call_id
-        for call in message.additional_kwargs.get("tool_calls") or []
-        if (call_id := wire_call_id(call))
-    ]
+    """All tool-call ids of an assistant message."""
+    return [call.call_id for call in tool_calls(message) if call.call_id]
 
 
 def delivery_call_ids(message: ChatMessage) -> list[str]:
     """Tool-call ids of an assistant message's delivery calls only."""
-    delivery = set(tool_call_names(message)) & DELIVERY_TOOLS
-    if blocks := [
-        block
-        for block in message.blocks
-        if isinstance(block, ToolCallBlock) and block.tool_name in delivery
-    ]:
-        return [str(block.tool_call_id) for block in blocks]
     return [
-        call_id
-        for call in message.additional_kwargs.get("tool_calls") or []
-        if wire_call_name(call) in delivery and (call_id := wire_call_id(call))
+        call.call_id
+        for call in tool_calls(message)
+        if call.name in DELIVERY_TOOLS and call.call_id
     ]
-
-
-def wire_call_id(call: Any) -> str:
-    """The id of a wire-shaped tool call dict, else ""."""
-    if not isinstance(call, dict):
-        return ""
-    return str(cast(dict[str, Any], call).get("id", ""))
 
 
 def tool_result_indices(messages: list[ChatMessage]) -> dict[str, int]:
@@ -352,7 +308,7 @@ def strip_delivery_kwargs(message: ChatMessage, text: str) -> ChatMessage:
     remaining = [
         call
         for call in message.additional_kwargs.get("tool_calls") or []
-        if wire_call_name(call) and wire_call_name(call) not in DELIVERY_TOOLS
+        if (parsed := wire_call(call)) and parsed.name not in DELIVERY_TOOLS
     ]
     if not remaining:
         return ChatMessage(role=MessageRole.ASSISTANT, content=text)
@@ -634,7 +590,7 @@ class FunctionCallingAgentWorkflow(Workflow):
     def any_delivery(self) -> bool:
         """True when any delivery tool already fired this run."""
         target = current_target()
-        return bool(target.get("sent") or target.get("reacted"))
+        return bool(target.sent or target.reacted)
 
     def delivery_complete(self, tool_calls: list[ToolSelection]) -> bool:
         """True when a delivery already fired and this round adds none.
@@ -679,20 +635,13 @@ class FunctionCallingAgentWorkflow(Workflow):
     async def collapse_delivery(self, ctx: Context) -> None:
         """Replace the last delivered tool group with plain assistant text.
 
-        A delivered reply (or reaction) sits in memory as an empty
-        assistant tool-call plus its tool-result envelope — scaffolding
-        the chat API needs mid-loop, but dead weight afterwards (two
-        messages, zero content beyond the delivery itself). At run end
-        the pair is swapped for one plain assistant message holding the
-        delivered content — the sent text, or a short marker for media,
-        forwards and reactions — so the retained history reads like the
-        chat it mirrors (and matches how operator-sent ``fromMe``
-        messages are stored). The whole group is replaced atomically: a
-        dangling tool call without its result is exactly what
-        :func:`repair_memory` must never find. Called on every run-end
-        path that follows a delivery (no-op when nothing was
-        delivered); with persistence, skipping it anywhere would write
-        the raw scaffolding to disk.
+        At run end the delivered pair (empty assistant tool-call plus
+        its tool-result envelope) is swapped for one plain assistant
+        message holding the delivered content, so the retained history
+        reads like the chat it mirrors. The whole group is replaced
+        atomically: a dangling tool call without its result is exactly
+        what :func:`repair_memory` must never find. No-op when nothing
+        was delivered (see docs/agent-workflow.md).
         """
         memory = await ctx.store.get("memory")
         messages = await memory.aget_all()
@@ -739,8 +688,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         must not be returned (the handler would send it as a second
         reply) nor stored in memory (memory mirrors the chat; the
         delivered text is preserved by ``collapse_delivery`` instead).
-        Research runs (no delivery) pass through untouched; the holder
-        is absent in tests, where nothing was provably delivered.
+        Research runs (no delivery) pass through untouched.
         """
         if not self.any_delivery() or not str(response.message.content or "").strip():
             return response
@@ -778,11 +726,10 @@ class FunctionCallingAgentWorkflow(Workflow):
 class ObservableOpenAILike(OpenAILike):
     """OpenAILike whose instrumentation payload names model/temperature.
 
-    The OTel llama-index instrumentor reads ``model_dict["model"]`` and
-    ``model_dict["temperature"]`` for the ``gen_ai.request.*`` span
-    attributes, but the base ``to_payload`` only exposes metadata
-    (``model_name``, no temperature) — leaving both as ``None`` and
-    spamming OTel "Invalid type NoneType" warnings per LLM call.
+    Exists because the OTel llama-index instrumentor reads
+    ``model_dict["model"]``/``["temperature"]`` for its span attributes
+    but the base ``to_payload`` exposes neither (external constraint;
+    see docs/agent-workflow.md).
     """
 
     @override
@@ -797,17 +744,12 @@ class ObservableOpenAILike(OpenAILike):
 def load_llm(settings: Settings) -> FunctionCallingLLM:
     """Configure the OpenAI-compatible chat LLM from settings.
 
-    Sampling options follow the model card (see ``Settings``): near-
-    greedy decoding (the library default, temperature 0.1) makes small
-    models repeat one tool call forever and narrate it, so temperature
-    is passed as the first-class field. ``top_p``/``presence_penalty``
-    ride ``additional_kwargs``, which merges straight into the API
-    request body. ``top_k``/``min_p``/``repetition_penalty`` are not
-    OpenAI SDK parameters — the client's typed ``create()`` signature
-    rejects them with a TypeError before any request is sent — so they
-    must ride ``extra_body``, which the openai SDK forwards verbatim
-    in the JSON body for OpenAI-compatible providers that do accept
-    them.
+    Sampling options follow the model card (see ``Settings``).
+    ``top_p``/``presence_penalty`` ride ``additional_kwargs`` (merged
+    into the request body); ``top_k``/``min_p``/``repetition_penalty``
+    ride ``extra_body`` because the OpenAI SDK's typed ``create()``
+    signature rejects them (external constraint; see
+    docs/agent-workflow.md).
     """
     kwargs: dict[str, Any] = {
         "top_p": settings.llm_top_p,

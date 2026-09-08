@@ -15,44 +15,22 @@ command. Bounded like the seen-id cache; entries expire with the same
 window WAHA redelivery uses.
 """
 
-import time
+from wahabot.core.cache import TtlCache
 
-_echoes: dict[str, float] = {}
 #: How long a sent id stays marked — past this, a redelivery of the
 #: echo is stale by the message-age guard anyway.
 _ECHO_TTL_S = 300
 _MAX_ECHOES = 1000
 
-
-def _drop_expired(now: float) -> None:
-    """Evict entries past the TTL (write-side sweep)."""
-    for stale_id in [k for k, ts in _echoes.items() if now - ts > _ECHO_TTL_S]:
-        del _echoes[stale_id]
+_echoes: TtlCache[str, bool] = TtlCache(_ECHO_TTL_S, _MAX_ECHOES)
 
 
 def remember_self_echo(message_id: str) -> None:
     """Mark a message the bot sent to its own self-chat as run output."""
-    if not message_id:
-        return
-    now = time.time()
-    while len(_echoes) >= _MAX_ECHOES:
-        # Insertion order is oldest first, same idiom as the seen cache.
-        del _echoes[next(iter(_echoes))]
-    _echoes[message_id] = now
-    _drop_expired(now)
+    if message_id:
+        _echoes.put(message_id, True)
 
 
 def is_self_echo(message_id: str) -> bool:
-    """True when this message id is one the bot sent to itself.
-
-    Expired entries are dropped on read: past the TTL a redelivery is
-    stale by the message-age guard and can no longer re-enter the
-    command path.
-    """
-    ts = _echoes.get(message_id)
-    if ts is None:
-        return False
-    if time.time() - ts > _ECHO_TTL_S:
-        del _echoes[message_id]
-        return False
-    return True
+    """True when this message id is one the bot sent to itself."""
+    return message_id in _echoes

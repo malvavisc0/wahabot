@@ -10,7 +10,6 @@ session is down, and notifies the operator once per transition.
 """
 
 import asyncio
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,25 +33,6 @@ class SessionState:
 
 
 state = SessionState()
-
-#: Consumers of the operator JID beyond this module (the escalation
-#: channel). Registered at agent build time and notified each time the
-#: JID is (re-)captured, so a startup WAHA hiccup — or a re-linked
-#: account — cannot leave the lifeline aimed nowhere (or at a stale
-#: identity) for the process lifetime.
-_recapture_callbacks: list[Callable[[str], None]] = []
-
-
-def on_operator_recapture(callback: Callable[[str], None]) -> None:
-    """Register a callback invoked with the operator JID on every capture."""
-    _recapture_callbacks.append(callback)
-
-
-def _publish_operator_jid(own: str) -> None:
-    """Store the operator JID and fan it out to registered consumers."""
-    state.operator_jid = own
-    for callback in _recapture_callbacks:
-        callback(own)
 
 
 def session_healthy() -> bool:
@@ -112,7 +92,7 @@ def capture_operator_target(waha: WahaClient, session: str) -> None:
         return
     own = str(me.get("id") or "")
     if own:
-        _publish_operator_jid(own)
+        state.operator_jid = own
 
 
 def register_session_status_handler(waha: WahaClient, session: str) -> None:

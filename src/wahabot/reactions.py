@@ -2,9 +2,9 @@
 
 Serialized message ids answer the "is this ours?" question for free:
 ``true_<chat>_<msgid>`` marks our own messages, ``false_…`` everyone
-else's (see :func:`chat_id_from_message_id`, which parses the same
-shape). Checking the prefix skips the WAHA fetch for the majority of
-reactions in busy groups; the fetched ``fromMe`` field stays the
+else's (see :func:`wahabot.core.jid.parse_message_id`, which parses
+the shape). Checking the prefix skips the WAHA fetch for the majority
+of reactions in busy groups; the fetched ``fromMe`` field stays the
 authoritative check for the rare ambiguous id.
 
 Reactions to the bot's own messages become a lightweight memory note in
@@ -26,7 +26,9 @@ from typing import Any
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from loguru import logger
 
+from wahabot.ai.messages import REACTION_TARGET_KWARG
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+from wahabot.core.jid import chat_from_message_id, is_own_message_id
 from wahabot.core.models import WahaEvent
 from wahabot.core.waha import WahaClient
 from wahabot.handlers import append_to_memory, chat_lock, context_for, persist_memory
@@ -37,10 +39,7 @@ from wahabot.webhook import on_reaction
 #: same target replaces the first note instead of stacking near-duplicates.
 _last_reaction_notes: dict[tuple[str, str, str], str] = {}
 
-
-def is_own_message_id(message_id: str) -> bool:
-    """True when the serialized id marks the message as sent by us."""
-    return message_id.startswith("true_")
+__all__ = ["is_own_message_id", "register_reaction_handler"]
 
 
 def register_reaction_handler(
@@ -96,12 +95,6 @@ def register_reaction_handler(
         )
 
 
-#: Key carrying the reaction target id on a folded note message; the
-#: superseded-note removal filters on it, so a note survives merging
-#: with a neighboring turn (content equality would miss it there).
-_REACTION_TARGET_KWARG = "reaction_target_id"
-
-
 async def remember_reaction_note(
     session: str,
     chat_id: str,
@@ -129,7 +122,7 @@ async def remember_reaction_note(
         ChatMessage(
             role=MessageRole.USER,
             content=note,
-            additional_kwargs={_REACTION_TARGET_KWARG: target_id},
+            additional_kwargs={REACTION_TARGET_KWARG: target_id},
         ),
     )
     await persist_memory(settings, session, chat_id, ctx)
@@ -157,7 +150,7 @@ async def forget_reaction_notes(
     messages = await memory.aget_all()
 
     def targets(msg: ChatMessage) -> Any:
-        return msg.additional_kwargs.get(_REACTION_TARGET_KWARG)
+        return msg.additional_kwargs.get(REACTION_TARGET_KWARG)
 
     kept = [m for m in messages if targets(m) != target_id]
     if len(kept) != len(messages):
@@ -189,13 +182,8 @@ def fetch_target(waha: WahaClient, session: str, target_id: str) -> dict[str, An
 
 
 def chat_id_from_message_id(message_id: str) -> str:
-    """Return the chat JID embedded in a serialized message id.
-
-    Serialized ids have the form ``{fromMe}_{chat}_{message_id}[_{participant}]``
-    and chat JIDs never contain underscores, so the chat is the second segment.
-    """
-    parts = message_id.split("_")
-    return parts[1] if len(parts) > 1 else message_id
+    """Return the chat JID embedded in a serialized message id, else the input."""
+    return chat_from_message_id(message_id) or message_id
 
 
 def message_preview(payload: dict[str, Any]) -> str:

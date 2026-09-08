@@ -71,42 +71,60 @@ def clamp_caption_line(text: str) -> str:
     return caption
 
 
-async def caption_image(
+async def caption_blocks(
     llm: FunctionCallingLLM,
-    image: dict[str, Any],
+    blocks: list[Any],
     timeout: float = 30.0,
     semaphore: asyncio.Semaphore | None = None,
+    kind: str = "Image",
 ) -> str:
-    """One-sentence description of *image*, or "" on any failure.
+    """One-sentence caption of the message *blocks*, or "" on any failure.
 
     A failed caption must never sink the turn: the caller falls back to
-    the plain ``(image)`` marker and the pixels still ride the first
-    LLM call, so the run degrades to the pre-caption behavior.
-    *semaphore* (the workflow's LLM gate) bounds this call within the
-    run's concurrency budget.
+    the plain marker and the pixels still ride the first LLM call, so
+    the run degrades to the pre-caption behavior. *semaphore* (the
+    workflow's LLM gate) bounds this call within the run's concurrency
+    budget. Shared by the image and video captioners.
     """
-    message = ChatMessage(
-        role=MessageRole.USER,
-        blocks=[
-            ImageBlock(
-                image=image["data"],
-                image_mimetype=image.get("mimetype") or "image/jpeg",
-            ),
-            TextBlock(text=_CAPTION_PROMPT),
-        ],
-    )
+    message = ChatMessage(role=MessageRole.USER, blocks=blocks)
     try:
         if semaphore is None:
             response = await asyncio.wait_for(llm.achat([message]), timeout=timeout)
         else:
             async with semaphore:
                 response = await asyncio.wait_for(llm.achat([message]), timeout=timeout)
-    except Exception as exc:  # any failure degrades to the bare (image) marker
-        logger.warning("Image caption failed (turn stays text-anchored): {exc}", exc=exc)
+    except Exception as exc:  # any failure degrades to the bare marker
+        logger.warning(
+            "{kind} caption failed (turn stays text-anchored): {exc}",
+            kind=kind,
+            exc=exc,
+        )
         return ""
     caption = clamp_caption_line(str(response.message.content or ""))
-    logger.info("Image caption: {caption!r}", caption=caption)
+    logger.info("{kind} caption: {caption!r}", kind=kind, caption=caption)
     return caption
+
+
+async def caption_image(
+    llm: FunctionCallingLLM,
+    image: dict[str, Any],
+    timeout: float = 30.0,
+    semaphore: asyncio.Semaphore | None = None,
+) -> str:
+    """One-sentence description of *image*, or "" on any failure."""
+    return await caption_blocks(
+        llm,
+        [
+            ImageBlock(
+                image=image["data"],
+                image_mimetype=image.get("mimetype") or "image/jpeg",
+            ),
+            TextBlock(text=_CAPTION_PROMPT),
+        ],
+        timeout,
+        semaphore=semaphore,
+        kind="Image",
+    )
 
 
 async def caption_images(

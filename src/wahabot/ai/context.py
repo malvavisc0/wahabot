@@ -4,7 +4,6 @@ import asyncio
 import datetime
 import json
 import re
-import time
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -14,14 +13,11 @@ from loguru import logger
 
 from wahabot.ai.messages import jid_string, message_replies_to
 from wahabot.ai.tools.url_images import fetch_url_images, image_urls
-from wahabot.ai.tools.whatsapp import (
-    OPERATOR_ARMED,
-    OPERATOR_KEY,
-    bind_target,
-    reset_target,
-)
+from wahabot.ai.tools.whatsapp import RunTarget, bind_target, reset_target
 from wahabot.ai.vision import image_caption, image_noun
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+from wahabot.core.cache import TtlCache
+from wahabot.core.jid import roster_entries
 from wahabot.core.models import WahaEvent
 from wahabot.core.waha import WahaClient
 from wahabot.settings import Settings
@@ -253,7 +249,10 @@ def reply_context_section(
 #: ``replyTo._data`` has only type/kind/body), so the roster is the only
 #: way to render "Ada" instead of "000000000000000@lid".
 ROSTER_TTL_S = 3600
-roster_cache: dict[tuple[str, str], tuple[float, dict[str, str]]] = {}
+_ROSTER_CAP = 1000
+roster_cache: TtlCache[tuple[str, str], dict[str, str]] = TtlCache(
+    ROSTER_TTL_S, _ROSTER_CAP
+)
 
 
 def participant_names(
@@ -267,10 +266,9 @@ def participant_names(
     """
     if waha is None or not chat_id.endswith("@g.us"):
         return {}
-    now = time.monotonic()
     cached = roster_cache.get((session, chat_id))
-    if cached and now - cached[0] < ROSTER_TTL_S:
-        return cached[1]
+    if cached is not None:
+        return cached
     try:
         overview = waha.get_chat_overview(session, chat_id)
     except Exception as exc:
@@ -279,7 +277,7 @@ def participant_names(
         )
         return {}
     names = roster_names(overview)
-    roster_cache[(session, chat_id)] = (now, names)
+    roster_cache.put((session, chat_id), names)
     return names
 
 
@@ -287,16 +285,6 @@ def roster_names(overview: dict[str, Any]) -> dict[str, str]:
     """Extract JID → name from a chat overview's participant list."""
     pairs = (roster_entry(entry) for entry in roster_entries(overview))
     return {jid: name for jid, name in pairs if jid and name}
-
-
-def roster_entries(overview: dict[str, Any]) -> list[Any]:
-    """The participant list, whether top-level or nested under ``_chat``."""
-    participants: Any = overview.get("participants")
-    if not isinstance(participants, list):
-        blob: Any = overview.get("_chat")
-        nested = cast(dict[str, Any], blob) if isinstance(blob, dict) else {}
-        participants = nested.get("participants")
-    return participants if isinstance(participants, list) else []
 
 
 def roster_entry(entry: Any) -> tuple[str, str]:
@@ -320,11 +308,11 @@ async def handle_message(
     settings: Settings | None = None,
     waha: WahaClient | None = None,
     armed: bool = False,
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, RunTarget]:
     """Run the agent workflow over an incoming message event.
 
     Returns ``(reply, target)``: the run's final text and its delivery
-    holder (``sent``/``reacted`` latches), so the caller can tell a
+    target (``sent``/``reacted`` latches), so the caller can tell a
     delivered run from a text reply without touching run-scoped state.
 
     ``image`` (single) or ``images`` (an album, already downloaded)
@@ -374,15 +362,9 @@ async def handle_message(
     # engine schedules steps/tasks under this context, so the binding
     # propagates to every step and tool call of THIS run — concurrent
     # runs bind their own targets and never see each other's. The
-    # binding resets before returning, so the *target dict itself* is
+    # binding resets before returning, so the *target itself* is
     # returned alongside the reply for the caller's latch checks.
-    target = {
-        "session": event.session,
-        "chat_id": chat_id,
-        "sent": "",
-        "reacted": "",
-        OPERATOR_KEY: OPERATOR_ARMED if armed else "",
-    }
+    target = RunTarget(session=event.session, chat_id=chat_id, armed=armed)
     token = bind_target(target)
     try:
         result = await agent.run(input=user_msg, image_blocks=image_blocks, ctx=ctx)

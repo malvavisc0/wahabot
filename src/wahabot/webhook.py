@@ -12,65 +12,59 @@ from wahabot.core.models import WahaEvent
 app = FastAPI(title="wahabot webhook server")
 
 Handler = Callable[[WahaEvent], Awaitable[None]]
-_message_handlers: list[Handler] = []
-_reaction_handlers: list[Handler] = []
-_command_handlers: list[Handler] = []
-_forget_handlers: list[Handler] = []
-_session_status_handlers: list[Handler] = []
+
+#: Handler registries keyed by event type; ``on_event`` registers,
+#: ``dispatch`` runs every handler of the event's type.
+_registries: dict[str, list[Handler]] = {
+    "message": [],
+    "message.reaction": [],
+    "command": [],
+    "forget": [],
+    "session.status": [],
+}
+
+
+def on_event(event_type: str, handler: Handler) -> None:
+    """Register a coroutine invoked for every incoming *event_type* event."""
+    _registries[event_type].append(handler)
 
 
 def on_message(handler: Handler) -> None:
     """Register a coroutine invoked for every incoming `message` event."""
-    _message_handlers.append(handler)
+    on_event("message", handler)
 
 
 def on_reaction(handler: Handler) -> None:
     """Register a coroutine invoked for every incoming `message.reaction` event."""
-    _reaction_handlers.append(handler)
+    on_event("message.reaction", handler)
 
 
 def on_command(handler: Handler) -> None:
     """Register a coroutine invoked for every incoming `command` event."""
-    _command_handlers.append(handler)
+    on_event("command", handler)
 
 
 def on_forget(handler: Handler) -> None:
     """Register a coroutine invoked for every incoming `forget` event."""
-    _forget_handlers.append(handler)
+    on_event("forget", handler)
 
 
 def on_session_status(handler: Handler) -> None:
     """Register a coroutine invoked for every incoming `session.status` event."""
-    _session_status_handlers.append(handler)
+    on_event("session.status", handler)
 
 
 async def dispatch(event: WahaEvent) -> None:
-    """Run all registered message handlers for the event."""
-    for handler in _message_handlers:
-        await handler(event)
+    """Run all registered handlers for the event's type.
 
-
-async def dispatch_reaction(event: WahaEvent) -> None:
-    """Run all registered reaction handlers for the event."""
-    for handler in _reaction_handlers:
-        await handler(event)
-
-
-async def dispatch_command(event: WahaEvent) -> None:
-    """Run all registered command handlers for the event."""
-    for handler in _command_handlers:
-        await handler(event)
-
-
-async def dispatch_forget(event: WahaEvent) -> None:
-    """Run all registered forget handlers for the event."""
-    for handler in _forget_handlers:
-        await handler(event)
-
-
-async def dispatch_session_status(event: WahaEvent) -> None:
-    """Run all registered session-status handlers for the event."""
-    for handler in _session_status_handlers:
+    ``message*`` events other than ``message.reaction`` (``message``,
+    ``message.any``, engine-specific variants) share the ``message``
+    registry, mirroring the original catch-all routing.
+    """
+    event_type = event.event
+    if event_type.startswith("message") and event_type != "message.reaction":
+        event_type = "message"
+    for handler in _registries[event_type]:
         await handler(event)
 
 
@@ -93,16 +87,7 @@ async def waha_webhook(
     event = parse_event(session, body)
     save_event(settings.journal_dir, session, body)
     log_event(event)
-    if event.event == "command":
-        await dispatch_command(event)
-    elif event.event == "forget":
-        await dispatch_forget(event)
-    elif event.event == "message.reaction":
-        await dispatch_reaction(event)
-    elif event.event == "session.status":
-        await dispatch_session_status(event)
-    elif event.event.startswith("message"):
-        await dispatch(event)
+    await dispatch(event)
     return event
 
 

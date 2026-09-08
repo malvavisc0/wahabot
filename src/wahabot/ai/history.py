@@ -31,6 +31,7 @@ Adapted from aria-ai's ``aria.web.session``.
 """
 
 from collections.abc import Callable
+from typing import Any, NamedTuple, cast
 
 from llama_index.core.base.llms.types import (
     ChatMessage,
@@ -38,9 +39,14 @@ from llama_index.core.base.llms.types import (
     ToolCallBlock,
 )
 
+from wahabot.ai.messages import REACTION_TARGET_KWARG
+
 __all__ = [
+    "ToolCall",
     "sanitize_chat_history",
+    "tool_calls",
     "trim_to_budget",
+    "wire_call",
 ]
 
 #: Cap for one tool-result message, in estimated tokens (chars).
@@ -56,22 +62,45 @@ __all__ = [
 MAX_TOOL_RESULT_TOKENS = 2000
 
 
-def _message_tool_call_count(msg: ChatMessage) -> int:
-    """The number of tool calls advertised by an assistant message.
+class ToolCall(NamedTuple):
+    """One tool call of an assistant message, either carrier."""
 
-    LlamaIndex carries tool calls in two places (mirroring
-    ``to_openai_message_dict``'s precedence): ``ToolCallBlock`` objects in
-    ``message.blocks`` (modern path) or ``additional_kwargs["tool_calls"]``
-    (legacy/streaming path). Blocks take precedence; the kwargs list is
-    only consulted when no blocks are present.
+    name: str
+    call_id: str
+
+
+def tool_calls(message: ChatMessage) -> list[ToolCall]:
+    """The tool calls an assistant message made (empty for plain text).
+
+    In-memory llama-index carries calls as ``ToolCallBlock`` blocks; the
+    OpenAI wire shape (``additional_kwargs["tool_calls"]``) appears in
+    serialized histories. Blocks take precedence — the kwargs list is
+    only consulted when no blocks are present, mirroring llama-index's
+    own serialization.
     """
-    if block_calls := sum(1 for block in msg.blocks if isinstance(block, ToolCallBlock)):
-        return block_calls
-    # The legacy/streaming path may store ``None`` (an assistant turn
-    # explicitly cleared of calls); count that as zero rather than
-    # crashing on ``len(None)``.
-    kwarg_calls = msg.additional_kwargs.get("tool_calls") or []
-    return len(kwarg_calls)
+    blocks = [b for b in message.blocks if isinstance(b, ToolCallBlock)]
+    if blocks:
+        return [ToolCall(str(b.tool_name), str(b.tool_call_id)) for b in blocks]
+    calls: Any = message.additional_kwargs.get("tool_calls") or []
+    return [call for call in (wire_call(c) for c in calls) if call is not None]
+
+
+def wire_call(call: Any) -> ToolCall | None:
+    """A wire-shaped tool call dict as a :class:`ToolCall`, else None."""
+    if not isinstance(call, dict):
+        return None
+    entry = cast(dict[str, Any], call)
+    function = entry.get("function")
+    if not isinstance(function, dict):
+        return None
+    name = str(cast(dict[str, Any], function).get("name", ""))
+    call_id = str(entry.get("id", ""))
+    return ToolCall(name, call_id) if name else None
+
+
+def _message_tool_call_count(msg: ChatMessage) -> int:
+    """The number of tool calls advertised by an assistant message."""
+    return len(tool_calls(msg))
 
 
 def _is_tool_message(msg: ChatMessage) -> bool:
@@ -84,10 +113,8 @@ def _deduplicate_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
 
     Out-of-band folds create consecutive same-role turns the chat API
     rejects (the operator's ``fromMe`` text after the model's reply; a
-    reaction note before the next user message). The old keep-last
-    collapse silently deleted the earlier message — for the model's own
-    reply that resurrected the 0.4.3 self-history bug, made durable by
-    persistence. Merging keeps everything the chat actually saw.
+    reaction note before the next user message); merging keeps
+    everything the chat actually saw.
 
     Never merges tool messages or assistant-with-tool-call messages.
     """
@@ -188,21 +215,16 @@ def _trim_history(
     return trimmed
 
 
-#: Prefix of out-of-band reaction notes (see ``reactions.py``); turns
-#: starting with it are folds, not run-scoped inbound turns.
-REACTION_NOTE_PREFIX = "[reaction "
-
-
 def _is_run_scoped(msg: ChatMessage) -> bool:
     """True when *msg* is the run-scoped turn a new user message replaces.
 
     ``repair_memory`` runs at the start of the next run with the buffer
     exactly as the previous run left it, so its trailing user message is
     always the just-processed inbound turn. An out-of-band reaction fold
-    leaves the buffer ending with a *different* user message — a
-    bracketed reaction note — which the next run must keep.
+    leaves the buffer ending with a *different* user message — one
+    tagged with the reaction-target kwarg — which the next run must keep.
     """
-    return not str(msg.content or "").startswith(REACTION_NOTE_PREFIX)
+    return REACTION_TARGET_KWARG not in msg.additional_kwargs
 
 
 def sanitize_chat_history(

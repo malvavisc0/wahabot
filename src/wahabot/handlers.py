@@ -39,6 +39,7 @@ from wahabot.ai.video import caption_video, extract_frames, join_anchor, video_m
 from wahabot.ai.vision import caption_images
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
 from wahabot.core.access import SessionConfigReloader, load_session_config
+from wahabot.core.cache import TtlCache
 from wahabot.core.echoes import is_self_echo, remember_self_echo
 from wahabot.core.filters import chat_allowed, jid_alias_lookup
 from wahabot.core.models import WahaEvent
@@ -46,10 +47,9 @@ from wahabot.core.persistence import forget_memory, load_memory, save_memory
 from wahabot.core.transcribe import fetch_transcript, transcribe_voice_note
 from wahabot.core.waha import MediaTooLargeError, WahaClient
 from wahabot.settings import Settings
-from wahabot.status import on_operator_recapture, session_healthy
+from wahabot.status import session_healthy
 from wahabot.webhook import on_forget, on_message
 
-_seen_ids: dict[str, float] = {}
 #: Messages older than this many seconds are stale backlog, not live turns.
 _MAX_MESSAGE_AGE_S = 300
 #: Dedup window for redelivered message ids. Must meet or exceed
@@ -59,6 +59,9 @@ _MAX_MESSAGE_AGE_S = 300
 #: (120 < age < 300) a redelivered message would slip through both
 #: and be answered twice.
 _SEE_TTL_S = _MAX_MESSAGE_AGE_S
+#: Seen-id cache hard cap; past it the oldest entries are evicted.
+_MAX_SEEN_IDS = 10_000
+_seen_ids: TtlCache[str, bool] = TtlCache(_SEE_TTL_S, _MAX_SEEN_IDS)
 #: Keep at most this many per-chat agent contexts; least recently used
 #: chats are evicted (their conversation memory is dropped).
 _MAX_CONTEXTS = 1000
@@ -82,14 +85,11 @@ _MAX_CHAT_LOCKS = 1000
 async def chat_lock(session: str, chat_id: str) -> AsyncIterator[None]:
     """Serialize agent runs for one chat (``async with chat_lock(…)``).
 
-    Eviction keeps the table bounded, idle entries going oldest-first.
-    A lock that is held or has an acquisition queued is never evicted:
-    evicting it would hand the next caller a fresh lock that runs
-    concurrently with the waiter still holding the old one (between
-    ``release()`` and the waiter resuming, ``Lock.locked()`` is
-    already False, so the pending count is the only witness). When
-    every entry is busy the table may temporarily exceed its cap
-    rather than spin — the cap is a memory bound, not an invariant.
+    Eviction keeps the table bounded, idle entries going oldest-first;
+    a held or waited-on lock is never evicted (the waiter-window
+    invariant, see docs/agent-workflow.md). When every entry is busy
+    the table may temporarily exceed its cap rather than spin — the
+    cap is a memory bound, not an invariant.
     """
     key = (session, chat_id)
     lock = _chat_locks.pop(key, None)
@@ -114,38 +114,22 @@ async def chat_lock(session: str, chat_id: str) -> AsyncIterator[None]:
             _chat_lock_pending.pop(key, None)
 
 
-#: Seen-id cache hard cap; past it the oldest entries are evicted.
-_MAX_SEEN_IDS = 10_000
-
-
 def seen_recently(message_id: str) -> bool:
     """Return True if this message id was already handled in the last TTL.
 
     The id is marked seen on first sight, so a duplicate redelivery
     racing the in-flight run is also deduplicated. A run that later
     fails must call :func:`forget_seen` to allow a retry.
-
-    The cache never wipes wholesale: at the cap the oldest entries are
-    evicted one by one (the insertion order of ``dict`` is oldest
-    first), so a redelivery stays deduplicated even while the cache
-    turns over.
     """
-    if not message_id:
-        return False
-    now = time.monotonic()
-    if message_id in _seen_ids:
-        if now - _seen_ids[message_id] < _SEE_TTL_S:
-            return True
-        del _seen_ids[message_id]
-    while len(_seen_ids) >= _MAX_SEEN_IDS:
-        del _seen_ids[next(iter(_seen_ids))]
-    _seen_ids[message_id] = now
+    if not message_id or message_id in _seen_ids:
+        return bool(message_id)
+    _seen_ids.put(message_id, True)
     return False
 
 
 def forget_seen(message_id: str) -> None:
     """Drop a message id's seen marker so a redelivery is reprocessed."""
-    _seen_ids.pop(message_id, None)
+    _seen_ids.drop(message_id)
 
 
 async def context_for(
@@ -560,7 +544,7 @@ def register_agent_handler(
                     event, agent, ctx=ctx, images=downloaded, settings=settings, waha=waha
                 )
             await persist_memory(settings, event.session, chat_id, ctx)
-            if target.get("sent") or target.get("reacted"):
+            if target.sent or target.reacted:
                 log_final_text(chat_id, reply)
                 return
         if reply and reply.strip():
@@ -590,12 +574,10 @@ def register_agent_handler(
             current.system_prompt, settings.timezone, current.bot_name, current.goal
         )
 
-    # Per-agent escalation state (operator JID + per-chat cooldowns).
-    # Registered for re-capture so a session recovery refreshes the
-    # delivery target — a startup WAHA hiccup must not wedge the
-    # lifeline (or aim it at a stale identity) for the process lifetime.
+    # Per-agent escalation state (per-chat cooldowns; the operator JID
+    # is read from status.state at call time, so a session recovery
+    # needs no re-capture wiring here).
     escalation_channel = EscalationChannel()
-    on_operator_recapture(escalation_channel.refresh)
     agent = build_agent(
         settings,
         tools=build_default_tools(waha, escalation_channel=escalation_channel),
@@ -770,7 +752,7 @@ def register_agent_handler(
                         waha=waha,
                     )
                 await persist_memory(settings, event.session, chat_id, ctx)
-                if target.get("sent") or target.get("reacted"):
+                if target.sent or target.reacted:
                     logger.info(
                         "Agent decision for {chat_id}: delivered via tool",
                         chat_id=chat_id,

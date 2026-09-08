@@ -9,12 +9,19 @@ from loguru import logger
 
 API_PREFIX = "/api"
 
-__all__ = ["MediaTooLargeError", "WahaClient"]
+__all__ = ["MediaTooLargeError", "WahaClient", "media_with_url", "message_media"]
 
 
 def message_media(message: dict[str, Any]) -> dict[str, Any]:
     """The media dict of a message, from either payload location."""
-    return message.get("media") or message.get("_data", {}).get("media") or {}
+    media = message.get("media") or message.get("_data", {}).get("media")
+    return media if isinstance(media, dict) else {}
+
+
+def media_with_url(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """The media dict of a payload when it carries a downloadable URL."""
+    media = message_media(payload)
+    return media if media.get("url") else None
 
 
 def message_fields(message: dict[str, Any]) -> tuple[str, str, str]:

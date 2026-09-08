@@ -7,7 +7,7 @@ import httpx
 from loguru import logger
 
 from wahabot.core.models import WahaEvent
-from wahabot.core.waha import MediaTooLargeError, WahaClient
+from wahabot.core.waha import MediaTooLargeError, WahaClient, media_with_url
 from wahabot.settings import Settings
 
 
@@ -22,19 +22,7 @@ def audio_media(event: WahaEvent) -> dict[str, Any] | None:
     Voice notes carry ``media`` at the top level or inside ``_data``
     (engine-dependent); only entries with a URL qualify.
     """
-    payload: dict[str, Any] = event.payload
-    media: Any = payload.get("media")
-    if not isinstance(media, dict):
-        data: Any = payload.get("_data")
-        if isinstance(data, dict):
-            data_dict: dict[str, Any] = data
-            media = data_dict.get("media")
-    if not isinstance(media, dict):
-        return None
-    media_dict: dict[str, Any] = media
-    if not media_dict.get("url"):
-        return None
-    return media_dict
+    return media_with_url(event.payload)
 
 
 def fetch_transcript(settings: Settings, audio: bytes, filename: str) -> str:

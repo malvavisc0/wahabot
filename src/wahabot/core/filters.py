@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 from loguru import logger
 
+from wahabot.core.jid import jid_aliases
 from wahabot.core.models import WahaEvent
 
 
@@ -54,18 +55,11 @@ def drop_message(event: WahaEvent, reason: str) -> bool:
 def jid_alias_lookup(event: WahaEvent) -> Callable[[str], set[str]]:
     """Resolve a JID to its alternate identity, based on the event's ``me``.
 
-    WhatsApp accounts have two stable identifiers: the phone-number JID
-    (``@c.us``) and the linked-device LID (``@lid``). Events carry
-    whichever the chat uses, and ``me`` carries both of ours, so a JID
-    equal to one of our identities resolves to the other. JIDs of
-    other people cannot be resolved locally and stay as they are.
+    A JID equal to one of the bot's own identities (the ``me`` id/lid
+    pair) resolves to the other; other people's JIDs cannot be resolved
+    locally and stay as they are.
     """
-
-    me = event.me or {}
-    phone_id = str(me.get("id") or "")
-    lid = str(me.get("lid") or "")
-    pairs = {phone_id: lid, lid: phone_id}
-    pairs.pop("", None)
+    pairs = jid_aliases(event.me or {})
 
     def lookup(jid: str) -> set[str]:
         return {alias for alias in (pairs.get(jid),) if alias}

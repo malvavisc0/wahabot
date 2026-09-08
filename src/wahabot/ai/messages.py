@@ -4,8 +4,15 @@ import re
 from typing import Any
 
 from wahabot.core.models import WahaEvent
+from wahabot.core.waha import media_with_url
 
 NON_REPLYABLE_SUFFIXES = ("@broadcast", "@newsletter")
+
+#: Kwarg key tagging a folded reaction note with its target message id.
+#: ``reactions`` stamps it so the superseded-note removal survives the
+#: history merge; ``history`` treats a tagged turn as a fold rather
+#: than a run-scoped inbound turn.
+REACTION_TARGET_KWARG = "reaction_target_id"
 
 
 def jid_string(value: Any) -> str:
@@ -74,13 +81,7 @@ def image_media(event: WahaEvent) -> dict[str, Any] | None:
     """
     if message_kind(event) not in ("image", "sticker"):
         return None
-    media = event.payload.get("media") or _data_media(event.payload)
-    if not isinstance(media, dict):
-        return None
-    media_dict: dict[str, Any] = media
-    if not media_dict.get("url"):
-        return None
-    return media_dict
+    return media_with_url(event.payload)
 
 
 def video_media(event: WahaEvent) -> dict[str, Any] | None:
@@ -91,22 +92,7 @@ def video_media(event: WahaEvent) -> dict[str, Any] | None:
     """
     if message_kind(event) not in ("video", "ptv"):
         return None
-    media = event.payload.get("media") or _data_media(event.payload)
-    if not isinstance(media, dict):
-        return None
-    media_dict: dict[str, Any] = media
-    if not media_dict.get("url"):
-        return None
-    return media_dict
-
-
-def _data_media(payload: dict[str, Any]) -> Any:
-    """The ``_data.media`` blob of a payload, when present."""
-    data = payload.get("_data")
-    if isinstance(data, dict):
-        data_dict: dict[str, Any] = data
-        return data_dict.get("media")
-    return None
+    return media_with_url(event.payload)
 
 
 def message_replies_to(event: WahaEvent) -> dict[str, Any] | None:

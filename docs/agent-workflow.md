@@ -222,11 +222,17 @@ Runs in **different chats proceed in parallel**; runs in the **same
 chat serialize** on that chat's run lock (`chat_lock` in
 `handlers.py` — they share one `Context` and one memory buffer).
 Operator commands run on a fresh `Context` with no chat lock, so a
-command never queues behind (or blocks) any chat.
+command never queues behind (or blocks) any chat. The lock table is
+bounded and evicts idle entries oldest-first, but **a lock that is
+held or has a queued waiter is never evicted**: between `release()`
+and the waiter resuming, `asyncio.Lock.locked()` is already `False`,
+so a `_chat_lock_pending` in-flight count is the only witness —
+evicting there would hand the next caller a fresh lock running
+concurrently with the old waiter.
 
 Everything a run needs — session, chat id, the once-per-run
 `sent`/`reacted` delivery latches, and the operator arming flag —
-lives in a `dict` bound for the run's duration through
+lives in a `RunTarget` dataclass bound for the run's duration through
 `contextvars` (`bind_target` / `current_target` in
 `ai/tools/whatsapp.py`). The workflow engine creates every step task
 (and each tool's `asyncio.to_thread` worker) inside the run's
@@ -647,6 +653,21 @@ and fall back to kwargs, or it will silently see zero.
   function calling (`is_chat_model=True`, `is_function_calling_model=True`
   in `load_llm`); the workflow constructor fails loudly if function
   calling is missing.
+- Two library boundaries in `load_llm`/`ObservableOpenAILike` are
+  external constraints, not design choices. **Sampling-parameter
+  routing**: `top_p` and `presence_penalty` are first-class OpenAI SDK
+  parameters and ride `additional_kwargs` (merged straight into the API
+  request body), but `top_k`, `min_p` and `repetition_penalty` are not —
+  the SDK's typed `create()` signature rejects them with a `TypeError`
+  before any request is sent, so they ride `extra_body`, which the SDK
+  forwards verbatim in the JSON body for OpenAI-compatible providers
+  that do accept them. **Instrumentation payload**: the OTel llama-index
+  instrumentor reads `model_dict["model"]` and
+  `model_dict["temperature"]` for the `gen_ai.request.*` span
+  attributes, but the base `OpenAILike.to_payload` only exposes metadata
+  (`model_name`, no temperature) — leaving both as `None` and spamming
+  OTel "Invalid type NoneType" warnings per LLM call.
+  `ObservableOpenAILike.to_payload` exists solely to add those two keys.
 - Workflow runs have a timeout (`WAHABOT_RUN_TIMEOUT`, 120 s by
   default; 0 disables it), so a runaway tool
   loop cannot hang the webhook forever.

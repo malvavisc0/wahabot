@@ -1,11 +1,12 @@
 """WhatsApp tools for the function calling agent.
 
-Each builder takes the shared mutable ``target`` holder refreshed by the
-handler before every agent run with the current ``session`` and default
-``chat_id``, so the shared agent's tools always speak for the message
-being handled. Tools calling a WAHA endpoint raise on HTTP errors; the
-tool functions here return the shared JSON envelope instead, so a
-failure feeds back to the model rather than crashing the workflow.
+Each run binds its own :class:`RunTarget` (session, chat, delivery
+latches, operator flag) through ``bind_target`` before the workflow
+starts, so the shared agent's tools always speak for the message being
+handled and concurrent runs never see each other's state. Tools calling
+a WAHA endpoint raise on HTTP errors; the tool functions here return
+the shared JSON envelope instead, so a failure feeds back to the model
+rather than crashing the workflow.
 
 Cross-chat reach is fenced (see :func:`fenced_chat`): only operator
 ``wahabot tell`` runs may aim the tools at a chat other than the one
@@ -18,6 +19,7 @@ import contextvars
 import json
 import mimetypes
 import time
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -42,12 +44,16 @@ from wahabot.ai.tools.schemas import (
     StaySilentSchema,
 )
 from wahabot.core.echoes import remember_self_echo
+from wahabot.core.jid import chat_from_message_id, roster_entries, same_chat
 from wahabot.core.waha import WahaClient
 from wahabot.status import state as _status_state
 
 __all__ = [
     "OPERATOR_ARMED",
+    "OPERATOR_KEY",
     "EscalationChannel",
+    "RunTarget",
+    "bind_target",
     "chat_jid",
     "current_target",
     "delivered_to_self",
@@ -62,6 +68,7 @@ __all__ = [
     "participant_jid",
     "react_to_message",
     "recent_chats",
+    "reset_target",
     "resolve_chat",
     "roster_entries",
     "same_chat",
@@ -105,71 +112,58 @@ _DOC_MIME_BY_EXT: dict[str, str] = {
 }
 
 
-def chat_jid(chat: str | None, target: dict[str, str]) -> str:
+def chat_jid(chat: str | None, target: RunTarget | dict[str, str]) -> str:
     """The chat JID to act on: *chat*, else the current conversation.
 
     Models sometimes pass a serialized message id (``false_<jid>_…``,
     scraped from a ``[message id: …]`` annotation) instead of a bare
-    JID — strip the ``false_``/``true_`` sender prefix and anything
-    after the JID so the call still lands in the right chat.
-
-    The split on the first ``_`` assumes the JID itself carries no
-    underscore; WhatsApp JIDs never do (user ids are digits, group ids
-    digits-dash-digits), so this is a safe shortcut rather than a full
-    serialized-id parser.
+    JID — the embedded chat is extracted so the call still lands in
+    the right chat. Anything else passes through unchanged.
     """
-    value = chat or target.get("chat_id", "")
-    for prefix in ("false_", "true_"):
-        if value.startswith(prefix):
-            value = value[len(prefix) :]
-            break
-    return value.split("_")[0] if "@" in value.split("_")[0] else value
-
-
-#: Server domains WhatsApp uses interchangeably for one person's JID
-#: (the phone-number identity). Group (``@g.us``) and broadcast JIDs
-#: are never aliased, so they compare by exact string.
-_PERSON_JID_DOMAINS = ("c.us", "s.whatsapp.net", "lid")
-
-
-def same_chat(a: str, b: str) -> bool:
-    """True when two JIDs name the same chat.
-
-    WAHA reports a person's chat as ``<phone>@c.us`` in some payloads
-    and ``<phone>@lid`` (linked-device id) or the classic
-    ``<phone>@s.whatsapp.net`` in others; comparing raw strings would
-    fence the current chat against itself. Person JIDs compare on
-    user id when both domains are interchangeable; every other shape
-    (groups, broadcasts, unknown domains) falls back to exact
-    equality. Failing closed — a false refusal — is the safe
-    direction for the fence.
-    """
-    if a == b:
-        return True
-    a_user, _, a_domain = a.partition("@")
-    b_user, _, b_domain = b.partition("@")
-    if not a_user or not b_user:
-        return False
-    return (
-        a_user == b_user
-        and a_domain in _PERSON_JID_DOMAINS
-        and b_domain in _PERSON_JID_DOMAINS
+    current = (
+        target.chat_id if isinstance(target, RunTarget) else target.get("chat_id", "")
     )
+    value = chat or current
+    return chat_from_message_id(value) or value
+
+
+@dataclass
+class RunTarget:
+    """One agent run's delivery target and latches.
+
+    Mutable: the delivery latches (``sent``/``reacted``) flip mid-run
+    from tool threads. Scoped by ``contextvars`` (``bind_target``), so
+    concurrent runs in different chats never see each other's targets,
+    latches, or the operator arming flag.
+    """
+
+    session: str = ""
+    chat_id: str = ""
+    sent: str = ""
+    reacted: str = ""
+    armed: bool = False
+
+    @classmethod
+    def from_dict(cls, holder: dict[str, str]) -> RunTarget:
+        """Build a target from the legacy string dict (compatibility shim)."""
+        return cls(
+            session=holder.get("session", ""),
+            chat_id=holder.get("chat_id", ""),
+            sent=holder.get("sent", ""),
+            reacted=holder.get("reacted", ""),
+            armed=holder.get(OPERATOR_KEY, "") == OPERATOR_ARMED,
+        )
 
 
 #: Holder key set (only) on operator-command runs; chat runs store the
-#: empty string. The holder is typed ``dict[str, str]``, so the armed
-#: value is a constant rather than a bare ``"1"`` — a future edit that
-#: writes any other string (or a leftover value) cannot accidentally
-#: pass the truthiness gate.
+#: empty string. Kept for the ``from_dict`` shim the smoke suite drives.
 OPERATOR_KEY = "operator"
 
-#: The one value that arms the operator flag. ``operator_run`` compares
-#: against it by identity of content, not truthiness.
+#: The one value that arms the operator flag in the dict shim.
 OPERATOR_ARMED = "armed"
 
 
-def operator_run(target: dict[str, str]) -> bool:
+def operator_run(target: RunTarget | dict[str, str]) -> bool:
     """True when the current run is a trusted ``wahabot tell`` command.
 
     Chat participants cannot be allowed to point the bot's tools at
@@ -179,6 +173,8 @@ def operator_run(target: dict[str, str]) -> bool:
     The HMAC-signed operator channel is the only trusted source of
     cross-chat intent, so the fence opens for it alone.
     """
+    if isinstance(target, RunTarget):
+        return target.armed
     return target.get(OPERATOR_KEY) == OPERATOR_ARMED
 
 
@@ -188,22 +184,26 @@ def operator_run(target: dict[str, str]) -> bool:
 #: other's session/chat targets, delivery latches, or — critically —
 #: the operator arming flag. Tool builders ignore their ``target``
 #: parameter at call time and resolve through here instead.
-_run_target: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+_run_target: contextvars.ContextVar[RunTarget | None] = contextvars.ContextVar(
     "wahabot_run_target", default=None
 )
 
 
-def bind_target(target: dict[str, str]) -> contextvars.Token[dict[str, str] | None]:
+def bind_target(
+    target: RunTarget | dict[str, str],
+) -> contextvars.Token[RunTarget | None]:
     """Bind *target* as the current run's holder (called per run)."""
+    if isinstance(target, dict):
+        target = RunTarget.from_dict(target)
     return _run_target.set(target)
 
 
-def reset_target(token: contextvars.Token[dict[str, str] | None]) -> None:
+def reset_target(token: contextvars.Token[RunTarget | None]) -> None:
     """Restore the previous binding after a run finishes."""
     _run_target.reset(token)
 
 
-def current_target() -> dict[str, str]:
+def current_target() -> RunTarget:
     """The holder of the run executing on this task.
 
     Raises when no run is bound — a tool firing outside a run is a
@@ -213,6 +213,25 @@ def current_target() -> dict[str, str]:
     if target is None:
         raise RuntimeError("tool called without a bound run target")
     return target
+
+
+def track_self_echo(sent_id: str, what: str) -> None:
+    """Mark a self-chat send's id, or warn that its echo is unprotected.
+
+    A self-chat send whose response carried no recognizable id cannot
+    be tracked in the echo cache, so its bounce-back would be parsed
+    as a fresh operator command — the one degradation of the echo
+    defense an operator must see (see ``core/echoes.py``).
+    """
+    if sent_id:
+        remember_self_echo(sent_id)
+        return
+    logger.warning(
+        "{what} to the self-chat returned no message id; its echo is"
+        + " NOT tracked and would be parsed as an operator command if it"
+        + " matches the mention pattern",
+        what=what,
+    )
 
 
 def delivered_to_self(chat_id: str, sent_id: str) -> None:
@@ -225,23 +244,11 @@ def delivered_to_self(chat_id: str, sent_id: str) -> None:
     *forwarded* message carrying injected text ("kAI message Roy …")
     would execute as a trusted command; marked, the echo is dead on
     arrival. Also covers self-sent images, files and plain sends.
-
-    A delivery to the self-chat whose send response carried no
-    recognizable id logs a WARNING: the echo cache cannot protect that
-    message, so its bounce-back would be parsed as a fresh command —
-    the one degradation of the echo defense an operator must see.
     """
     me = _status_state.operator_jid
     if not me or not same_chat(chat_id, me):
         return
-    if sent_id:
-        remember_self_echo(sent_id)
-        return
-    logger.warning(
-        "Delivery to the self-chat returned no message id; its echo is"
-        + " NOT tracked and would be parsed as an operator command if it"
-        + " matches the mention pattern"
-    )
+    track_self_echo(sent_id, "Delivery")
 
 
 #: The refusal envelope text for a chat run aiming outside its chat.
@@ -253,29 +260,23 @@ _FENCE_ERROR = (
 
 
 def fenced_chat(
-    chat: str | None, target: dict[str, str]
+    chat: str | None, target: RunTarget | dict[str, str]
 ) -> tuple[str | None, str | None]:
     """The ``(jid, error)`` a tool call may act on — exactly one is set.
 
     Every WhatsApp tool that takes a ``chat`` parameter runs through
     here instead of calling :func:`chat_jid` directly. Non-operator
-    runs (a chat message woke the agent) may only ever act on the
-    conversation that produced them: an explicit ``chat`` pointing
-    anywhere else — a different group, someone's DM, the bot's own
-    "message yourself" JID — is refused. Operator-command runs pass
-    through :func:`chat_jid` unchanged (the instruction *names* the
-    target chat; that reach is their documented purpose).
-
-    The error half keeps the tools honest: a caller must surface it as
-    an envelope, never silently fall back to the current chat — a
-    misdirected "send" must fail loudly, not deliver to the wrong
-    room. Refusals log at WARNING: they are the audit trail of a
-    participant (or an injected instruction) trying to make the bot
-    act outside its conversation.
+    runs may only ever act on the conversation that produced them;
+    operator-command runs pass through :func:`chat_jid` unchanged.
+    The error half keeps the tools honest: a misdirected call fails
+    loudly as an envelope, never silently falls back to the current
+    chat (the fence invariant, see docs/agent-workflow.md).
     """
     if operator_run(target):
         return chat_jid(chat, target), None
-    current = target.get("chat_id", "")
+    current = (
+        target.chat_id if isinstance(target, RunTarget) else target.get("chat_id", "")
+    )
     if not chat:
         return current, None
     resolved = chat_jid(chat, target)
@@ -297,7 +298,7 @@ def fenced_chat(
 
 
 def fenced_message_id(
-    message_id: str, target: dict[str, str]
+    message_id: str, target: RunTarget | dict[str, str]
 ) -> tuple[str | None, str | None]:
     """The ``(message_id, error)`` a tool call may act on — one is set.
 
@@ -317,20 +318,23 @@ def fenced_message_id(
     """
     if operator_run(target):
         return message_id, None
-    embedded = chat_jid(message_id, {"chat_id": ""})
+    embedded = chat_jid(message_id, RunTarget())
     if not embedded or "@" not in embedded:
         return message_id, None
-    if same_chat(embedded, target.get("chat_id", "")):
+    current = (
+        target.chat_id if isinstance(target, RunTarget) else target.get("chat_id", "")
+    )
+    if same_chat(embedded, current):
         return message_id, None
     logger.warning(
         "Refused cross-chat message id {id} from chat run in {current}",
         id=message_id,
-        current=target.get("chat_id", ""),
+        current=current,
     )
     return None, _FENCE_ERROR
 
 
-def send_message(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
+def send_message(waha: WahaClient) -> BaseTool:
     """Build a tool that sends a WhatsApp text message.
 
     Sends to the current chat by default; an operator-command run may
@@ -367,14 +371,14 @@ def send_message(waha: WahaClient, _target: dict[str, str] | None = None) -> Bas
         if not text.strip():
             return error("empty message text")
         target = current_target()
-        if target.get("sent"):
+        if target.sent:
             return error(
-                f"message already sent this run (to {target['sent']}); do not send again"
+                f"message already sent this run (to {target.sent}); do not send again"
             )
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
-        session = target.get("session", "")
+        session = target.session
         if not session or not chat_id:
             return error("no active conversation context")
         if reply_to:
@@ -385,7 +389,7 @@ def send_message(waha: WahaClient, _target: dict[str, str] | None = None) -> Bas
             session, chat_id, text, reply_to=reply_to, mentions=mentions
         )
         delivered_to_self(chat_id, sent_id)
-        target["sent"] = chat_id
+        target.sent = chat_id
         fields: dict[str, Any] = {
             "chat": chat_id,
             "text": text,
@@ -447,26 +451,24 @@ _ESCALATE_COOLDOWN_S = 3600
 
 
 class EscalationChannel:
-    """Per-agent escalation state: the operator's JID and the cooldowns.
+    """Per-agent escalation state: the cooldowns.
 
     Instance-scoped (one per ``build_default_tools`` call) rather than
     module-global: two agents built in one process — the smoke suite
-    does exactly this — must never share a cooldown window, and a stale
-    JID from a previous session configuration must never receive this
-    agent's reports. ``operator_jid`` starts as the bot's own JID at
-    build time (captured by ``status.seed_health``) and is refreshed on
-    every session recovery, so a startup WAHA hiccup cannot wedge the
-    lifeline for the process lifetime.
+    does exactly this — must never share a cooldown window. The
+    operator JID is *not* cached here: it is read from
+    ``status.state`` at call time, so a startup WAHA hiccup or a
+    re-linked account can never wedge the lifeline (or aim it at a
+    stale identity) for the process lifetime.
     """
 
     def __init__(self) -> None:
-        self.operator_jid: str = _status_state.operator_jid
         self._last: dict[str, float] = {}
 
-    def refresh(self, operator_jid: str) -> None:
-        """Update the delivery target (session recovery re-capture)."""
-        if operator_jid:
-            self.operator_jid = operator_jid
+    @property
+    def operator_jid(self) -> str:
+        """The current operator JID (single-sourced on ``status.state``)."""
+        return _status_state.operator_jid
 
     def cooldown_refusal(self, chat_id: str) -> str | None:
         """The cooldown error text for *chat_id*, or None when clear."""
@@ -516,8 +518,8 @@ def escalate(waha: WahaClient, channel: EscalationChannel) -> BaseTool:
         if not report.strip():
             return error("empty report text")
         target = current_target()
-        chat_id = target.get("chat_id", "")
-        if not chat_id or not target.get("session"):
+        chat_id = target.chat_id
+        if not chat_id or not target.session:
             return error("no active conversation context")
         operator_jid = channel.operator_jid
         if not operator_jid:
@@ -532,7 +534,7 @@ def escalate(waha: WahaClient, channel: EscalationChannel) -> BaseTool:
             return error(refusal)
         try:
             sent_id = waha.send_text(
-                target["session"],
+                target.session,
                 operator_jid,
                 f"🆘 wahabot escalation from {chat_id}:\n{report.strip()}",
             )
@@ -549,14 +551,7 @@ def escalate(waha: WahaClient, channel: EscalationChannel) -> BaseTool:
                 f"could not forward the report to the operator: {exc}"
                 + " — tell the person the escalation did NOT go through"
             )
-        if sent_id:
-            remember_self_echo(sent_id)
-        else:
-            logger.warning(
-                "Escalation to the self-chat returned no message id;"
-                + " its echo is NOT tracked and would be parsed as an"
-                + " operator command if it matches the mention pattern"
-            )
+        track_self_echo(sent_id, "Escalation")
         channel.stamp(chat_id)
         logger.info(
             "Escalated from {chat_id} to operator: {report}",
@@ -583,7 +578,7 @@ def escalate(waha: WahaClient, channel: EscalationChannel) -> BaseTool:
     )
 
 
-def react_to_message(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
+def react_to_message(waha: WahaClient) -> BaseTool:
     """Build a tool that reacts to a WhatsApp message.
 
     One reaction per run: like the send tools, a successful reaction
@@ -601,9 +596,9 @@ def react_to_message(waha: WahaClient, _target: dict[str, str] | None = None) ->
                 an existing reaction.
         """
         target = current_target()
-        if target.get("reacted"):
+        if target.reacted:
             return error("already reacted this run; do not react again")
-        session = target.get("session", "")
+        session = target.session
         if not session:
             return error("no active conversation context")
         if not message_id:
@@ -612,7 +607,7 @@ def react_to_message(waha: WahaClient, _target: dict[str, str] | None = None) ->
         if id_error:
             return error(id_error)
         waha.send_reaction(session, message_id, reaction)
-        target["reacted"] = message_id
+        target.reacted = message_id
         return ok(message_id=message_id, reaction=reaction, removed=not reaction)
 
     return FunctionTool.from_defaults(
@@ -628,7 +623,7 @@ def react_to_message(waha: WahaClient, _target: dict[str, str] | None = None) ->
     )
 
 
-def send_image(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
+def send_image(waha: WahaClient) -> BaseTool:
     """Build a tool that sends an image to a chat."""
 
     def send_image_fn(
@@ -645,14 +640,14 @@ def send_image(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseT
                 send to the current chat.
         """
         target = current_target()
-        if target.get("sent"):
+        if target.sent:
             return error(
-                f"message already sent this run (to {target['sent']}); do not send again"
+                f"message already sent this run (to {target.sent}); do not send again"
             )
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
-        session = target.get("session", "")
+        session = target.session
         if not session or not chat_id:
             return error("no active conversation context")
         if not url:
@@ -665,7 +660,7 @@ def send_image(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseT
             caption=caption,
         )
         delivered_to_self(chat_id, sent_id)
-        target["sent"] = chat_id
+        target.sent = chat_id
         return ok(chat=chat_id, url=url, mimetype=mimetype, caption=caption)
 
     return FunctionTool.from_defaults(
@@ -704,9 +699,7 @@ def infer_mimetype(name_or_url: str, curated: dict[str, str], default: str) -> s
     return guessed or default
 
 
-def send_file(
-    waha: WahaClient, max_file_bytes: int, _target: dict[str, str] | None = None
-) -> BaseTool:
+def send_file(waha: WahaClient, max_file_bytes: int) -> BaseTool:
     """Build a tool that sends a document (PDF, etc.) to a chat.
 
     Two sources, matching WAHA's ``sendFile`` file shapes: a public
@@ -736,14 +729,14 @@ def send_file(
                 send to the current chat.
         """
         target = current_target()
-        if target.get("sent"):
+        if target.sent:
             return error(
-                f"message already sent this run (to {target['sent']}); do not send again"
+                f"message already sent this run (to {target.sent}); do not send again"
             )
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
-        session = target.get("session", "")
+        session = target.session
         if not session or not chat_id:
             return error("no active conversation context")
         if bool(url) == bool(path):
@@ -755,7 +748,7 @@ def send_file(
             file["filename"] = filename
         sent_id = waha.send_file(session, chat_id, file=file, caption=caption or None)
         delivered_to_self(chat_id, sent_id)
-        target["sent"] = chat_id
+        target.sent = chat_id
         return ok(
             chat=chat_id,
             mimetype=file["mimetype"],
@@ -858,9 +851,7 @@ def fit_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def fetch_chat_messages(
-    waha: WahaClient, _target: dict[str, str] | None = None
-) -> BaseTool:
+def fetch_chat_messages(waha: WahaClient) -> BaseTool:
     """Build a tool that fetches recent messages from a chat."""
 
     def fetch_chat_messages_fn(chat: str | None = None, limit: int = 20) -> str:
@@ -875,7 +866,7 @@ def fetch_chat_messages(
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
-        session = target.get("session", "")
+        session = target.session
         if not session or not chat_id:
             return error("no active conversation context")
         messages = waha.fetch_chat_messages(session, chat_id, limit=limit)
@@ -899,7 +890,7 @@ def fetch_chat_messages(
     )
 
 
-def get_chat(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
+def get_chat(waha: WahaClient) -> BaseTool:
     """Build a tool that returns metadata about a chat."""
 
     def get_chat_fn(chat: str | None = None) -> str:
@@ -913,7 +904,7 @@ def get_chat(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseToo
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
-        session = target.get("session", "")
+        session = target.session
         if not session or not chat_id:
             return error("no active conversation context")
         overview = waha.get_chat_overview(session, chat_id)
@@ -1016,7 +1007,7 @@ def add_participant_summary(
     known name keep the bare JID so the model can still mention by id.
     """
     participants = roster_entries(overview)
-    if not isinstance(participants, list):
+    if not participants:
         return
     scalar["participants"] = len(participants)
     pairs = [
@@ -1028,25 +1019,6 @@ def add_participant_summary(
         scalar["participant_list"] = pairs
 
 
-def roster_entries(overview: dict[str, Any]) -> list[Any] | None:
-    """The participant list, wherever WAHA put it.
-
-    Engines differ: top level, under ``_chat``, or (LID groups) nested
-    inside ``_chat.groupMetadata.participants``; entries are plain JID
-    strings or ``{"id": {...}}`` objects.
-    """
-    blob = overview.get("_chat")
-    chat_blob: dict[str, Any] = blob if isinstance(blob, dict) else {}
-    for candidates in (
-        overview.get("participants"),
-        chat_blob.get("participants"),
-        chat_blob.get("groupMetadata", {}).get("participants"),
-    ):
-        if isinstance(candidates, list):
-            return candidates
-    return None
-
-
 def participant_jid(participant: Any) -> str:
     """The JID of one participant entry (string, ``{"id": ...}``, or JID object)."""
     if isinstance(participant, dict):
@@ -1055,7 +1027,7 @@ def participant_jid(participant: Any) -> str:
     return jid_string(participant)
 
 
-def search_messages(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
+def search_messages(waha: WahaClient) -> BaseTool:
     """Build a tool that searches recent messages for text."""
 
     def search_messages_fn(
@@ -1079,7 +1051,7 @@ def search_messages(waha: WahaClient, _target: dict[str, str] | None = None) -> 
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
-        session = target.get("session", "")
+        session = target.session
         if not session or not chat_id:
             return error("no active conversation context")
         messages = waha.search_messages(session, query, chat_id, limit=limit)
@@ -1105,7 +1077,7 @@ def search_messages(waha: WahaClient, _target: dict[str, str] | None = None) -> 
     )
 
 
-def resolve_chat(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
+def resolve_chat(waha: WahaClient) -> BaseTool:
     """Build a tool that resolves a person/group name to chat JIDs.
 
     The model knows chats by name ("send it to the group Familia") but
@@ -1129,7 +1101,7 @@ def resolve_chat(waha: WahaClient, _target: dict[str, str] | None = None) -> Bas
         target = current_target()
         if not operator_run(target):
             return error(_FENCE_ERROR)
-        session = target.get("session", "")
+        session = target.session
         if not session:
             return error("no active conversation context")
         if not name.strip():
@@ -1167,7 +1139,7 @@ def resolve_chat(waha: WahaClient, _target: dict[str, str] | None = None) -> Bas
 _RECENT_CHATS_CAP = 30
 
 
-def recent_chats(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
+def recent_chats(waha: WahaClient) -> BaseTool:
     """Build a tool that lists the most recent conversations.
 
     Operator commands only, like :func:`resolve_chat` — the chat list
@@ -1185,7 +1157,7 @@ def recent_chats(waha: WahaClient, _target: dict[str, str] | None = None) -> Bas
         target = current_target()
         if not operator_run(target):
             return error(_FENCE_ERROR)
-        session = target.get("session", "")
+        session = target.session
         if not session:
             return error("no active conversation context")
         try:
@@ -1241,7 +1213,7 @@ def search_matches(entries: list[dict[str, Any]], name: str) -> list[dict[str, A
     return (exact + partial)[:_RESOLVE_CHAT_CANDIDATES]
 
 
-def forward_message(waha: WahaClient, _target: dict[str, str] | None = None) -> BaseTool:
+def forward_message(waha: WahaClient) -> BaseTool:
     """Build a tool that forwards a message to a chat."""
 
     def forward_message_fn(message_id: str, chat: str | None = None) -> str:
@@ -1253,16 +1225,16 @@ def forward_message(waha: WahaClient, _target: dict[str, str] | None = None) -> 
                 only. Defaults to the current chat.
         """
         target = current_target()
-        if target.get("sent"):
+        if target.sent:
             return error(
-                f"message already sent this run (to {target['sent']}); do not send again"
+                f"message already sent this run (to {target.sent}); do not send again"
             )
         if not message_id:
             return error("message_id is required")
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
-        session = target.get("session", "")
+        session = target.session
         if not session or not chat_id:
             return error("no active conversation context")
         _, id_error = fenced_message_id(message_id, target)
@@ -1270,7 +1242,7 @@ def forward_message(waha: WahaClient, _target: dict[str, str] | None = None) -> 
             return error(id_error)
         sent_id = waha.forward_message(session, chat_id, message_id)
         delivered_to_self(chat_id, sent_id)
-        target["sent"] = chat_id
+        target.sent = chat_id
         return ok(message_id=message_id, chat=chat_id)
 
     return FunctionTool.from_defaults(

@@ -15,16 +15,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from llama_index.core.base.llms.types import (
-    ChatMessage,
-    ImageBlock,
-    MessageRole,
-    TextBlock,
-)
+from llama_index.core.base.llms.types import ImageBlock, TextBlock
 from llama_index.core.llms.function_calling import FunctionCallingLLM
 from loguru import logger
 
-from wahabot.ai.vision import clamp_caption_line
+from wahabot.ai.vision import caption_blocks
 
 __all__ = [
     "MAX_TRANSCRIPT_CHARS",
@@ -124,30 +119,17 @@ async def caption_video(
 ) -> str:
     """One-sentence description of the video from *frames*; "" on failure.
 
-    Same shape as ``vision.caption_image``: one user message, N
-    ImageBlocks + the prompt, first line clamped to
-    ``vision.MAX_CAPTION_CHARS``. A failed caption degrades the marker
-    to the bare ``(video)`` form while the frames still ride the first
-    LLM call. *semaphore* (the workflow's LLM gate) bounds this call
-    within the run's concurrency budget.
+    A failed caption degrades the marker to the bare ``(video)`` form
+    while the frames still ride the first LLM call.
     """
-    message = ChatMessage(
-        role=MessageRole.USER,
-        blocks=[ImageBlock(image=frame, image_mimetype="image/jpeg") for frame in frames]
+    return await caption_blocks(
+        llm,
+        [ImageBlock(image=frame, image_mimetype="image/jpeg") for frame in frames]
         + [TextBlock(text=VIDEO_CAPTION_PROMPT)],
+        timeout,
+        semaphore=semaphore,
+        kind="Video",
     )
-    try:
-        if semaphore is None:
-            response = await asyncio.wait_for(llm.achat([message]), timeout=timeout)
-        else:
-            async with semaphore:
-                response = await asyncio.wait_for(llm.achat([message]), timeout=timeout)
-    except Exception as exc:
-        logger.warning("Video caption failed (turn stays text-anchored): {exc}", exc=exc)
-        return ""
-    caption = clamp_caption_line(str(response.message.content or ""))
-    logger.info("Video caption: {caption!r}", caption=caption)
-    return caption
 
 
 def video_marker(caption: str, transcript: str) -> str:
