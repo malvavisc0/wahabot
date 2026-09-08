@@ -625,11 +625,20 @@ class FunctionCallingAgentWorkflow(Workflow):
         *skip_text* drops a post-delivery final text: it was never sent
         to the chat, and memory mirrors the chat — storing it would
         record words nobody saw.
+
+        Thinking models separate the reasoning block from the text with
+        a leading blank line inside the text block; that separator is
+        stripped before storage — it costs buffer tokens on every turn
+        and its recurrence teaches the model to keep emitting it.
         """
         memory = await ctx.store.get("memory")
-        has_text = bool(str(response.message.content or "").strip())
+        message = response.message
+        for block in message.blocks:
+            if isinstance(block, TextBlock) and block.text:
+                block.text = block.text.strip()
+        has_text = bool(str(message.content or "").strip())
         if tool_calls or (has_text and not skip_text):
-            await memory.aput(response.message)
+            await memory.aput(message)
         await ctx.store.set("memory", memory)
 
     async def collapse_delivery(self, ctx: Context) -> None:

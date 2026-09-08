@@ -808,3 +808,50 @@ def test_host_placeholder() -> None:
     assert rendered == f"Host info:\n{host_context()}"
     assert "Host: " in rendered
     assert "- Python: " in rendered
+
+
+def test_remember_strips_thinking_separator() -> None:
+    """``remember`` stores the reply text without the thinking separator.
+
+    Reasoning models split thinking from text with a leading blank line
+    inside the text block; memory must keep the words, not the
+    separator — the stored prefix costs tokens every turn and teaches
+    the model to keep emitting it.
+    """
+    import asyncio
+
+    from llama_index.core.base.llms.types import (
+        ChatMessage,
+        ChatResponse,
+        MessageRole,
+        TextBlock,
+        ThinkingBlock,
+    )
+    from llama_index.core.memory import ChatMemoryBuffer
+    from llama_index.core.workflow import Context
+
+    from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+
+    async def stored_texts() -> list[str]:
+        wf = FunctionCallingAgentWorkflow.__new__(FunctionCallingAgentWorkflow)
+        ctx = Context(wf)
+        await ctx.store.set("memory", ChatMemoryBuffer.from_defaults())
+        message = ChatMessage(
+            role=MessageRole.ASSISTANT,
+            blocks=[
+                ThinkingBlock(content="reasoning"),
+                TextBlock(text="\n\njaj real reply"),
+            ],
+        )
+        await FunctionCallingAgentWorkflow.remember(
+            wf, ctx, ChatResponse(message=message), []
+        )
+        memory = await ctx.store.get("memory")
+        return [
+            block.text or ""
+            for m in await memory.aget_all()
+            for block in m.blocks
+            if isinstance(block, TextBlock)
+        ]
+
+    assert asyncio.run(stored_texts()) == ["jaj real reply"]
