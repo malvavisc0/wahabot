@@ -28,6 +28,7 @@ from tests.harness import (
 )
 from wahabot.ai.context import render_system_prompt
 from wahabot.ai.messages import (
+    bot_jids,
     bot_mentioned,
     is_group_addressed,
     is_replyable,
@@ -822,6 +823,29 @@ def test_self_chat_command_classification() -> None:
         },
     )
     assert self_command_instruction(to_other, bot_name="kai") is None
+
+
+def test_bot_jids_falls_back_to_captured_identity() -> None:
+    """Events without a ``me`` block use the startup-captured identity."""
+    from wahabot.status import state as status_state
+
+    status_state.operator_jid = "491555000000@c.us"
+    status_state.operator_lid = "491555000000@lid"
+    thin = WahaEvent(
+        id="bj1",
+        timestamp=1,
+        event="message",
+        session=SESSION,
+        me=None,
+        payload={
+            "from": "491555000000@c.us",
+            "to": "491555000000@lid",
+            "fromMe": True,
+            "body": "kai do the thing",
+        },
+    )
+    assert self_command_instruction(thin, bot_name="kai") == "do the thing"
+    assert bot_jids(thin) == {"491555000000@c.us", "491555000000@lid"}
 
 
 def test_echo_tracking() -> None:

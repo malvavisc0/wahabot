@@ -188,9 +188,19 @@ def self_command_instruction(
 
 
 def bot_jids(event: WahaEvent) -> set[str]:
-    """The bot's own JIDs — its phone id and, when known, its LID."""
+    """The bot's own JIDs — its phone id and, when known, its LID.
+
+    Read from the event's ``me`` block; events without one fall back
+    to the identities captured from ``get_me`` at startup/recovery,
+    so mention and self-chat detection keep working on thin events.
+    """
     me = event.me or {}
-    return {jid_string(me[key]) for key in ("id", "lid") if me.get(key)}
+    ids = {jid_string(me[key]) for key in ("id", "lid") if me.get(key)}
+    if ids:
+        return ids
+    from wahabot.status import state
+
+    return {jid for jid in (state.operator_jid, state.operator_lid) if jid}
 
 
 def is_group_addressed(

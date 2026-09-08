@@ -1030,6 +1030,7 @@ def test_escalate_cooldown(bot: Bot) -> None:
 
 def test_escalate_fail_soft() -> None:
     ME_JID = "491555000000@c.us"
+    status_state.operator_jid = ME_JID
     failing_waha = RecordingWaha()
 
     def boom(*_args: object, **_kwargs: object) -> str:

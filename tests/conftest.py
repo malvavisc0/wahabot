@@ -26,6 +26,7 @@ import pytest
 
 import wahabot.settings as settings_module
 from tests.harness import (
+    ME_JID,
     SESSION,
     FakeLlm,
     RecordingWaha,
@@ -56,6 +57,9 @@ from wahabot.status import (
     register_session_status_handler,
     seed_health,
     set_session_health,
+)
+from wahabot.status import (
+    state as status_state,
 )
 
 
@@ -190,6 +194,8 @@ def _reset_registries() -> Iterator[None]:
     runs_contexts.clear()
     reset_albums()
     set_session_health("WORKING")
+    status_state.operator_jid = ME_JID
+    status_state.operator_lid = "491555000000@lid"
     yield
     reset_handlers()
     _echoes.clear()
@@ -199,6 +205,8 @@ def _reset_registries() -> Iterator[None]:
     _last_reaction_notes.clear()
     runs_contexts.clear()
     reset_albums()
+    status_state.operator_jid = ""
+    status_state.operator_lid = ""
 
 
 @pytest.fixture()

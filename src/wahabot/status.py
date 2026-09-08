@@ -95,6 +95,11 @@ def capture_operator_target(waha: WahaClient, session: str) -> None:
     if own:
         state.operator_jid = own
         state.operator_lid = str(me.get("lid") or "")
+        logger.info(
+            "Operator identity: jid={jid} lid={lid}",
+            jid=own,
+            lid=state.operator_lid or "unknown",
+        )
 
 
 def register_session_status_handler(waha: WahaClient, session: str) -> None:
