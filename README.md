@@ -1,8 +1,8 @@
 # wahabot
 
-A WhatsApp bot that answers chats with an LLM agent — one that *actually thinks*. It reads the conversation, decides what it needs, calls tools, reads the results, and only then replies. Built on the [WAHA](https://waha.devlike.pro) HTTP API behind a small FastAPI webhook.
+An agentic AI bot living in your WhatsApp — an LLM agent that *actually thinks*. It reads the conversation, decides what it needs, calls tools, reads the results, and only then replies. Built on the [WAHA](https://waha.devlike.pro) HTTP API behind a small FastAPI webhook.
 
-It hears voice notes. It sees photos and videos. It searches the web, checks stock prices, pulls YouTube transcripts, sends documents, reacts with emoji, escalates to a human when someone asks for one, and stays quiet when it has nothing to add — all without anyone saying "use a tool."
+It hears voice notes. It sees photos and videos. It searches the web, checks stock prices, pulls YouTube transcripts, sends documents, reacts with emoji, escalates to a human when someone asks for one, and stays quiet when it has nothing to add — all without anyone saying "use a tool." And it's yours to command from your own phone: message the bot's account and it runs your instruction with its full toolset — across chats, not just the one you're in.
 
 ```
 StartEvent ──► prepare_chat_history ──► InputEvent
@@ -40,7 +40,7 @@ Every tool answers with a small JSON envelope — `{"ok": true, ...}` or `{"ok":
 
 ## Talking to the bot
 
-`wahabot tell` gives the operator a direct line — not a chat message, a command:
+`wahabot tell` gives the operator a direct line — not a chat message, a command run by the same agent, with its full toolset:
 
 ```bash
 uv run wahabot tell "send a message to Ana: the deploy is done"
