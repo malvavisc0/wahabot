@@ -135,6 +135,11 @@ Per chat, the bot keeps a rolling conversation in memory:
   LRU-evicted chat (past 1000 live contexts) reloads from disk instead of
   starting blank. The load/save/restore implementation lives in
   `wahabot.core.persistence`; this section summarizes its behavior.
+- Memory is **continuity, not learning**: everything older than the
+  token budget is trimmed and forgotten — corrections, tone norms and
+  facts included. The planned learned-memory layer (rolling summary +
+  typed fact store injected into the system prompt) is specified in
+  `docs/plans/learned-memory.md`.
 - Messages the **operator sends from the bot's own WhatsApp account**
   (typing in the app, `fromMe` events) are folded into memory as
   assistant turns — the account's voice is the bot's voice, so the
