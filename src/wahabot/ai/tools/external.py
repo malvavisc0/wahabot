@@ -110,7 +110,10 @@ def visit_url_builder(settings: Settings) -> BaseTool:
         description=(
             "Fetch a web page and return a JSON envelope with its visible "
             "`text` (plus `status`, `truncated`). Use to read the content "
-            "of a specific URL."
+            "of a specific URL. This reads the page only — it cannot "
+            "watch videos or play media: for a reel/short/video link you "
+            "get the title, description and comments around it, so say "
+            "you read the page, never that you watched the video."
         ),
     )
 

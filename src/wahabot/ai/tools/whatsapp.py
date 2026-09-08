@@ -877,8 +877,11 @@ def fetch_chat_messages(waha: WahaClient) -> BaseTool:
         fn_schema=FetchChatMessagesSchema,
         name="fetch_chat_messages",
         description=(
-            "Fetch the most recent messages of the current chat. "
-            "Returns a JSON envelope with `messages` (each carrying its "
+            "Fetch the most recent messages of the current chat. Your "
+            "own conversation history already covers the recent turns — "
+            "call this only for message ids or media details you no "
+            "longer have, not to re-read what you already saw. Returns "
+            "a JSON envelope with `messages` (each carrying its "
             "serialized `id`, `body`, sender and media info): `count` is "
             "how many were found, `returned` how many fit (oldest are "
             "dropped when `truncated` is true — raise limit to look "
@@ -1067,7 +1070,10 @@ def search_messages(waha: WahaClient) -> BaseTool:
         name="search_messages",
         description=(
             "Search the current chat's recent messages for a text "
-            "substring in body, media filename or mimetype. Returns a "
+            "substring in body, media filename or mimetype. Check your "
+            "own conversation history first — this is for messages older "
+            "than what you remember, not for content already in "
+            "context. Returns a "
             "JSON envelope with matching `messages`: `count` is how "
             "many matched, `returned` how many fit (oldest are dropped "
             "when `truncated` is true). Operator commands may pass chat "
