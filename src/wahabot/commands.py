@@ -69,7 +69,9 @@ async def run_command(
     tool or stayed silent). A `wahabot tell` command logs it — the
     terminal has no chat to land in — while a self-chat command has
     the caller send it back to the operator's "message yourself" chat
-    via ``reply_chat_id``.
+    via ``reply_chat_id``. When the run delivered via a tool instead,
+    the caller gets a short delivered-notice so the console is never
+    silent about where the answer went.
     """
     instruction = str(event.payload.get("body", "")).strip()
     if not instruction:
@@ -87,11 +89,13 @@ async def run_command(
             # channel; the fence in the WhatsApp tools opens for this run
             # alone (the arming flag rides the run's own target binding,
             # so a concurrent chat run can never inherit it).
-            reply, _target = await handle_message(
+            reply, target = await handle_message(
                 event, agent, ctx=ctx, settings=settings, waha=waha, armed=True
             )
         await persist_memory(settings, event.session, OPERATOR_CHAT_ID, ctx)
     reply = (reply or "").strip()
+    if not reply and target.sent and target.sent != OPERATOR_CHAT_ID:
+        reply = f"✅ done — delivered to {target.sent}"
     if reply:
         logger.info(
             "Command {id} final reply: {reply}",

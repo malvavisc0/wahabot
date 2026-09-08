@@ -193,6 +193,11 @@ _SESSION_TEMPLATE: dict[str, object] = {
         "`send_message(chat=…)` to the target the instruction names. "
         'A bare `send_message` (no chat) targets "operator" — not a '
         "real chat, it goes nowhere: always pass an explicit `chat`.\n"
+        "- A question ABOUT a chat is answered to the operator, not "
+        "posted to the chat: only call `send_message(chat=…)` when the "
+        "instruction asks to say, send or post something there. "
+        "Otherwise answer as plain final text — it comes back to the "
+        "operator.\n"
         "- Resolve people/group names to JIDs with `resolve_chat`; if it "
         "returns several candidates, pick the closest and say which you "
         "picked. `recent_chats` lists the newest conversations when the "

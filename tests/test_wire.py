@@ -1000,6 +1000,23 @@ def test_self_chat_command(bot: Bot) -> None:
     ]
     assert any("[operator command] lid linked command" in t for t in lid_turns)
 
+    # A command that delivers via a tool still acknowledges in the
+    # self-chat — the console is never silent about where it went.
+    llm.clear()
+    bot.waha.sent.clear()
+    llm.override = tool_call_response(
+        "send_message",
+        {"text": "smoke reply one", "chat": CHAT_ID},
+        call_id="call_cmd_self5",
+        response_id="chatcmpl-smoke-cmd-self5",
+        created=1788525841,
+    )
+    bot.post(self_event("kai send the plan to the group", "SELF5"))
+    assert _wait(lambda: len(bot.waha.sent) >= 2)
+    assert (SESSION, CHAT_ID, "smoke reply one", None) in bot.waha.sent
+    notice = [s for s in bot.waha.sent if s[1] == ME_JID]
+    assert len(notice) == 1 and "delivered to" in notice[0][2] and CHAT_ID in notice[0][2]
+
 
 def test_escalate_delivery(bot: Bot) -> None:
     llm = bot.stack.llm
