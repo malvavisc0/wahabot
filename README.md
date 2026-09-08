@@ -47,7 +47,7 @@ uv run wahabot tell "send a message to Ana: the deploy is done"
 uv run wahabot tell "search the latest news about elon musk and send a summary to the group Familia"
 ```
 
-The agent runs the instruction with its full toolset on a fresh context. No whitelist applies, no chat history is touched, and names resolve to the right person or group automatically. The result lands in WhatsApp, not in your terminal.
+The agent runs the instruction with its full toolset over the operator's own rolling history — commands share one conversation, so follow-ups ("now send that to the second group") work without restating context. No whitelist applies, no chat's history is touched, and names resolve to the right person or group automatically. The result lands in WhatsApp, not in your terminal.
 
 You can send the same kind of command from WhatsApp by messaging the bot's own account, using its configured mention pattern:
 
@@ -55,7 +55,7 @@ You can send the same kind of command from WhatsApp by messaging the bot's own a
 kAI do this and send a message to Roy
 ```
 
-Only a matching message sent to the bot's own self-chat is treated this way — the bot's reply comes back as a quote-reply in that same chat. Messages you type from the bot account in other chats remain memory-only, and the bot never re-triggers on its own replies.
+Only a matching message sent to the bot's own self-chat is treated this way — the bot's reply comes back as a quote-reply in that same chat. A voice note works too: speak "kAI do this…" and it transcribes and runs like the typed command. Messages you type from the bot account in other chats remain memory-only, and the bot never re-triggers on its own replies.
 
 Chat participants have one sanctioned way to reach you: the `escalate` tool. When someone asks for a human, reports a problem, or complains about the bot, it forwards a bot-written report to your self-chat — once per chat per hour, never pasting the person's words (so hidden instructions can't ride the channel).
 

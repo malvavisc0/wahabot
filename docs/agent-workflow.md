@@ -304,7 +304,11 @@ logged and skipped, never fatal for the turn.
 When `WAHABOT_TRANSCRIBE_URL` points at a WhisperX service, voice notes
 are transcribed to text **before** the agent run, so a note behaves
 exactly like typed input (gating, memory, reply, silence filters all
-apply unchanged). `message_kind` maps the WEBJS voice-note type `ptt`
+apply unchanged) — with one exception: a voice note in the operator's
+**self-chat** transcribes ahead of the gates, so a spoken "kai do x"
+runs as an operator command (the console is trusted — only the
+operator's own devices can post there; everywhere else transcription
+stays behind the whitelist). `message_kind` maps the WEBJS voice-note type `ptt`
 (and the audio-file type `audio`) to `audio`; `core/transcribe.py`
 downloads the `media.url` bytes (capped by `WAHABOT_MAX_AUDIO_BYTES`),
 POSTs them to `{transcribe_url}/transcribe` and joins the returned
