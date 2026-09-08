@@ -59,7 +59,7 @@ from wahabot.cli import build_forget_event
 from wahabot.commands import build_command_event
 from wahabot.core.echoes import remember_self_echo
 from wahabot.core.persistence import load_memory, memory_file
-from wahabot.handlers import contexts as handlers_contexts
+from wahabot.core.runs import contexts as handlers_contexts
 from wahabot.handlers import seen_recently
 from wahabot.reactions import forget_reaction_notes as _forget_notes
 from wahabot.status import state as status_state
@@ -534,6 +534,68 @@ def test_operator_command(bot: Bot) -> None:
     assert bot.waha.sent == [(SESSION, CHAT_ID, "smoke reply one", None)]
 
 
+def test_operator_history_shared_across_commands(bot: Bot) -> None:
+    """Commands share one rolling history: turn two sees turn one."""
+    llm = bot.stack.llm
+    llm.override = None
+    bot.post(build_command_event(SESSION, "first command context"))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    llm.requests.clear()
+    bot.post(build_command_event(SESSION, "second command"))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    first_turns = [
+        str(m.get("content", ""))
+        for m in llm.requests[0]["messages"]
+        if m.get("role") == "user"
+    ]
+    assert any("[operator command] first command context" in t for t in first_turns), (
+        "second command must see the first turn in its history"
+    )
+    # One shared context key, persisted like a chat's memory.
+    assert (SESSION, "operator") in handlers_contexts
+    assert memory_file(bot.settings.data_dir, SESSION, "operator").exists()
+
+
+def test_operator_history_survives_eviction(bot: Bot) -> None:
+    """An LRU-evicted operator context reloads from disk, not blank."""
+    llm = bot.stack.llm
+    llm.override = None
+    bot.post(build_command_event(SESSION, "persisted operator turn"))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    handlers_contexts.pop((SESSION, "operator"), None)
+    llm.requests.clear()
+    bot.post(build_command_event(SESSION, "after eviction"))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    restored_users = [
+        str(m.get("content", ""))
+        for m in llm.requests[0]["messages"]
+        if m.get("role") == "user"
+    ]
+    assert any("persisted operator turn" in t for t in restored_users)
+
+
+def test_operator_forget(bot: Bot) -> None:
+    """``wahabot forget operator`` wipes the shared command history."""
+    llm = bot.stack.llm
+    llm.override = None
+    bot.post(build_command_event(SESSION, "forgettable operator turn"))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    mem_path = memory_file(bot.settings.data_dir, SESSION, "operator")
+    assert mem_path.exists()
+    bot.post(build_forget_event(SESSION, "operator"))
+    assert (SESSION, "operator") not in handlers_contexts
+    assert not mem_path.exists()
+    llm.requests.clear()
+    bot.post(build_command_event(SESSION, "after forget"))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    post_forget_users = [
+        str(m.get("content", ""))
+        for m in llm.requests[0]["messages"]
+        if m.get("role") == "user"
+    ]
+    assert not any("forgettable operator turn" in t for t in post_forget_users)
+
+
 def test_cross_chat_fence_refusal(bot: Bot) -> None:
     llm = bot.stack.llm
     llm.override = FenceRefusalResponse
@@ -743,7 +805,7 @@ def test_persistent_memory_roundtrip_wire(bot: Bot) -> None:
     assert "smoke reply one" in persisted_contents()
 
     # Restore-on-miss.
-    from wahabot.handlers import contexts as ctxs
+    from wahabot.core.runs import contexts as ctxs
 
     ctxs.pop((SESSION, PC), None)
     assert (SESSION, PC) not in ctxs

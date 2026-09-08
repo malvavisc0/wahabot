@@ -3,8 +3,7 @@
 import asyncio
 import io
 import time
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Callable
 from typing import Any, cast
 
 import openai
@@ -43,7 +42,7 @@ from wahabot.core.cache import TtlCache
 from wahabot.core.echoes import is_self_echo, remember_self_echo
 from wahabot.core.filters import chat_allowed, jid_alias_lookup
 from wahabot.core.models import WahaEvent
-from wahabot.core.persistence import forget_memory, load_memory, save_memory
+from wahabot.core.persistence import forget_memory
 from wahabot.core.transcribe import fetch_transcript, transcribe_voice_note
 from wahabot.core.waha import MediaTooLargeError, WahaClient
 from wahabot.settings import Settings
@@ -62,56 +61,16 @@ _SEE_TTL_S = _MAX_MESSAGE_AGE_S
 #: Seen-id cache hard cap; past it the oldest entries are evicted.
 _MAX_SEEN_IDS = 10_000
 _seen_ids: TtlCache[str, bool] = TtlCache(_SEE_TTL_S, _MAX_SEEN_IDS)
-#: Keep at most this many per-chat agent contexts; least recently used
-#: chats are evicted (their conversation memory is dropped).
-_MAX_CONTEXTS = 1000
-contexts: dict[tuple[str, str], Context] = {}
 
-#: Per-chat run serialization: runs in DIFFERENT chats proceed in
-#: parallel (a slow group turn never delays a DM), while two runs in
-#: the SAME chat queue — they share one memory buffer and one
-#: conversation timeline, so interleaving them would corrupt both.
-#: Keyed like ``contexts``; command runs take no chat lock at all.
-_chat_locks: dict[tuple[str, str], asyncio.Lock] = {}
-#: Acquisitions in flight per key (queued or holding). ``Lock.locked``
-#: is already False in the window between ``release()`` and the queued
-#: waiter actually resuming, so a lock with a waiter would look
-#: evictable there — the pending count is the only witness.
-_chat_lock_pending: dict[tuple[str, str], int] = {}
-_MAX_CHAT_LOCKS = 1000
-
-
-@asynccontextmanager
-async def chat_lock(session: str, chat_id: str) -> AsyncIterator[None]:
-    """Serialize agent runs for one chat (``async with chat_lock(…)``).
-
-    Eviction keeps the table bounded, idle entries going oldest-first;
-    a held or waited-on lock is never evicted (the waiter-window
-    invariant, see docs/agent-workflow.md). When every entry is busy
-    the table may temporarily exceed its cap rather than spin — the
-    cap is a memory bound, not an invariant.
-    """
-    key = (session, chat_id)
-    lock = _chat_locks.pop(key, None)
-    if lock is None:
-        lock = asyncio.Lock()
-    _chat_locks[key] = lock
-    _chat_lock_pending[key] = _chat_lock_pending.get(key, 0) + 1
-    for oldest in list(_chat_locks):
-        if len(_chat_locks) <= _MAX_CHAT_LOCKS:
-            break
-        if _chat_locks[oldest].locked() or _chat_lock_pending.get(oldest, 0):
-            continue
-        del _chat_locks[oldest]
-    try:
-        async with lock:
-            yield
-    finally:
-        pending = _chat_lock_pending.get(key, 0) - 1
-        if pending > 0:
-            _chat_lock_pending[key] = pending
-        else:
-            _chat_lock_pending.pop(key, None)
+#: Per-chat context table, run locks and persistence moved to
+#: ``wahabot.core.runs`` (imported by the command path too); the names
+#: are re-exported here so every existing import keeps working.
+from wahabot.core.runs import (  # noqa: E402
+    chat_lock,
+    context_for,
+    contexts,
+    persist_memory,
+)
 
 
 def seen_recently(message_id: str) -> bool:
@@ -130,56 +89,6 @@ def seen_recently(message_id: str) -> bool:
 def forget_seen(message_id: str) -> None:
     """Drop a message id's seen marker so a redelivery is reprocessed."""
     _seen_ids.drop(message_id)
-
-
-async def context_for(
-    session: str,
-    chat_id: str,
-    agent: FunctionCallingAgentWorkflow,
-    settings: Settings,
-) -> Context:
-    """The per-chat agent context, evicting stale chats past the cap.
-
-    Every touch moves the chat to the end (most recently used);
-    inserts past the cap drop the oldest entry. On a miss the chat's
-    memory is lazily restored from disk (when persistence is on), so an
-    LRU-evicted chat reloads its history instead of starting blank.
-    """
-    key = (session, chat_id)
-    ctx = contexts.pop(key, None)
-    if ctx is None:
-        ctx = Context(agent)
-        if settings.memory_persist:
-            memory = load_memory(settings.data_dir, session, chat_id)
-            if memory is not None:
-                await ctx.store.set("memory", memory)
-                logger.info(
-                    "Restored memory for {chat_id}: {count} messages",
-                    chat_id=chat_id,
-                    count=len(memory.get_all()),
-                )
-    contexts[key] = ctx
-    while len(contexts) > _MAX_CONTEXTS:
-        oldest = next(iter(contexts))
-        del contexts[oldest]
-    return ctx
-
-
-async def persist_memory(
-    settings: Settings, session: str, chat_id: str, ctx: Context
-) -> None:
-    """Write the chat's run-end buffer to disk; a no-op when disabled.
-
-    The buffer is the coherent snapshot of a run (sanitized, trimmed,
-    delivery groups collapsed). Write failures are logged and swallowed
-    inside ``save_memory`` so a disk problem never breaks a reply.
-    """
-    if not settings.memory_persist:
-        return
-    memory = await ctx.store.get("memory", default=None)
-    if memory is None:
-        return
-    save_memory(settings.data_dir, session, chat_id, memory)
 
 
 async def append_to_memory(
@@ -637,7 +546,7 @@ def register_agent_handler(
         )
         if instruction:
             # A self-chat mention is the WhatsApp equivalent of `wahabot
-            # tell`: fresh operator context, chat gates bypassed. The
+            # tell`: shared operator context, chat gates bypassed. The
             # reply lands in the same self-chat so the operator sees it
             # on their phone, and its id is marked as run output so the
             # echo event cannot re-trigger the command path.

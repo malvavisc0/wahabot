@@ -37,6 +37,7 @@ from wahabot.ai.messages import (
     self_command_instruction,
     video_media,
 )
+from wahabot.ai.observability import _mask_value  # pyright: ignore[reportPrivateUsage]
 from wahabot.ai.tools.whatsapp import (
     _DOC_MIME_BY_EXT as DOC_MIME_BY_EXT,  # pyright: ignore[reportPrivateUsage]
 )
@@ -53,6 +54,7 @@ from wahabot.ai.tools.whatsapp import (
     infer_mimetype,
     local_file,
     participant_jid,
+    probe_media_url,
     remote_file,
     roster_entries,
     search_matches,
@@ -494,6 +496,52 @@ def test_send_file_payloads() -> None:
         assert base64.b64decode(local["data"]) == b"%PDF-1.4 smoke bytes"
         assert isinstance(local_file(str(pdf), max_file_bytes=4), str)
         assert isinstance(local_file(str(Path(tmpdir) / "missing.pdf"), 1024), str)
+
+
+def test_probe_media_url_refuses_malformed() -> None:
+    assert "not an http(s) URL" in (probe_media_url("not a url") or "")
+    assert "not an http(s) URL" in (probe_media_url("ftp://x/y.png") or "")
+
+
+def test_probe_media_url_refuses_missing() -> None:
+    """A definitive 404 refuses the send — the URL was likely invented."""
+    gone = unittest.mock.Mock(status_code=404)
+    with (
+        unittest.mock.patch.object(httpx, "head", return_value=gone),
+        unittest.mock.patch.object(httpx, "get", return_value=gone),
+    ):
+        error = probe_media_url("https://x.invalid/pic.png")
+    assert error is not None and "does not exist" in error
+
+
+def test_probe_media_url_soft_fails_offline() -> None:
+    """Connection errors leave the send to WAHA (soft fail), never refuse."""
+    with unittest.mock.patch.object(
+        httpx, "head", side_effect=httpx.ConnectError("dns gone")
+    ):
+        assert probe_media_url("http://files.invalid/q3/report.pdf") is None
+
+
+def test_probe_media_url_allows_live() -> None:
+    probe_ok = unittest.mock.Mock(status_code=200)
+    with unittest.mock.patch.object(httpx, "head", return_value=probe_ok):
+        assert probe_media_url("https://cdn.example.org/pic.png") is None
+
+
+def test_mask_value_redacts_all_jid_forms() -> None:
+    """c.us, g.us and lid addresses must all be masked — lid is PII too."""
+    assert _mask_value("491555000000@c.us") == "[jid redacted]"
+    assert _mask_value("491555000000@lid") == "[jid redacted]"
+    assert _mask_value("120363000000000000@g.us") == "[jid redacted]"
+    assert _mask_value("4915151503271-1630682381@g.us") == "[jid redacted]"
+    assert _mask_value("status@broadcast") == "[jid redacted]"
+    masked = _mask_value("chat with 491555000000@lid about 491555000001@c.us")
+    assert "491555000000" not in masked and "491555000001" not in masked
+    assert _mask_value("no identifiers here") == "no identifiers here"
+    assert _mask_value(["491555000002@lid", {"id": "491555000003@lid"}]) == [
+        "[jid redacted]",
+        {"id": "[jid redacted]"},
+    ]
 
 
 def test_command_holder_bare_send_target() -> None:

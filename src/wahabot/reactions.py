@@ -30,8 +30,9 @@ from wahabot.ai.messages import REACTION_TARGET_KWARG
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.jid import chat_from_message_id, is_own_message_id
 from wahabot.core.models import WahaEvent
+from wahabot.core.runs import chat_lock, context_for, persist_memory
 from wahabot.core.waha import WahaClient
-from wahabot.handlers import append_to_memory, chat_lock, context_for, persist_memory
+from wahabot.handlers import append_to_memory
 from wahabot.settings import Settings
 from wahabot.webhook import on_reaction
 
