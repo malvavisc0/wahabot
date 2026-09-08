@@ -28,13 +28,16 @@ _MIN_MAX_OUTPUT = 200
 _GRACE_SECONDS = 1.0
 _KILL_WAIT_SECONDS = 2.0
 _READ_CHUNK = 65536
-_SHELL = "/bin/sh"
+#: The shell every ``run_shell_command`` call executes through. Public:
+#: ``core.host`` reports it in the ``{{host}}`` block so the prompt's
+#: claim and the tool's behavior cannot drift apart.
+SHELL = "/bin/bash"
 
 
 def shell_command(settings: Settings, command: str) -> str:
     """Run a shell command and return its result as a JSON envelope.
 
-    The command runs through ``/bin/sh`` so pipes, redirection and the
+    The command runs through ``/bin/bash`` so pipes, redirection and the
     usual shell features work; stdin is closed so a command that reads
     it cannot hang. Capture is bounded: reader threads stop collecting
     past ``settings.shell_max_output`` bytes per stream, so a flooding
@@ -53,7 +56,7 @@ def shell_command(settings: Settings, command: str) -> str:
         proc = subprocess.Popen(
             command,
             shell=True,
-            executable=_SHELL,
+            executable=SHELL,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

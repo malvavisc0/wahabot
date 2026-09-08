@@ -1,10 +1,11 @@
 """Snapshot of the machine the bot runs on, for the ``{{host}}`` placeholder."""
 
-import os
 import platform
 import shutil
 import subprocess
 from functools import cache
+
+from wahabot.ai.tools.shell import SHELL
 
 
 @cache
@@ -69,13 +70,12 @@ def host_context() -> str:
     python = f"Python {platform.python_version()} ({platform.python_implementation()})"
     py_path = shutil.which("python") or shutil.which("python3") or "unknown"
     node = version_of("node", "v")
-    shell = os.environ.get("SHELL") or shutil.which("sh") or "unknown"
     os_name = os_release_field("PRETTY_NAME=") or uname_pretty()
     lines = [
         f"Host: {uname_pretty()}",
         f"- OS: {os_name}",
         f"- Python: {python} at {py_path}",
         f"- Node: {node}",
-        f"- Shell: {shell}",
+        f"- Shell: {SHELL} (what run_shell_command uses)",
     ]
     return "\n".join(lines)
