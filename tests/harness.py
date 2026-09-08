@@ -470,7 +470,7 @@ class RecordingWaha(WahaClient):
     @override
     def get_me(self, session: str) -> dict[str, Any]:
         """Own identity for the operator-notification target."""
-        return {"id": ME_JID, "pushname": "kai"}
+        return {"id": ME_JID, "lid": "491555000000@lid", "pushname": "kai"}
 
     @override
     def download_media(self, url: str, max_bytes: int | None = None) -> bytes:

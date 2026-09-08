@@ -30,6 +30,7 @@ class SessionState:
 
     healthy: bool = True
     operator_jid: str = ""
+    operator_lid: str = ""
 
 
 state = SessionState()
@@ -93,6 +94,7 @@ def capture_operator_target(waha: WahaClient, session: str) -> None:
     own = str(me.get("id") or "")
     if own:
         state.operator_jid = own
+        state.operator_lid = str(me.get("lid") or "")
 
 
 def register_session_status_handler(waha: WahaClient, session: str) -> None:

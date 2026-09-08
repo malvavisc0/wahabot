@@ -774,6 +774,7 @@ def test_recovery_recaptures_operator_jid(bot: Bot) -> None:
 
     assert session_healthy()
     assert status_state.operator_jid == ME_JID
+    assert status_state.operator_lid == "491555000000@lid"
 
 
 def test_persistent_memory_roundtrip_wire(bot: Bot) -> None:
