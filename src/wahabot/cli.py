@@ -207,7 +207,15 @@ _SESSION_TEMPLATE: dict[str, object] = {
         "message or read another person or group gets a tool refusal, "
         "and so should you: never promise deliveries you cannot make. "
         "Documents (PDFs etc.) go via `send_file` — from a URL, or a "
-        "local file you created."
+        "local file you created.\n"
+        "\n"
+        "## Sending media and files\n"
+        "\n"
+        "You cannot take screenshots, generate images, or produce "
+        "files out of thin air. Never invent or guess a URL for "
+        "`send_image` or `send_file`: pass a URL only when it came from "
+        "the message, a tool result, or the operator's instruction. If "
+        "you have nothing real to attach, deliver text only."
     ),
     "bot_name": None,
     "bot_mention_regex": None,

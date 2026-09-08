@@ -24,6 +24,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
 from llama_index.core.tools import BaseTool, FunctionTool
 from loguru import logger
 
@@ -66,6 +67,7 @@ __all__ = [
     "infer_mimetype",
     "operator_run",
     "participant_jid",
+    "probe_media_url",
     "react_to_message",
     "recent_chats",
     "reset_target",
@@ -110,6 +112,67 @@ _DOC_MIME_BY_EXT: dict[str, str] = {
     ".zip": "application/zip",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
+
+#: Seconds to spend probing a media URL before sending it. Fabricated or
+#: dead links fail here instead of delivering a broken image/document.
+_URL_PROBE_TIMEOUT_S = 10.0
+
+#: Who we claim to be when probing; some CDNs refuse empty defaults.
+_PROBE_USER_AGENT = "wahabot/0.6"
+
+
+def probe_media_url(url: str) -> str | None:
+    """Check that *url* is a fetchable http(s) link; None when it is.
+
+    A pre-send gate for `send_image`/`send_file`: models sometimes
+    hallucinate media URLs (an "attached screenshot" that never
+    existed), and a made-up link must not reach a chat. Falls back to
+    GET when a HEAD is refused, mirroring what WAHA itself will do
+    moments later. Returns an error message on failure.
+
+    Soft-fail by design: connection/timeout errors only warn — WAHA
+    may still fetch the URL fine (different network path, transient
+    DNS) — while a definitive "not found" (404/410) refuses the send.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return f"not a valid URL: {url}"
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return f"not an http(s) URL: {url}"
+    try:
+        response = httpx.head(
+            url,
+            timeout=_URL_PROBE_TIMEOUT_S,
+            follow_redirects=True,
+            headers={"User-Agent": _PROBE_USER_AGENT},
+        )
+        if 400 <= response.status_code < 405:
+            # Some servers refuse HEAD — verify with the real verb.
+            response = httpx.get(
+                url,
+                timeout=_URL_PROBE_TIMEOUT_S,
+                follow_redirects=True,
+                headers={"User-Agent": _PROBE_USER_AGENT},
+            )
+        if response.status_code in (404, 410):
+            return (
+                f"URL does not exist (HTTP {response.status_code}); "
+                "do not guess media URLs"
+            )
+        if response.status_code >= 400:
+            logger.warning(
+                "Media URL probe got HTTP {code} for {url}; leaving the send to WAHA",
+                code=response.status_code,
+                url=url,
+            )
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "Media URL probe failed for {url} ({exc}); leaving the send to WAHA",
+            url=url,
+            exc=exc,
+        )
+    return None
 
 
 def chat_jid(chat: str | None, target: RunTarget | dict[str, str]) -> str:
@@ -652,6 +715,9 @@ def send_image(waha: WahaClient) -> BaseTool:
             return error("no active conversation context")
         if not url:
             return error("url is required")
+        probe_error = probe_media_url(url)
+        if probe_error:
+            return error(probe_error)
         mimetype = infer_image_mimetype(url)
         sent_id = waha.send_image(
             session,
@@ -669,9 +735,11 @@ def send_image(waha: WahaClient) -> BaseTool:
         name="send_image",
         description=(
             "Send an image to the current WhatsApp chat from a public "
-            "URL. caption is optional. Operator commands may pass chat "
-            "to reach the target the instruction names; chat runs must "
-            "omit it."
+            "URL. The URL must come from the message, a tool result, "
+            "or the operator's instruction — never invented or guessed; "
+            "unfetchable links are refused. caption is optional. "
+            "Operator commands may pass chat to reach the target the "
+            "instruction names; chat runs must omit it."
         ),
     )
 
@@ -741,6 +809,10 @@ def send_file(waha: WahaClient, max_file_bytes: int) -> BaseTool:
             return error("no active conversation context")
         if bool(url) == bool(path):
             return error("pass exactly one of url or path")
+        if url:
+            probe_error = probe_media_url(str(url))
+            if probe_error:
+                return error(probe_error)
         file = remote_file(str(url)) if url else local_file(str(path), max_file_bytes)
         if isinstance(file, str):
             return error(file)
@@ -763,9 +835,12 @@ def send_file(waha: WahaClient, max_file_bytes: int) -> BaseTool:
         description=(
             "Send a document (PDF, etc.) to the current WhatsApp chat — "
             "from a public url, or a local path for files you created. "
-            "caption and filename are optional. Operator commands may "
-            "pass chat to reach the target the instruction names; chat "
-            "runs must omit it. Send at most once per run."
+            "A URL must come from the message, a tool result, or the "
+            "operator's instruction — never invented or guessed; "
+            "unfetchable links are refused. caption and filename are "
+            "optional. Operator commands may pass chat to reach the "
+            "target the instruction names; chat runs must omit it. "
+            "Send at most once per run."
         ),
     )
 
