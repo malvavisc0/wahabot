@@ -40,6 +40,7 @@ from wahabot.ai.tools.schemas import (
 from wahabot.core.waha import WahaClient
 
 __all__ = [
+    "OPERATOR_ARMED",
     "chat_jid",
     "fenced_chat",
     "fenced_message_id",
@@ -52,6 +53,7 @@ __all__ = [
     "react_to_message",
     "resolve_chat",
     "roster_entries",
+    "same_chat",
     "search_matches",
     "search_messages",
     "send_file",
@@ -99,6 +101,11 @@ def chat_jid(chat: str | None, target: dict[str, str]) -> str:
     scraped from a ``[message id: …]`` annotation) instead of a bare
     JID — strip the ``false_``/``true_`` sender prefix and anything
     after the JID so the call still lands in the right chat.
+
+    The split on the first ``_`` assumes the JID itself carries no
+    underscore; WhatsApp JIDs never do (user ids are digits, group ids
+    digits-dash-digits), so this is a safe shortcut rather than a full
+    serialized-id parser.
     """
     value = chat or target.get("chat_id", "")
     for prefix in ("false_", "true_"):
@@ -108,8 +115,47 @@ def chat_jid(chat: str | None, target: dict[str, str]) -> str:
     return value.split("_")[0] if "@" in value.split("_")[0] else value
 
 
-#: Holder key set (only) on operator-command runs; empty on chat runs.
+#: Server domains WhatsApp uses interchangeably for one person's JID
+#: (the phone-number identity). Group (``@g.us``) and broadcast JIDs
+#: are never aliased, so they compare by exact string.
+_PERSON_JID_DOMAINS = ("c.us", "s.whatsapp.net", "lid")
+
+
+def same_chat(a: str, b: str) -> bool:
+    """True when two JIDs name the same chat.
+
+    WAHA reports a person's chat as ``<phone>@c.us`` in some payloads
+    and ``<phone>@lid`` (linked-device id) or the classic
+    ``<phone>@s.whatsapp.net`` in others; comparing raw strings would
+    fence the current chat against itself. Person JIDs compare on
+    user id when both domains are interchangeable; every other shape
+    (groups, broadcasts, unknown domains) falls back to exact
+    equality. Failing closed — a false refusal — is the safe
+    direction for the fence.
+    """
+    if a == b:
+        return True
+    a_user, _, a_domain = a.partition("@")
+    b_user, _, b_domain = b.partition("@")
+    if not a_user or not b_user:
+        return False
+    return (
+        a_user == b_user
+        and a_domain in _PERSON_JID_DOMAINS
+        and b_domain in _PERSON_JID_DOMAINS
+    )
+
+
+#: Holder key set (only) on operator-command runs; chat runs store the
+#: empty string. The holder is typed ``dict[str, str]``, so the armed
+#: value is a constant rather than a bare ``"1"`` — a future edit that
+#: writes any other string (or a leftover value) cannot accidentally
+#: pass the truthiness gate.
 OPERATOR_KEY = "operator"
+
+#: The one value that arms the operator flag. ``operator_run`` compares
+#: against it by identity of content, not truthiness.
+OPERATOR_ARMED = "armed"
 
 
 def operator_run(target: dict[str, str]) -> bool:
@@ -122,7 +168,7 @@ def operator_run(target: dict[str, str]) -> bool:
     The HMAC-signed operator channel is the only trusted source of
     cross-chat intent, so the fence opens for it alone.
     """
-    return bool(target.get(OPERATOR_KEY))
+    return target.get(OPERATOR_KEY) == OPERATOR_ARMED
 
 
 #: The refusal envelope text for a chat run aiming outside its chat.
@@ -160,7 +206,7 @@ def fenced_chat(
     if not chat:
         return current, None
     resolved = chat_jid(chat, target)
-    if resolved == current:
+    if same_chat(resolved, current):
         return current, None
     if "@" not in resolved:
         logger.warning(
@@ -177,8 +223,10 @@ def fenced_chat(
     return None, _FENCE_ERROR
 
 
-def fenced_message_id(message_id: str, target: dict[str, str]) -> str | None:
-    """*message_id* when its chat is the current one, else None.
+def fenced_message_id(
+    message_id: str, target: dict[str, str]
+) -> tuple[str | None, str | None]:
+    """The ``(message_id, error)`` a tool call may act on — one is set.
 
     A serialized WhatsApp id embeds its chat's JID as the second
     segment (``false_<jid>_<msgid>``); reads, reactions, quotes and
@@ -189,20 +237,24 @@ def fenced_message_id(message_id: str, target: dict[str, str]) -> str | None:
     foreign formats, engine quirks — are allowed through: WAHA
     validates ids server-side, and refusing unknown shapes would fence
     the current chat's own messages too.
+
+    Returning the error (not just ``None``) lets every call site log
+    and surface the same specific refusal, so the audit trail does not
+    depend on which tool caught the id.
     """
     if operator_run(target):
-        return message_id
+        return message_id, None
     embedded = chat_jid(message_id, {"chat_id": ""})
     if not embedded or "@" not in embedded:
-        return message_id
-    if embedded == target.get("chat_id", ""):
-        return message_id
+        return message_id, None
+    if same_chat(embedded, target.get("chat_id", "")):
+        return message_id, None
     logger.warning(
         "Refused cross-chat message id {id} from chat run in {current}",
         id=message_id,
         current=target.get("chat_id", ""),
     )
-    return None
+    return None, _FENCE_ERROR
 
 
 def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
@@ -251,8 +303,10 @@ def send_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
         session = target.get("session", "")
         if not session or not chat_id:
             return error("no active conversation context")
-        if reply_to and fenced_message_id(reply_to, target) is None:
-            return error(_FENCE_ERROR)
+        if reply_to:
+            _, id_error = fenced_message_id(reply_to, target)
+            if id_error:
+                return error(id_error)
         waha.send_text(session, chat_id, text, reply_to=reply_to, mentions=mentions)
         target["sent"] = chat_id
         fields: dict[str, Any] = {
@@ -333,8 +387,9 @@ def react_to_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             return error("no active conversation context")
         if not message_id:
             return error("message_id is required")
-        if fenced_message_id(message_id, target) is None:
-            return error(_FENCE_ERROR)
+        _, id_error = fenced_message_id(message_id, target)
+        if id_error:
+            return error(id_error)
         waha.send_reaction(session, message_id, reaction)
         target["reacted"] = message_id
         return ok(message_id=message_id, reaction=reaction, removed=not reaction)
@@ -912,16 +967,17 @@ def forward_message(waha: WahaClient, target: dict[str, str]) -> BaseTool:
             return error(
                 f"message already sent this run (to {target['sent']}); do not send again"
             )
+        if not message_id:
+            return error("message_id is required")
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
         session = target.get("session", "")
         if not session or not chat_id:
             return error("no active conversation context")
-        if not message_id:
-            return error("message_id is required")
-        if fenced_message_id(message_id, target) is None:
-            return error(_FENCE_ERROR)
+        _, id_error = fenced_message_id(message_id, target)
+        if id_error:
+            return error(id_error)
         waha.forward_message(session, chat_id, message_id)
         target["sent"] = chat_id
         return ok(message_id=message_id, chat=chat_id)

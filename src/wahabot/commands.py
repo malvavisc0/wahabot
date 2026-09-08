@@ -21,7 +21,7 @@ from loguru import logger
 
 from wahabot.ai.context import handle_message
 from wahabot.ai.observability import chat_trace_attributes
-from wahabot.ai.tools.whatsapp import OPERATOR_KEY
+from wahabot.ai.tools.whatsapp import OPERATOR_ARMED, OPERATOR_KEY
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.models import WahaEvent
 from wahabot.core.waha import WahaClient
@@ -49,7 +49,10 @@ async def run_command(
     model may pass ``chat=…`` explicitly (a group or a person resolved
     via ``resolve_chat``) or omit it, exactly as in a normal chat —
     and a delivery latch left over from a previous turn can never
-    block this command's send.
+    block this command's send. The holder also arms the operator flag
+    (``OPERATOR_KEY``) that opens the cross-chat fence in the WhatsApp
+    tools; chat-triggered runs clear it, so this run is the only one
+    with cross-chat reach.
     """
     instruction = str(event.payload.get("body", "")).strip()
     if not instruction:
@@ -68,7 +71,7 @@ async def run_command(
         holder["reacted"] = ""
         # Operator commands are the one trusted cross-chat channel: the
         # fence in the WhatsApp tools opens for this run alone.
-        holder[OPERATOR_KEY] = "1"
+        holder[OPERATOR_KEY] = OPERATOR_ARMED
     ctx = Context(agent)
     with chat_trace_attributes("operator-command"):
         reply = await handle_message(event, agent, ctx=ctx, settings=settings, waha=waha)
