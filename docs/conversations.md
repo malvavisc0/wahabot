@@ -48,7 +48,8 @@ Before the agent ever wakes up, the message passes through, in order:
    own JID that matches `bot_mention_regex` is an **operator
    command** delivered from WhatsApp (the "message yourself" chat is
    the operator console): it bypasses the chat gates below and runs
-   on a fresh context, and the reply comes back as a quote-reply in
+   on the shared operator context (one rolling history across
+   commands), and the reply comes back as a quote-reply in
    the same chat. The bot's own writes into that chat — command
    replies, escalations, session notifications, tool deliveries —
    are echo-tracked by id, so their `fromMe` bounce-backs never
@@ -156,7 +157,9 @@ Per chat, the bot keeps a rolling conversation in memory:
 
 `wahabot forget <chat-id>` wipes one chat's memory — it posts a signed
 `forget` event to the running bot, which drops the live context and the
-file under the chat's run lock (so an in-flight run can't resurrect it). With
+file under the chat's run lock (so an in-flight run can't resurrect it).
+`wahabot forget operator` wipes the shared operator-command history the
+same way. With
 the bot stopped, the equivalent is `rm data/memory/<session>/<chat-id>.json`.
 There is no retention TTL: memory is kept forever until wiped. `data/memory/`
 carries the same privacy weight as `data/events/` — back it up and

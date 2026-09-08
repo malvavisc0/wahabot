@@ -109,7 +109,7 @@ is checked when the workflow is first built.
 A workflow run only keeps context for as long as that run lives. Each
 `agent.run()` with a **fresh** `Context` starts with empty memory, which
 would make the bot forget everything between messages. To fix that,
-`handlers.py` keeps one `Context` per **session/chat pair** and reuses
+`core/runs.py` keeps one `Context` per **session/chat pair** and reuses
 it for every message from that chat in that session:
 
 ```python
@@ -131,7 +131,7 @@ ever served.
 ### Persistence
 
 The per-chat buffer is not just process-local: at the end of every agent
-run (and after every memory-only fold) `handlers.persist_memory` writes
+run (and after every memory-only fold) `core.runs.persist_memory` writes
 the run-end buffer to `data/memory/<session>/<chat-id>.json`, so a chat's
 memory survives restarts and LRU evictions. The save points are:
 
@@ -220,9 +220,10 @@ Before each run reaches the LLM, the buffered history passes through two
 
 Runs in **different chats proceed in parallel**; runs in the **same
 chat serialize** on that chat's run lock (`chat_lock` in
-`handlers.py` — they share one `Context` and one memory buffer).
-Operator commands run on a fresh `Context` with no chat lock, so a
-command never queues behind (or blocks) any chat. The lock table is
+`core/runs.py` — they share one `Context` and one memory buffer).
+Operator commands lock their own `("…", "operator")` key — they
+serialize against each other (one shared history buffer) but never
+queue behind (or block) any chat. The lock table is
 bounded and evicts idle entries oldest-first, but **a lock that is
 held or has a queued waiter is never evicted**: between `release()`
 and the waiter resuming, `asyncio.Lock.locked()` is already `False`,
@@ -320,8 +321,10 @@ disables the whole path.
 
 Three event flows sit outside the plain message → reply pipeline:
 
-- **Operator commands** run the same agent on a **fresh `Context`** —
-  no chat memory, no whitelist, no group gating. The turn is prefixed
+- **Operator commands** run the same agent over the operator's **own
+  rolling history** (context key `"operator"`) — shared across all
+  commands, LRU-evicted and persisted like a chat's, but touching no
+  chat's memory; no whitelist, no group gating. The turn is prefixed
   `[operator command]`; the session prompt keys on it (deliver with
   `send_message(chat=…)` to the named target, resolve names with
   `resolve_chat`, browse recency with `recent_chats`). The shared
@@ -375,7 +378,9 @@ the OpenTelemetry context with a stable `wa:<chat_id>` session id and a
 `wahabot` tag — so one WhatsApp chat shows up as one session in the
 Langfuse UI, with each bot turn as a trace. WhatsApp JIDs are PII; the
 export-stage `mask_otel_spans` hook rewrites span attributes to
-`[jid redacted]` before they leave the process (the session id itself is
+`[jid redacted]` before they leave the process — all address forms:
+`@c.us`, `@g.us`, `@lid` (linked-device identities) and `@broadcast`
+(the session id itself is
 exempt — masking it would collapse every chat into one anonymous
 session). Credentials are checked
 once with a best-effort `auth_check` (a failure warns but never disables
@@ -444,8 +449,8 @@ refusal.
 | `stay_silent` | — | — | End the run with no reply at all (terminal: the workflow stops before executing it) |
 | `escalate` | `report` | `POST /api/sendText` (to the bot's own chat) | Forward a report to the operator's self-chat — for "I want a human" requests, complaints, reports. No `chat` parameter (target is fixed); once per chat per hour (cooldown); writes the report itself, never pastes the person's words; refused on operator runs (a command already talks to the operator) |
 | `react_to_message` | `message_id`, `reaction` | `PUT /api/reaction` | Emoji-react to a message (empty = remove); once per run |
-| `send_image` | `url`, `caption?`, `chat?` | `POST /api/sendImage` | Send an image from a URL; once per run (shared latch) |
-| `send_file` | `url?`, `path?`, `caption?`, `filename?`, `chat?` | `POST /api/sendFile` | Send a document (PDF, etc.) from a URL or a local file; once per run (shared latch) |
+| `send_image` | `url`, `caption?`, `chat?` | `POST /api/sendImage` | Send an image from a URL (probed pre-send; 404/410 refused); once per run (shared latch) |
+| `send_file` | `url?`, `path?`, `caption?`, `filename?`, `chat?` | `POST /api/sendFile` | Send a document (PDF, etc.) from a URL (probed like `send_image`) or a local file; once per run (shared latch) |
 | `fetch_chat_messages` | `chat?`, `limit?` | `GET /api/{session}/chats/{chatId}/messages` | Read recent chat messages (JSON `messages` list) |
 | `get_chat` | `chat?` | `POST /api/{session}/chats/overview` | Chat metadata (name, participants, …) |
 | `search_messages` | `query`, `chat?`, `limit?` | `GET /api/messages` (local filter) | Find recent messages by text / media |
@@ -466,6 +471,13 @@ subsections below.
 | `send_image(url, caption="", chat=None)` | Send an image from a public URL (mimetype inferred from the URL extension), with an optional caption |
 | `send_file(url=None, path=None, caption="", filename=None, chat=None)` | Send a document (PDF, etc.) — from a public `url` (WAHA downloads it) or a local `path` for files the agent created (base64, capped at `WAHABOT_MAX_FILE_BYTES`); mimetype and filename inferred from the extension |
 | `forward_message(message_id, chat=None)` | Forward an existing message (by serialized id) to a chat |
+
+A URL passed to `send_image`/`send_file` is probed first
+(`probe_media_url`): malformed or non-http(s) links and definitive
+404/410 responses are refused (models sometimes invent media URLs),
+while connection/timeout errors only warn and let WAHA try — its
+network path may succeed where the probe's failed. The session prompt
+forbids invented URLs outright.
 
 In all four, `chat` is operator-commands-only; on chat runs the fence
 refuses any target other than the current conversation. `reply_to` and
@@ -593,8 +605,9 @@ next run. Two consequences:
   between the bot and that exception — two turns in the SAME chat must
   never run concurrently (they share the `Context` and its memory
   buffer); turns in different chats hold no shared `Context` and run
-  in parallel. Commands run on a fresh `Context` each, so they never
-  contend with chat runs (or each other).
+  in parallel. Commands share one `Context` under the `"operator"`
+  key and serialize on its lock, so they never contend with chat
+  runs — only with each other.
 
 The store is a `DictState` (a Pydantic model that shoves undeclared
 keys into a `_data` dict), which is why heterogenous values — a
