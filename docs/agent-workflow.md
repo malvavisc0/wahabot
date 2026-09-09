@@ -450,18 +450,28 @@ refusal.
 
 | Tool | Params | WAHA endpoint | Purpose |
 |---|---|---|---|
-| `send_message` | `chat?`, `text`, `reply_to?`, `mentions?` | `POST /api/sendText` | Send a text (current chat, or operator-named target); `reply_to` quotes a message; `mentions` tags contacts; once per run (shared latch) |
-| `stay_silent` | — | — | End the run with no reply at all (terminal: the workflow stops before executing it) |
+| `send_message` | `chat?`, `text`, `reply_to?`, `mentions?`, `reason?` | `POST /api/sendText` | Send a text (current chat, or operator-named target); `reply_to` quotes a message; `mentions` tags contacts; once per run (shared latch) |
+| `stay_silent` | `reason?` | — | End the run with no reply at all (terminal: the workflow stops before executing it) |
 | `escalate` | `report` | `POST /api/sendText` (to the bot's own chat) | Forward a report to the operator's self-chat — for "I want a human" requests, complaints, reports. No `chat` parameter (target is fixed); once per chat per hour (cooldown); writes the report itself, never pastes the person's words; refused on operator runs (a command already talks to the operator) |
-| `react_to_message` | `message_id`, `reaction` | `PUT /api/reaction` | Emoji-react to a message (empty = remove); once per run |
-| `send_image` | `url`, `caption?`, `chat?` | `POST /api/sendImage` | Send an image from a URL (probed pre-send; 404/410 refused); once per run (shared latch) |
-| `send_file` | `url?`, `path?`, `caption?`, `filename?`, `chat?` | `POST /api/sendFile` | Send a document (PDF, etc.) from a URL (probed like `send_image`) or a local file; once per run (shared latch) |
+| `react_to_message` | `message_id`, `reaction`, `reason?` | `PUT /api/reaction` | Emoji-react to a message (empty = remove); once per run |
+| `send_image` | `url`, `caption?`, `chat?`, `reason?` | `POST /api/sendImage` | Send an image from a URL (probed pre-send; 404/410 refused); once per run (shared latch) |
+| `send_file` | `url?`, `path?`, `caption?`, `filename?`, `chat?`, `reason?` | `POST /api/sendFile` | Send a document (PDF, etc.) from a URL (probed like `send_image`) or a local file; once per run (shared latch) |
 | `fetch_chat_messages` | `chat?`, `limit?` | `GET /api/{session}/chats/{chatId}/messages` | Read recent chat messages (JSON `messages` list) |
 | `get_chat` | `chat?` | `POST /api/{session}/chats/overview` | Chat metadata (name, participants, …) |
 | `search_messages` | `query`, `chat?`, `limit?` | `GET /api/messages` (local filter) | Find recent messages by text / media |
-| `forward_message` | `message_id`, `chat?` | `POST /api/forwardMessage` | Forward a message to a chat; once per run (shared latch) |
+| `forward_message` | `message_id`, `chat?`, `reason?` | `POST /api/forwardMessage` | Forward a message to a chat; once per run (shared latch) |
 | `resolve_chat` | `name` | `GET /api/{session}/chats`, `GET /api/contacts/all` | Operator-only: resolve a person/group name to chat JIDs (exact match first, then substring; ≤5 candidates) |
 | `recent_chats` | `limit?` | `GET /api/{session}/chats` | Operator-only: list the newest conversations (each `{id, name}`), for instructions that go by recency instead of name |
+
+Every WhatsApp-facing action tool (the sends, `forward_message`,
+`react_to_message`, `stay_silent`) takes an optional `reason`: one short
+sentence justifying the action. It is log-only — `log_action_reason`
+(`whatsapp.py`) writes it to the operator's log (INFO; a missing reason
+logs a WARNING) and nothing else — never delivered to a chat, never fed
+back to the model. It is an observability and self-restraint knob:
+naming *why* forces the model to articulate its judgment in
+`judicious` group mode, and gives every send an audit trail for prompt
+tuning.
 
 All tool implementations live under `src/wahabot/ai/tools/` (WhatsApp
 tools in `whatsapp.py`, external tools in `external.py`); the

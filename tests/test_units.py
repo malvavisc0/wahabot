@@ -1053,3 +1053,38 @@ def test_ordered_merge() -> None:
         ["491555000001@c.us"], ["111222333444555@lid", "491555000001@c.us"]
     ) == ["491555000001@c.us", "111222333444555@lid"]
     assert ordered_merge([], []) == []
+
+
+def test_log_action_reason() -> None:
+    """``log_action_reason`` logs the justification, warns when absent.
+
+    The reason is capped at 200 chars and rides the log kwargs; a
+    missing/blank reason is the model acting without articulating why
+    — worth a WARNING so the operator sees it in the audit trail.
+    """
+    from loguru import logger
+
+    from wahabot.ai.tools.whatsapp import log_action_reason
+
+    infos: list[tuple[str, dict[str, Any]]] = []
+    warnings: list[tuple[str, dict[str, Any]]] = []
+
+    def record(message: str, **kwargs: Any) -> None:
+        (warnings if "carried no reason" in message else infos).append((message, kwargs))
+
+    with (
+        unittest.mock.patch.object(logger, "info", record),
+        unittest.mock.patch.object(logger, "warning", record),
+    ):
+        log_action_reason("send_message", "directly asked by name", chat=CHAT_ID)
+        log_action_reason("stay_silent", "  ")
+        log_action_reason("react_to_message", "x" * 500)
+    assert [tool for _, kw in infos for tool in [kw["tool"]]] == [
+        "send_message",
+        "react_to_message",
+    ]
+    assert infos[0][1]["reason"] == "directly asked by name"
+    assert infos[0][1]["suffix"] == f" {{'chat': '{CHAT_ID}'}}"
+    assert len(infos[1][1]["reason"]) == 200  # the 500-char reason was capped
+    assert warnings[0][0] == "Tool call {tool} carried no reason{suffix}"
+    assert warnings[0][1] == {"tool": "stay_silent", "suffix": ""}

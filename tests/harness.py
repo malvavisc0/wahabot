@@ -64,7 +64,12 @@ FirstResponse = {
                         "type": "function",
                         "function": {
                             "name": "send_message",
-                            "arguments": json.dumps({"text": "smoke reply one"}),
+                            "arguments": json.dumps(
+                                {
+                                    "text": "smoke reply one",
+                                    "reason": "directly addressed by name",
+                                }
+                            ),
                         },
                     }
                 ],

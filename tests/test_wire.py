@@ -694,6 +694,48 @@ def test_text_token_becomes_real_mention(bot: Bot) -> None:
     ]
 
 
+def test_stay_silent_reason_logged(bot: Bot) -> None:
+    """The ``reason`` of a stay_silent call reaches the log, not the chat.
+
+    ``stay_silent`` is terminal — the workflow stops before executing
+    it — so the workflow itself must surface the reason; the message
+    here names another member, and the model's justification ("not
+    addressed to me") is exactly the audit line judicious mode needs.
+    """
+    from loguru import logger
+
+    llm = bot.stack.llm
+    llm.override = tool_call_response(
+        "stay_silent",
+        {"reason": "question addressed to @222333444555666, not to me"},
+        call_id="call_quiet_1",
+        response_id="chatcmpl-smoke-quiet",
+        created=1788525837,
+    )
+    quiet_event = waha_event()
+    quiet_event["payload"]["id"] = f"false_{CHAT_ID}_QUIET"
+    # The harness config runs "mentioned" mode, so the body must name
+    # the bot for the run to wake; the model then judges the *quoted*
+    # question as aimed at @222333444555666 and stays silent.
+    quiet_event["payload"]["body"] = (
+        "kai mira @222333444555666 que haces para ser millonario"
+    )
+    infos: list[tuple[str, dict[str, Any]]] = []
+
+    def record(message: str, **kwargs: Any) -> None:
+        infos.append((message, kwargs))
+
+    with unittest.mock.patch.object(logger, "info", record):
+        bot.post(quiet_event)
+        assert _wait(lambda: any(kw.get("tool") == "stay_silent" for _, kw in infos))
+    assert any(
+        kw["reason"] == "question addressed to @222333444555666, not to me"
+        for _, kw in infos
+        if kw.get("tool") == "stay_silent"
+    )
+    assert bot.waha.sent == []
+
+
 def test_send_file_wire(bot: Bot) -> None:
     llm = bot.stack.llm
     llm.override = FileResponse
