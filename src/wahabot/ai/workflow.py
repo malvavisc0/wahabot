@@ -40,7 +40,7 @@ from wahabot.ai.history import (
     trim_to_budget,
     wire_call,
 )
-from wahabot.ai.tools.whatsapp import current_target
+from wahabot.ai.tools.whatsapp import current_target, log_action_reason
 from wahabot.settings import Settings
 
 __all__ = [
@@ -523,6 +523,7 @@ class FunctionCallingAgentWorkflow(Workflow):
             response, error_on_no_tool_call=False
         )
         if any(call.tool_name == SILENCE_TOOL for call in tool_calls):
+            self.log_silence_reason(tool_calls)
             logger.debug("Stopping run: model chose stay_silent")
             await self.collapse_delivery(ctx)
             return self.stopped_response()
@@ -548,6 +549,28 @@ class FunctionCallingAgentWorkflow(Workflow):
             return StopEvent(result=result)
         await self.remember(ctx, response, tool_calls)
         return ToolCallEvent(tool_calls=tool_calls)
+
+    @staticmethod
+    def log_silence_reason(tool_calls: list[ToolSelection]) -> None:
+        """Surface a ``stay_silent`` call's ``reason`` in the log.
+
+        The workflow stops before executing the call (silence is
+        terminal), so the tool's own logging never runs — this is the
+        reason's only path to the audit trail. The reason is taken from
+        the stay_silent call itself: a parallel batch may put other
+        calls (no reason kwarg) first.
+        """
+        reason = str(
+            next(
+                (
+                    call.tool_kwargs.get("reason", "")
+                    for call in tool_calls
+                    if call.tool_name == SILENCE_TOOL
+                ),
+                "",
+            )
+        )
+        log_action_reason(SILENCE_TOOL, reason)
 
     async def populated_history(self, ctx: Context, ev: InputEvent) -> list[ChatMessage]:
         """The event's history, with one-shot image blocks spliced in.
