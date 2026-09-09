@@ -66,6 +66,7 @@ __all__ = [
     "forward_message",
     "get_chat",
     "infer_mimetype",
+    "log_action_reason",
     "operator_run",
     "participant_jid",
     "probe_media_url",
@@ -299,6 +300,37 @@ def track_self_echo(sent_id: str, what: str) -> None:
     )
 
 
+#: How many chars of a tool's ``reason`` reach the log — a justification
+#: is an audit line, not a transcript.
+_REASON_LOG_CAP = 200
+
+
+def log_action_reason(tool: str, reason: str, **context: Any) -> None:
+    """Log the model's justification for a delivery/silence decision.
+
+    The WhatsApp-facing tools take an optional ``reason``: naming *why*
+    the model is speaking (or staying quiet) forces the choice to be
+    articulated — the judicious group mode lives or dies by it — and
+    gives the operator an audit trail of every send. Log-only: the
+    reason never reaches a chat. An omitted reason is worth its own
+    warning: it usually means the model acted on reflex.
+    """
+    suffix = f" {context}" if context else ""
+    if not reason.strip():
+        logger.warning(
+            "Tool call {tool} carried no reason{suffix}",
+            tool=tool,
+            suffix=f" {context}" if context else "",
+        )
+        return
+    logger.info(
+        "Tool call {tool} reason: {reason}{suffix}",
+        tool=tool,
+        reason=reason.strip()[:_REASON_LOG_CAP],
+        suffix=suffix,
+    )
+
+
 def delivered_to_self(chat_id: str, sent_id: str) -> None:
     """Mark a tool delivery that landed in the bot's own self-chat.
 
@@ -425,6 +457,7 @@ def send_message(waha: WahaClient) -> BaseTool:
         text: str = "",
         reply_to: str | None = None,
         mentions: list[str] | None = None,
+        reason: str = "",
     ) -> str:
         """Send a WhatsApp text message.
 
@@ -440,6 +473,8 @@ def send_message(waha: WahaClient) -> BaseTool:
                 attached.
             mentions: Optional JIDs to @-mention; each mentioned
                 person's `@`-token must appear in text.
+            reason: One short sentence justifying this reply (goes to
+                the operator's log, never to the chat).
         """
         if not text.strip():
             return error("empty message text")
@@ -458,6 +493,7 @@ def send_message(waha: WahaClient) -> BaseTool:
             _, id_error = fenced_message_id(reply_to, target)
             if id_error:
                 return error(id_error)
+        log_action_reason("send_message", reason, chat=chat_id)
         roster = chat_roster(waha, session, chat_id)
         resolved = resolve_mentions(text, roster)
         merged = ordered_merge(mentions or [], resolved)
@@ -492,7 +528,8 @@ def send_message(waha: WahaClient) -> BaseTool:
             "— roster members named that way are tagged automatically. "
             "Operator commands may pass chat to reach the target the "
             "instruction names; chat runs must omit it. Send at most once "
-            "per run."
+            "per run. Pass reason: one short sentence saying why this "
+            "reply (logged for the operator, never shown in the chat)."
         ),
     )
 
@@ -506,8 +543,14 @@ def stay_silent() -> BaseTool:
     sent to the chat as a normal reply.
     """
 
-    def stay_silent_fn() -> str:
-        """Stay silent in this conversation (send nothing)."""
+    def stay_silent_fn(reason: str = "") -> str:
+        """Stay silent in this conversation (send nothing).
+
+        Args:
+            reason: One short sentence saying why the message needs no
+                reply (logged for the operator, never shown).
+        """
+        log_action_reason("stay_silent", reason)
         return ok()
 
     return FunctionTool.from_defaults(
@@ -517,7 +560,9 @@ def stay_silent() -> BaseTool:
         description=(
             "Stay silent: say nothing in this chat. Call this instead of "
             "replying when the message needs no answer (not addressed to "
-            "you, nothing useful to add). Never combine with send_message."
+            "you, nothing useful to add). Never combine with send_message. "
+            "Pass reason: one short sentence saying why you are staying "
+            "quiet (logged for the operator, never shown)."
         ),
     )
 
@@ -664,7 +709,7 @@ def react_to_message(waha: WahaClient) -> BaseTool:
     a looping model (the same react call repeated) cannot spam emoji.
     """
 
-    def react_to_message_fn(message_id: str, reaction: str = "") -> str:
+    def react_to_message_fn(message_id: str, reaction: str = "", reason: str = "") -> str:
         """React to a message.
 
         Args:
@@ -672,6 +717,8 @@ def react_to_message(waha: WahaClient) -> BaseTool:
                 (e.g. `false_12132132130@c.us_AAAAAAAAAAAAAAAAAAAA`).
             reaction: The emoji to react with, or empty string to remove
                 an existing reaction.
+            reason: One short sentence justifying this reaction (goes to
+                the operator's log, never to the chat).
         """
         target = current_target()
         if target.reacted:
@@ -684,6 +731,7 @@ def react_to_message(waha: WahaClient) -> BaseTool:
         _, id_error = fenced_message_id(message_id, target)
         if id_error:
             return error(id_error)
+        log_action_reason("react_to_message", reason, message_id=message_id)
         waha.send_reaction(session, message_id, reaction)
         target.reacted = message_id
         return ok(message_id=message_id, reaction=reaction, removed=not reaction)
@@ -696,7 +744,8 @@ def react_to_message(waha: WahaClient) -> BaseTool:
             "React with an emoji to a WhatsApp message. Provide the "
             "message's serialized id (use fetch_chat_messages to find "
             "ids). Pass an empty reaction to remove the bot's reaction. "
-            "React at most once per run."
+            "React at most once per run. Pass reason: one short sentence "
+            "saying why (logged for the operator, never shown)."
         ),
     )
 
@@ -708,6 +757,7 @@ def send_image(waha: WahaClient) -> BaseTool:
         url: str | None = None,
         caption: str = "",
         chat: str | None = None,
+        reason: str = "",
     ) -> str:
         """Send an image.
 
@@ -716,6 +766,8 @@ def send_image(waha: WahaClient) -> BaseTool:
             caption: Optional caption text.
             chat: Optional chat id; operator commands only. Omit to
                 send to the current chat.
+            reason: One short sentence justifying this send (goes to
+                the operator's log, never to the chat).
         """
         target = current_target()
         if target.sent:
@@ -733,6 +785,7 @@ def send_image(waha: WahaClient) -> BaseTool:
         probe_error = probe_media_url(url)
         if probe_error:
             return error(probe_error)
+        log_action_reason("send_image", reason, chat=chat_id)
         mimetype = infer_image_mimetype(url)
         sent_id = waha.send_image(
             session,
@@ -754,7 +807,9 @@ def send_image(waha: WahaClient) -> BaseTool:
             "or the operator's instruction — never invented or guessed; "
             "unfetchable links are refused. caption is optional. "
             "Operator commands may pass chat to reach the target the "
-            "instruction names; chat runs must omit it."
+            "instruction names; chat runs must omit it. Pass reason: one "
+            "short sentence saying why (logged for the operator, never "
+            "shown)."
         ),
     )
 
@@ -798,6 +853,7 @@ def send_file(waha: WahaClient, max_file_bytes: int) -> BaseTool:
         caption: str = "",
         filename: str | None = None,
         chat: str | None = None,
+        reason: str = "",
     ) -> str:
         """Send a document (PDF, etc.) to a WhatsApp chat.
 
@@ -810,6 +866,8 @@ def send_file(waha: WahaClient, max_file_bytes: int) -> BaseTool:
                 defaults to the URL/path basename.
             chat: Optional chat id; operator commands only. Omit to
                 send to the current chat.
+            reason: One short sentence justifying this send (goes to
+                the operator's log, never to the chat).
         """
         target = current_target()
         if target.sent:
@@ -828,6 +886,7 @@ def send_file(waha: WahaClient, max_file_bytes: int) -> BaseTool:
             probe_error = probe_media_url(str(url))
             if probe_error:
                 return error(probe_error)
+        log_action_reason("send_file", reason, chat=chat_id)
         file = remote_file(str(url)) if url else local_file(str(path), max_file_bytes)
         if isinstance(file, str):
             return error(file)
@@ -855,7 +914,8 @@ def send_file(waha: WahaClient, max_file_bytes: int) -> BaseTool:
             "unfetchable links are refused. caption and filename are "
             "optional. Operator commands may pass chat to reach the "
             "target the instruction names; chat runs must omit it. "
-            "Send at most once per run."
+            "Send at most once per run. Pass reason: one short sentence "
+            "saying why (logged for the operator, never shown)."
         ),
     )
 
@@ -1392,13 +1452,17 @@ def search_matches(entries: list[dict[str, Any]], name: str) -> list[dict[str, A
 def forward_message(waha: WahaClient) -> BaseTool:
     """Build a tool that forwards a message to a chat."""
 
-    def forward_message_fn(message_id: str, chat: str | None = None) -> str:
+    def forward_message_fn(
+        message_id: str, chat: str | None = None, reason: str = ""
+    ) -> str:
         """Forward a message to a chat.
 
         Args:
             message_id: The serialized id of the message to forward.
             chat: Optional chat id to forward into; operator commands
                 only. Defaults to the current chat.
+            reason: One short sentence justifying this forward (goes
+                to the operator's log, never to the chat).
         """
         target = current_target()
         if target.sent:
@@ -1416,6 +1480,7 @@ def forward_message(waha: WahaClient) -> BaseTool:
         _, id_error = fenced_message_id(message_id, target)
         if id_error:
             return error(id_error)
+        log_action_reason("forward_message", reason, chat=chat_id)
         sent_id = waha.forward_message(session, chat_id, message_id)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
@@ -1428,6 +1493,8 @@ def forward_message(waha: WahaClient) -> BaseTool:
         description=(
             "Forward an existing WhatsApp message (by its serialized "
             "id) to the current chat. Operator commands may pass chat "
-            "to choose the destination; chat runs must omit it."
+            "to choose the destination; chat runs must omit it. Pass "
+            "reason: one short sentence saying why (logged for the "
+            "operator, never shown)."
         ),
     )

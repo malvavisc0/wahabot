@@ -27,6 +27,14 @@ CHAT_DESCRIPTION = (
     "must omit it (current conversation only)."
 )
 
+REASON_DESCRIPTION = (
+    "One short sentence justifying this action to the operator's log — "
+    "why this reply/reaction now, e.g. 'directly asked by name', "
+    "'question addressed to @<other member>, not for me' (for "
+    "stay_silent). Not shown to the chat; never quote message text or "
+    "metadata in it."
+)
+
 
 class SendMessageSchema(BaseModel):
     """Send a WhatsApp text message."""
@@ -56,12 +64,19 @@ class SendMessageSchema(BaseModel):
             "`participant` field of messages in fetch_chat_messages."
         ),
     )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class StaySilentSchema(BaseModel):
-    """Stay silent: send nothing in this conversation."""
+    """Stay silent: send nothing in this conversation.
 
-    model_config = {"extra": "forbid"}
+    Deliberately without ``extra="forbid"`` (its pre-``reason`` shape):
+    with a real parameter to validate, strict mode would hard-reject a
+    model call carrying an unknown kwarg — every other tool tolerates
+    extras, and the workflow stops before the call executes anyway.
+    """
+
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class ReactToMessageSchema(BaseModel):
@@ -79,6 +94,7 @@ class ReactToMessageSchema(BaseModel):
             "The emoji to react with, or empty string to remove an existing reaction."
         ),
     )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class SendImageSchema(BaseModel):
@@ -93,6 +109,7 @@ class SendImageSchema(BaseModel):
         description="Optional caption text.",
     )
     chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class FetchChatMessagesSchema(BaseModel):
@@ -131,6 +148,7 @@ class ForwardMessageSchema(BaseModel):
         description="The serialized id of the message to forward.",
     )
     chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class ResolveChatSchema(BaseModel):
@@ -185,6 +203,7 @@ class SendFileSchema(BaseModel):
         description="File name shown to the recipient (default: the url/path basename).",
     )
     chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class WebSearchSchema(BaseModel):
