@@ -35,7 +35,6 @@ from loguru import logger
 
 from wahabot.ai.events import InputEvent, ToolCallEvent
 from wahabot.ai.history import (
-    MAX_TOOL_RESULT_TOKENS,
     sanitize_chat_history,
     tool_calls,
     trim_to_budget,
@@ -94,15 +93,16 @@ async def run_tool_call(
 
     Tool functions are sync and do network I/O (WAHA, web), so they run
     in a worker thread via ``asyncio.to_thread`` to keep the event loop
-    responsive. Outputs are capped at ``MAX_TOOL_RESULT_TOKENS`` chars:
-    list tools embed WAHA's raw ``_data`` blobs (15 messages ≈ 58k
-    chars), and a tool group that large evicts the user turn from the
-    prompt when the buffer's real tokenizer re-trims.
+    responsive. Tool outputs are not truncated here: every tool bounds
+    its own payload at the source (``visit_url`` capping its text,
+    ``web_search`` its per-result snippets, the list tools slimming
+    ``_data`` and fitting to a whole-message budget), so a blunt
+    workflow-level char cutoff would only mangle already-curated JSON
+    envelopes.
 
     Each call is logged: one INFO line with its outcome (completed,
-    unknown, truncation noted), or WARNING with the exception when the
-    tool raised — tool failures are what gets grepped for, so they
-    carry the error detail.
+    unknown), or WARNING with the exception when the tool raised — tool
+    failures are what gets grepped for, so they carry the error detail.
     """
     tool = tools_by_name.get(tool_call.tool_name)
     kwargs = {"tool_call_id": tool_call.tool_id, "name": tool_call.tool_name}
@@ -120,9 +120,6 @@ async def run_tool_call(
             content = f"Encountered error in tool call: {exc}"
             outcome = "failed"
             failure = exc
-    if len(content) > MAX_TOOL_RESULT_TOKENS:
-        content = content[:MAX_TOOL_RESULT_TOKENS] + "… (truncated)"
-        outcome = f"{outcome}, result truncated"
     if failure is not None:
         logger.warning(
             "Tool call {tool} failed: {exc}", tool=tool_call.tool_name, exc=failure
@@ -533,6 +530,7 @@ class FunctionCallingAgentWorkflow(Workflow):
             await self.collapse_delivery(ctx)
             return self.stopped_response()
         if not tool_calls:
+            self.warn_accidental_silence(response, rounds)
             delivered = self.any_delivery()
             await self.remember(ctx, response, tool_calls, skip_text=delivered)
             await self.collapse_delivery(ctx)
@@ -664,6 +662,28 @@ class FunctionCallingAgentWorkflow(Workflow):
         """A StopEvent carrying an empty reply: nothing more to say."""
         empty = ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content=""))
         return StopEvent(result=empty)
+
+    def warn_accidental_silence(self, response: ChatResponse, rounds: int) -> None:
+        """Warn when a run stops empty after research without any delivery.
+
+        A chosen silence is the ``stay_silent`` tool or an empty first
+        reply; an empty final answer *after tool rounds* with nothing
+        delivered is the reasoning-model glitch where thinking is spent
+        but no visible answer is produced. It raises no error and is
+        indistinguishable from chosen silence at run time, so this
+        warning is the only trace it leaves in the logs.
+        """
+        if rounds <= 1 or self.any_delivery():
+            return
+        if str(response.message.content or "").strip():
+            return
+        logger.warning(
+            (
+                "Stopping run: empty final answer after {rounds} rounds "
+                "(nothing delivered, no stay_silent)"
+            ),
+            rounds=rounds,
+        )
 
     async def wrap_up_response(self, ctx: Context, reason: str) -> ChatResponse:
         """One last tool-free LLM call after a delivered reply / round limit.

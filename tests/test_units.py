@@ -955,3 +955,55 @@ def test_remember_strips_thinking_separator() -> None:
         ]
 
     assert asyncio.run(stored_texts()) == ["jaj real reply"]
+
+
+def test_warn_accidental_silence() -> None:
+    """``warn_accidental_silence`` fires only on the accidental-empty shape.
+
+    The trace-audit case: a reasoning model spends its tokens thinking,
+    returns an empty final answer after tool rounds, nothing is
+    delivered — indistinguishable at run time from chosen silence, so
+    this warning is the only signal in the logs. Chosen silence (first
+    round, or a delivery already made) must stay unlogged.
+    """
+    from collections.abc import Iterator
+    from contextlib import contextmanager
+
+    from llama_index.core.base.llms.types import ChatResponse
+    from loguru import logger
+
+    from wahabot.ai.tools.whatsapp import RunTarget, bind_target, reset_target
+    from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+
+    wf = FunctionCallingAgentWorkflow.__new__(FunctionCallingAgentWorkflow)
+    empty = ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content=""))
+    text = ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content="hi"))
+    quiet = RunTarget(session=SESSION, chat_id=CHAT_ID)
+    delivered = RunTarget(session=SESSION, chat_id=CHAT_ID, sent=CHAT_ID)
+
+    @contextmanager
+    def bound(target: RunTarget) -> Iterator[None]:
+        token = bind_target(target)
+        try:
+            yield
+        finally:
+            reset_target(token)
+
+    logs: list[str] = []
+
+    def record(message: str, **_: Any) -> None:
+        logs.append(message)
+
+    with (
+        unittest.mock.patch.object(logger, "warning", record),
+        bound(quiet),
+    ):
+        wf.warn_accidental_silence(empty, rounds=8)  # the audit shape: warns
+        wf.warn_accidental_silence(empty, rounds=1)  # first-round silence: no
+        wf.warn_accidental_silence(text, rounds=8)  # visible answer: no
+    with unittest.mock.patch.object(logger, "warning", record), bound(delivered):
+        wf.warn_accidental_silence(empty, rounds=8)  # post-delivery quiet: no
+    assert logs == [
+        "Stopping run: empty final answer after {rounds} rounds "
+        "(nothing delivered, no stay_silent)"
+    ]

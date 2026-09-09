@@ -895,9 +895,10 @@ def slim_message(message: dict[str, Any], max_body: int = 200) -> dict[str, Any]
 
 
 #: Whole-message budget for list-tool envelopes, in serialized chars.
-#: Kept under ``MAX_TOOL_RESULT_TOKENS`` (2000) so the workflow-level
-#: hard cap never mangles the envelope: list results are trimmed to
-#: whole messages *before* serialization and stay parseable JSON.
+#: List results are trimmed to whole messages *before* serialization so
+#: the envelope stays parseable JSON and each tool result is small
+#: enough to coexist with the conversation around it in the token
+#: budget.
 _LIST_ENVELOPE_BUDGET = 1800
 
 

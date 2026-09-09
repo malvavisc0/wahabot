@@ -179,14 +179,15 @@ Before each run reaches the LLM, the buffered history passes through two
    prompt lives outside the rolling buffer so the trim can never evict
    it; its token cost is accounted via `initial_token_count` (a prompt
    larger than the budget is clamped and logged, not fatal).
-3. **Cap** (`MAX_TOOL_RESULT_TOKENS`, 2000 chars) — tool outputs are
-   truncated in `run_tool_call` before entering memory. A single
-   oversized tool group defeats both trims: `trim_to_budget` keeps it
-   ("a single group larger than the budget is kept"), then
-   `ChatMemoryBuffer.get` re-trims with the real tokenizer, finds only
-   that group, and drops everything but the tool message — the LLM
-   request goes out with no user turn and the provider answers 400
-   ("No user query found in messages").
+3. **Bounded at the source** — every tool caps its own payload before
+   enveloping (see "Tool inventory" below), so no workflow-level
+   cutoff is needed. A single oversized tool group would defeat both
+   trims: `trim_to_budget` keeps it ("a single group larger than the
+   budget is kept"), then `ChatMemoryBuffer.get` re-trims with the real
+   tokenizer, finds only that group, and drops everything but the tool
+   message — the LLM request goes out with no user turn and the provider
+   answers 400 ("No user query found in messages"). The tools' own
+   per-field budgets prevent this.
 
 ## The entrypoint
 
@@ -650,7 +651,8 @@ Two of `get`'s behaviors shape the design:
   `trim_to_budget` can still be over budget here. `get` then keeps
   dropping oldest messages until only the newest survives; if that is
   a `tool` message, the request has no user turn (the 400 above).
-  `MAX_TOOL_RESULT_TOKENS` exists so no single group can force this.
+  Each tool's own per-field budget exists so no single group can
+  force this.
 - It never starts history on `assistant`/`tool` — it drops extra
   leading messages to avoid it — which compounds the collapse above.
 
@@ -750,8 +752,13 @@ and fall back to kwargs, or it will silently see zero.
 - List tools (`fetch_chat_messages`, `search_messages`) return
   *slimmed* messages (`slim_message`): WAHA's raw `_data` blob
   (~90% of the payload) is stripped before enveloping, so results stay
-  valid JSON and small enough for the memory budget. Tool outputs are
-  additionally capped at `MAX_TOOL_RESULT_TOKENS` chars.
+  valid JSON and small enough for the memory budget.
+- Every tool bounds its own payload at the source: `visit_url` caps its
+  stripped text (`_MAX_CHARS`), `web_search` each result snippet,
+  `get_youtube_transcript` its prose, `shell` its stdout/stderr, and the
+  list tools their whole-message envelope (`_LIST_ENVELOPE_BUDGET`).
+  There is no workflow-level char cutoff that would mangle these JSON
+  envelopes.
 - Tools run inside a `try/except`: a failing tool never crashes the
   workflow. It only feeds an error message back to the model, which can
   then decide what to do next.

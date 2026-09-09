@@ -25,6 +25,13 @@ __all__ = ["web_search"]
 
 _MIN_TIMEOUT_SECONDS = 2.0
 
+#: Cap on one search result's ``content`` snippet. webserp's snippets
+#: are the only unbounded field across all tools — every other payload
+#: self-limits at its source. Capping here keeps the envelope valid JSON
+#: (the whole result survives; only the snippet is trimmed) instead of a
+#: workflow-level blunt char cutoff mangling the envelope mid-string.
+_MAX_CONTENT_CHARS = 600
+
 
 def web_search(
     settings: Settings,
@@ -123,8 +130,8 @@ def _build_finding(raw: dict[str, Any]) -> dict[str, Any] | None:
     if not url or not title:
         return None
     finding: dict[str, Any] = {"url": url, "title": title}
-    if raw.get("content"):
-        finding["content"] = raw["content"]
+    if content := raw.get("content"):
+        finding["content"] = content[:_MAX_CONTENT_CHARS]
     if raw.get("engine"):
         finding["engine"] = raw["engine"]
     return finding

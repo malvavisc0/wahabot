@@ -49,18 +49,6 @@ __all__ = [
     "wire_call",
 ]
 
-#: Cap for one tool-result message, in estimated tokens (chars).
-#: ``fetch_chat_messages``/``search_messages`` embed WAHA's raw
-#: ``_data`` blobs — 15 messages ≈ 58k chars — and a group that large
-#: breaks the budget twice over: ``trim_to_budget`` keeps it ("a single
-#: group larger than the budget is kept"), then ``ChatMemoryBuffer.get``
-#: re-trims with the real tokenizer, finds only that group, and drops
-#: everything but the tool message — the LLM request goes out with no
-#: user turn ("No user query found in messages"). Capping the payload
-#: at the source keeps any tool group small enough to coexist with the
-#: conversation around it.
-MAX_TOOL_RESULT_TOKENS = 2000
-
 
 class ToolCall(NamedTuple):
     """One tool call of an assistant message, either carrier."""
