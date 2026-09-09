@@ -18,6 +18,7 @@ import base64
 import contextvars
 import json
 import mimetypes
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -180,9 +181,10 @@ def chat_jid(chat: str | None, target: RunTarget | dict[str, str]) -> str:
 
     Models sometimes pass a serialized message id (``false_<jid>_…``,
     scraped from a ``[message id: …]`` annotation) instead of a bare
-    JID — the embedded chat is extracted so the call still lands in
-    the right chat. Anything else passes through unchanged.
+    JID — the embedded chat is extracted so the call still lands in the
+    right chat. Anything else passes through unchanged.
     """
+
     current = (
         target.chat_id if isinstance(target, RunTarget) else target.get("chat_id", "")
     )
@@ -409,6 +411,13 @@ def send_message(waha: WahaClient) -> BaseTool:
     an error envelope instead of sending again. A looping model (the
     same tool call repeated dozens of times) can therefore deliver at
     most one message per incoming event.
+
+    ``@<number>`` tokens in *text* that name a roster member become
+    real mentions automatically (WhatsApp shows people this way, e.g.
+    "Para @111222333444555" — the model copying that shape into its
+    reply must still tag the person). Explicit ``mentions`` JIDs are
+    merged in, so a model passing the JID list correctly never loses
+    the notification to a formatting slip.
     """
 
     def send_message_fn(
@@ -424,12 +433,13 @@ def send_message(waha: WahaClient) -> BaseTool:
                 `1234567890@g.us` or `9876543210@c.us`). Operator
                 commands only: reach the target the instruction names.
                 Chat runs must omit it (current conversation only).
-            text: The text to send.
+            text: The text to send. An `@<number>` token naming a
+                member becomes a real mention (highlight + push).
             reply_to: Optional serialized message id to quote — the
                 text goes out as a native quote-reply with that message
                 attached.
             mentions: Optional JIDs to @-mention; each mentioned
-                person's display name must appear in text as `@<name>`.
+                person's `@`-token must appear in text.
         """
         if not text.strip():
             return error("empty message text")
@@ -448,17 +458,20 @@ def send_message(waha: WahaClient) -> BaseTool:
             _, id_error = fenced_message_id(reply_to, target)
             if id_error:
                 return error(id_error)
+        roster = chat_roster(waha, session, chat_id)
+        resolved = resolve_mentions(text, roster)
+        merged = ordered_merge(mentions or [], resolved)
         sent_id = waha.send_text(
-            session, chat_id, text, reply_to=reply_to, mentions=mentions
+            session, chat_id, text, reply_to=reply_to, mentions=merged or None
         )
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
         fields: dict[str, Any] = {
             "chat": chat_id,
             "text": text,
-            "mentions": mentions or [],
+            "mentions": merged,
         }
-        if mentions and "@" not in text:
+        if merged and "@" not in text:
             fields["warning"] = (
                 "no `@name` in the text — WhatsApp pairs each mention JID "
                 "with an `@<name>` token, so nobody was notified"
@@ -474,10 +487,12 @@ def send_message(waha: WahaClient) -> BaseTool:
             "a specific message, pass its id as reply_to — the incoming "
             "message's own id rides the turn as [message id: …], others "
             "come from fetch_chat_messages. To @-mention someone (real "
-            "highlight + notification), pass their JID in mentions and "
-            "write @<their name> in the text. Operator commands may pass "
-            "chat to reach the target the instruction names; chat runs "
-            "must omit it. Send at most once per run."
+            "highlight + notification), write @<their LID number> in the "
+            "text exactly as it appears in the chat (e.g. @111222333444555) "
+            "— roster members named that way are tagged automatically. "
+            "Operator commands may pass chat to reach the target the "
+            "instruction names; chat runs must omit it. Send at most once "
+            "per run."
         ),
     )
 
@@ -1104,6 +1119,85 @@ def participant_jid(participant: Any) -> str:
         entry: dict[str, Any] = participant
         return jid_string(entry.get("id"))
     return jid_string(participant)
+
+
+#: One ``@<token>`` in message text: a bare user part or a full JID.
+#: Display names are deliberately not matched — a roster name like
+#: "Ana" could collide with unrelated words, while a bare LID/phone
+#: user part (what the chat itself shows, as in "Para @111222333444555")
+#: identifies exactly one person. The JID alternative must come first:
+#: regex alternation is ordered, and the digits-only branch would
+#: otherwise truncate a full-JID token to its user part.
+_MENTION_RE = re.compile(r"@([\dA-Za-z.-]+@[\da-z.-]+|\d{6,})")
+
+
+def mention_tokens(text: str) -> list[str]:
+    """The ``@``-tokens of *text* that can name a chat member.
+
+    Each is a bare user part (``@111222333444555``) or a full JID
+    (``@111222333444555@lid``); ``@`` followed by anything else is
+    ordinary prose and never a mention.
+    """
+    return _MENTION_RE.findall(text)
+
+
+def resolve_mentions(text: str, roster: list[str]) -> list[str]:
+    """Roster JIDs named by *text*'s ``@``-tokens, in token order.
+
+    A token matches a roster JID when their user parts are equal: the
+    chat writes mentions as bare LID/phone user parts, so
+    ``@111222333444555`` resolves against ``111222333444555@lid``.
+    Unresolved tokens are left out — inventing a mention for a
+    non-member would tag nobody (or worse, the wrong person in another
+    chat's namespace).
+    """
+    by_user = {jid.split("@", 1)[0]: jid for jid in roster}
+    resolved: list[str] = []
+    for token in dict.fromkeys(mention_tokens(text)):
+        jid = by_user.get(token.split("@", 1)[0])
+        if jid is not None and jid not in resolved:
+            resolved.append(jid)
+    return resolved
+
+
+def chat_roster(waha: WahaClient, session: str, chat_id: str) -> list[str]:
+    """The chat's participant JIDs (empty for DMs and unreadable chats).
+
+    Two sources, both fail-soft — the roster only enriches mentions, so
+    an unavailable one must not break the send itself. The overview's
+    ``groupMetadata.participants`` carries phone JIDs, but LID groups
+    speak ``@lid`` in message ``participant`` fields (verified against
+    WAHA: a 34-member LID group's overview roster shows zero ``@lid``
+    entries, while its messages carry only ``@lid`` participants), so
+    recent senders are merged in to bridge the two namespaces.
+    """
+    roster: list[str] = []
+    try:
+        overview = waha.get_chat_overview(session, chat_id)
+    except Exception:
+        overview = None
+    if overview:
+        roster.extend(
+            jid for jid in map(participant_jid, roster_entries(overview)) if jid
+        )
+    try:
+        messages = waha.fetch_chat_messages(session, chat_id, limit=50)
+    except Exception:
+        messages = []
+    for message in messages:
+        jid = jid_string(message.get("participant"))
+        if jid:
+            roster.append(jid)
+    return list(dict.fromkeys(roster))
+
+
+def ordered_merge(explicit: list[str], resolved: list[str]) -> list[str]:
+    """Explicit mention JIDs first, then newly resolved ones; no dupes.
+
+    The model's own ``mentions`` list wins on ordering so the envelope
+    reports what it asked for first; resolver additions follow.
+    """
+    return list(dict.fromkeys([*explicit, *resolved]))
 
 
 def search_messages(waha: WahaClient) -> BaseTool:

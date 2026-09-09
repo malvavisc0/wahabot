@@ -49,11 +49,11 @@ class SendMessageSchema(BaseModel):
         default=None,
         description=(
             "Optional JIDs of people to truly @-mention (highlighted, they get "
-            "notified). For every JID here, that person's display name must "
-            "appear in `text` as `@<name>` — WhatsApp pairs the two. Get JIDs "
-            "and names from `get_chat` (participants) or the `participant` "
-            "field of messages in fetch_chat_messages. Typing `@name` alone "
-            "does NOT notify anyone."
+            "notified). Write each person's `@`-token in `text` (e.g. "
+            "`@111222333444555`) — WhatsApp pairs the JID with the token. "
+            "Tokens naming roster members are also tagged automatically when "
+            "this is omitted. Get JIDs from `get_chat` (participants) or the "
+            "`participant` field of messages in fetch_chat_messages."
         ),
     )
 

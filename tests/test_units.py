@@ -54,9 +54,12 @@ from wahabot.ai.tools.whatsapp import (
     infer_image_mimetype,
     infer_mimetype,
     local_file,
+    mention_tokens,
+    ordered_merge,
     participant_jid,
     probe_media_url,
     remote_file,
+    resolve_mentions,
     roster_entries,
     search_matches,
     sender_names,
@@ -536,9 +539,14 @@ def test_mask_value_redacts_all_jid_forms() -> None:
     assert _mask_value("120363000000000000@g.us") == "[jid redacted]"
     assert _mask_value("4915151503271-1630682381@g.us") == "[jid redacted]"
     assert _mask_value("status@broadcast") == "[jid redacted]"
+    # Bare mention tokens (the @<lid-number> shape group chats show).
+    assert _mask_value("Para @111222333444555") == "Para [jid redacted]"
     masked = _mask_value("chat with 491555000000@lid about 491555000001@c.us")
     assert "491555000000" not in masked and "491555000001" not in masked
     assert _mask_value("no identifiers here") == "no identifiers here"
+    assert _mask_value("invoice 123456 stays; @1234567890 goes") == (
+        "invoice 123456 stays; [jid redacted] goes"
+    )
     assert _mask_value(["491555000002@lid", {"id": "491555000003@lid"}]) == [
         "[jid redacted]",
         {"id": "[jid redacted]"},
@@ -1007,3 +1015,41 @@ def test_warn_accidental_silence() -> None:
         "Stopping run: empty final answer after {rounds} rounds "
         "(nothing delivered, no stay_silent)"
     ]
+
+
+def test_mention_tokens() -> None:
+    """``mention_tokens`` extracts only user-part and JID-shaped tokens."""
+    text = "Para @111222333444555 y @491555000001@c.us, no @ana ni mail@x.com"
+    assert mention_tokens(text) == ["111222333444555", "491555000001@c.us"]
+    assert mention_tokens("no ats here") == []
+
+
+def test_resolve_mentions() -> None:
+    """Tokens resolve against roster user parts; non-members stay out."""
+    roster = [
+        "111222333444555@lid",
+        "491555000001@c.us",
+        "666777888999000@lid",
+    ]
+    assert resolve_mentions("Para @111222333444555", roster) == ["111222333444555@lid"]
+    # Full-JID token resolves to the roster's canonical form.
+    assert resolve_mentions("hi @491555000001@c.us", roster) == ["491555000001@c.us"]
+    # Multiple tokens, roster order, no duplicates.
+    assert resolve_mentions(
+        "@666777888999000 mira @111222333444555 y @111222333444555", roster
+    ) == ["666777888999000@lid", "111222333444555@lid"]
+    # Token order wins over roster order; duplicates collapse.
+    assert resolve_mentions("@111222333444555 luego @666777888999000", roster) == [
+        "111222333444555@lid",
+        "666777888999000@lid",
+    ]
+    # A token naming nobody on the roster invents no mention.
+    assert resolve_mentions("cc @999999999999", roster) == []
+
+
+def test_ordered_merge() -> None:
+    """Explicit mentions keep their order; resolved additions follow."""
+    assert ordered_merge(
+        ["491555000001@c.us"], ["111222333444555@lid", "491555000001@c.us"]
+    ) == ["491555000001@c.us", "111222333444555@lid"]
+    assert ordered_merge([], []) == []

@@ -667,6 +667,33 @@ def test_operator_run_reaches_foreign_chat(bot: Bot) -> None:
     assert bot.waha.sent == [(SESSION, FOREIGN_JID, "operator says hi", None)]
 
 
+def test_text_token_becomes_real_mention(bot: Bot) -> None:
+    """An ``@<lid-number>`` token in the text tags the roster member.
+
+    The trace-audit failure: the model copies the chat's own mention
+    shape ("Para @111222333444555") into its reply but passes no
+    ``mentions`` — WAHA then sends plain text and nobody is notified.
+    The tool now resolves text tokens against the chat roster, so the
+    identical call delivers a real mention.
+    """
+    llm = bot.stack.llm
+    # RecordingWaha's roster: 491555000001@c.us ("Smoke Sender") + the bot.
+    llm.override = tool_call_response(
+        "send_message",
+        {"text": "Para @491555000001"},
+        call_id="call_mention_1",
+        response_id="chatcmpl-smoke-mention",
+        created=1788525836,
+    )
+    event = waha_event()
+    event["payload"]["body"] = "kai dale para smoke sender"
+    bot.post(event)
+    assert _wait(lambda: len(bot.waha.sent) >= 1)
+    assert bot.waha.sent == [
+        (SESSION, CHAT_ID, "Para @491555000001", ["491555000001@c.us"])
+    ]
+
+
 def test_send_file_wire(bot: Bot) -> None:
     llm = bot.stack.llm
     llm.override = FileResponse

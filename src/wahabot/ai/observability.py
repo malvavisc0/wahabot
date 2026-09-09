@@ -47,10 +47,18 @@ _client: Langfuse | None = None
 _enabled = False
 
 #: WhatsApp JIDs — ``1234567890@c.us``, ``1234-567890123@g.us``,
-#: ``123456789012345@lid`` (the linked-device identity), ``@broadcast``.
-_JID_RE = re.compile(
-    r"\b\d{6,}(?:-\d+)?@(?:c|g)\.us\b|\b\d{6,}@lid\b|\b[\w.-]+@broadcast\b"
+#: ``123456789012345@lid`` (the linked-device identity), ``@broadcast`` —
+#: plus the bare mention-token shape (``@1234567890``): group chats write
+#: mentions as bare LID/phone user parts, and a mention-resolving send
+#: carries them in tool arguments and message text.
+_JID_PATTERN = (
+    r"\b\d{6,}(?:-\d+)?@(?:c|g)\.us\b"
+    r"|\b\d{6,}@lid\b"
+    r"|\b[\w.-]+@broadcast\b"
+    r"|(?<![\w@])@\d{6,}\b"
 )
+
+_JID_RE = re.compile(_JID_PATTERN)
 
 
 def enable_langfuse(settings: Settings) -> bool:
