@@ -40,6 +40,7 @@ from wahabot.ai.history import (
     trim_to_budget,
     wire_call,
 )
+from wahabot.ai.messages import TURN_HANDLED_KWARG
 from wahabot.ai.tools.whatsapp import current_target, log_action_reason
 from wahabot.settings import Settings
 
@@ -525,15 +526,18 @@ class FunctionCallingAgentWorkflow(Workflow):
         if any(call.tool_name == SILENCE_TOOL for call in tool_calls):
             self.log_silence_reason(tool_calls)
             logger.debug("Stopping run: model chose stay_silent")
+            await self.mark_turn_handled(ctx)
             await self.collapse_delivery(ctx)
             return self.stopped_response()
         if tool_calls and await self.repeats_tool_call(ctx, tool_calls):
+            await self.mark_turn_handled(ctx)
             await self.collapse_delivery(ctx)
             return self.stopped_response()
         if not tool_calls:
             self.warn_accidental_silence(response, rounds)
             delivered = self.any_delivery()
             await self.remember(ctx, response, tool_calls, skip_text=delivered)
+            await self.mark_turn_handled(ctx)
             await self.collapse_delivery(ctx)
             return StopEvent(result=self.drop_post_delivery_text(response))
         if self.delivery_complete(tool_calls) or rounds >= self.tool_round_limit:
@@ -545,10 +549,42 @@ class FunctionCallingAgentWorkflow(Workflow):
                 else f"round limit {self.tool_round_limit}"
             )
             result = await self.wrap_up_response(ctx, reason)
+            await self.mark_turn_handled(ctx)
             await self.collapse_delivery(ctx)
             return StopEvent(result=result)
         await self.remember(ctx, response, tool_calls)
         return ToolCallEvent(tool_calls=tool_calls)
+
+    async def mark_turn_handled(self, ctx: Context) -> None:
+        """Stamp the run's inbound user turn as handled conversation.
+
+        ``prepare_chat_history`` appended the turn unstamped; the four
+        stop paths above call this once the run has concluded. The
+        stamp tells ``history``'s trailing-user drop that this message
+        is real conversation a completed run read — in ``judicious``
+        group mode a silent run's message must stay in context for the
+        next run, not be discarded as scaffolding. Fail-soft: without
+        the stamp the turn merely behaves like today (dropped on the
+        next run's repair).
+        """
+        memory = await ctx.store.get("memory", default=None)
+        if memory is None:
+            return
+        messages = await memory.aget_all()
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if msg.role == MessageRole.USER and TURN_HANDLED_KWARG not in (
+                msg.additional_kwargs
+            ):
+                messages[i] = ChatMessage(
+                    role=msg.role,
+                    blocks=list(msg.blocks),
+                    content=msg.content,
+                    additional_kwargs={**msg.additional_kwargs, TURN_HANDLED_KWARG: True},
+                )
+                break
+        await memory.aset(messages)
+        await ctx.store.set("memory", memory)
 
     @staticmethod
     def log_silence_reason(tool_calls: list[ToolSelection]) -> None:

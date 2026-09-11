@@ -14,6 +14,15 @@ NON_REPLYABLE_SUFFIXES = ("@broadcast", "@newsletter")
 #: than a run-scoped inbound turn.
 REACTION_TARGET_KWARG = "reaction_target_id"
 
+#: Kwarg key stamped on an inbound user turn once its agent run has
+#: finished. ``prepare_chat_history`` appends the turn unstamped; the
+#: workflow stamps it at run end. ``history``'s trailing-user drop then
+#: only removes an *unstamped* trailing turn — the scaffolding of a
+#: crashed/replaced run — never a message a completed run already read
+#: (in ``judicious`` group mode that is most of the conversation: a
+#: silent run's message must stay in context for the next run).
+TURN_HANDLED_KWARG = "turn_handled"
+
 
 def jid_string(value: Any) -> str:
     """A JID field as a plain ``user@server`` string.

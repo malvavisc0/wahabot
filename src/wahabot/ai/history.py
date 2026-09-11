@@ -39,7 +39,7 @@ from llama_index.core.base.llms.types import (
     ToolCallBlock,
 )
 
-from wahabot.ai.messages import REACTION_TARGET_KWARG
+from wahabot.ai.messages import REACTION_TARGET_KWARG, TURN_HANDLED_KWARG
 
 __all__ = [
     "ToolCall",
@@ -181,10 +181,14 @@ def _trim_history(
 
     Drop leading messages until history starts with user.
     Drop trailing assistant with unfulfilled tool calls.
-    Drop trailing user only when it is the run-scoped about-to-be-replaced
-    turn: a real out-of-band fold (a reaction note, an operator ``fromMe``
-    text) must survive — it is conversation, not scaffolding, and the
+    Drop a trailing user turn only when it is unhandled run scaffolding:
+    the run that consumed it crashed or was replaced before stamping it
+    ``turn_handled``. A *handled* trailing user turn — a message a
+    completed run read and (in ``judicious`` mode) chose to answer or
+    ignore — is conversation, not scaffolding: it stays, and the
     alternation it would break is fixed by the merge in step 1 instead.
+    An out-of-band fold (a reaction note, an operator ``fromMe`` text)
+    must survive the same way.
     """
     trimmed = list(messages)
 
@@ -194,7 +198,7 @@ def _trim_history(
     while trimmed:
         last = trimmed[-1]
         if _message_tool_call_count(last) > 0 or (
-            drop_trailing_user and last.role == MessageRole.USER and _is_run_scoped(last)
+            drop_trailing_user and last.role == MessageRole.USER and not _is_handled(last)
         ):
             trimmed.pop()
         else:
@@ -203,16 +207,18 @@ def _trim_history(
     return trimmed
 
 
-def _is_run_scoped(msg: ChatMessage) -> bool:
-    """True when *msg* is the run-scoped turn a new user message replaces.
+def _is_handled(msg: ChatMessage) -> bool:
+    """True when *msg*'s run completed — the turn is real conversation.
 
-    ``repair_memory`` runs at the start of the next run with the buffer
-    exactly as the previous run left it, so its trailing user message is
-    always the just-processed inbound turn. An out-of-band reaction fold
-    leaves the buffer ending with a *different* user message — one
-    tagged with the reaction-target kwarg — which the next run must keep.
+    Unstamped means the run that appended it never finished, so it is
+    the run-scoped turn the next run replaces. A reaction fold carries
+    the reaction-target kwarg instead (it has no run at all) and must
+    never be dropped here.
     """
-    return REACTION_TARGET_KWARG not in msg.additional_kwargs
+    return (
+        TURN_HANDLED_KWARG in msg.additional_kwargs
+        or REACTION_TARGET_KWARG in msg.additional_kwargs
+    )
 
 
 def sanitize_chat_history(

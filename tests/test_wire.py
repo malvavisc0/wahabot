@@ -224,6 +224,51 @@ def test_voice_note_in_mentioned_group_skipped(bot: Bot) -> None:
     transcriber.assert_not_called()
 
 
+def test_silent_run_message_stays_in_context(bot: Bot) -> None:
+    """A message the bot read but stayed silent on survives into history.
+
+    The judicious-mode bug this pins: a silent run's user turn was
+    trailing and unstamped, so the next run's ``repair_memory``
+    dropped it as scaffolding — every message the bot chose not to
+    answer vanished from context, and replies came out "factually
+    correct but out of context". The run-end ``turn_handled`` stamp
+    keeps it; the next run sees the whole conversation.
+    """
+    llm = bot.stack.llm
+    # Message 1: the model stays silent on it.
+    llm.override = tool_call_response(
+        "stay_silent",
+        {"reason": "banter between others"},
+        call_id="call_silent_m1",
+        response_id="chatcmpl-silent-m1",
+        created=1788525845,
+    )
+    silent_event = waha_event()
+    silent_event["payload"]["id"] = f"false_{CHAT_ID}_SILENT1"
+    silent_event["payload"]["body"] = "kai mira el partido de anoche"
+    bot.post(silent_event)
+    assert _wait(lambda: len(llm.requests) >= 1)
+    assert bot.waha.sent == []
+
+    # Message 2: a fresh run must see message 1 in its history.
+    llm.clear()
+    bot.waha.sent.clear()
+    llm.override = None
+    follow_up = waha_event()
+    follow_up["payload"]["id"] = f"false_{CHAT_ID}_FOLLOW1"
+    follow_up["payload"]["body"] = "kai y tu que viste el partido?"
+    bot.post(follow_up)
+    assert _wait(lambda: len(llm.requests) >= 1)
+    follow_up_turns = [
+        str(m.get("content", ""))
+        for m in llm.requests[0]["messages"]
+        if m.get("role") == "user"
+    ]
+    assert any("el partido de anoche" in turn for turn in follow_up_turns), (
+        "the silent-run message must ride the next run's history"
+    )
+
+
 def test_fromMe_own_message_folded(bot: Bot) -> None:
     llm = bot.stack.llm
     # Establish a context first (the fold needs prior memory).
