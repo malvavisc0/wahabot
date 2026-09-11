@@ -243,8 +243,7 @@ def test_silent_run_message_stays_in_context(bot: Bot) -> None:
         response_id="chatcmpl-silent-m1",
         created=1788525845,
     )
-    silent_event = waha_event()
-    silent_event["payload"]["id"] = f"false_{CHAT_ID}_SILENT1"
+    silent_event = waha_event("SILENT1")
     silent_event["payload"]["body"] = "kai mira el partido de anoche"
     bot.post(silent_event)
     assert _wait(lambda: len(llm.requests) >= 1)
@@ -254,8 +253,7 @@ def test_silent_run_message_stays_in_context(bot: Bot) -> None:
     llm.clear()
     bot.waha.sent.clear()
     llm.override = None
-    follow_up = waha_event()
-    follow_up["payload"]["id"] = f"false_{CHAT_ID}_FOLLOW1"
+    follow_up = waha_event("FOLLOW1")
     follow_up["payload"]["body"] = "kai y tu que viste el partido?"
     bot.post(follow_up)
     assert _wait(lambda: len(llm.requests) >= 1)
@@ -267,6 +265,62 @@ def test_silent_run_message_stays_in_context(bot: Bot) -> None:
     assert any("el partido de anoche" in turn for turn in follow_up_turns), (
         "the silent-run message must ride the next run's history"
     )
+    assert any("viste el partido" in turn for turn in follow_up_turns), (
+        "the new message itself must ride its own run"
+    )
+
+
+def test_redelivery_does_not_duplicate_message(bot: Bot) -> None:
+    """A WAHA redelivery of a crashed run never duplicates the message.
+
+    The handler drops the seen marker on failure so WAHA retries. The
+    first attempt's turn survives the repair (an earlier completed run
+    stamped the merged turn it rides), so a plain re-append would copy
+    the message once per retry. ``already_in_buffer`` keys on the
+    serialized id: the redelivered event's id is already in the newest
+    user turn, so the run proceeds without appending again — the agent
+    still gets its fresh run. Posting the same event twice stands in
+    for the crash+redelivery pair (identical wire shape; the second
+    post is exactly what WAHA re-sends).
+    """
+    llm = bot.stack.llm
+    # Message 1 completes and is stamped.
+    bot.post(waha_event())
+    assert _wait(lambda: len(llm.requests) >= 1)
+    llm.clear()
+    bot.waha.sent.clear()
+
+    # Message 2 arrives but its run "crashes": simulate the marker
+    # drop by entering the turn directly — then WAHA redelivers.
+    probe = chat_event(body="kai redelivery probe", mid="REDEL1")
+    bot.post(probe)
+    assert _wait(lambda: len(llm.requests) >= 1)
+    turns_after_first = user_turns_of(llm.requests[-1])
+    assert any("redelivery probe" in t for t in turns_after_first)
+
+    # Redelivery: same wire event, the seen marker was dropped by the
+    # failed run (the handler's except path forgets it).
+    from wahabot.handlers import forget_seen
+
+    forget_seen(f"false_{CHAT_ID}_REDEL1")
+    bot.post(probe)
+    assert _wait(lambda: len(bot.waha.sent) >= 1)
+
+    turns_after_redelivery = user_turns_of(llm.requests[-1])
+    probe_turn = next((t for t in turns_after_redelivery if "redelivery probe" in t), "")
+    assert probe_turn.count("redelivery probe") == 1, (
+        f"the redelivered message must appear exactly once, got: {probe_turn!r}"
+    )
+    assert bot.waha.sent, "the redelivery run must still deliver its reply"
+
+
+def user_turns_of(request: dict[str, Any]) -> list[str]:
+    """The user-role turn texts of a captured LLM request."""
+    return [
+        str(m.get("content", ""))
+        for m in request.get("messages", [])
+        if m.get("role") == "user"
+    ]
 
 
 def test_fromMe_own_message_folded(bot: Bot) -> None:
@@ -574,11 +628,18 @@ def test_fresh_message_passes(bot: Bot) -> None:
     llm = bot.stack.llm
     bot.post(waha_event())
     llm.requests.clear()
-    fresh = waha_event()
-    fresh["payload"]["id"] = f"false_{CHAT_ID}_FRESH"
+    fresh = waha_event("FRESH")
     fresh["payload"]["body"] = "kai fresh turn"
     bot.post(fresh)
     assert _wait(lambda: len(llm.requests) >= 1)
+    fresh_turns = [
+        str(m.get("content", ""))
+        for m in llm.requests[-1]["messages"]
+        if m.get("role") == "user"
+    ]
+    assert any("kai fresh turn" in t for t in fresh_turns), (
+        "the fresh message must ride its own run's history"
+    )
 
 
 def test_operator_command(bot: Bot) -> None:
@@ -757,8 +818,7 @@ def test_stay_silent_reason_logged(bot: Bot) -> None:
         response_id="chatcmpl-smoke-quiet",
         created=1788525837,
     )
-    quiet_event = waha_event()
-    quiet_event["payload"]["id"] = f"false_{CHAT_ID}_QUIET"
+    quiet_event = waha_event("QUIET")
     # The harness config runs "mentioned" mode, so the body must name
     # the bot for the run to wake; the model then judges the *quoted*
     # question as aimed at @222333444555666 and stays silent.
@@ -921,9 +981,7 @@ def test_persistent_memory_roundtrip_wire(bot: Bot) -> None:
     def pc_event(
         body: str, mid: str, from_me: bool = False, chat: str = PC
     ) -> dict[str, Any]:
-        return chat_event(
-            body=body, mid=mid, chat=chat, from_me=from_me, include_serialized=True
-        )
+        return chat_event(body=body, mid=mid, chat=chat, from_me=from_me)
 
     def persisted_contents() -> list[str]:
         memory = load_memory(bot.settings.data_dir, SESSION, PC)
@@ -996,7 +1054,7 @@ def test_persistence_corrupt_and_forget(bot: Bot) -> None:
     PC = "5553333333-5553333333@g.us"
 
     def pc_event(body: str, mid: str, chat: str = PC) -> dict[str, Any]:
-        return chat_event(body=body, mid=mid, chat=chat, include_serialized=True)
+        return chat_event(body=body, mid=mid, chat=chat)
 
     llm.override = None
     bot.post(pc_event("kai pc first", "PC1"))
@@ -1035,9 +1093,10 @@ def test_memory_persist_disabled(bot: Bot) -> None:
     no_persist_bot = bot.rebuild(memory_persist=False)
 
     def npc_event(body: str, chat: str = NPC) -> dict[str, Any]:
-        ev = waha_event()
+        ev = waha_event("NPC1")
         ev["id"] = "evt-smoke-npc-1"
         ev["payload"]["id"] = f"false_{chat}_NPC1"
+        ev["payload"]["_data"]["id"] = {"_serialized": f"false_{chat}_NPC1"}
         ev["payload"]["from"] = chat
         ev["payload"]["body"] = body
         return ev
@@ -1056,9 +1115,10 @@ def test_self_chat_command(bot: Bot) -> None:
     llm.clear()
 
     def self_event(body: str, mid: str) -> dict[str, Any]:
-        ev = waha_event()
+        ev = waha_event(mid)
         ev["id"] = f"evt-smoke-self-{mid}"
         ev["payload"]["id"] = f"true_{ME_JID}_{mid}"
+        ev["payload"]["_data"]["id"] = {"_serialized": f"true_{ME_JID}_{mid}"}
         ev["payload"]["from"] = ME_JID
         ev["payload"]["fromMe"] = True
         ev["payload"]["body"] = body
@@ -1136,9 +1196,9 @@ def test_escalate_delivery(bot: Bot) -> None:
     llm = bot.stack.llm
     llm.override = EscalateResponse
     PC = "5553333333-5553333333@g.us"
-    pc_event = waha_event()
-    pc_event["id"] = "evt-smoke-escalate-1"
+    pc_event = waha_event("ESC1")
     pc_event["payload"]["id"] = f"false_{PC}_ESC1"
+    pc_event["payload"]["_data"]["id"] = {"_serialized": f"false_{PC}_ESC1"}
     pc_event["payload"]["from"] = PC
     pc_event["payload"]["body"] = "kai I want to speak to a human"
     bot.post(pc_event)
@@ -1159,9 +1219,9 @@ def test_escalate_cooldown(bot: Bot) -> None:
     llm.override = EscalateResponse
     # Trigger the first escalation so the channel is stamped.
     PC = "5553333333-5553333333@g.us"
-    pc_event = waha_event()
-    pc_event["id"] = "evt-smoke-esc-1"
+    pc_event = waha_event("ESC1")
     pc_event["payload"]["id"] = f"false_{PC}_ESC1"
+    pc_event["payload"]["_data"]["id"] = {"_serialized": f"false_{PC}_ESC1"}
     pc_event["payload"]["from"] = PC
     pc_event["payload"]["body"] = "kai I want to speak to a human"
     bot.post(pc_event)
@@ -1169,9 +1229,9 @@ def test_escalate_cooldown(bot: Bot) -> None:
     self_sent_before = sum(1 for _, chat, _, _ in bot.waha.sent if chat == ME_JID)
     llm.requests.clear()
     # Second escalate: cooldown refuses, no new self-chat delivery.
-    pc_event2 = waha_event()
-    pc_event2["id"] = "evt-smoke-esc-2"
+    pc_event2 = waha_event("ESC2")
     pc_event2["payload"]["id"] = f"false_{PC}_ESC2"
+    pc_event2["payload"]["_data"]["id"] = {"_serialized": f"false_{PC}_ESC2"}
     pc_event2["payload"]["from"] = PC
     pc_event2["payload"]["body"] = "kai please escalate again"
     bot.post(pc_event2)

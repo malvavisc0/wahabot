@@ -35,6 +35,7 @@ from loguru import logger
 
 from wahabot.ai.events import InputEvent, ToolCallEvent
 from wahabot.ai.history import (
+    inbound_message_id,
     sanitize_chat_history,
     tool_calls,
     trim_to_budget,
@@ -457,9 +458,39 @@ class FunctionCallingAgentWorkflow(Workflow):
         await ctx.store.set("image_blocks", getattr(ev, "image_blocks", None))
         await ctx.store.set("tool_rounds", 0)
         await ctx.store.set("last_tool_calls", [])
-        await memory.aput(ChatMessage(role="user", content=str(ev.input)))
+        if not await self.already_in_buffer(memory, str(ev.input)):
+            await memory.aput(ChatMessage(role="user", content=str(ev.input)))
         await ctx.store.set("memory", memory)
         return InputEvent(input=await self.chat_history(ctx))
+
+    @staticmethod
+    async def already_in_buffer(memory: ChatMemoryBuffer, incoming: str) -> bool:
+        """Whether *incoming*'s message-id note already rides the buffer.
+
+        A WAHA redelivery (the handler drops the seen marker so a
+        crashed run retries) re-enters ``prepare_chat_history`` with
+        the same text. The previous attempt's turn — merged with the
+        turns before it, and stamped ``turn_handled`` by an *earlier*
+        completed run — would survive the trailing-user drop, so a
+        plain re-append duplicates the message once per retry. The
+        serialized id in the ``[message id: …]`` note identifies the
+        exact event: already present means this is a redelivery whose
+        body the buffer already carries, and the run proceeds without
+        appending (the agent still gets its fresh run).
+        """
+        message_id = inbound_message_id(incoming)
+        if not message_id:
+            return False
+        messages = await memory.aget_all()
+        for message in reversed(messages):
+            if message.role != MessageRole.USER:
+                continue
+            if message_id in str(message.content or ""):
+                return True
+            # Only the newest user turn can carry it: older turns are
+            # earlier messages, already distinct in the buffer.
+            break
+        return False
 
     @staticmethod
     def with_image(

@@ -302,14 +302,14 @@ def chat_event(
     mid: str,
     chat: str = CHAT_ID,
     from_me: bool = False,
-    include_serialized: bool = False,
 ) -> dict[str, Any]:
     """A text ``message`` event for *mid* on *chat*, distinct from the shared fixtures.
 
     Used by the persistence reservations that must address a specific
-    private chat (``PC``…). ``from_me`` marks the event as the bot's own;
-    ``include_serialized`` writes the ``_data.id`` block the
-    message-id handlers read. Replaces the per-test ``pc_event`` closures.
+    private chat (``PC``…). ``from_me`` marks the event as the bot's own.
+    The ``_data.id`` block always carries the same serialized id as
+    ``payload.id`` (real WAHA keeps the two in sync). Replaces the
+    per-test ``pc_event`` closures.
     """
     ev = waha_event()
     prefix = "true" if from_me else "false"
@@ -318,9 +318,12 @@ def chat_event(
     ev["payload"]["from"] = chat
     ev["payload"]["fromMe"] = from_me
     ev["payload"]["body"] = body
-    if include_serialized:
-        ev["payload"]["_data"] = dict(ev["payload"]["_data"])
-        ev["payload"]["_data"]["id"] = {"_serialized": f"{prefix}_{chat}_{mid}"}
+    # Real WAHA keeps payload.id and _data.id._serialized in sync (both
+    # are the same serialized id); the inbound-note fallback reads
+    # _data first, so a stale base fixture id here would make every
+    # event share one message id — the redelivery dedup keys on it.
+    ev["payload"]["_data"] = dict(ev["payload"]["_data"])
+    ev["payload"]["_data"]["id"] = {"_serialized": f"{prefix}_{chat}_{mid}"}
     return ev
 
 
@@ -501,22 +504,28 @@ def smoke_settings(data_dir: Path, llm_base: str) -> Settings:
     )
 
 
-def waha_event() -> dict[str, Any]:
+def waha_event(mid: str = "ABCDEF") -> dict[str, Any]:
     """A realistic WAHA message event: group chat, bot mentioned.
 
     The timestamp is one second in the future so it deterministically
     postdates the handler's ``started_at`` (an integer second could
     truncate below the registration time and read as startup backlog).
+
+    *mid* rides both id shapes (``payload.id`` and
+    ``_data.id._serialized``) — real WAHA keeps them in sync, and the
+    inbound-note fallback prefers ``_data``, so a test posting two
+    events into one chat must give each its own *mid* or the
+    redelivery dedup keys collide.
     """
     now = int(time.time()) + 1
     return {
-        "id": "evt-smoke-1",
+        "id": f"evt-smoke-{mid}",
         "timestamp": now,
         "event": "message",
         "session": SESSION,
         "me": {"id": ME_JID, "lid": "491555000000@lid"},
         "payload": {
-            "id": f"false_{CHAT_ID}_ABCDEF",
+            "id": f"false_{CHAT_ID}_{mid}",
             "timestamp": now,
             "from": CHAT_ID,
             "fromMe": False,
@@ -524,7 +533,7 @@ def waha_event() -> dict[str, Any]:
             "body": "kai hola, smoke check",
             "_data": {
                 "type": "text",
-                "id": {"_serialized": f"false_{CHAT_ID}_ABCDEF"},
+                "id": {"_serialized": f"false_{CHAT_ID}_{mid}"},
                 "notifyName": "Smoke Sender",
             },
         },

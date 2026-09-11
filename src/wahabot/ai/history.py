@@ -30,6 +30,7 @@ roles for plain turns. Together these invariants are enforced by
 Adapted from aria-ai's ``aria.web.session``.
 """
 
+import re
 from collections.abc import Callable
 from typing import Any, NamedTuple, cast
 
@@ -43,11 +44,26 @@ from wahabot.ai.messages import REACTION_TARGET_KWARG, TURN_HANDLED_KWARG
 
 __all__ = [
     "ToolCall",
+    "inbound_message_id",
     "sanitize_chat_history",
     "tool_calls",
     "trim_to_budget",
     "wire_call",
 ]
+
+#: The serialized id note an inbound turn carries (``context.py``
+#: appends it as the turn's last line): the id inside brackets.
+_INBOUND_ID_RE = re.compile(r"\[message id: ([^\]]+)\]")
+
+
+def inbound_message_id(incoming: str) -> str:
+    """The serialized id of an inbound turn's ``[message id: …]`` note.
+
+    Empty when the turn carries no note — operator commands have none,
+    so they are never treated as redeliveries.
+    """
+    match = _INBOUND_ID_RE.search(incoming)
+    return match.group(1).strip() if match else ""
 
 
 class ToolCall(NamedTuple):
