@@ -391,6 +391,16 @@ def test_video_urls() -> None:
     assert video_urls("no links here", 2) == []
 
 
+def test_video_urls_skip_youtube() -> None:
+    # YouTube stays with the get_youtube_transcript tool (full captions
+    # beat six sampled frames on long-form), so sniffing skips it.
+    assert video_urls("watch https://www.youtube.com/watch?v=dQw4w9WgXcQ", 2) == []
+    assert video_urls("https://youtu.be/dQw4w9WgXcQ nice", 2) == []
+    assert video_urls(
+        "https://youtu.be/dQw4w9WgXcQ then https://insta.example/reel/abc", 2
+    ) == ["https://insta.example/reel/abc"]
+
+
 def test_video_media_kind_guard() -> None:
     video_evt = WahaEvent(
         id="e7",

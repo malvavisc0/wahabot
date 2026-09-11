@@ -27,6 +27,15 @@ __all__ = ["fetch_url_video", "video_urls"]
 
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
+#: Hosts excluded from sniffing: YouTube is long-form — the
+#: ``get_youtube_transcript`` tool reads its captions directly, which
+#: beats downloading an hour of video to sample six frames. Its formats
+#: also need a JS runtime to resolve, so ``best`` often fails outright.
+_YOUTUBE_HOST_RE = re.compile(
+    r"^https?://(?:[\w-]+\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/",
+    re.IGNORECASE,
+)
+
 #: Files to skip when picking the downloaded artifact out of the temp dir.
 _SKIP_SUFFIXES = (".part", ".ytdl", ".temp")
 
@@ -34,14 +43,16 @@ _SKIP_SUFFIXES = (".part", ".ytdl", ".temp")
 def video_urls(text: str, limit: int) -> list[str]:
     """Extract up to *limit* candidate media URLs from *text*.
 
-    Any http(s) URL qualifies; yt-dlp decides whether it is a
-    downloadable video. Trailing punctuation/quote chars are stripped
-    (the same trim ``url_images`` does) so a period after a pasted link
-    does not break the extractor.
+    Any http(s) URL qualifies except YouTube (see ``_YOUTUBE_HOST_RE``);
+    yt-dlp decides whether the rest is a downloadable video. Trailing
+    punctuation/quote chars are stripped (the same trim ``url_images``
+    does) so a period after a pasted link does not break the extractor.
     """
     urls: list[str] = []
     for match in _URL_RE.finditer(text):
         url = match.group().rstrip(").,;:!?\"'>]}")
+        if _YOUTUBE_HOST_RE.match(url):
+            continue
         if url not in urls:
             urls.append(url)
         if len(urls) >= limit:
