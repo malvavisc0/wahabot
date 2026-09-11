@@ -35,6 +35,7 @@ from wahabot.ai.messages import (
 )
 from wahabot.ai.observability import chat_trace_attributes, enable_langfuse
 from wahabot.ai.tools import build_default_tools
+from wahabot.ai.tools.url_videos import fetch_url_video, video_urls
 from wahabot.ai.tools.whatsapp import EscalationChannel
 from wahabot.ai.video import caption_video, extract_frames, join_anchor, video_marker
 from wahabot.ai.vision import caption_images
@@ -345,14 +346,72 @@ async def prepare_video(
     logger.info(
         "Downloaded video ({size} B) from message {id}", size=len(data), id=message_id
     )
+    filename = str(media.get("filename") or "") or "video.mp4"
+    return await build_video(settings, llm, semaphore, data, filename)
+
+
+async def build_video(
+    settings: Settings,
+    llm: FunctionCallingLLM,
+    semaphore: asyncio.Semaphore | None,
+    data: bytes,
+    filename: str,
+) -> dict[str, Any]:
+    """Frames + caption + transcript for already-downloaded video bytes.
+
+    Shared by the WAHA video path (:func:`prepare_video`) and the URL
+    path (:func:`prepare_url_video`): identical fail-soft behavior —
+    a dead ffmpeg, caption call or transcription each drop their marker
+    part and still return a (possibly bare) result.
+    """
     frames = await asyncio.to_thread(extract_frames, data, settings.video_frames)
     caption = await caption_video(llm, frames, semaphore=semaphore) if frames else ""
-    filename = str(media.get("filename") or "") or "video.mp4"
     transcript = await video_transcript(settings, data, filename)
     return {
         "frames": [{"data": frame, "mimetype": "image/jpeg"} for frame in frames],
         "marker": video_marker(caption, transcript),
     }
+
+
+async def prepare_url_video(
+    settings: Settings,
+    llm: FunctionCallingLLM,
+    semaphore: asyncio.Semaphore | None,
+    body: str,
+) -> dict[str, Any] | None:
+    """Resolve + download video URLs in *body*, then frames + transcript.
+
+    Returns the same ``{"frames": [...], "marker": ...}`` shape as
+    :func:`prepare_video`, or None when no URL resolved to a video. Only
+    the first ``settings.max_url_videos`` links are tried; each failure
+    is a log line and the link stays ordinary text. Runs before the
+    chat's run lock (like ``prepare_video``) so the yt-dlp download and
+    the vision/transcription calls don't extend the serialized
+    agent-run section.
+    """
+    urls = video_urls(body, settings.max_url_videos)
+    for url in urls:
+        result = await asyncio.to_thread(fetch_url_video, settings, url)
+        if result is None:
+            continue
+        return await build_video(
+            settings, llm, semaphore, result["data"], result["filename"]
+        )
+    return None
+
+
+def video_frames(
+    video: dict[str, Any] | None, url_video: dict[str, Any] | None
+) -> list[dict[str, Any]] | None:
+    """The frames of whichever video source resolved, or None.
+
+    The URL path only runs when no WAHA video was attached, so at most
+    one of the two is ever non-None — this is a pick, not a merge.
+    """
+    for source in (video, url_video):
+        if source is not None:
+            return cast(list[dict[str, Any]], source["frames"]) or None
+    return None
 
 
 def register_forget_handler(settings: Settings) -> None:
@@ -649,7 +708,25 @@ def register_agent_handler(
             if video is not None:
                 event.payload["body"] = join_anchor(body or "", video["marker"])
                 body = event.payload["body"]
-        if body is None and image is None and video is None:
+        url_video = None
+        if (
+            settings.video
+            and settings.vision
+            and settings.max_url_videos > 0
+            and video is None
+            and body
+        ):
+            # A media URL in text ("watch this reel link") gets the same
+            # frames + transcript treatment as a forwarded video. Runs
+            # before the lock like prepare_video; a miss keeps the link
+            # as ordinary text.
+            url_video = await prepare_url_video(
+                settings, agent.llm, agent.llm_semaphore, body
+            )
+            if url_video is not None:
+                body = join_anchor(body, url_video["marker"])
+                event.payload["body"] = body
+        if body is None and image is None and video is None and url_video is None:
             logger.debug("Skipping media/album message {id}", id=event.payload.get("id"))
             return
         chat_id = str(event.payload["from"])
@@ -676,7 +753,7 @@ def register_agent_handler(
                         agent,
                         ctx=ctx,
                         image=image,
-                        images=video["frames"] if video is not None else None,
+                        images=video_frames(video, url_video),
                         settings=settings,
                         waha=waha,
                     )

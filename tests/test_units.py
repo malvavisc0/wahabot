@@ -39,6 +39,7 @@ from wahabot.ai.messages import (
     video_media,
 )
 from wahabot.ai.observability import _mask_value  # pyright: ignore[reportPrivateUsage]
+from wahabot.ai.tools.url_videos import video_urls
 from wahabot.ai.tools.whatsapp import (
     _DOC_MIME_BY_EXT as DOC_MIME_BY_EXT,  # pyright: ignore[reportPrivateUsage]
 )
@@ -370,6 +371,24 @@ def test_video_frame_extraction() -> None:
     many = extract_frames(video_bytes, 99)
     assert len(many) >= 1
     assert extract_frames(b"not a video at all", 4) == []
+
+
+def test_video_urls() -> None:
+    assert video_urls("watch this https://insta.example/reel/abc.", 2) == [
+        "https://insta.example/reel/abc"
+    ]
+    assert video_urls('see "https://a.example/v" and https://b.example/v)!', 2) == [
+        "https://a.example/v",
+        "https://b.example/v",
+    ]
+    # Duplicates collapse; the limit caps how many are tried.
+    assert video_urls("https://a.example/v https://a.example/v", 2) == [
+        "https://a.example/v"
+    ]
+    assert video_urls("https://a.example/v https://b.example/v", 1) == [
+        "https://a.example/v"
+    ]
+    assert video_urls("no links here", 2) == []
 
 
 def test_video_media_kind_guard() -> None:

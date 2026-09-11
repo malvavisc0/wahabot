@@ -95,6 +95,12 @@ class Settings(BaseSettings):
     #: frames read on-screen text more faithfully at ~192 image
     #: tokens each.
     video_frames: int = Field(default=6, ge=1, le=12)
+    #: How many video URLs sniffed from a message's text to resolve and
+    #: download via yt-dlp (see ``wahabot.ai.tools.url_videos``). The
+    #: pipeline shares ``video``/``vision`` gating and the video prep
+    #: machinery, so a link like "watch this instagram reel URL" shows
+    #: the model frames + a transcript just like a forwarded video.
+    max_url_videos: int = 1
     #: Local files larger than this are rejected by the send_file tool
     #: (base64 inflates ~4/3x and the whole file rides one JSON request);
     #: 16 MB matches WhatsApp's own document limit.

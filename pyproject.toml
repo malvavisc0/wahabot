@@ -27,6 +27,7 @@ dependencies = [
     # without credentials, and these stay dormant unless enabled.
     "langfuse",
     "opentelemetry-instrumentation-llamaindex",
+    "yt-dlp",
 ]
 
 [project.scripts]
