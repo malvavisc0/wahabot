@@ -36,6 +36,7 @@ Every tool answers with a small JSON envelope — `{"ok": true, ...}` or `{"ok":
 - **Videos** are understood as frames + spoken track (`WAHABOT_VIDEO`): evenly spaced stills are captioned by the vision model, the audio goes to WhisperX, and the turn carries `(video shows: …) [audio: "…"]` as a durable text anchor. The frames ride the first LLM call only; needs ffmpeg on PATH (the Docker image ships it).
 - **Albums** arrive as a container plus N images; the handler buffers them and runs the agent once, all images attached.
 - **Bare image links** in text are sniffed out, fetched, and shown to the model too.
+- **Video links** in text (reels, TikTok, X, YouTube…) are resolved and downloaded via yt-dlp (`WAHABOT_MAX_URL_VIDEOS`), then get the same frames + transcript treatment as a forwarded video — the bot watched it, not just read the page.
 - **Reactions** to the bot's own messages are folded into memory as context — a 👍 lands quietly, visible on the next turn, never waking the agent.
 
 ## Talking to the bot

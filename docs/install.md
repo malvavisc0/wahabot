@@ -45,6 +45,7 @@ Key env vars:
 | `WAHABOT_VIDEO` | Enable video understanding (frames + WhisperX transcript; needs ffmpeg) | `true` |
 | `WAHABOT_MAX_VIDEO_BYTES` | Per-video download cap | `67108864` |
 | `WAHABOT_VIDEO_FRAMES` | Frames sampled per video for the caption call | `6` |
+| `WAHABOT_MAX_URL_VIDEOS` | Max video-URLs to resolve via yt-dlp per message (`0` = off) | `1` |
 | `WAHABOT_MAX_FILE_BYTES` | Local-file cap for the `send_file` tool | `16777216` |
 | `WAHABOT_TRANSCRIBE_URL` | WhisperX base URL for voice-note transcription (empty = off) | — |
 | `WAHABOT_TRANSCRIBE_TIMEOUT` | Per-request transcription timeout (s) | `300` |
