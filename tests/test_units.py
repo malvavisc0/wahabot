@@ -26,7 +26,7 @@ from tests.harness import (
     SESSION,
     smoke_video_bytes,
 )
-from wahabot.ai.context import render_system_prompt
+from wahabot.ai.context import is_silence_narration, render_system_prompt
 from wahabot.ai.messages import (
     bot_jids,
     bot_mentioned,
@@ -1117,3 +1117,19 @@ def test_log_action_reason() -> None:
     assert len(infos[1][1]["reason"]) == 200  # the 500-char reason was capped
     assert warnings[0][0] == "Tool call {tool} carried no reason{suffix}"
     assert warnings[0][1] == {"tool": "stay_silent", "suffix": ""}
+
+
+def test_is_silence_narration_catches_leaked_tool_token() -> None:
+    """A leaked ``stay_silent`` tool token is silence chatter, not an answer.
+
+    The trace shows the model emitting the literal tool name ``stay_silent``
+    as a plain-text reply instead of calling the tool; those go straight to
+    the chat, so ``is_silence_narration`` must treat the token as silence.
+    It stays anchored to the *whole* reply — a real sentence containing the
+    word must still go through.
+    """
+    assert is_silence_narration("stay_silent")
+    assert is_silence_narration(" stay_silent ")
+    assert not is_silence_narration(
+        "I could say stay_silent here but I'll answer anyway."
+    )

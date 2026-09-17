@@ -53,6 +53,7 @@ _SILENCE_PATTERNS = tuple(
         r"^nothing to (add|say)\b",
         r"^nothing (more|else) to (add|say|do)\b",
         r"^(i'?ll |i will |i'?m )?(stay|staying|remain|choosing to stay)[\s'-]*silent\b",
+        r"^stay_silent\b",
         r"^(i'?ll |i will )?(stay|keep) (quiet|out of (this|it|the conversation))\b",
         r"^silence[.!…]?$",
         r"^\(silence\)$",
