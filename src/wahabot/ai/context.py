@@ -28,12 +28,42 @@ __all__ = [
     "handle_message",
     "is_error_narration",
     "is_silence_narration",
+    "is_single_emoji",
     "participant_names",
     "render_system_prompt",
     "reply_context",
     "reply_context_section",
     "sender_tag",
 ]
+
+#: Emoji-only replies.  Small models often output a lone emoji (👋, 🤣,
+#: 😂) as plain text instead of calling ``react_to_message``.  The
+#: system prompt says "A lone emoji is a reaction, never a message",
+#: so we treat a single-emoji final reply as an implicit reaction or
+#: silence.  Multi-emoji strings like ``🤣🤣🤣`` are kept as real
+#: messages — those are intentional chat text.
+_SINGLE_EMOJI_RE = re.compile(
+    r"^\s*(?:"
+    r"[\U0001F600-\U0001F64F]"  # emoticons
+    r"|[\U0001F300-\U0001F5FF]"  # misc symbols & pictographs
+    r"|[\U0001F680-\U0001F6FF]"  # transport & map
+    r"|[\U0001F1E0-\U0001F1FF]"  # flags (regional indicators)
+    r"|[\U00002702-\U000027B0]"  # dingbats
+    r"|[\U0000FE00-\U0000FE0F]"  # variation selectors
+    r"|[\U0001F900-\U0001F9FF]"  # supplemental symbols
+    r"|[\U0001FA00-\U0001FA6F]"  # chess symbols / extended-A
+    r"|[\U0001FA70-\U0001FAFF]"  # symbols extended-A (cont.)
+    r"|[\U00002600-\U000026FF]"  # misc symbols (☀, ⚡, …)
+    r"|[\U0000200D]"  # ZWJ
+    r"|[\U0000FE0F]"  # VS-16
+    r")\s*$"  # exactly ONE emoji (with optional whitespace)
+)
+
+
+def is_single_emoji(reply: str) -> bool:
+    """True when *reply* is exactly one emoji and nothing else."""
+    return bool(_SINGLE_EMOJI_RE.match(reply))
+
 
 #: Replies that narrate a chosen silence instead of being one. Small
 #: models asked to "reply with an empty string to stay silent" often

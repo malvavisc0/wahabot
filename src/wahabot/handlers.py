@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import random
 import time
 from collections.abc import Callable
 from typing import Any, cast
@@ -21,7 +22,7 @@ from wahabot.ai.albums import (
     set_completion_handler,
     start_album,
 )
-from wahabot.ai.context import handle_message, render_system_prompt
+from wahabot.ai.context import handle_message, is_single_emoji, render_system_prompt
 from wahabot.ai.messages import (
     bot_jids,
     extract_text,
@@ -518,6 +519,28 @@ def register_agent_handler(
                 log_final_text(chat_id, reply)
                 return
         if reply and reply.strip():
+            album_mid = str(event.payload.get("id", ""))
+            if is_single_emoji(reply):
+                emoji = reply.strip()
+                if random.random() < 0.5 and album_mid:
+                    logger.info(
+                        "Converting album lone emoji to reaction on {mid}: {emoji}",
+                        mid=album_mid,
+                        emoji=emoji,
+                    )
+                    await asyncio.to_thread(
+                        waha.send_reaction,
+                        event.session,
+                        album_mid,
+                        emoji,
+                    )
+                else:
+                    logger.info(
+                        "Dropping album lone emoji as silence for {chat_id}: {reply!r}",
+                        chat_id=chat_id,
+                        reply=reply,
+                    )
+                return
             logger.info(
                 "Replying to album in {chat_id}: {reply}",
                 chat_id=chat_id,
@@ -528,7 +551,7 @@ def register_agent_handler(
                 event.session,
                 chat_id,
                 reply,
-                str(event.payload.get("id", "")),
+                album_mid,
             )
 
     set_completion_handler(run_album)
@@ -767,6 +790,30 @@ def register_agent_handler(
                     return
             if not reply or not reply.strip():
                 logger.info("Agent decision for {chat_id}: stay silent", chat_id=chat_id)
+                return
+            if is_single_emoji(reply):
+                # Model output a lone emoji as text instead of calling
+                # react_to_message or stay_silent.  Randomly convert it
+                # into a reaction (~50 %) or drop it as silence.
+                emoji = reply.strip()
+                if random.random() < 0.5:
+                    logger.info(
+                        "Converting lone emoji to reaction on {mid}: {emoji}",
+                        mid=message_id,
+                        emoji=emoji,
+                    )
+                    await asyncio.to_thread(
+                        waha.send_reaction,
+                        event.session,
+                        message_id,
+                        emoji,
+                    )
+                else:
+                    logger.info(
+                        "Dropping lone emoji as silence for {chat_id}: {reply!r}",
+                        chat_id=chat_id,
+                        reply=reply,
+                    )
                 return
             logger.info(
                 "Replying to {chat_id}: {reply}", chat_id=chat_id, reply=reply[:500]

@@ -26,7 +26,7 @@ from tests.harness import (
     SESSION,
     smoke_video_bytes,
 )
-from wahabot.ai.context import is_silence_narration, render_system_prompt
+from wahabot.ai.context import is_silence_narration, is_single_emoji, render_system_prompt
 from wahabot.ai.messages import (
     bot_jids,
     bot_mentioned,
@@ -1133,3 +1133,39 @@ def test_is_silence_narration_catches_leaked_tool_token() -> None:
     assert not is_silence_narration(
         "I could say stay_silent here but I'll answer anyway."
     )
+
+
+def test_is_single_emoji_catches_lone_emoji() -> None:
+    """A lone emoji reply is intercepted — it's a reaction, not a message.
+
+    The model sometimes outputs a single emoji as text instead of calling
+    ``react_to_message``.  ``is_single_emoji`` catches these so the handler
+    can convert them to reactions or silence.
+    """
+    assert is_single_emoji("👋")
+    assert is_single_emoji("🤣")
+    assert is_single_emoji("😂")
+    assert is_single_emoji("👍")
+    assert is_single_emoji("❤")
+    assert is_single_emoji("🔥")
+    # Surrounding whitespace is tolerated.
+    assert is_single_emoji(" 👋 ")
+    assert is_single_emoji("  🤣\n")
+
+
+def test_is_single_emoji_passes_multi_emoji() -> None:
+    """Multi-emoji strings are real messages — they must NOT be intercepted."""
+    assert not is_single_emoji("🤣🤣🤣")
+    assert not is_single_emoji("😂👍")
+    assert not is_single_emoji("🤣😂")
+    assert not is_single_emoji("👋🔥❤")
+
+
+def test_is_single_emoji_passes_text() -> None:
+    """Plain text and text-with-emoji must pass through as normal messages."""
+    assert not is_single_emoji("hola 👋")
+    assert not is_single_emoji("me sirve pa' reírme 🤣")
+    assert not is_single_emoji("hello")
+    assert not is_single_emoji("stay_silent")
+    assert not is_single_emoji("")
+    assert not is_single_emoji("   ")
