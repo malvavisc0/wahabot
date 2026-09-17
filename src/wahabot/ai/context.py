@@ -2,8 +2,6 @@
 
 import asyncio
 import datetime
-import json
-import re
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -11,9 +9,20 @@ from llama_index.core.base.llms.types import ChatMessage, ImageBlock
 from llama_index.core.workflow import Context
 from loguru import logger
 
+from wahabot.ai.history import (
+    chat_visible_text,
+    is_error_narration,
+    is_silence_narration,
+    is_single_emoji,
+)
 from wahabot.ai.messages import jid_string, message_replies_to
 from wahabot.ai.tools.url_images import fetch_url_images, image_urls
-from wahabot.ai.tools.whatsapp import RunTarget, bind_target, reset_target
+from wahabot.ai.tools.whatsapp import (
+    RunTarget,
+    bind_target,
+    reset_target,
+    sender_names,
+)
 from wahabot.ai.vision import image_caption, image_noun
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.cache import TtlCache
@@ -29,6 +38,7 @@ __all__ = [
     "is_error_narration",
     "is_silence_narration",
     "is_single_emoji",
+    "own_identity_pass",
     "participant_names",
     "render_system_prompt",
     "reply_context",
@@ -36,109 +46,14 @@ __all__ = [
     "sender_tag",
 ]
 
-#: Emoji-only replies.  Small models often output a lone emoji (👋, 🤣,
-#: 😂) as plain text instead of calling ``react_to_message``.  The
-#: system prompt says "A lone emoji is a reaction, never a message",
-#: so we treat a single-emoji final reply as an implicit reaction or
-#: silence.  Multi-emoji strings like ``🤣🤣🤣`` are kept as real
-#: messages — those are intentional chat text.
-_SINGLE_EMOJI_RE = re.compile(
-    r"^\s*(?:"
-    r"[\U0001F600-\U0001F64F]"  # emoticons
-    r"|[\U0001F300-\U0001F5FF]"  # misc symbols & pictographs
-    r"|[\U0001F680-\U0001F6FF]"  # transport & map
-    r"|[\U0001F1E0-\U0001F1FF]"  # flags (regional indicators)
-    r"|[\U00002702-\U000027B0]"  # dingbats
-    r"|[\U0000FE00-\U0000FE0F]"  # variation selectors
-    r"|[\U0001F900-\U0001F9FF]"  # supplemental symbols
-    r"|[\U0001FA00-\U0001FA6F]"  # chess symbols / extended-A
-    r"|[\U0001FA70-\U0001FAFF]"  # symbols extended-A (cont.)
-    r"|[\U00002600-\U000026FF]"  # misc symbols (☀, ⚡, …)
-    r"|[\U0000200D]"  # ZWJ
-    r"|[\U0000FE0F]"  # VS-16
-    r")\s*$"  # exactly ONE emoji (with optional whitespace)
-)
-
-
-def is_single_emoji(reply: str) -> bool:
-    """True when *reply* is exactly one emoji and nothing else."""
-    return bool(_SINGLE_EMOJI_RE.match(reply))
-
-
-#: Replies that narrate a chosen silence instead of being one. Small
-#: models asked to "reply with an empty string to stay silent" often
-#: answer with meta-commentary ("I'll stay silent here — ...", "No
-#: response.") — matching it here keeps it out of the chat. The reply
-#: must *be about* staying silent, not merely contain the word (so
-#: "silence is golden, but I'll answer anyway" still goes through).
-#: The same happens after a delivered reaction or reply: the model
-#: pattern-completes "I already reacted to that message, so I'm done
-#: here." instead of going quiet — the reaction/reply already went out
-#: via the tool, so the narration is chatter, not an answer.
-_SILENCE_PATTERNS = tuple(
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in (
-        r"^no response\b",
-        r"^no reply\b",
-        r"^nothing to (add|say)\b",
-        r"^nothing (more|else) to (add|say|do)\b",
-        r"^(i'?ll |i will |i'?m )?(stay|staying|remain|choosing to stay)[\s'-]*silent\b",
-        r"^stay_silent\b",
-        r"^(i'?ll |i will )?(stay|keep) (quiet|out of (this|it|the conversation))\b",
-        r"^silence[.!…]?$",
-        r"^\(silence\)$",
-        r"^not (addressed|directed) (to|at) me\b",
-        r"^(i'?ll |i will )?say nothing\b",
-        r"^i (already )?(reacted|replied|sent|answered)\b[^.]*" + r"(so )?i'?m done\b",
-        r"^i (already )?(reacted|replied|sent|answered)\b[^.]*"
-        + r"(so )?(there'?s?|there is) nothing (more|else|left) (to )?(add|say|do)",
-        r"^i'?m done (here|with this)\b",
-    )
-)
-
-
-def is_silence_narration(reply: str) -> bool:
-    """True when *reply* narrates a silence instead of being one.
-
-    Stripped of surrounding whitespace/quotes/parentheses and matched
-    case-insensitively against the silence-meta patterns; anything the
-    model actually wanted to say still goes through.
-    """
-    cleaned = reply.strip().strip("\"'`()").strip()
-    return any(pattern.search(cleaned) for pattern in _SILENCE_PATTERNS)
-
-
-def is_error_narration(reply: str) -> bool:
-    """True when *reply* is an error payload, not a chat answer.
-
-    Small models sometimes *write* an API error as their reply — e.g.
-    a made-up ``{"error": {"message": "resource exhausted …", "type":
-    "upstream_error", "code": "resource_exhausted"}}`` naming a provider
-    the bot never used. Whatever the model's reason (pattern-
-    completing text it has seen), the result must never reach the
-    chat. Only near-JSON bodies whose top level is an ``error`` object
-    match; genuine prose answers never do.
-    """
-    stripped = reply.strip()
-    if not stripped.startswith("{"):
-        return False
-    try:
-        data = json.loads(stripped)
-    except json.JSONDecodeError, ValueError:
-        return False
-    if not isinstance(data, dict):
-        return False
-    error = cast(dict[str, Any], data).get("error")
-    return isinstance(error, dict) and any(
-        key in error for key in ("message", "code", "type", "status")
-    )
-
 
 def render_system_prompt(
     prompt: str,
     tz_name: str = "UTC",
     bot_name: str | None = None,
     goal: str = "",
+    own_jid: str = "",
+    own_lid: str = "",
 ) -> str:
     """Substitute date/time/name/host placeholders in the system prompt.
 
@@ -154,6 +69,8 @@ def render_system_prompt(
     - ``{{tz}}`` — the timezone name, e.g. ``UTC``
     - ``{{bot_name}}`` — the bot's display name, e.g. ``Kai``
     - ``{{host}}`` — a summary of the machine (OS, Python, Node, shell)
+    - ``{{own_jid}}`` / ``{{own_lid}}`` / ``{{own_identities}}`` — the
+      bot's own WhatsApp ids (see :func:`own_identity_pass)
 
     Unknown/invalid timezone names fall back to UTC.
     """
@@ -175,26 +92,81 @@ def render_system_prompt(
     for key, value in replacements.items():
         prompt = prompt.replace(key, value)
         goal = goal.replace(key, value)
+    prompt = own_identity_pass(prompt, own_jid, own_lid)
     goal = goal.strip()
     if goal:
         return f"Goal: {goal}\n\n{prompt}"
     return prompt
 
 
-def sender_tag(event: WahaEvent) -> str:
+#: Own-identity placeholders the prompt may carry; every one of them
+#: is dropped line-wise when the bot's identity is unknown.
+_OWN_PLACEHOLDERS = ("{{own_jid}}", "{{own_lid}}", "{{own_identities}}")
+
+
+def own_identity_pass(prompt: str, own_jid: str, own_lid: str) -> str:
+    """Substitute the bot's own identity placeholders in *prompt*.
+
+    ``{{own_jid}}``/``{{own_lid}}`` become the ids; ``{{own_identities}}``
+    becomes the two-id list, e.g. `` `4915…@c.us` or `4915…@lid` ``, for
+    a sentence like "You are {{own_identities}} — …". When no identity
+    is known (startup fetch failed, mid-recovery) the placeholder is
+    never left verbatim or stale: every line carrying one of the
+    placeholders is dropped wholesale, so the prompt has no dangling
+    text and never claims the wrong JID.
+    """
+    ids = [jid for jid in dict.fromkeys(j for j in (own_jid, own_lid) if j)]
+    if not ids:
+        return _drop_placeholder_lines(prompt)
+    prompt = prompt.replace("{{own_jid}}", own_jid or "unknown")
+    prompt = prompt.replace("{{own_lid}}", own_lid or "unknown")
+    return prompt.replace("{{own_identities}}", " or ".join(f"`{jid}`" for jid in ids))
+
+
+def _drop_placeholder_lines(prompt: str) -> str:
+    """*prompt* without any line carrying an own-identity placeholder."""
+    return "".join(
+        line
+        for line in prompt.splitlines(keepends=True)
+        if not any(placeholder in line for placeholder in _OWN_PLACEHOLDERS)
+    )
+
+
+def sender_tag(event: WahaEvent, names: dict[str, str] | None = None) -> str:
     """The sender's display identity for the agent prompt, e.g. ``[Ana]``.
 
     Prefers the WhatsApp display name (``_data.notifyName``, then a
     top-level ``notifyName`` for engines that hoist it); falls back to
     the participant/author id so a group turn is never anonymous.
     Returns an empty tag when nothing is known (should not happen).
+
+    Group turns render ``[Name <jid>]`` when the sender's JID is
+    known: one string that is both the display identity and the
+    mention handle the model copies into ``@<user-part>`` tokens /
+    ``mentions`` — no suffix-parsing inference, no extra tool call.
+    The JID comes from ``payload.participant``/``_data.author``
+    (normalized through :func:`jid_string` — LID groups report
+    participants as JID objects) and the name from *names*, the shared
+    roster. Fallbacks: unknown name → ``[<full-jid>]`; known name, no
+    JID → today's ``[Name]``. DM turns keep ``[Name]`` — the chat
+    partner needs no mentioning, and the JID buys nothing there.
     """
     data = event.payload.get("_data", {})
     name = str(data.get("notifyName") or event.payload.get("notifyName") or "").strip()
-    if name:
-        return f"[{name}]"
-    participant = event.payload.get("participant") or data.get("author") or ""
-    return f"[{participant}]" if participant else ""
+    participant = jid_string(event.payload.get("participant") or data.get("author"))
+    if not participant:
+        return f"[{name}]" if name else ""
+    if not str(event.payload.get("from", "")).endswith("@g.us"):
+        return f"[{name}]" if name else f"[{participant}]"
+    return group_sender_tag(name, participant, names or {})
+
+
+def group_sender_tag(name: str, participant: str, names: dict[str, str]) -> str:
+    """A group turn's ``[Name <jid>]`` tag with its two fallbacks."""
+    resolved = name or names.get(participant, "")
+    if resolved:
+        return f"[{resolved} <{participant}>]"
+    return f"[{participant}]"
 
 
 def message_id_note(event: WahaEvent) -> str:
@@ -239,9 +211,12 @@ def quoted_participant(
 
     Prefers the quoted message's own ``_data.notifyName``, then the
     chat's participant roster (*participant_names*), then the raw
-    participant/author id stripped of its ``@…`` domain — a bare number
-    reads like an id, a full JID reads like noise. The participant
-    field may be a JID object (LID groups), so it is normalized via
+    participant/author id. With a resolved name the render is
+    ``Name <jid>`` — the same mention-handle shape the sender tags
+    carry, so the model can copy the id without a tool call; without
+    one it falls back to the bare user part (a bare number reads like
+    an id, a full JID reads like noise). The participant field may be
+    a JID object (LID groups), so it is normalized via
     :func:`jid_string` before use.
     """
     data = message_reply.get("_data", {})
@@ -251,7 +226,7 @@ def quoted_participant(
     if not name and jid and participant_names:
         name = participant_names.get(jid, "")
     if name:
-        return name
+        return f"{name} <{jid}>" if jid else name
     return jid.split("@", 1)[0] if jid else ""
 
 
@@ -294,9 +269,13 @@ def participant_names(
 ) -> dict[str, str]:
     """JID → display name for a chat's participants, cached per chat.
 
-    Fails soft: any WAHA error yields an empty map and quoted senders
-    fall back to their bare id. Non-group chats skip the lookup — a DM
-    partner's name already rides the sender tag.
+    Two sources, both fail-soft: the overview roster first, then — for
+    every roster JID still missing a name (LID groups carry bare JIDs
+    only) — a backfill from the chat's recent messages via
+    :func:`sender_names`, whose ``notifyName`` walk is the only place
+    WAHA surfaces display names there. Any error yields fewer names;
+    quoted senders fall back to their bare id. Non-group chats skip the
+    lookup — a DM partner's name already rides the sender tag.
     """
     if waha is None or not chat_id.endswith("@g.us"):
         return {}
@@ -304,13 +283,17 @@ def participant_names(
     if cached is not None:
         return cached
     try:
-        overview = waha.get_chat_overview(session, chat_id)
+        names = roster_names(waha.get_chat_overview(session, chat_id))
     except Exception as exc:
         logger.debug(
             "Participant roster fetch failed for {chat}: {exc}", chat=chat_id, exc=exc
         )
-        return {}
-    names = roster_names(overview)
+        names = {}
+    # Roster names win; the message walk only backfills JIDs the roster
+    # left bare — a recent sender's notifyName is better than a raw
+    # number, never worse than a roster entry.
+    for jid, name in sender_names(waha, session, chat_id).items():
+        names.setdefault(jid, name)
     roster_cache.put((session, chat_id), names)
     return names
 
@@ -368,7 +351,11 @@ async def handle_message(
     chat_id = str(event.payload.get("from", ""))
     body = str(event.payload.get("body", "")).strip()
     logger.info("Agent handling message from {chat_id}", chat_id=chat_id)
-    tag = sender_tag(event)
+    # Roster before tag: group sender tags render ``[Name <jid>]`` via
+    # the resolver, so the fetch must precede the tag build. One
+    # fetch, same cache the quoting lines and reaction notes share.
+    names = await asyncio.to_thread(participant_names, waha, event.session, chat_id)
+    tag = sender_tag(event, names)
     text = f"{tag} {body}".strip() if tag else body
     attached = list(images or [])
     if image is not None:
@@ -377,7 +364,6 @@ async def handle_message(
     if all_images:
         marker = image_noun([image_caption(img) for img in all_images])
         text = f"{text} {marker}".strip()
-    names = await asyncio.to_thread(participant_names, waha, event.session, chat_id)
     user_msg = text + message_id_note(event)
     user_msg += reply_context_section(message_replies_to(event), names)
     image_blocks = [
@@ -423,19 +409,19 @@ def collect_images(
 def final_reply(result: Any) -> str:
     """The run's reply text, emptied when the model narrated instead of answered.
 
-    Silence narration ("I'll stay silent here — ...") and invented
-    error payloads (``{"error": {...}}``) are chatter, not answers:
-    both are dropped so they never reach the chat.
+    Delivery filters by :func:`chat_visible_text` — the one definition
+    storage (``remember``) also applies, so the two ends cannot drift
+    apart. This wrapper only adds the delivery-side log lines.
     """
     message = cast(ChatMessage, result.message)
     content = message.content
     reply = content.strip() if isinstance(content, str) else ""
+    if not reply or chat_visible_text(reply):
+        return chat_visible_text(reply)
     if is_silence_narration(reply):
         logger.debug("Filtering silence narration: {reply!r}", reply=reply)
         return ""
-    if is_error_narration(reply):
-        logger.warning(
-            "Dropping invented error payload as final reply: {reply!r}", reply=reply[:200]
-        )
-        return ""
-    return reply
+    logger.warning(
+        "Dropping invented error payload as final reply: {reply!r}", reply=reply[:200]
+    )
+    return ""

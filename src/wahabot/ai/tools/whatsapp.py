@@ -1123,6 +1123,18 @@ def sender_names(
             "sender names unavailable for {chat_id}: {exc}", chat_id=chat_id, exc=exc
         )
         return {}
+    return names_from_messages(messages)
+
+
+def names_from_messages(messages: list[dict[str, Any]]) -> dict[str, str]:
+    """JID → display name from chat messages' ``notifyName`` fields.
+
+    Shared by the roster enrichment (``participant_names``) and the
+    chat-summary path (``sender_names``): the first name a sender's
+    message carries wins, JID objects are normalized via
+    :func:`jid_string` (LID groups report participants as objects), and
+    entries without a name are dropped.
+    """
     names: dict[str, str] = {}
     for message in messages:
         jid = jid_string(message.get("participant"))

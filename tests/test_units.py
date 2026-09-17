@@ -26,7 +26,16 @@ from tests.harness import (
     SESSION,
     smoke_video_bytes,
 )
-from wahabot.ai.context import is_silence_narration, is_single_emoji, render_system_prompt
+from wahabot.ai.context import (
+    is_silence_narration,
+    is_single_emoji,
+    participant_names,
+    quoted_participant,
+    render_system_prompt,
+    roster_cache,
+    sender_tag,
+)
+from wahabot.ai.history import chat_visible_text
 from wahabot.ai.messages import (
     bot_jids,
     bot_mentioned,
@@ -947,7 +956,7 @@ def test_host_placeholder() -> None:
     assert "- Python: " in rendered
 
 
-def test_remember_strips_thinking_separator() -> None:
+def test_remember_strips_thinking_separator(unit_settings: Settings) -> None:
     """``remember`` stores the reply text without the thinking separator.
 
     Reasoning models split thinking from text with a leading blank line
@@ -967,10 +976,10 @@ def test_remember_strips_thinking_separator() -> None:
     from llama_index.core.memory import ChatMemoryBuffer
     from llama_index.core.workflow import Context
 
-    from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+    from wahabot.ai.workflow import FunctionCallingAgentWorkflow, load_llm
 
     async def stored_texts() -> list[str]:
-        wf = FunctionCallingAgentWorkflow.__new__(FunctionCallingAgentWorkflow)
+        wf = FunctionCallingAgentWorkflow(llm=load_llm(unit_settings))
         ctx = Context(wf)
         await ctx.store.set("memory", ChatMemoryBuffer.from_defaults())
         message = ChatMessage(
@@ -1041,8 +1050,12 @@ def test_warn_accidental_silence() -> None:
     with unittest.mock.patch.object(logger, "warning", record), bound(delivered):
         wf.warn_accidental_silence(empty, rounds=8)  # post-delivery quiet: no
     assert logs == [
-        "Stopping run: empty final answer after {rounds} rounds "
-        "(nothing delivered, no stay_silent)"
+        "".join(
+            (
+                "Stopping run: empty final answer after {rounds} rounds ",
+                "(nothing delivered, no stay_silent)",
+            )
+        )
     ]
 
 
@@ -1169,3 +1182,282 @@ def test_is_single_emoji_passes_text() -> None:
     assert not is_single_emoji("stay_silent")
     assert not is_single_emoji("")
     assert not is_single_emoji("   ")
+
+
+# ---------------------------------------------------------------------------
+# Semantic identity: sender tags, resolver backfill, quoting, own identity
+# ---------------------------------------------------------------------------
+
+
+def _group_waha() -> Any:
+    """A stub WAHA with a bare LID roster, whose recent messages carry
+    ``notifyName`` for the LID participants."""
+
+    class StubWaha:
+        def get_chat_overview(self, _session: str, chat_id: str) -> dict[str, Any]:
+            return {
+                "id": chat_id,
+                "participants": [{"id": "132469693124738@lid"}],
+            }
+
+        def fetch_chat_messages(
+            self,
+            _session: str,
+            _chat_id: str,
+            limit: int = 100,  # pyright: ignore[reportUnusedParameter]
+        ) -> list[dict[str, Any]]:
+            return [
+                {
+                    "participant": {"_serialized": "132469693124738@lid"},
+                    "_data": {"notifyName": "Mikhail Polozhaev"},
+                },
+                {
+                    "participant": {"_serialized": "74943001800935@lid"},
+                    "_data": {"notifyName": "Troche"},
+                },
+            ]
+
+    return StubWaha()
+
+
+def test_participant_names_backfills_from_messages() -> None:
+    """A bare LID roster gains names from recent messages' notifyName."""
+    roster_cache.clear()
+    names = participant_names(_group_waha(), SESSION, CHAT_ID)
+    assert names == {
+        "132469693124738@lid": "Mikhail Polozhaev",
+        "74943001800935@lid": "Troche",
+    }
+
+
+def _conflicting_waha() -> Any:
+    """A stub WAHA whose roster and messages disagree on one JID's name.
+
+    Only the roster's entry may survive — roster names win.
+    """
+
+    class ConflictingWaha:
+        def get_chat_overview(self, _session: str, chat_id: str) -> dict[str, Any]:
+            return {
+                "id": chat_id,
+                "participants": [{"id": "132469693124738@lid", "name": "Roster Name"}],
+            }
+
+        def fetch_chat_messages(
+            self,
+            _session: str,
+            _chat_id: str,
+            limit: int = 100,  # pyright: ignore[reportUnusedParameter]
+        ) -> list[dict[str, Any]]:
+            return [
+                {
+                    "participant": {"_serialized": "132469693124738@lid"},
+                    "_data": {"notifyName": "Message Name"},
+                }
+            ]
+
+    return ConflictingWaha()
+
+
+def test_participant_names_roster_wins_over_backfill() -> None:
+    """Roster names are authoritative; the message walk only backfills."""
+    roster_cache.clear()
+    names = participant_names(_conflicting_waha(), SESSION, CHAT_ID)
+    assert names == {"132469693124738@lid": "Roster Name"}
+
+
+def _group_event(
+    participant: Any = "132469693124738@lid", name: str | None = None
+) -> WahaEvent:
+    payload: dict[str, Any] = {
+        "from": CHAT_ID,
+        "participant": participant,
+        "body": "hola",
+    }
+    if name is not None:
+        payload["_data"] = {"notifyName": name}
+    return WahaEvent(
+        id="tag1",
+        timestamp=1,
+        event="message",
+        session=SESSION,
+        me={},
+        payload=payload,
+    )
+
+
+def test_sender_tag_group_renders_name_and_jid() -> None:
+    event = _group_event(name="Mikhail Polozhaev")
+    assert sender_tag(event) == "[Mikhail Polozhaev <132469693124738@lid>]"
+
+
+def test_sender_tag_group_resolves_name_from_roster() -> None:
+    event = _group_event()  # no notifyName on the event itself
+    names = {"132469693124738@lid": "Mikhail Polozhaev"}
+    assert sender_tag(event, names) == "[Mikhail Polozhaev <132469693124738@lid>]"
+
+
+def test_sender_tag_group_unknown_name_falls_back_to_jid() -> None:
+    assert sender_tag(_group_event()) == "[132469693124738@lid]"
+
+
+def test_sender_tag_dm_keeps_bare_name() -> None:
+    dm = WahaEvent(
+        id="dm-tag",
+        timestamp=1,
+        event="message",
+        session=SESSION,
+        me={},
+        payload={
+            "from": "491555000001@c.us",
+            "body": "hi",
+            "_data": {"notifyName": "Smoke Sender"},
+        },
+    )
+    assert sender_tag(dm) == "[Smoke Sender]"
+
+
+def test_sender_tag_dm_without_name_yields_empty() -> None:
+    """A DM with neither notifyName nor participant has nothing to show.
+
+    Today's documented fallback: an empty tag (should not happen —
+    real DM events always carry one of the two).
+    """
+    dm = WahaEvent(
+        id="dm-tag2",
+        timestamp=1,
+        event="message",
+        session=SESSION,
+        me={},
+        payload={"from": "491555000001@c.us", "body": "hi"},
+    )
+    assert sender_tag(dm) == ""
+
+
+def test_sender_tag_normalizes_jid_object() -> None:
+    event = _group_event(participant={"_serialized": "132469693124738@lid"})
+    assert sender_tag(event) == "[132469693124738@lid]"
+
+
+def test_quoted_participant_renders_name_and_jid() -> None:
+    reply = {
+        "participant": {"_serialized": "132469693124738@lid"},
+    }
+    names = {"132469693124738@lid": "Mikhail Polozhaev"}
+    assert quoted_participant(reply, names) == "Mikhail Polozhaev <132469693124738@lid>"
+
+
+def test_quoted_participant_notify_name_wins() -> None:
+    reply = {
+        "participant": "74943001800935@lid",
+        "_data": {"notifyName": "Troche"},
+    }
+    assert quoted_participant(reply, {"74943001800935@lid": "wrong"}) == (
+        "Troche <74943001800935@lid>"
+    )
+
+
+def test_quoted_participant_unknown_falls_back_to_bare_id() -> None:
+    assert quoted_participant({"participant": "74943001800935@lid"}) == "74943001800935"
+
+
+def test_render_system_prompt_substitutes_own_identities() -> None:
+    prompt = "You are {{own_identities}} — a message that names you.\n{{date}}"
+    out = render_system_prompt(prompt, own_jid="4915@c.us", own_lid="4915@lid")
+    assert "You are `4915@c.us` or `4915@lid`" in out
+    assert "{{own" not in out
+
+
+def test_render_system_prompt_drops_identity_lines_when_unknown() -> None:
+    prompt = "# Groups\nYou are {{own_identities}} — addresses you.\nRule stays.\n"
+    out = render_system_prompt(prompt)
+    assert "{{own" not in out
+    assert "addresses you" not in out
+    assert "Rule stays." in out
+
+
+def test_render_system_prompt_drops_own_jid_line_when_unknown() -> None:
+    out = render_system_prompt("id: {{own_jid}}\nkeep")
+    assert "{{own_jid}}" not in out
+    assert "id:" not in out
+    assert "keep" in out
+
+
+def test_chat_visible_text_filters_leaked_tokens() -> None:
+    assert chat_visible_text("stay_silent") == ""
+    assert chat_visible_text('{"error": {"message": "boom"}}') == ""
+    assert chat_visible_text("real answer") == "real answer"
+    assert chat_visible_text("") == ""
+
+
+def test_remember_filters_undelivered_leak(unit_settings: Settings) -> None:
+    """``remember`` stores nothing when the final text is a leaked token."""
+    import asyncio
+
+    from llama_index.core.base.llms.types import ChatResponse
+    from llama_index.core.memory import ChatMemoryBuffer
+    from llama_index.core.workflow import Context
+
+    from wahabot.ai.workflow import FunctionCallingAgentWorkflow, load_llm
+
+    async def stored() -> list[Any]:
+        wf = FunctionCallingAgentWorkflow(llm=load_llm(unit_settings))
+        ctx = Context(wf)
+        await ctx.store.set("memory", ChatMemoryBuffer.from_defaults())
+        for text in ("stay_silent", "I'll stay silent here"):
+            message = ChatMessage(role=MessageRole.ASSISTANT, content=text)
+            await FunctionCallingAgentWorkflow.remember(
+                wf, ctx, ChatResponse(message=message), []
+            )
+        real = ChatMessage(role=MessageRole.ASSISTANT, content="real words")
+        await FunctionCallingAgentWorkflow.remember(
+            wf, ctx, ChatResponse(message=real), []
+        )
+        memory = await ctx.store.get("memory")
+        return [str(m.content) for m in await memory.aget_all()]
+
+    assert asyncio.run(stored()) == ["real words"]
+
+
+def test_purge_script_drops_leaked_tokens() -> None:
+    """The purge script produces sanitized, alternating history."""
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "purge_leaked_silence",
+        Path("scripts/purge_leaked_silence.py"),
+    )
+    assert spec is not None and spec.loader is not None
+    purge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(purge)
+
+    memory = ChatMemoryBuffer.from_defaults(token_limit=8000)  # pyright: ignore[reportUnknownMemberType]
+
+    def U(c: str) -> ChatMessage:
+        return ChatMessage(role=MessageRole.USER, content=c)
+
+    def A(c: str) -> ChatMessage:
+        return ChatMessage(role=MessageRole.ASSISTANT, content=c)
+
+    memory.put(U("[Ana] q1"))
+    memory.put(A("stay_silent"))
+    memory.put(U("[Ana] q2"))
+    memory.put(A("real answer"))
+    memory.put(A("stay_silent"))
+    kept, dropped = purge.purge_buffer(memory)
+    assert dropped == 2
+    # The purge removed the assistant turns between/before user turns;
+    # the re-sanitize merges the now-consecutive user messages (every
+    # word kept, kwargs merged) so alternation holds.
+    assert [str(m.content) for m in kept] == ["[Ana] q1\n[Ana] q2", "real answer"]
+    roles = [m.role for m in kept]
+    assert roles[0] == MessageRole.USER and roles[-1] == MessageRole.ASSISTANT
+    # Idempotent: a second pass over already-clean history drops nothing
+    # and keeps the merged shape.
+    again = ChatMemoryBuffer.from_defaults(token_limit=8000)  # pyright: ignore[reportUnknownMemberType]
+    for message in kept:
+        again.put(message)
+    kept2, dropped2 = purge.purge_buffer(again)
+    assert dropped2 == 0
+    assert [str(m.content) for m in kept2] == ["[Ana] q1\n[Ana] q2", "real answer"]

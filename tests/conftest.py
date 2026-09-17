@@ -36,6 +36,7 @@ from tests.harness import (
     write_session_config,
 )
 from wahabot.ai.albums import reset as reset_albums
+from wahabot.ai.context import roster_cache
 from wahabot.commands import register_command_handler
 from wahabot.core.echoes import _echoes  # pyright: ignore[reportPrivateUsage]
 from wahabot.core.runs import (
@@ -188,6 +189,7 @@ def _reset_registries() -> Iterator[None]:
     _chat_lock_pending.clear()
     _last_reaction_notes.clear()
     runs_contexts.clear()
+    roster_cache.clear()
     reset_albums()
     set_session_health("WORKING")
     yield
@@ -198,6 +200,7 @@ def _reset_registries() -> Iterator[None]:
     _chat_lock_pending.clear()
     _last_reaction_notes.clear()
     runs_contexts.clear()
+    roster_cache.clear()
     reset_albums()
 
 
