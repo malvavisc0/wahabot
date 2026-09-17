@@ -90,20 +90,38 @@ The message is wrapped in a small annotation envelope before entering
 the agent:
 
 ```
-[Sender Name] the actual text
+[Name <jid>] the actual text            (groups)
+[Name] the actual text                   (direct messages)
 [message id: false_<chat-jid>_<hash>@lid]
-[quoting] Sender: "the text being replied to"
+[quoting] Name <jid>: "the text being replied to"
 ```
 
-- The **sender name** (from WhatsApp pushnames) tells the model who's
-  talking, so it can keep track of the humans in a multi-person chat.
+- The **sender tag** carries the display name *and* the sender's full
+  JID in groups — the same string is the mention handle: to @-mention
+  that person later, the model copies the `<jid>`'s user part into an
+  `@<user-part>` token (the tool resolves it against the chat roster
+  into a real tagged mention). When no name is known the tag degrades
+  to `[<jid>]`; DMs keep the bare `[Name]` (one person, nothing to
+  mention).
 - The **message id** is there so the model can reference the message
   later: quote it in `send_message(reply_to=…)`, or react to it.
 - The **quoting** line appears when the message is a reply to an
   earlier one and carries what that earlier message said (and who said
-  it) — including when the quoted message is the bot's own.
+  it, rendered `Name <jid>`) — including when the quoted message is
+  the bot's own.
+- The **reaction notes** (`[reaction X from Name <jid> to your
+  message: "…"]`) name the reactor the same way. A reaction made by
+  the bot's own account (the operator tapping on the phone, the echo
+  of our own `react_to_message`) never folds — it is not an external
+  social signal.
 - Bracketed notes are metadata for the model, never to be repeated
   verbatim in replies.
+
+Names resolve from a per-chat roster cached for one hour: the chat
+overview's participant list first, backfilled from the display names
+(`notifyName`) on the chat's recent messages — LID-group rosters carry
+bare JIDs only, and the recent messages are the only place WAHA
+surfaces names there.
 
 ### Images
 
@@ -147,6 +165,15 @@ Per chat, the bot keeps a rolling conversation in memory:
   facts included. The planned learned-memory layer (rolling summary +
   typed fact store injected into the system prompt) is specified in
   `docs/plans/learned-memory.md`.
+- Memory **mirrors the chat**: what the model's self-history records as
+  its own words is exactly what the chat saw. A reply that was never
+  delivered — a leaked `stay_silent` token written as text instead of
+  the tool call, an invented error payload, post-delivery chatter — is
+  filtered from storage by the same visibility definition that guards
+  delivery (`chat_visible_text`, applied in `remember`), so the
+  self-history can never re-teach the model its own bugs. (The
+  one-time purge script `scripts/purge_leaked_silence.py` removed the
+  leaked tokens stored by the pre-fix handler.)
 - Messages the **operator sends from the bot's own WhatsApp account**
   (typing in the app, `fromMe` events) are folded into memory as
   assistant turns — the account's voice is the bot's voice, so the
@@ -266,8 +293,10 @@ attached to the right person in fast-moving group chats.
 mention**: the mentioned person's client highlights the message and
 notifies them. The rule is a pair — every JID passed in `mentions`
 must have its owner's display name written in the text as `@<name>`;
-WhatsApp matches the two up. JIDs and names come from `get_chat`'s
-participant list or from message history (`participant` fields).
+WhatsApp matches the two up. JIDs and names come from the `[Name
+<jid>]` sender tags (copy the user part into an `@<user-part>` token —
+the tool resolves it against the roster), from `get_chat`'s
+participant list, or from message history (`participant` fields).
 Typing `@name` alone in the text is *not* a mention — no highlight,
 no notification — which is why the tool description and the system
 prompt both spell the pairing out for the model. When the model
@@ -336,3 +365,10 @@ the last good config (and logs it) rather than crashing the bot.
 - **Participant list shows bare JIDs, no names**: the name lookup
   (recent-message `notifyName`s) failed — the chat history was
   unreadable; the debug log says why. The roster itself is fine.
+- **Identity confusion (bot can't tell itself from members)**: the
+  system prompt states the bot's own JIDs (`{{own_jid}}`,
+  `{{own_lid}}`, `{{own_identities}}` placeholders, filled from the
+  WAHA `get_me` capture at startup and on every session recovery); a
+  message quoting or naming those ids is the bot's own. When the
+  identity is not yet captured, the prompt's identity lines are
+  dropped rather than rendered stale.

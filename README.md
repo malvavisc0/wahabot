@@ -37,7 +37,8 @@ Every tool answers with a small JSON envelope — `{"ok": true, ...}` or `{"ok":
 - **Albums** arrive as a container plus N images; the handler buffers them and runs the agent once, all images attached.
 - **Bare image links** in text are sniffed out, fetched, and shown to the model too.
 - **Video links** in text (reels, TikTok, X…) are resolved and downloaded via yt-dlp (`WAHABOT_MAX_URL_VIDEOS`), then get the same frames + transcript treatment as a forwarded video — the bot watched it, not just read the page. YouTube links stay with the `get_youtube_transcript` tool: full captions beat six sampled frames on long-form.
-- **Reactions** to the bot's own messages are folded into memory as context — a 👍 lands quietly, visible on the next turn, never waking the agent.
+- **Reactions** to the bot's own messages are folded into memory as context — a 👍 lands quietly, visible on the next turn, never waking the agent. The bot's own reactions never fold: it knows its own JIDs (stated in the system prompt) and skips itself.
+- **Semantic identity in history**: group turns arrive as `[Name <jid>]` — display name plus the mention handle in one tag the model can copy; quoting lines and reaction notes render `Name <jid>`. Memory mirrors the chat: a reply that was never delivered (a leaked silence token, an invented error) is never stored, so the model's self-history can't teach it its own bugs.
 
 ## Talking to the bot
 
