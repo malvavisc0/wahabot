@@ -26,7 +26,8 @@ from typing import Any
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from loguru import logger
 
-from wahabot.ai.messages import REACTION_TARGET_KWARG
+from wahabot.ai.context import participant_names
+from wahabot.ai.messages import REACTION_TARGET_KWARG, bot_jids, jid_string
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.jid import chat_from_message_id, is_own_message_id
 from wahabot.core.models import WahaEvent
@@ -72,17 +73,38 @@ def register_reaction_handler(
                 target=target_id,
             )
             return
+        # The bot's own reaction (an operator tap on the phone, or the
+        # echo of our own react_to_message) is not an external social
+        # signal — skip the fold and the WAHA fetch entirely. The
+        # genuine tool path already preserved the action via
+        # collapse_delivery; an operator-typed tap is the same voice
+        # saying the same thing, and "I reacted to me" teaches nothing.
+        reactor = jid_string(
+            event.payload.get("participant") or event.payload.get("from")
+        )
+        if reactor and reactor in bot_jids(event):
+            logger.debug(
+                "Ignoring own reaction to {target} from {reactor}",
+                target=target_id,
+                reactor=reactor,
+            )
+            return
         message = await asyncio.to_thread(fetch_target, waha, event.session, target_id)
         if message is None or not message.get("fromMe"):
             return
         emoji = str(reaction.get("text", "")).strip() or "(removed)"
         preview = message_preview(message)
         # In groups `from` is the group JID and `participant` the actual
-        # reactor — the note must name the person, not the room.
-        sender = str(
-            event.payload.get("participant") or event.payload.get("from") or "someone"
-        )
+        # reactor — the note must name the person, not the room. The
+        # roster resolves the JID to ``Name <jid>`` (the mention-handle
+        # shape sender tags carry); the bare JID stays when the roster
+        # knows no name.
         chat_id = chat_id_from_message_id(str(target_id))
+        names = await asyncio.to_thread(participant_names, waha, event.session, chat_id)
+        sender = str(event.payload.get("participant") or event.payload.get("from") or "")
+        sender = jid_string(sender) or "someone"
+        display = names.get(sender)
+        sender = f"{display} <{sender}>" if display else sender
         note = f"[reaction {emoji} from {sender} to your message: {preview}]"
         async with chat_lock(event.session, chat_id):
             await remember_reaction_note(
