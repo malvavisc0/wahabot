@@ -27,9 +27,18 @@ roles for plain turns. Together these invariants are enforced by
    new user message is about to be appended), a trailing ``user`` message
    is also removed so the next turn maintains alternation.
 
+This module also owns the reply-text classification that decides what
+is *chat-visible* (:func:`is_silence_narration`,
+:func:`is_error_narration`, :func:`chat_visible_text`) — one definition
+shared by delivery (``final_reply``) and storage (``remember``) so the
+two filters can never drift apart. It lives here, next to the history
+invariants it protects, because ``context`` imports ``workflow`` which
+imports this module: the predicates must sit below both.
+
 Adapted from aria-ai's ``aria.web.session``.
 """
 
+import json
 import re
 from collections.abc import Callable
 from typing import Any, NamedTuple, cast
@@ -44,7 +53,10 @@ from wahabot.ai.messages import REACTION_TARGET_KWARG, TURN_HANDLED_KWARG
 
 __all__ = [
     "ToolCall",
+    "chat_visible_text",
     "inbound_message_id",
+    "is_error_narration",
+    "is_silence_narration",
     "sanitize_chat_history",
     "tool_calls",
     "trim_to_budget",
@@ -54,6 +66,135 @@ __all__ = [
 #: The serialized id note an inbound turn carries (``context.py``
 #: appends it as the turn's last line): the id inside brackets.
 _INBOUND_ID_RE = re.compile(r"\[message id: ([^\]]+)\]")
+
+
+#: Emoji-only replies.  Small models often output a lone emoji (👋, 🤣,
+#: 😂) as plain text instead of calling ``react_to_message``.  The
+#: system prompt says "A lone emoji is a reaction, never a message",
+#: so we treat a single-emoji final reply as an implicit reaction or
+#: silence.  Multi-emoji strings like ``🤣🤣🤣`` are kept as real
+#: messages — those are intentional chat text.
+_SINGLE_EMOJI_RE = re.compile(
+    "".join(
+        (
+            r"^\s*(?:",
+            r"[\U0001F600-\U0001F64F]",  # emoticons
+            r"|[\U0001F300-\U0001F5FF]",  # misc symbols & pictographs
+            r"|[\U0001F680-\U0001F6FF]",  # transport & map
+            r"|[\U0001F1E0-\U0001F1FF]",  # flags (regional indicators)
+            r"|[\U00002702-\U000027B0]",  # dingbats
+            r"|[\U0000FE00-\U0000FE0F]",  # variation selectors
+            r"|[\U0001F900-\U0001F9FF]",  # supplemental symbols
+            r"|[\U0001FA00-\U0001FA6F]",  # chess symbols / extended-A
+            r"|[\U0001FA70-\U0001FAFF]",  # symbols extended-A (cont.)
+            r"|[\U00002600-\U000026FF]",  # misc symbols (☀, ⚡, …)
+            r"|[\U0000200D]",  # ZWJ
+            r"|[\U0000FE0F]",  # VS-16
+            r")\s*$",  # exactly ONE emoji (with optional whitespace)
+        )
+    )
+)
+
+
+def is_single_emoji(reply: str) -> bool:
+    """True when *reply* is exactly one emoji and nothing else."""
+    return bool(_SINGLE_EMOJI_RE.match(reply))
+
+
+#: Replies that narrate a chosen silence instead of being one. Small
+#: models asked to "reply with an empty string to stay silent" often
+#: answer with meta-commentary ("I'll stay silent here — ...", "No
+#: response.") — matching it here keeps it out of the chat. The reply
+#: must *be about* staying silent, not merely contain the word (so
+#: "silence is golden, but I'll answer anyway" still goes through).
+#: The same happens after a delivered reaction or reply: the model
+#: pattern-completes "I already reacted to that message, so I'm done
+#: here." instead of going quiet — the reaction/reply already went out
+#: via the tool, so the narration is chatter, not an answer.
+_SILENCE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"^no response\b",
+        r"^no reply\b",
+        r"^nothing to (add|say)\b",
+        r"^nothing (more|else) to (add|say|do)\b",
+        r"^(i'?ll |i will |i'?m )?(stay|staying|remain|choosing to stay)[\s'-]*silent\b",
+        r"^stay_silent\b",
+        r"^(i'?ll |i will )?(stay|keep) (quiet|out of (this|it|the conversation))\b",
+        r"^silence[.!…]?$",
+        r"^\(silence\)$",
+        r"^not (addressed|directed) (to|at) me\b",
+        r"^(i'?ll |i will )?say nothing\b",
+        r"^i (already )?(reacted|replied|sent|answered)\b[^.]*(so )?i'?m done\b",
+        "".join(
+            (
+                r"^i (already )?(reacted|replied|sent|answered)\b[^.]*",
+                r"(so )?(there'?s?|there is) nothing (more|else|left) (to )?(add|say|do)",
+            )
+        ),
+        r"^i'?m done (here|with this)\b",
+    )
+)
+
+
+def is_silence_narration(reply: str) -> bool:
+    """True when *reply* narrates a silence instead of being one.
+
+    Stripped of surrounding whitespace/quotes/parentheses and matched
+    case-insensitively against the silence-meta patterns; anything the
+    model actually wanted to say still goes through.
+    """
+    cleaned = reply.strip().strip("\"'`()").strip()
+    return any(pattern.search(cleaned) for pattern in _SILENCE_PATTERNS)
+
+
+def is_error_narration(reply: str) -> bool:
+    """True when *reply* is an error payload, not a chat answer.
+
+    Small models sometimes *write* an API error as their reply — e.g.
+    a made-up ``{"error": {"message": "resource exhausted …", "type":
+    "upstream_error", "code": "resource_exhausted"}}`` naming a provider
+    the bot never used. Whatever the model's reason (pattern-
+    completing text it has seen), the result must never reach the
+    chat. Only near-JSON bodies whose top level is an ``error`` object
+    match; genuine prose answers never do.
+    """
+    stripped = reply.strip()
+    if not stripped.startswith("{"):
+        return False
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError, ValueError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    error = cast(dict[str, Any], data).get("error")
+    return isinstance(error, dict) and any(
+        key in error for key in ("message", "code", "type", "status")
+    )
+
+
+def chat_visible_text(content: Any) -> str:
+    """The chat-visible text of *content*.
+
+    Empty when the model narrated instead of answering:
+
+    One definition of "this text would reach the chat" shared by both
+    ends of a run — delivery (``final_reply``) and storage
+    (``remember``) — so a leaked ``stay_silent`` token or an invented
+    error payload is filtered at the source and can never drift back
+    into the model's self-history (the exact string it pattern-
+    completes on). Thinking blocks are ignored: only the *text* blocks
+    decide visibility.
+    """
+    reply = str(content or "").strip() if content is not None else ""
+    if not reply:
+        return ""
+    if is_silence_narration(reply):
+        return ""
+    if is_error_narration(reply):
+        return ""
+    return reply
 
 
 def inbound_message_id(incoming: str) -> str:

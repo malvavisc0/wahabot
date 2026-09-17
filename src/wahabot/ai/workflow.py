@@ -35,6 +35,7 @@ from loguru import logger
 
 from wahabot.ai.events import InputEvent, ToolCallEvent
 from wahabot.ai.history import (
+    chat_visible_text,
     inbound_message_id,
     sanitize_chat_history,
     tool_calls,
@@ -712,7 +713,14 @@ class FunctionCallingAgentWorkflow(Workflow):
 
         *skip_text* drops a post-delivery final text: it was never sent
         to the chat, and memory mirrors the chat — storing it would
-        record words nobody saw.
+        record words nobody saw. The same mirroring rule filters
+        leaked non-answers at the source: a plain-text round whose
+        content is not chat-visible (``chat_visible_text`` — the
+        identical predicates ``final_reply`` applies to delivery: a
+        leaked ``stay_silent`` token, an invented error payload) is
+        never stored, so the model's self-history cannot re-teach it
+        its own bugs. A message with tool calls always stores: the
+        calls will execute and their results belong to the run.
 
         Thinking models separate the reasoning block from the text with
         a leading blank line inside the text block; that separator is
@@ -724,8 +732,8 @@ class FunctionCallingAgentWorkflow(Workflow):
         for block in message.blocks:
             if isinstance(block, TextBlock) and block.text:
                 block.text = block.text.strip()
-        has_text = bool(str(message.content or "").strip())
-        if tool_calls or (has_text and not skip_text):
+        visible = "" if skip_text else chat_visible_text(message.content)
+        if tool_calls or visible:
             await memory.aput(message)
         await ctx.store.set("memory", memory)
 
