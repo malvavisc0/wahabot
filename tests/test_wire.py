@@ -1442,3 +1442,205 @@ def test_same_chat_runs_serialize(bot: Bot) -> None:
     later_dump = json.dumps(later.get("messages", []))
     assert later_text not in earlier_dump
     assert earlier_text in later_dump and "smoke reply one" in later_dump
+
+
+# ---------------------------------------------------------------------------
+# Semantic identity (docs/plans/semantic-identity.md)
+# ---------------------------------------------------------------------------
+
+
+def test_self_reaction_folds_nothing(bot: Bot) -> None:
+    """A reaction whose reactor is the bot itself never becomes a note.
+
+    The audit case: the bot's own LID tapped (operator's phone or the
+    echo of our own react_to_message) and folded back as external
+    praise. The guard skips the fold — and the WAHA target fetch —
+    before it happens; the debug log line is the only trace.
+    """
+    llm = bot.stack.llm
+    bot.post(waha_event())  # establish context + delivered reply
+    llm.requests.clear()
+    bot.waha.sent.clear()
+    self_reaction = {
+        "id": "evt-smoke-self-reaction",
+        "timestamp": int(time.time()),
+        "event": "message.reaction",
+        "session": SESSION,
+        "me": {"id": ME_JID, "lid": "491555000000@lid"},
+        "payload": {
+            "id": "evt-smoke-self-reaction-payload",
+            "from": CHAT_ID,
+            "participant": "491555000000@lid",  # the bot's own LID
+            "fromMe": False,
+            "reaction": {"text": "🙏", "messageId": f"true_{CHAT_ID}_SMOKEREPLY"},
+        },
+    }
+    bot.post(self_reaction)
+    time.sleep(0.5)
+    assert len(llm.requests) == 0
+
+    async def reaction_notes() -> list[str]:
+        ctx = handlers_contexts[(SESSION, CHAT_ID)]
+        memory = await ctx.store.get("memory")
+        messages = await memory.aget_all()
+        return [str(m.content) for m in messages if "🙏" in str(m.content)]
+
+    assert asyncio.run(reaction_notes()) == []
+
+
+def test_foreign_reaction_folds_name_and_jid(bot: Bot) -> None:
+    """Another member's reaction folds with the ``Name <jid>`` rendering."""
+    bot.post(waha_event())  # establish context + delivered reply
+    bot.waha.sent.clear()
+    reaction = {
+        "id": "evt-smoke-reaction-named",
+        "timestamp": int(time.time()),
+        "event": "message.reaction",
+        "session": SESSION,
+        "me": None,
+        "payload": {
+            "id": "evt-smoke-reaction-named-payload",
+            "from": CHAT_ID,
+            "participant": "491555000001@c.us",
+            "fromMe": False,
+            "reaction": {"text": "😂", "messageId": f"true_{CHAT_ID}_SMOKEREPLY"},
+        },
+    }
+    bot.post(reaction)
+    time.sleep(0.5)
+
+    async def reaction_notes() -> list[str]:
+        ctx = handlers_contexts[(SESSION, CHAT_ID)]
+        memory = await ctx.store.get("memory")
+        messages = await memory.aget_all()
+        return [str(m.content) for m in messages if "[reaction" in str(m.content)]
+
+    notes = asyncio.run(reaction_notes())
+    assert any(
+        "😂" in note and "Smoke Sender <491555000001@c.us>" in note for note in notes
+    ), notes
+
+
+def test_group_turn_sender_tag_carries_jid(bot: Bot) -> None:
+    """A group turn's captured user message opens with ``[Name <jid>]``."""
+    llm = bot.stack.llm
+    event = waha_event()
+    bot.post(event)
+    assert _wait(lambda: len(llm.requests) >= 1)
+    first_user = user_turns_of(llm.requests[0])[0]
+    assert first_user.startswith("[Smoke Sender <491555000001@c.us>]"), first_user
+
+
+def test_tag_copied_mention_resolves_end_to_end(bot: Bot) -> None:
+    """An ``@<user-part>`` copied from a sender tag becomes a real mention.
+
+    The bridge already exists (`resolve_mentions` matches text tokens
+    against roster user parts); the sender tag putting the user part in
+    reach is what makes the model copy it. Wire-verify the full path:
+    tag in the history → model copies the bare id → send carries
+    ``mentions``.
+    """
+    llm = bot.stack.llm
+    llm.override = tool_call_response(
+        "send_message",
+        {"text": "Para @491555000001 dile hola"},
+        call_id="call_tag_mention_1",
+        response_id="chatcmpl-smoke-tag-mention",
+        created=1788525841,
+    )
+    bot.post(waha_event())
+    assert _wait(lambda: len(bot.waha.sent) >= 1)
+    session_id, chat_id, _text, mentions = bot.waha.sent[0]
+    assert (session_id, chat_id) == (SESSION, CHAT_ID)
+    assert mentions == ["491555000001@c.us"]
+
+
+def test_system_prompt_states_own_identity(bot: Bot) -> None:
+    """The first captured LLM request contains the own-identity sentence.
+
+    The wiring under test is ``status.state`` (captured at boot from
+    ``get_me``) → ``render_prompt`` → the rendered system message; the
+    template sentence is operator data, so the test injects it into
+    the session config the same way an operator's edit would (hot
+    reload picks it up on the next run).
+    """
+    llm = bot.stack.llm
+    config_path = bot.settings.access_config
+    config = json.loads(config_path.read_text())
+    config["system_prompt"] += (
+        "\n\n# Identity\n\nYou are {{own_identities}} — a message that "
+        "names or quotes those ids addresses you.\n"
+    )
+    config_path.write_text(json.dumps(config, indent=2))
+    bot.post(waha_event())
+    assert _wait(lambda: len(llm.requests) >= 1)
+    system = [
+        str(m.get("content", ""))
+        for m in llm.requests[0]["messages"]
+        if m.get("role") == "system"
+    ]
+    assert system, "no system message in the first request"
+    assert f"You are `{ME_JID}` or `491555000000@lid`" in system[0], system[0][:400]
+
+
+def test_unknown_identity_drops_the_sentence(bot: Bot) -> None:
+    """Without a captured identity the placeholder line is dropped wholesale."""
+    llm = bot.stack.llm
+    config_path = bot.settings.access_config
+    config = json.loads(config_path.read_text())
+    config["system_prompt"] += (
+        "\n\n# Identity\n\nYou are {{own_identities}} — addresses you.\n"
+    )
+    config_path.write_text(json.dumps(config, indent=2))
+    saved = (status_state.operator_jid, status_state.operator_lid)
+    status_state.operator_jid = ""
+    status_state.operator_lid = ""
+    try:
+        bot.post(waha_event())
+        assert _wait(lambda: len(llm.requests) >= 1)
+        system = [
+            str(m.get("content", ""))
+            for m in llm.requests[0]["messages"]
+            if m.get("role") == "system"
+        ]
+        assert system
+        assert "{{own" not in system[0]
+        assert "addresses you" not in system[0]
+    finally:
+        status_state.operator_jid, status_state.operator_lid = saved
+
+
+def test_leaked_silence_token_delivers_and_stores_nothing(bot: Bot) -> None:
+    """A run whose final reply is the literal token sends nothing and
+    leaves no assistant turn in memory — delivery and storage share
+    one chat-visibility definition."""
+    llm = bot.stack.llm
+    llm.override = {
+        "id": "chatcmpl-leak",
+        "object": "chat.completion",
+        "created": 1788525842,
+        "model": "smoke-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "stay_silent"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+    }
+    bot.post(waha_event())
+    assert _wait(lambda: len(llm.requests) >= 1)
+    time.sleep(0.3)
+    assert bot.waha.sent == []
+
+    async def assistant_turns() -> list[str]:
+        ctx = handlers_contexts[(SESSION, CHAT_ID)]
+        memory = await ctx.store.get("memory")
+        messages = await memory.aget_all()
+        return [
+            str(m.content) for m in messages if str(m.role) == "MessageRole.ASSISTANT"
+        ]
+
+    turns = asyncio.run(assistant_turns())
+    assert all(str(t).strip() != "stay_silent" for t in turns), turns

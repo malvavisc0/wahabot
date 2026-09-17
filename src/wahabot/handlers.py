@@ -51,6 +51,7 @@ from wahabot.core.transcribe import fetch_transcript, transcribe_voice_note
 from wahabot.core.waha import MediaTooLargeError, WahaClient
 from wahabot.settings import Settings
 from wahabot.status import session_healthy
+from wahabot.status import state as status_state
 from wahabot.webhook import on_forget, on_message
 
 #: Messages older than this many seconds are stale backlog, not live turns.
@@ -560,11 +561,21 @@ def register_agent_handler(
         """Re-render ``{{date}}``/``{{time}}`` and pick up config edits.
 
         The current config's prompt always wins over the startup
-        snapshot, so prompt changes apply without a restart too.
+        snapshot, so prompt changes apply without a restart too. The
+        bot's own ids (``{{own_jid}}``/``{{own_lid}}``/``{{own_identities}}``)
+        come from ``status.state`` — captured at startup and re-captured
+        on every session recovery — so identity in the prompt is
+        knowledge, not inference; an unknown identity drops the
+        prompt's identity lines instead of rendering a stale JID.
         """
         current = config_reloader.current_config()
         return render_system_prompt(
-            current.system_prompt, settings.timezone, current.bot_name, current.goal
+            current.system_prompt,
+            settings.timezone,
+            current.bot_name,
+            current.goal,
+            own_jid=status_state.operator_jid,
+            own_lid=status_state.operator_lid,
         )
 
     # Per-agent escalation state (per-chat cooldowns; the operator JID
