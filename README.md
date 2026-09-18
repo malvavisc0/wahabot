@@ -19,7 +19,10 @@ StartEvent ──► prepare_chat_history ──► InputEvent
 Brakes on the loop: `stay_silent` ends the run quietly, a repeated tool
 call is never executed, a round limit force-wraps the run, and a hard
 timeout keeps the webhook free. A final text produced after a delivery
-tool already fired is dropped — the chat saw it once, not twice.
+tool already fired is dropped — the chat saw it once, not twice. A
+lone-emoji final reply (👋 instead of the `react_to_message` call) is
+treated as the reaction it obviously is: it lands as a reaction on the
+triggering message or is dropped as silence, never sent as chat text.
 
 ## Giving the model hands
 
@@ -83,7 +86,7 @@ logs the WAHA session's live identity, the loaded session config summary, and
 the toolset the agent was built with:
 
 ```
-Info: wahabot 0.4.8 (Python 3.14.6)
+Info: wahabot 0.7.3 (Python 3.14.6)
 Info: Session: default
 Info: LLM: gpt-4o-mini @ https://api.openai.com/v1
 Info: Memory: 8000 token ceiling
@@ -115,12 +118,12 @@ The agent workflow lives under `src/wahabot/ai/` as a set of focused modules:
 | `context.py` | Sender tagging, reply-context rendering, `handle_message` entrypoint |
 | `messages.py` | Message classification, `extract_text`, `image_media`, `video_media`, `is_replyable` |
 | `albums.py` | Album reassembly: container + images buffered into one agent turn |
-| `history.py` | `sanitize_chat_history` (repair) + `trim_to_budget` (token budget) |
+| `history.py` | `sanitize_chat_history` (repair) + `trim_to_budget` (token budget), final-reply filters (`is_single_emoji`, silence/error narration) |
 | `tools/whatsapp.py` | WhatsApp actions: send, react, forward, search, resolve chats, escalate, list recent chats |
 | `tools/external.py` | Web, finance, YouTube & (opt-in) shell tool builders |
 | `tools/schemas.py` | Pydantic parameter schemas for every tool |
 | `tools/envelope.py` | The unified JSON envelope (`ok` / `error`) every tool returns |
-| `tools/web_search.py` / `tools/visit_url.py` / `tools/url_images.py` / `tools/shell.py` | Web lookup, image-URL & shell tool functions |
+| `tools/web_search.py` / `tools/visit_url.py` / `tools/url_images.py` / `tools/url_videos.py` / `tools/shell.py` | Web lookup, image-URL & video-URL sniffing (yt-dlp) & shell tool functions |
 | `tools/finance.py` / `tools/youtube.py` | Market data and transcript tools |
 | `video.py` / `vision.py` | Video frame extraction + anchor; image captions |
 | `observability.py` | Langfuse export |

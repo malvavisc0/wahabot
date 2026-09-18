@@ -214,7 +214,10 @@ a loop of LLM calls in which the model can use tools, ending in one of:
   this is the *primary* outcome: most messages end in silence, and
   that is the feature working.
 - **`react_to_message`** — a low-effort emoji reaction instead of a
-  reply; the polite wave for greetings and jokes landing.
+  reply; the polite wave for greetings and jokes landing. A final
+  reply that is *just* one emoji (👋) gets the same treatment as a
+  fallback: it lands as a reaction on the triggering message or is
+  dropped as silence, never sent as text.
 - **A tool round then a send** — the model fetches context first
   (history, a web search, a page read), then answers with it.
 
@@ -229,7 +232,10 @@ missing reason shows up as a WARNING.
 
 Silence is a first-class outcome: the system prompt explicitly forbids
 narrating the decision ("I'll stay silent", "No response") — the bot
-either says something real or says nothing at all.
+either says something real or says nothing at all. The same filters
+treat a leaked `stay_silent` token written as text, an invented error
+payload, or a lone emoji as non-answers, so none of them reach the
+chat as a bogus reply.
 
 ---
 

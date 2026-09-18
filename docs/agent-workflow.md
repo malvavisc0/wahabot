@@ -759,6 +759,15 @@ and fall back to kwargs, or it will silently see zero.
   drops invented API-error payloads (e.g. a made-up
   `{"error": {"code": "resource_exhausted", …}}` naming a provider the
   bot never used) — model-authored noise never reaches the chat.
+- A **lone-emoji** final reply (the system prompt says "a lone emoji is
+  a reaction, never a message", but small models sometimes write 👋 as
+  plain text instead of calling `react_to_message`) is caught by
+  `is_single_emoji` in the handler: with ~50% probability it is
+  converted into a reaction on the triggering message, otherwise it is
+  dropped as silence — either way it is never sent as chat text. The
+  same guard covers album runs (reacting on the album's container id).
+  Multi-emoji strings (`🤣🤣🤣`) are intentional chat text and pass
+  through as a normal reply.
 - List tools (`fetch_chat_messages`, `search_messages`) return
   *slimmed* messages (`slim_message`): WAHA's raw `_data` blob
   (~90% of the payload) is stripped before enveloping, so results stay
