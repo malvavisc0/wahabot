@@ -1003,6 +1003,43 @@ def test_remember_strips_thinking_separator(unit_settings: Settings) -> None:
     assert asyncio.run(stored_texts()) == ["jaj real reply"]
 
 
+def test_remember_drops_lone_emoji_reply(unit_settings: Settings) -> None:
+    """``remember`` never stores a lone-emoji reply as the bot's text.
+
+    The handler converts a lone emoji into a reaction (~50 %) or drops
+    it as silence — the chat never sees it as a text reply, so memory
+    must not record it (memory mirrors the chat). Delivery still
+    receives it: the conversion happens handler-side. Multi-emoji
+    strings are real chat text and must stay.
+    """
+    import asyncio
+
+    from llama_index.core.base.llms.types import (
+        ChatMessage,
+        ChatResponse,
+        MessageRole,
+        TextBlock,
+    )
+    from llama_index.core.memory import ChatMemoryBuffer
+    from llama_index.core.workflow import Context
+
+    from wahabot.ai.workflow import FunctionCallingAgentWorkflow, load_llm
+
+    async def stored_count(reply: str) -> int:
+        wf = FunctionCallingAgentWorkflow(llm=load_llm(unit_settings))
+        ctx = Context(wf)
+        await ctx.store.set("memory", ChatMemoryBuffer.from_defaults())
+        message = ChatMessage(role=MessageRole.ASSISTANT, blocks=[TextBlock(text=reply)])
+        await FunctionCallingAgentWorkflow.remember(
+            wf, ctx, ChatResponse(message=message), []
+        )
+        memory = await ctx.store.get("memory")
+        return len(await memory.aget_all())
+
+    assert asyncio.run(stored_count("👋")) == 0
+    assert asyncio.run(stored_count("🤣🤣🤣")) == 1
+
+
 def test_warn_accidental_silence() -> None:
     """``warn_accidental_silence`` fires only on the accidental-empty shape.
 

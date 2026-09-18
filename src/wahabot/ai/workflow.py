@@ -37,6 +37,7 @@ from wahabot.ai.events import InputEvent, ToolCallEvent
 from wahabot.ai.history import (
     chat_visible_text,
     inbound_message_id,
+    is_single_emoji,
     sanitize_chat_history,
     tool_calls,
     trim_to_budget,
@@ -719,8 +720,12 @@ class FunctionCallingAgentWorkflow(Workflow):
         identical predicates ``final_reply`` applies to delivery: a
         leaked ``stay_silent`` token, an invented error payload) is
         never stored, so the model's self-history cannot re-teach it
-        its own bugs. A message with tool calls always stores: the
-        calls will execute and their results belong to the run.
+        its own bugs. A lone-emoji final reply is dropped here for the
+        same reason (the handler converts it to a reaction or silence —
+        it never lands as text), while delivery keeps receiving it so
+        the conversion can happen. A message with tool calls always
+        stores: the calls will execute and their results belong to the
+        run.
 
         Thinking models separate the reasoning block from the text with
         a leading blank line inside the text block; that separator is
@@ -733,6 +738,8 @@ class FunctionCallingAgentWorkflow(Workflow):
             if isinstance(block, TextBlock) and block.text:
                 block.text = block.text.strip()
         visible = "" if skip_text else chat_visible_text(message.content)
+        if visible and is_single_emoji(visible) and not tool_calls:
+            visible = ""
         if tool_calls or visible:
             await memory.aput(message)
         await ctx.store.set("memory", memory)
