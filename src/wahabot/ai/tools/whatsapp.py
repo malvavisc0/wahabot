@@ -51,7 +51,9 @@ from wahabot.ai.tools.schemas import (
 from wahabot.core.echoes import remember_self_echo
 from wahabot.core.jid import chat_from_message_id, roster_entries, same_chat
 from wahabot.core.presence import clear_typing, typing_pause
+from wahabot.core.tts import synthesize
 from wahabot.core.waha import WahaClient
+from wahabot.settings import Settings
 from wahabot.status import state as _status_state
 
 __all__ = [
@@ -1088,30 +1090,40 @@ def local_file(path: str, max_file_bytes: int) -> dict[str, Any] | str:
     }
 
 
-def send_voice(waha: WahaClient, max_audio_upload_bytes: int) -> BaseTool:
+def send_voice(
+    waha: WahaClient, settings: Settings, max_audio_upload_bytes: int
+) -> BaseTool:
     """Build a tool that sends a voice note to a chat.
 
-    Two sources, matching WAHA's ``sendVoice`` file shapes: a public
-    ``url`` (``VoiceRemoteFile``) or a local ``path``
-    (``VoiceBinaryFile`` — read, capped at *max_audio_upload_bytes*
-    and base64-encoded, e.g. a shell-tool render). WAHA transcodes with
-    ffmpeg (``convert: true``) so the result arrives as a playable opus
-    voice note.
+    Three sources, exactly one per call: ``text`` (synthesize this
+    string with the configured TTS voice — the primary form; requires
+    ``settings.tts_url``), a public ``url`` (``VoiceRemoteFile``), or a
+    local ``path`` (``VoiceBinaryFile`` — read, capped at
+    *max_audio_upload_bytes* and base64-encoded, e.g. a shell-tool
+    render). WAHA transcodes with ffmpeg (``convert: true``) so every
+    form arrives as a playable opus voice note.
     """
 
     def send_voice_fn(
+        text: str | None = None,
         url: str | None = None,
         path: str | None = None,
+        language: str | None = None,
         chat: str | None = None,
         reason: str = "",
     ) -> str:
         """Send a voice note to a WhatsApp chat.
 
         Args:
+            text: Text to speak as a voice note, in the language of
+                that text; requires voice synthesis to be configured.
             url: Public URL of the audio to send (WAHA downloads and
                 transcodes it).
             path: Local path of an audio file you created (e.g. with
                 the shell tool); read and sent as base64.
+            language: Language code (e.g. 'es') when the spoken
+                text's language needs naming; config maps it to a
+                voice.
             chat: Optional chat id; operator commands only. Omit to
                 send to the current chat.
             reason: One short sentence justifying this send (goes to
@@ -1128,16 +1140,32 @@ def send_voice(waha: WahaClient, max_audio_upload_bytes: int) -> BaseTool:
         session = target.session
         if not session or not chat_id:
             return error("no active conversation context")
-        if bool(url) == bool(path):
-            return error("pass exactly one of url or path")
+        sources = sum(bool(source) for source in (text, url, path))
+        if sources != 1:
+            return error("pass exactly one of text, url or path")
         if url:
             probe_error = probe_media_url(str(url))
             if probe_error:
                 return error(probe_error)
         log_action_reason("send_voice", reason, chat=chat_id)
-        file = voice_file(str(url) if url else str(path), max_audio_upload_bytes)
-        if isinstance(file, str):
-            return error(file)
+        if text:
+            spoken = str(text).strip()
+            if not spoken:
+                return error("text is empty")
+            if not settings.tts_url:
+                return error(
+                    "voice synthesis is not configured — pass url or path instead"
+                )
+            audio = synthesize(settings, spoken, (language or "").strip().lower())
+            if audio is None:
+                return error("voice synthesis failed — send your reply as text instead")
+            if len(audio) > max_audio_upload_bytes:
+                return error(f"voice note exceeds the {max_audio_upload_bytes} B cap")
+            file = voice_payload(audio)
+        else:
+            file = voice_file(str(url) if url else str(path), max_audio_upload_bytes)
+            if isinstance(file, str):
+                return error(file)
         sent_id = waha.send_voice(session, chat_id, file=file)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
@@ -1152,20 +1180,39 @@ def send_voice(waha: WahaClient, max_audio_upload_bytes: int) -> BaseTool:
         fn_schema=SendVoiceSchema,
         name="send_voice",
         description=(
-            "Send a voice note to the current WhatsApp chat — from a public "
-            "url, or a local path for audio you created (e.g. with the shell "
-            "tool). WAHA transcodes it with ffmpeg, so common formats (mp3, "
-            "m4a, wav, ...) arrive as a playable voice note. Best for short "
-            "casual replies where typing would be too formal, or when "
-            "answering a voice note in kind. A URL must come from the "
-            "message, a tool result, or the operator's instruction — never "
-            "invented or guessed; unfetchable links are refused. Operator "
-            "commands may pass chat to reach the target the instruction "
-            "names; chat runs must omit it. Send at most once per run. "
-            "Pass reason: one short sentence saying why (logged for the "
-            "operator, never shown)."
+            "Send a voice note to the current WhatsApp chat. Primary "
+            "form: pass text and the bot speaks it in its own voice — "
+            "use it when the reply should be heard, not read: answering "
+            "a voice note in kind, a joke that lands better spoken, or "
+            "when typing would be too formal. Pass language when the "
+            "text's language isn't the chat's obvious one; the voice "
+            "itself is the operator's configured one. Relay forms: a "
+            "public url, or a local path for audio you created (e.g. "
+            "with the shell tool). Pass exactly one of text, url or "
+            "path. WAHA transcodes with ffmpeg, so common formats "
+            "(mp3, m4a, wav, ...) arrive as a playable voice note. A "
+            "URL must come from the message, a tool result, or the "
+            "operator's instruction — never invented or guessed; "
+            "unfetchable links are refused. Operator commands may pass "
+            "chat to reach the target the instruction names; chat runs "
+            "must omit it. Send at most once per run. Pass reason: one "
+            "short sentence saying why (logged for the operator, never "
+            "shown)."
         ),
     )
+
+
+def voice_payload(audio: bytes) -> dict[str, Any]:
+    """A WAHA ``VoiceBinaryFile`` for synthesized mp3 bytes.
+
+    No disk touch: the bytes the TTS service returned ride straight to
+    the send as base64. The synthesized form is always mp3
+    (``response_format``), so the mimetype is fixed.
+    """
+    return {
+        "mimetype": "audio/mpeg",
+        "data": base64.b64encode(audio).decode(),
+    }
 
 
 def voice_file(name_or_url: str, max_file_bytes: int) -> dict[str, Any] | str:

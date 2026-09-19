@@ -29,6 +29,7 @@ from tests.harness import (
     ME_JID,
     SESSION,
     SMOKE_PNG,
+    TTS_MP3,
     EscalateResponse,
     FenceRefusalResponse,
     FileResponse,
@@ -38,6 +39,7 @@ from tests.harness import (
     StickerResponse,
     VideoResponse,
     VoiceResponse,
+    VoiceTextResponse,
     album_events,
     chat_event,
     data_url_payload,
@@ -970,6 +972,71 @@ def test_send_voice_wire(bot: Bot) -> None:
         and v_convert is True
     )
     assert len(bot.waha.sent) == 0  # the latch: no text rode along too
+
+
+def test_send_voice_speaks_text(bot: Bot) -> None:
+    """send_voice(text=…) synthesizes and delivers a playable voice note.
+
+    The model writes text; the tool speaks it through the configured
+    TTS voice (never a model-picked one) and the bytes ride the send
+    as a VoiceBinaryFile without touching disk. Fail-soft contract: a
+    synthesis failure degrades to an error envelope, no send — the
+    model recovers in-run with plain text.
+    """
+    tts_bot = bot.rebuild(tts_url="http://tts.invalid")
+    llm = tts_bot.stack.llm
+    llm.override = VoiceTextResponse
+    spoken: list[tuple[str, str]] = []
+
+    def fake_synthesize(settings: Any, text: str, language: str) -> bytes:
+        spoken.append((text, language))
+        return TTS_MP3
+
+    with unittest.mock.patch("wahabot.ai.tools.whatsapp.synthesize", fake_synthesize):
+        voice_event = waha_event("VOICETEXT")
+        voice_event["payload"]["body"] = "kai answer with your voice"
+        tts_bot.post(voice_event)
+    assert _wait(lambda: len(tts_bot.waha.sent_voices) >= 1)
+    assert spoken == [("ya voy, un momento", "es")]
+    v_session, v_chat, v_file, v_convert = tts_bot.waha.sent_voices[0]
+    assert v_session == SESSION and v_chat == CHAT_ID and v_convert is True
+    assert v_file["mimetype"] == "audio/mpeg"
+    assert base64.b64decode(v_file["data"]) == TTS_MP3
+    assert len(tts_bot.waha.sent) == 0  # the latch: no text rode along
+
+
+def test_send_voice_text_requires_configured_tts(bot: Bot) -> None:
+    """TTS off: the text form errors — no voice is sent, the run survives.
+
+    The gate is the settings URL: the error envelope tells the model to
+    fall back, and its text reply lands normally.
+    """
+    llm = bot.stack.llm  # default settings: tts_url empty
+    llm.override = VoiceTextResponse
+    bot.post(waha_event("VOICETEXTOFF"))
+    assert _wait(lambda: len(llm.requests) >= 2)  # the error envelope loops back
+    assert bot.waha.sent_voices == []  # the gate: no synthesis, no voice send
+    assert _wait(lambda: len(bot.waha.sent) >= 1)  # the fallback text lands
+
+
+def test_send_voice_text_synthesis_failure_degrades_to_text(bot: Bot) -> None:
+    """A synthesis failure returns an error envelope; the run survives.
+
+    Fail-soft: the tool must degrade to a text reply, never crash the
+    run — the model sees the envelope and answers in writing.
+    """
+    tts_bot = bot.rebuild(tts_url="http://tts.invalid")
+    llm = tts_bot.stack.llm
+    llm.override = VoiceTextResponse
+    with unittest.mock.patch("wahabot.ai.tools.whatsapp.synthesize", return_value=None):
+        voice_event = waha_event("VOICETEXTFAIL")
+        voice_event["payload"]["body"] = "kai answer with your voice"
+        tts_bot.post(voice_event)
+    assert _wait(lambda: len(llm.requests) >= 2)  # the envelope looped back
+    assert tts_bot.waha.sent_voices == []
+    # Fail-soft: the run survives and the model's fallback text still lands.
+    assert _wait(lambda: len(tts_bot.waha.sent) >= 1)
+    assert tts_bot.waha.sent[0][2] == "smoke final answer"
 
 
 def test_send_sticker_wire(bot: Bot) -> None:

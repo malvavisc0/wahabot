@@ -194,6 +194,44 @@ VoiceResponse = {
     "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
 }
 
+#: Voice-note reply, synthesized form: the model writes text, the bot
+#: speaks it (TTS integration; the fake synthesize returns FIXED bytes).
+VoiceTextResponse = {
+    "id": "chatcmpl-smoke-voice-text",
+    "object": "chat.completion",
+    "created": 1788525835,
+    "model": "smoke-model",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_voice_text_1",
+                        "type": "function",
+                        "function": {
+                            "name": "send_voice",
+                            "arguments": json.dumps(
+                                {
+                                    "text": "ya voy, un momento",
+                                    "language": "es",
+                                    "reason": "answering a voice note in kind",
+                                }
+                            ),
+                        },
+                    }
+                ],
+            },
+            "finish_reason": "tool_calls",
+        }
+    ],
+    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+}
+
+#: Bytes the fake TTS service returns for any synthesis request.
+TTS_MP3 = b"ID3\x03fake-tts-mp3"
 
 #: Sixth scenario: the model replies with a sticker via send_sticker (URL form).
 StickerResponse = {

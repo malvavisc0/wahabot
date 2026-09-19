@@ -73,6 +73,7 @@ def _feature_flags(settings: Settings) -> list[str]:
             if settings.transcribe_url
             else "no-transcribe"
         ),
+        "tts" if settings.tts_url else "no-tts",
         "langfuse"
         if settings.langfuse_public_key and settings.langfuse_secret_key
         else "no-langfuse",

@@ -227,16 +227,34 @@ class SendVideoSchema(BaseModel):
 class SendVoiceSchema(BaseModel):
     """Send a voice note to a WhatsApp chat."""
 
+    text: str | None = Field(
+        default=None,
+        description=(
+            "Text to speak as a voice note (the bot's own voice, the "
+            "language matching this text). The primary form — use it "
+            "when the reply should be heard, not read."
+        ),
+    )
     url: str | None = Field(
         default=None,
         description=(
-            "Public URL of the audio to send as a voice note. Pass url XOR path."
+            "Public URL of the audio to relay as a voice note. "
+            "Pass exactly one of text, url or path."
         ),
     )
     path: str | None = Field(
         default=None,
         description=(
-            "Local path of an audio file you created (sent as base64). Pass path XOR url."
+            "Local path of an audio file you created (sent as base64). "
+            "Pass exactly one of text, url or path."
+        ),
+    )
+    language: str | None = Field(
+        default=None,
+        description=(
+            "Language code of the spoken text (e.g. 'es', 'en', 'de') "
+            "when it differs from the chat's obvious one; the voice is "
+            "picked from config per language."
         ),
     )
     chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)

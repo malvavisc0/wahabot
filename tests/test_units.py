@@ -13,6 +13,7 @@ import shutil
 import tempfile
 import time
 import unittest.mock
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast, override
 
@@ -100,6 +101,7 @@ from wahabot.core.persistence import (
 )
 from wahabot.core.presence import clear_typing, mark_seen, typing_pause
 from wahabot.core.transcribe import fetch_transcript, is_transcribable_mimetype
+from wahabot.core.tts import synthesize
 from wahabot.core.waha import WahaClient
 from wahabot.reactions import is_own_message_id
 from wahabot.settings import Settings
@@ -489,6 +491,128 @@ def test_fetch_transcript_joins_segments(unit_settings: Settings) -> None:
     assert transcript == "hello world"
 
 
+def _mock_httpx_client(wire: Callable[[httpx.Request], httpx.Response]) -> Any:
+    """A patched httpx.Client factory that routes every request through *wire*.
+
+    Built against the real class captured before patching, so the
+    factory never recurses into its own patch.
+    """
+    real_client = httpx.Client
+
+    def factory(**kwargs: Any) -> httpx.Client:
+        return real_client(transport=httpx.MockTransport(wire), **kwargs)
+
+    return factory
+
+
+def test_synthesize_wire_shape(unit_settings: Settings) -> None:
+    """synthesize POSTs the OpenAI speech shape and returns the mp3 bytes.
+
+    The voice and instruct come from config per language — never from
+    the model — and an empty instruct entry means the key is omitted
+    entirely (the `_casual` voices carry their own delivery).
+    """
+    unit_settings.tts_url = "http://tts.invalid"
+    unit_settings.tts_voices = {"es": "vd_spanish_male", "en": "vd_british_male_casual"}
+    unit_settings.tts_instruct = {
+        "es": "spoken casually, like teasing a friend in a group chat",
+        "en": "",
+    }
+    unit_settings.tts_timeout = 7.5
+    requests: list[httpx.Request] = []
+
+    def speech_wire(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=b"ID3mp3")
+
+    with unittest.mock.patch.object(httpx, "Client", _mock_httpx_client(speech_wire)):
+        audio = synthesize(unit_settings, "ya voy", "es")
+    assert audio == b"ID3mp3"
+    (request,) = requests
+    assert request.url.path == "/v1/audio/speech"
+    assert json.loads(request.content) == {
+        "model": "tts-1",
+        "input": "ya voy",
+        "voice": "vd_spanish_male",
+        "response_format": "mp3",
+        "instruct": "spoken casually, like teasing a friend in a group chat",
+    }
+    # English: the _casual voice, instruct omitted (empty map entry).
+    with unittest.mock.patch.object(httpx, "Client", _mock_httpx_client(speech_wire)):
+        synthesize(unit_settings, "on it", "en")
+    assert json.loads(requests[1].content) == {
+        "model": "tts-1",
+        "input": "on it",
+        "voice": "vd_british_male_casual",
+        "response_format": "mp3",
+    }
+
+
+def test_synthesize_default_language_fallback(unit_settings: Settings) -> None:
+    """An unmapped language falls back to the configured default's voice."""
+    unit_settings.tts_url = "http://tts.invalid"
+    unit_settings.tts_voices = {"es": "vd_spanish_male", "en": "vd_british_male_casual"}
+    unit_settings.tts_default_language = "es"
+    requests: list[httpx.Request] = []
+
+    def speech_wire(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=b"ID3mp3")
+
+    with unittest.mock.patch.object(httpx, "Client", _mock_httpx_client(speech_wire)):
+        audio = synthesize(unit_settings, "bonjour tout le monde", "fr")
+    assert audio == b"ID3mp3"
+    assert json.loads(requests[0].content)["voice"] == "vd_spanish_male"
+
+
+def test_synthesize_fail_soft(unit_settings: Settings) -> None:
+    """Every failure returns None: off, HTTP error, timeout, empty body."""
+
+    def responder(
+        status: int = 200, content: bytes = b"ID3mp3"
+    ) -> Callable[[httpx.Request], httpx.Response]:
+        def wire(_request: httpx.Request) -> httpx.Response:
+            if status == -1:
+                raise httpx.ConnectTimeout("timed out")
+            return httpx.Response(status, content=content)
+
+        return wire
+
+    unit_settings.tts_url = ""  # feature off
+    assert synthesize(unit_settings, "hola", "es") is None
+    unit_settings.tts_url = "http://tts.invalid"
+    unit_settings.tts_voices = {"es": "vd_spanish_male"}
+    for status, content in ((500, b"boom"), (200, b"")):
+        with unittest.mock.patch.object(
+            httpx,
+            "Client",
+            _mock_httpx_client(responder(status, content)),
+        ):
+            assert synthesize(unit_settings, "hola", "es") is None, (status, content)
+    with unittest.mock.patch.object(
+        httpx,
+        "Client",
+        _mock_httpx_client(responder(-1)),
+    ):
+        assert synthesize(unit_settings, "hola", "es") is None
+
+
+def test_synthesize_unmapped_no_default(unit_settings: Settings) -> None:
+    """No voice for the language and no usable default: None, no request."""
+    unit_settings.tts_url = "http://tts.invalid"
+    unit_settings.tts_voices = {"es": "vd_spanish_male"}
+    unit_settings.tts_default_language = "zz"
+    requests: list[httpx.Request] = []
+
+    def speech_wire(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=b"ID3mp3")
+
+    with unittest.mock.patch.object(httpx, "Client", _mock_httpx_client(speech_wire)):
+        assert synthesize(unit_settings, "hello", "en") is None
+    assert requests == []
+
+
 def test_search_matches_ranking() -> None:
     roster = [
         {"id": "1@g.us", "name": "Familia"},
@@ -812,15 +936,15 @@ def test_waha_wire_shapes() -> None:
     wire_waha.fetch_chat_messages(SESSION, "123 456@g.us", limit=7)
     wire_waha.send_image(SESSION, CHAT_ID, {"url": "https://x.invalid/a.png"}, "image")
     wire_waha.send_file(SESSION, CHAT_ID, {"url": "https://x.invalid/a.pdf"}, "file")
-    wire_waha.send_voice(
-        SESSION, CHAT_ID, {"mimetype": "audio/mpeg", "url": "https://x.invalid/a.mp3"}
-    )
-    wire_waha.send_sticker(SESSION, CHAT_ID, {"mimetype": "image/webp", "data": "AAAA"})
     wire_waha.send_video(
         SESSION, CHAT_ID, {"url": "https://x.invalid/a.mp4"}, "video", convert=False
     )
     wire_waha.forward_message(SESSION, CHAT_ID, "false_message")
     wire_waha.send_reaction(SESSION, "false_message", "")
+    wire_waha.send_voice(
+        SESSION, CHAT_ID, {"mimetype": "audio/mpeg", "url": "https://x.invalid/a.mp3"}
+    )
+    wire_waha.send_sticker(SESSION, CHAT_ID, {"mimetype": "image/webp", "data": "AAAA"})
     wire_waha.set_typing(SESSION, CHAT_ID, True)
     wire_waha.set_typing(SESSION, CHAT_ID, False)
     wire_waha.send_seen(SESSION, CHAT_ID)
@@ -830,11 +954,11 @@ def test_waha_wire_shapes() -> None:
         read_request,
         image_request,
         file_request,
-        voice_request,
-        sticker_request,
         video_request,
         forward_request,
         reaction_request,
+        voice_request,
+        sticker_request,
         typing_on_request,
         typing_off_request,
         seen_request,

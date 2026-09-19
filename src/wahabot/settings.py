@@ -143,6 +143,41 @@ class Settings(BaseSettings):
     #: it detect).
     transcribe_language: str = "auto"
 
+    #: OpenAI-compatible TTS service (base URL, e.g. http://host:8021)
+    #: behind ``send_voice(text=…)``. Empty disables voice synthesis
+    #: entirely (the tool's text form errors out; url/path relay still
+    #: works).
+    tts_url: str = ""
+    #: Per-request HTTP timeout (s) for synthesis; ~4 s warm, but the
+    #: service documents 30-60 s cold loads.
+    tts_timeout: float = 120.0
+    #: Language-code → voice-id map for synthesis (JSON env var
+    #: WAHABOT_TTS_VOICES). Seeded from the operator audition
+    #: (docs/plans/tts-integration.md): the `_casual` variants won for
+    #: en/de; Spanish has no `_casual` so the base voice stays.
+    tts_voices: dict[str, str] = Field(
+        default_factory=lambda: {
+            "en": "vd_british_male_casual",
+            "de": "vd_german_male_casual",
+            "es": "vd_spanish_male",
+        }
+    )
+    #: Language-code → frozen delivery direction for synthesis (JSON env
+    #: var WAHABOT_TTS_INSTRUCT). Empty string per language = send none
+    #: (the `_casual` voices carry it); the Spanish entry keeps the
+    #: instruct — its only casualness carrier. Never model-controllable.
+    tts_instruct: dict[str, str] = Field(
+        default_factory=lambda: {
+            "en": "",
+            "de": "",
+            "es": "spoken casually, like teasing a friend in a group chat",
+        }
+    )
+    #: Fallback language for synthesis when the reply's language has no
+    #: voice-map entry (the model names the language per call; the map
+    #: decides the voice).
+    tts_default_language: str = "en"
+
     web_search_max_results: int = 5
     web_search_timeout: float = 30.0
     web_search_proxy: str | None = None
