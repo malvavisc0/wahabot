@@ -1507,7 +1507,12 @@ def test_self_chat_command(bot: Bot) -> None:
     assert _wait(lambda: len(bot.waha.sent) >= 2)
     assert (SESSION, CHAT_ID, "smoke reply one", None) in bot.waha.sent
     notice = [s for s in bot.waha.sent if s[1] == ME_JID]
-    assert len(notice) == 1 and "delivered to" in notice[0][2] and CHAT_ID in notice[0][2]
+    assert (
+        len(notice) == 1
+        and "delivered to" in notice[0][2]
+        and CHAT_ID in notice[0][2]
+        and "smoke group" in notice[0][2]  # the name, not the bare JID alone
+    )
 
 
 def test_escalate_delivery(bot: Bot) -> None:

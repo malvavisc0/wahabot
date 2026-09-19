@@ -39,6 +39,21 @@ COMMAND_PREFIX = "[operator command]"
 OPERATOR_CHAT_ID = "operator"
 
 
+def chat_display_name(waha: WahaClient, session: str, chat_id: str) -> str:
+    """A chat's display name for operator notices; the bare JID if unknown.
+
+    The delivered-notice is a convenience, not a feature — a WAHA
+    hiccup or a nameless chat must never turn it into an error, so the
+    overview lookup is best-effort with the JID as the floor.
+    """
+    try:
+        overview = waha.get_chat_overview(session, chat_id)
+        name = str(overview.get("name", "")).strip() if overview else ""
+        return f"{name} ({chat_id})" if name else chat_id
+    except Exception:
+        return chat_id
+
+
 async def run_command(
     event: WahaEvent,
     agent: FunctionCallingAgentWorkflow,
@@ -95,7 +110,8 @@ async def run_command(
         await persist_memory(settings, event.session, OPERATOR_CHAT_ID, ctx)
     reply = (reply or "").strip()
     if not reply and target.sent and target.sent != OPERATOR_CHAT_ID:
-        reply = f"✅ done — delivered to {target.sent}"
+        name = chat_display_name(waha, event.session, target.sent)
+        reply = f"✅ done — delivered to {name}"
     if reply:
         logger.info(
             "Command {id} final reply: {reply}",

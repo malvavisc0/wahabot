@@ -86,7 +86,7 @@ from wahabot.ai.tools.whatsapp import (
 )
 from wahabot.ai.video import extract_frames, join_anchor, probe_duration, video_marker
 from wahabot.cli import build_forget_event
-from wahabot.commands import build_command_event
+from wahabot.commands import build_command_event, chat_display_name
 from wahabot.core.cache import TtlCache
 from wahabot.core.echoes import is_self_echo, remember_self_echo
 from wahabot.core.filters import chat_allowed
@@ -632,6 +632,17 @@ def test_search_matches_ranking() -> None:
     matches = search_matches(roster, "FAMILIA")
     assert [m["id"] for m in matches] == ["1@g.us", "1809-1373@g.us", "2@c.us"]
     assert all(set(m) == {"id", "name"} for m in matches)
+
+
+def test_chat_display_name_resolves_and_fails_soft() -> None:
+    """The delivered-notice renders names; WAHA down falls back to the JID."""
+    waha = unittest.mock.Mock()
+    waha.get_chat_overview.return_value = {"id": CHAT_ID, "name": "Las Engineers"}
+    assert chat_display_name(waha, SESSION, CHAT_ID) == f"Las Engineers ({CHAT_ID})"
+    waha.get_chat_overview.return_value = {"id": CHAT_ID}
+    assert chat_display_name(waha, SESSION, CHAT_ID) == CHAT_ID
+    waha.get_chat_overview.side_effect = httpx.ConnectError("waha gone")
+    assert chat_display_name(waha, SESSION, CHAT_ID) == CHAT_ID
 
 
 def test_command_event_shape() -> None:
