@@ -129,6 +129,40 @@ FileResponse = {
     "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
 }
 
+#: Fourth scenario: the model delivers a video via send_video (URL form).
+VideoResponse = {
+    "id": "chatcmpl-smoke-4",
+    "object": "chat.completion",
+    "created": 1788525833,
+    "model": "smoke-model",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_video_1",
+                        "type": "function",
+                        "function": {
+                            "name": "send_video",
+                            "arguments": json.dumps(
+                                {
+                                    "url": "http://files.invalid/q4/clip.mp4",
+                                    "caption": "the clip",
+                                }
+                            ),
+                        },
+                    }
+                ],
+            },
+            "finish_reason": "tool_calls",
+        }
+    ],
+    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+}
+
 #: Fence regression: the model (misleadingly instructed by a chat
 #: participant) tries to send to a chat outside the conversation.
 FenceRefusalResponse = {
@@ -405,6 +439,7 @@ class RecordingWaha(WahaClient):
         )
         self.sent: list[tuple[str, str, str, list[str] | None]] = []
         self.sent_files: list[tuple[str, str, dict[str, Any], str | None]] = []
+        self.sent_videos: list[tuple[str, str, dict[str, Any], str | None, bool]] = []
         self.reactions: list[tuple[str, str]] = []
         self.video_bytes = b""
 
@@ -454,6 +489,18 @@ class RecordingWaha(WahaClient):
     ) -> str:
         self.sent_files.append((session, chat_id, file, caption))
         return f"true_{chat_id}_SENTFILE{len(self.sent_files)}"
+
+    @override
+    def send_video(
+        self,
+        session: str,
+        chat_id: str,
+        file: dict[str, Any],
+        caption: str | None = None,
+        convert: bool = True,
+    ) -> str:
+        self.sent_videos.append((session, chat_id, file, caption, convert))
+        return f"true_{chat_id}_SENTVIDEO{len(self.sent_videos)}"
 
     @override
     def send_reaction(self, session: str, message_id: str, reaction: str) -> None:

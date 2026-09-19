@@ -105,6 +105,11 @@ class Settings(BaseSettings):
     #: (base64 inflates ~4/3x and the whole file rides one JSON request);
     #: 16 MB matches WhatsApp's own document limit.
     max_file_bytes: int = 16 * 1024 * 1024
+    #: Local videos larger than this are rejected by the send_video tool
+    #: (same base64/JSON constraint, but a shell-tool render easily
+    #: outruns a document; WAHA's ffmpeg transcode still handles the
+    #: format, the cap only bounds the request size).
+    max_video_upload_bytes: int = 64 * 1024 * 1024
 
     #: WhisperX transcription service (base URL, e.g. http://host:9191).
     #: Empty disables voice-note transcription entirely (the feature is

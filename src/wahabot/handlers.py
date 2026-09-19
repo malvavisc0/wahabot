@@ -37,7 +37,7 @@ from wahabot.ai.messages import (
 from wahabot.ai.observability import chat_trace_attributes, enable_langfuse
 from wahabot.ai.tools import build_default_tools
 from wahabot.ai.tools.url_videos import fetch_url_video, video_urls
-from wahabot.ai.tools.whatsapp import EscalationChannel
+from wahabot.ai.tools.whatsapp import EscalationChannel, deliver_chat_text
 from wahabot.ai.video import caption_video, extract_frames, join_anchor, video_marker
 from wahabot.ai.vision import caption_images
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
@@ -154,8 +154,9 @@ async def send_self_reply(waha: WahaClient, command: WahaEvent, reply: str) -> N
     chat_id = str(command.payload.get("reply_chat_id", ""))
     if not chat_id:
         return
-    sent_id = await asyncio.to_thread(
-        waha.send_text,
+    sent_id, _ = await asyncio.to_thread(
+        deliver_chat_text,
+        waha,
         command.session,
         chat_id,
         reply,
@@ -548,7 +549,8 @@ def register_agent_handler(
                 reply=reply[:500],
             )
             await asyncio.to_thread(
-                waha.send_text,
+                deliver_chat_text,
+                waha,
                 event.session,
                 chat_id,
                 reply,
@@ -830,7 +832,12 @@ def register_agent_handler(
                 "Replying to {chat_id}: {reply}", chat_id=chat_id, reply=reply[:500]
             )
             await asyncio.to_thread(
-                waha.send_text, event.session, chat_id, reply, message_id
+                deliver_chat_text,
+                waha,
+                event.session,
+                chat_id,
+                reply,
+                message_id,
             )
         except openai.APIConnectionError as exc:
             # Provider unreachable — a transient outage, not a bug. The

@@ -206,6 +206,24 @@ class SendFileSchema(BaseModel):
     reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
+class SendVideoSchema(BaseModel):
+    """Send a video to a WhatsApp chat."""
+
+    url: str | None = Field(
+        default=None,
+        description="Public URL of the video to send. Pass url XOR path.",
+    )
+    path: str | None = Field(
+        default=None,
+        description=(
+            "Local path of a video file you created (sent as base64). Pass path XOR url."
+        ),
+    )
+    caption: str = Field(default="", description="Optional caption text.")
+    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
+
+
 class WebSearchSchema(BaseModel):
     """Search the web via the webserp metasearch CLI."""
 

@@ -13,7 +13,7 @@ import tempfile
 import time
 import unittest.mock
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, override
 
 import httpx
 import pytest
@@ -56,9 +56,13 @@ from wahabot.ai.tools.whatsapp import (
     _FENCE_ERROR as FENCE_ERROR_TEXT,  # pyright: ignore[reportPrivateUsage]
 )
 from wahabot.ai.tools.whatsapp import (
+    _VIDEO_MIME_BY_EXT as VIDEO_MIME_BY_EXT,  # pyright: ignore[reportPrivateUsage]
+)
+from wahabot.ai.tools.whatsapp import (
     OPERATOR_ARMED,
     OPERATOR_KEY,
     chat_jid,
+    deliver_chat_text,
     fenced_chat,
     fenced_message_id,
     infer_image_mimetype,
@@ -74,6 +78,7 @@ from wahabot.ai.tools.whatsapp import (
     search_matches,
     sender_names,
     summarize_chat,
+    video_file,
 )
 from wahabot.ai.video import extract_frames, join_anchor, probe_duration, video_marker
 from wahabot.cli import build_forget_event
@@ -540,6 +545,38 @@ def test_send_file_payloads() -> None:
         assert isinstance(local_file(str(Path(tmpdir) / "missing.pdf"), 1024), str)
 
 
+def test_send_video_payloads() -> None:
+    """The video payloads for both send_video sources.
+
+    A URL must carry the video MIME (not a guessed type) and the path's
+    basename; a local file must be re-typed from the document default
+    to ``video/mp4`` — a shell-tool ``.mp4`` must not ride the wire
+    stamped ``application/octet-stream``. Oversize/missing paths come
+    back as the shared error-string shape, same as ``send_file``.
+    """
+    remote = video_file("http://files.invalid/q4/clip.webm", max_file_bytes=1024)
+    assert not isinstance(remote, str)
+    assert remote == {
+        "mimetype": "video/webm",
+        "url": "http://files.invalid/q4/clip.webm",
+        "filename": "clip.webm",
+    }
+    assert (
+        infer_mimetype("http://x.invalid/noext", VIDEO_MIME_BY_EXT, "video/mp4")
+        == "video/mp4"
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mp4 = Path(tmpdir) / "out.mp4"
+        mp4.write_bytes(b"\x00\x00\x00\x18ftypmp42 smoke bytes")
+        local = video_file(str(mp4), max_file_bytes=1024)
+        assert not isinstance(local, str)
+        assert local["mimetype"] == "video/mp4"
+        assert local["filename"] == "out.mp4"
+        assert base64.b64decode(local["data"]).startswith(b"\x00\x00\x00\x18ftyp")
+        assert isinstance(video_file(str(mp4), max_file_bytes=4), str)
+        assert isinstance(video_file(str(Path(tmpdir) / "missing.mp4"), 1024), str)
+
+
 def test_probe_media_url_refuses_malformed() -> None:
     assert "not an http(s) URL" in (probe_media_url("not a url") or "")
     assert "not an http(s) URL" in (probe_media_url("ftp://x/y.png") or "")
@@ -624,6 +661,9 @@ def test_waha_wire_shapes() -> None:
     wire_waha.fetch_chat_messages(SESSION, "123 456@g.us", limit=7)
     wire_waha.send_image(SESSION, CHAT_ID, {"url": "https://x.invalid/a.png"}, "image")
     wire_waha.send_file(SESSION, CHAT_ID, {"url": "https://x.invalid/a.pdf"}, "file")
+    wire_waha.send_video(
+        SESSION, CHAT_ID, {"url": "https://x.invalid/a.mp4"}, "video", convert=False
+    )
     wire_waha.forward_message(SESSION, CHAT_ID, "false_message")
     wire_waha.send_reaction(SESSION, "false_message", "")
 
@@ -632,6 +672,7 @@ def test_waha_wire_shapes() -> None:
         read_request,
         image_request,
         file_request,
+        video_request,
         forward_request,
         reaction_request,
     ) = waha_requests
@@ -655,6 +696,15 @@ def test_waha_wire_shapes() -> None:
         and json.loads(image_request.content)["caption"] == "image"
         and file_request.url.path == "/api/sendFile"
         and json.loads(file_request.content)["caption"] == "file"
+        and video_request.url.path == "/api/sendVideo"
+        and json.loads(video_request.content)
+        == {
+            "session": SESSION,
+            "chatId": CHAT_ID,
+            "file": {"url": "https://x.invalid/a.mp4"},
+            "convert": False,
+            "caption": "video",
+        }
         and forward_request.url.path == "/api/forwardMessage"
         and json.loads(forward_request.content)["messageId"] == "false_message"
         and reaction_request.url.path == "/api/reaction"
@@ -1132,6 +1182,64 @@ def test_ordered_merge() -> None:
         ["491555000001@c.us"], ["111222333444555@lid", "491555000001@c.us"]
     ) == ["491555000001@c.us", "111222333444555@lid"]
     assert ordered_merge([], []) == []
+
+
+def test_deliver_chat_text_resolves_mentions() -> None:
+    """Text delivery resolves ``@``-tokens into real mention JIDs.
+
+    The handler's final-reply send and the ``send_message`` tool share
+    one delivery core: a ``@<number>`` token naming a roster member
+    rides the send as a mention JID (highlight + push), and text
+    naming nobody mentions nobody. A roster outage fails soft — the
+    text still goes out, unmentioned.
+    """
+
+    class RosterWaha(WahaClient):
+        """A WAHA recording sends, whose overview serves a LID roster."""
+
+        def __init__(self) -> None:
+            super().__init__(base_url="http://waha.invalid", api_key="k")
+            self.sent: list[tuple[str, str, str, list[str] | None]] = []
+
+        @override
+        def get_chat_overview(self, session: str, chat_id: str) -> Any:
+            return {
+                "id": chat_id,
+                "participants": [
+                    {"id": {"_serialized": "111222333444555@lid"}},
+                    {"id": {"_serialized": "491555000000@c.us"}},
+                ],
+            }
+
+        @override
+        def send_text(
+            self,
+            session: str,
+            chat_id: str,
+            text: str,
+            reply_to: str | None = None,
+            mentions: list[str] | None = None,
+        ) -> str:
+            self.sent.append((session, chat_id, text, mentions))
+            return f"true_{chat_id}_SENT{len(self.sent)}"
+
+    class BrokenRosterWaha(RosterWaha):
+        @override
+        def get_chat_overview(self, session: str, chat_id: str) -> Any:
+            raise RuntimeError("roster unavailable")
+
+    waha = RosterWaha()
+    text = "listado vacío, @111222333444555, pero documentado"
+    sent_id, mentions = deliver_chat_text(waha, "default", "123@g.us", text)
+    assert mentions == ["111222333444555@lid"]
+    assert waha.sent == [("default", "123@g.us", text, ["111222333444555@lid"])]
+    assert sent_id == "true_123@g.us_SENT1"
+    # No tokens naming members: nothing to mention.
+    _, mentions = deliver_chat_text(waha, "default", "123@g.us", "sin menciones aquí")
+    assert mentions == []
+    # A roster outage fails soft: the text still goes out.
+    _, mentions = deliver_chat_text(BrokenRosterWaha(), "default", "123@g.us", text)
+    assert mentions == []
 
 
 def test_log_action_reason() -> None:

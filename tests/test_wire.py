@@ -35,6 +35,7 @@ from tests.harness import (
     FirstResponse,
     RecordingWaha,
     SecondResponse,
+    VideoResponse,
     album_events,
     chat_event,
     data_url_payload,
@@ -100,6 +101,46 @@ def test_agent_replies_via_send_message(bot: Bot) -> None:
     assert body.get("top_p") == 0.95 and body.get("top_k") == 20
     assert body.get("tools") is not None
     assert body.get("parallel_tool_calls") is True
+
+
+def test_final_text_reply_carries_resolved_mentions(bot: Bot) -> None:
+    """A final-text reply (no tool call) still tags roster members.
+
+    The model answered in plain text instead of calling ``send_message``
+    — exactly the production incident: the reply contained a bare
+    ``@<number>`` token and WhatsApp rendered it literally because no
+    mention JID rode the send. The handler fallback must resolve the
+    token against the chat roster and attach the mention.
+    """
+    llm = bot.stack.llm
+    llm.override = {
+        "id": "chatcmpl-smoke-mention",
+        "object": "chat.completion",
+        "created": 1788525840,
+        "model": "smoke-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "listo @491555000001, la captura salió vacía",
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+    try:
+        bot.post(waha_event())
+        assert _wait(lambda: len(bot.waha.sent) >= 1)
+        session_id, chat_id, text, mentions = bot.waha.sent[-1]
+        assert (session_id, chat_id) == (SESSION, CHAT_ID)
+        assert "listo @491555000001" in text
+        # The roster's canonical JID for the tokened participant rides
+        # the send as a real mention.
+        assert mentions == ["491555000001@c.us"]
+    finally:
+        llm.override = None
 
 
 def test_event_journal_exact_bytes(bot: Bot) -> None:
@@ -861,6 +902,30 @@ def test_send_file_wire(bot: Bot) -> None:
             "filename": "report.pdf",
         }
         and f_caption == "the report"
+    )
+
+
+def test_send_video_wire(bot: Bot) -> None:
+    llm = bot.stack.llm
+    llm.override = VideoResponse
+    video_event = waha_event()
+    video_event["payload"]["id"] = f"false_{CHAT_ID}_SENDVIDEO"
+    video_event["payload"]["body"] = "kai send me the clip"
+    bot.post(video_event)
+    assert _wait(lambda: len(bot.waha.sent_videos) >= 1)
+    assert len(bot.waha.sent_videos) == 1
+    v_session, v_chat, v_file, v_caption, v_convert = bot.waha.sent_videos[0]
+    assert (
+        v_session == SESSION
+        and v_chat == CHAT_ID
+        and v_file
+        == {
+            "mimetype": "video/mp4",
+            "url": "http://files.invalid/q4/clip.mp4",
+            "filename": "clip.mp4",
+        }
+        and v_caption == "the clip"
+        and v_convert is True
     )
 
 

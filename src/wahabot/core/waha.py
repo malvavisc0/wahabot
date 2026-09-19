@@ -239,6 +239,34 @@ class WahaClient:
         response.raise_for_status()
         return sent_message_id(response)
 
+    def send_video(
+        self,
+        session: str,
+        chat_id: str,
+        file: dict[str, Any],
+        caption: str | None = None,
+        convert: bool = True,
+    ) -> str:
+        """Send a video from a url or base64 payload; returns its serialized id.
+
+        ``file`` is a WAHA ``RemoteFile`` (``{mimetype, url}``) or
+        ``BinaryFile`` (``{mimetype, data, filename?}``), per
+        ``POST /api/sendVideo``. ``convert`` (required by the schema)
+        tells WAHA to transcode with ffmpeg to WhatsApp's video format
+        before sending — off only for files already in that format.
+        """
+        body: dict[str, Any] = {
+            "session": session,
+            "chatId": chat_id,
+            "file": file,
+            "convert": convert,
+        }
+        if caption:
+            body["caption"] = caption
+        response = self._client.post(f"{API_PREFIX}/sendVideo", json=body)
+        response.raise_for_status()
+        return sent_message_id(response)
+
     def fetch_chat_messages(
         self,
         session: str,

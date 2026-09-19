@@ -67,7 +67,13 @@ _EARLY_STOPPING_PROMPT = (
 #: The tools that deliver content to a chat; each latches the shared
 #: holder at most once per run.
 DELIVERY_TOOLS = frozenset(
-    {"send_message", "send_image", "forward_message", "react_to_message"}
+    {
+        "send_message",
+        "send_image",
+        "send_video",
+        "forward_message",
+        "react_to_message",
+    }
 )
 
 SILENCE_TOOL = "stay_silent"

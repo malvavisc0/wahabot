@@ -43,6 +43,7 @@ from wahabot.ai.tools.schemas import (
     SendFileSchema,
     SendImageSchema,
     SendMessageSchema,
+    SendVideoSchema,
     StaySilentSchema,
 )
 from wahabot.core.echoes import remember_self_echo
@@ -58,6 +59,7 @@ __all__ = [
     "bind_target",
     "chat_jid",
     "current_target",
+    "deliver_chat_text",
     "delivered_to_self",
     "escalate",
     "fenced_chat",
@@ -81,10 +83,12 @@ __all__ = [
     "send_file",
     "send_image",
     "send_message",
+    "send_video",
     "sender_names",
     "slim_message",
     "stay_silent",
     "summarize_chat",
+    "video_file",
 ]
 
 
@@ -113,6 +117,22 @@ _DOC_MIME_BY_EXT: dict[str, str] = {
     ".csv": "text/csv",
     ".zip": "application/zip",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+#: Extension → MIME mapping for videos, curated for the same reason as
+#: the image map: guessed types such as ``video/x-matroska`` are not
+#: accepted by WhatsApp's video pipeline (``convert`` handles the
+#: transcode, but the declared mimetype must still be sane).
+_VIDEO_MIME_BY_EXT: dict[str, str] = {
+    ".mp4": "video/mp4",
+    ".m4v": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".3gp": "video/3gpp",
+    ".3g2": "video/3gpp2",
+    ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska",
+    ".ogv": "video/ogg",
 }
 
 #: Seconds to spend probing a media URL before sending it. Fabricated or
@@ -494,11 +514,8 @@ def send_message(waha: WahaClient) -> BaseTool:
             if id_error:
                 return error(id_error)
         log_action_reason("send_message", reason, chat=chat_id)
-        roster = chat_roster(waha, session, chat_id)
-        resolved = resolve_mentions(text, roster)
-        merged = ordered_merge(mentions or [], resolved)
-        sent_id = waha.send_text(
-            session, chat_id, text, reply_to=reply_to, mentions=merged or None
+        sent_id, merged = deliver_chat_text(
+            waha, session, chat_id, text, reply_to=reply_to, mentions=mentions
         )
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
@@ -819,6 +836,87 @@ def infer_image_mimetype(url: str) -> str:
     return infer_mimetype(url, _IMAGE_MIME_BY_EXT, "image/jpeg")
 
 
+def send_video(waha: WahaClient, max_file_bytes: int) -> BaseTool:
+    """Build a tool that sends a video to a chat.
+
+    Two sources, matching WAHA's ``sendVideo`` file shapes: a public
+    ``url`` (``RemoteFile`` — WAHA downloads it) or a local ``path``
+    (``BinaryFile`` — read, capped at *max_file_bytes* and base64-
+    encoded). WAHA transcodes with ffmpeg (``convert: true``), so
+    common formats land playable in the chat.
+    """
+
+    def send_video_fn(
+        url: str | None = None,
+        path: str | None = None,
+        caption: str = "",
+        chat: str | None = None,
+        reason: str = "",
+    ) -> str:
+        """Send a video to a WhatsApp chat.
+
+        Args:
+            url: Public URL of the video to send (WAHA downloads and
+                transcodes it).
+            path: Local path of a video file you created (e.g. with
+                the shell tool); read and sent as base64.
+            caption: Optional caption text.
+            chat: Optional chat id; operator commands only. Omit to
+                send to the current chat.
+            reason: One short sentence justifying this send (goes to
+                the operator's log, never to the chat).
+        """
+        target = current_target()
+        if target.sent:
+            return error(
+                f"message already sent this run (to {target.sent}); do not send again"
+            )
+        chat_id, fence_error = fenced_chat(chat, target)
+        if fence_error:
+            return error(fence_error)
+        session = target.session
+        if not session or not chat_id:
+            return error("no active conversation context")
+        if bool(url) == bool(path):
+            return error("pass exactly one of url or path")
+        if url:
+            probe_error = probe_media_url(str(url))
+            if probe_error:
+                return error(probe_error)
+        log_action_reason("send_video", reason, chat=chat_id)
+        file = video_file(str(url) if url else str(path), max_file_bytes)
+        if isinstance(file, str):
+            return error(file)
+        sent_id = waha.send_video(session, chat_id, file=file, caption=caption or None)
+        delivered_to_self(chat_id, sent_id)
+        target.sent = chat_id
+        return ok(
+            chat=chat_id,
+            mimetype=file["mimetype"],
+            filename=file.get("filename") or "",
+            caption=caption,
+        )
+
+    return FunctionTool.from_defaults(
+        fn=send_video_fn,
+        fn_schema=SendVideoSchema,
+        name="send_video",
+        description=(
+            "Send a video to the current WhatsApp chat — from a public "
+            "url, or a local path for files you created (e.g. with the "
+            "shell tool). WAHA transcodes it with ffmpeg, so common "
+            "formats (mp4, webm, mov, ...) arrive playable. A URL must "
+            "come from the message, a tool result, or the operator's "
+            "instruction — never invented or guessed; unfetchable links "
+            "are refused. caption is optional. Operator commands may "
+            "pass chat to reach the target the instruction names; chat "
+            "runs must omit it. Send at most once per run. Pass reason: "
+            "one short sentence saying why (logged for the operator, "
+            "never shown)."
+        ),
+    )
+
+
 def infer_mimetype(name_or_url: str, curated: dict[str, str], default: str) -> str:
     """Best-effort mimetype from a filename's or URL's extension.
 
@@ -920,13 +1018,22 @@ def send_file(waha: WahaClient, max_file_bytes: int) -> BaseTool:
     )
 
 
-def remote_file(url: str) -> dict[str, Any]:
-    """A WAHA RemoteFile for a document URL."""
-    name = PurePosixPath(urlsplit(url).path).name
+def remote_file(
+    url: str,
+    curated: dict[str, str] | None = None,
+    default: str = "application/octet-stream",
+) -> dict[str, Any]:
+    """A WAHA RemoteFile for a URL, typed by the extension of its path.
+
+    *curated*/*default* select the MIME map — documents by default,
+    videos pass the video map so the declared type is one WhatsApp's
+    video pipeline accepts.
+    """
     file: dict[str, Any] = {
-        "mimetype": infer_mimetype(url, _DOC_MIME_BY_EXT, "application/octet-stream"),
+        "mimetype": infer_mimetype(url, curated or _DOC_MIME_BY_EXT, default),
         "url": url,
     }
+    name = PurePosixPath(urlsplit(url).path).name
     if name:
         file["filename"] = name
     return file
@@ -947,6 +1054,24 @@ def local_file(path: str, max_file_bytes: int) -> dict[str, Any] | str:
         ),
         "filename": local.name,
         "data": base64.b64encode(data).decode(),
+    }
+
+
+def video_file(name_or_url: str, max_file_bytes: int) -> dict[str, Any] | str:
+    """A WAHA video payload for a URL or local path, or an error string.
+
+    A URL becomes a ``RemoteFile`` (WAHA downloads and transcodes it);
+    a local path a ``BinaryFile`` via :func:`local_file`, re-typed to
+    the video MIME map — a ``.mp4`` produced by the shell tool must
+    not ride the wire stamped ``application/octet-stream``.
+    """
+    if "://" in name_or_url:
+        return remote_file(name_or_url, _VIDEO_MIME_BY_EXT, "video/mp4")
+    loaded = local_file(name_or_url, max_file_bytes)
+    if isinstance(loaded, str):
+        return loaded
+    return loaded | {
+        "mimetype": infer_mimetype(name_or_url, _VIDEO_MIME_BY_EXT, "video/mp4")
     }
 
 
@@ -1270,6 +1395,37 @@ def ordered_merge(explicit: list[str], resolved: list[str]) -> list[str]:
     reports what it asked for first; resolver additions follow.
     """
     return list(dict.fromkeys([*explicit, *resolved]))
+
+
+def deliver_chat_text(
+    waha: WahaClient,
+    session: str,
+    chat_id: str,
+    text: str,
+    reply_to: str | None = None,
+    mentions: list[str] | None = None,
+) -> tuple[str, list[str]]:
+    """Send text with the full delivery treatment.
+
+    Every text delivery — the ``send_message`` tool and the handler's
+    final-reply send alike — goes through here, so mention resolution
+    is a property of sending, not of which path fired: ``@``-tokens in
+    *text* that name roster members become real mentions (highlight +
+    push) in both, and a model answering in plain final text can never
+    produce a literal ``@<number>`` that tags nobody. Explicit
+    *mentions* JIDs merge in ahead of resolved ones.
+
+    Returns ``(sent_id, merged_mentions)`` — the id of the sent message
+    ("" when the response carried none) and the merged JID list, so a
+    caller with a use for either (the tool's envelope, the echo
+    guard's id) gets them without a second API call.
+    """
+    roster = chat_roster(waha, session, chat_id)
+    merged = ordered_merge(mentions or [], resolve_mentions(text, roster))
+    sent_id = waha.send_text(
+        session, chat_id, text, reply_to=reply_to, mentions=merged or None
+    )
+    return sent_id, merged
 
 
 def search_messages(waha: WahaClient) -> BaseTool:
