@@ -573,6 +573,23 @@ def test_album_vision(bot: Bot) -> None:
     )
 
 
+def test_album_reply_types_before_sending(bot: Bot) -> None:
+    """An album's text reply rides the typing pause like every path.
+
+    The album fallback is the third delivery path; the pause was
+    silently missing there while the tool and single-message paths
+    had it — an album answer went out machine-fast.
+    """
+    typing_bot = bot.rebuild(typing_presence_min_s=0.05, typing_presence_max_s=0.1)
+    llm = typing_bot.stack.llm
+    llm.override = SecondResponse  # plain final-text reply, no tool call
+    for album_event in album_events():
+        typing_bot.post(album_event)
+    assert _wait(lambda: len(typing_bot.waha.sent) >= 1)
+    assert typing_bot.waha.typing_calls == [(SESSION, CHAT_ID, True)]
+    assert typing_bot.waha.sent[0][2] == "smoke final answer"
+
+
 @requires_ffmpeg
 def test_video_understanding(bot: Bot) -> None:
     llm = bot.stack.llm
@@ -927,6 +944,97 @@ def test_send_video_wire(bot: Bot) -> None:
         and v_caption == "the clip"
         and v_convert is True
     )
+
+
+def test_seen_and_typing_presence(bot: Bot) -> None:
+    """An addressed message is marked seen; a reply types before it lands.
+
+    The seen receipt goes out for *their* message regardless of the
+    run's outcome. FirstResponse delivers via the send_message tool,
+    so this also proves the typing prelude rides the *tool* path —
+    both delivery paths must type alike. The indicator is left on;
+    the send itself clears it.
+    """
+    typing_bot = bot.rebuild(typing_presence_min_s=0.05, typing_presence_max_s=0.1)
+    llm = typing_bot.stack.llm
+    llm.override = FirstResponse  # send_message tool delivery
+    seen_event = waha_event()
+    seen_event["payload"]["id"] = f"false_{CHAT_ID}_SEEN"
+    seen_event["payload"]["body"] = "kai que tal"
+    typing_bot.post(seen_event)
+    assert _wait(lambda: len(typing_bot.waha.sent) >= 1)
+    assert typing_bot.waha.seen_chats == [(SESSION, CHAT_ID)]
+    assert typing_bot.waha.typing_calls == [(SESSION, CHAT_ID, True)]
+
+
+def test_seen_off_when_disabled(bot: Bot) -> None:
+    quiet_bot = bot.rebuild(send_seen=False, typing_presence_min_s=0.0)
+    llm = quiet_bot.stack.llm
+    llm.override = FirstResponse
+    quiet_bot.post(waha_event())
+    assert _wait(lambda: len(quiet_bot.waha.sent) >= 1)
+    assert quiet_bot.waha.seen_chats == []
+    assert quiet_bot.waha.typing_calls == []
+
+
+def test_final_text_fallback_types_before_sending(bot: Bot) -> None:
+    """The handler's final-text fallback types like the tool path does.
+
+    A model answering in plain text (no ``send_message`` call) is the
+    other delivery path; without the pause there it goes out
+    sub-second — the machine tell this feature exists to kill. The
+    indicator is left ON for the send to clear.
+    """
+    typing_bot = bot.rebuild(typing_presence_min_s=0.05, typing_presence_max_s=0.1)
+    llm = typing_bot.stack.llm
+    llm.override = SecondResponse  # plain final text, no tool call
+    typing_bot.post(waha_event())
+    assert _wait(lambda: len(typing_bot.waha.sent) >= 1)
+    assert typing_bot.waha.typing_calls == [(SESSION, CHAT_ID, True)]
+    assert typing_bot.waha.sent[0][2] == "smoke final answer"
+
+
+def test_typing_cleared_when_fallback_send_fails(bot: Bot) -> None:
+    """A failed fallback send clears the typing indicator it lit.
+
+    The send itself clears the indicator on success; when the send
+    raises, nothing lands and nothing clears it — the handler's
+    generic failure path must not strand "typing…" on forever.
+    """
+    typing_bot = bot.rebuild(typing_presence_min_s=0.05, typing_presence_max_s=0.1)
+    llm = typing_bot.stack.llm
+    llm.override = SecondResponse
+    with unittest.mock.patch.object(
+        type(typing_bot.waha), "send_text", side_effect=httpx.ConnectError("waha gone")
+    ) as broken_send:
+        typing_bot.post(waha_event())
+    assert _wait(lambda: broken_send.call_count >= 1)
+    assert _wait(
+        lambda: (
+            typing_bot.waha.typing_calls
+            == [(SESSION, CHAT_ID, True), (SESSION, CHAT_ID, False)]
+        )
+    )
+
+
+def test_silent_run_still_marks_seen(bot: Bot) -> None:
+    """A run that ends silent still read the message — seen goes out.
+
+    The receipt answers *their* message, not the bot's reply; a
+    ``stay_silent`` outcome is the headline case (the bot "saw it and
+    chose not to speak", not "never read it").
+    """
+    llm = bot.stack.llm
+    llm.override = tool_call_response(
+        "stay_silent",
+        {"reason": "banter between others"},
+        call_id="call_seen_silent",
+        response_id="chatcmpl-seen-silent",
+    )
+    silent_event = waha_event("SEENSILENT")
+    bot.post(silent_event)
+    assert _wait(lambda: bot.waha.seen_chats == [(SESSION, CHAT_ID)])
+    assert bot.waha.sent == []
 
 
 def test_reaction_fold_in(bot: Bot) -> None:

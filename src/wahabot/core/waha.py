@@ -267,6 +267,32 @@ class WahaClient:
         response.raise_for_status()
         return sent_message_id(response)
 
+    def set_typing(self, session: str, chat_id: str, typing: bool) -> None:
+        """Show or clear the "typing…" indicator in a chat.
+
+        ``POST /api/startTyping`` / ``POST /api/stopTyping`` — the
+        same ``ChatRequest`` payload either way. Purely cosmetic
+        presence: callers treat failures as best-effort and never
+        propagate them (a presence hiccup must not kill a reply).
+        """
+        endpoint = "startTyping" if typing else "stopTyping"
+        self._client.post(
+            f"{API_PREFIX}/{endpoint}",
+            json={"session": session, "chatId": chat_id},
+        ).raise_for_status()
+
+    def send_seen(self, session: str, chat_id: str) -> None:
+        """Mark the chat's pending messages as read/seen.
+
+        ``POST /api/sendSeen`` (per-chat, no explicit message ids —
+        WAHA marks everything pending). Best-effort like typing
+        presence: failures are swallowed by the caller.
+        """
+        self._client.post(
+            f"{API_PREFIX}/sendSeen",
+            json={"session": session, "chatId": chat_id},
+        ).raise_for_status()
+
     def fetch_chat_messages(
         self,
         session: str,

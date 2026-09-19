@@ -47,6 +47,7 @@ from wahabot.core.echoes import is_self_echo, remember_self_echo
 from wahabot.core.filters import chat_allowed, jid_alias_lookup
 from wahabot.core.models import WahaEvent
 from wahabot.core.persistence import forget_memory
+from wahabot.core.presence import mark_seen
 from wahabot.core.transcribe import fetch_transcript, transcribe_voice_note
 from wahabot.core.waha import MediaTooLargeError, WahaClient
 from wahabot.settings import Settings
@@ -161,6 +162,7 @@ async def send_self_reply(waha: WahaClient, command: WahaEvent, reply: str) -> N
         chat_id,
         reply,
         str(command.payload.get("reply_to", "")) or None,
+        typing=None,  # self-chat: no one is watching for "typing…"
     )
     remember_self_echo(sent_id)
 
@@ -555,6 +557,10 @@ def register_agent_handler(
                 chat_id,
                 reply,
                 album_mid,
+                typing=(
+                    settings.typing_presence_min_s,
+                    settings.typing_presence_max_s,
+                ),
             )
 
     set_completion_handler(run_album)
@@ -586,7 +592,7 @@ def register_agent_handler(
     escalation_channel = EscalationChannel()
     agent = build_agent(
         settings,
-        tools=build_default_tools(waha, escalation_channel=escalation_channel),
+        tools=build_default_tools(waha, settings, escalation_channel=escalation_channel),
         system_prompt=config.system_prompt,
         prompt_renderer=render_prompt,
     )
@@ -726,6 +732,14 @@ def register_agent_handler(
                 "Ignoring unaddressed group message {id}", id=event.payload.get("id")
             )
             return
+        if settings.send_seen:
+            # The read receipt answers *their* message, not the bot's
+            # reply — it goes out even when the run later stays silent.
+            # Runs before the media prep so long downloads can't delay
+            # it into meaninglessness.
+            await asyncio.to_thread(
+                mark_seen, waha, event.session, str(event.payload["from"])
+            )
         if message_kind(event) == "audio" and settings.transcribe_url:
             transcript = await transcribe_voice_note(event, waha, settings)
             if transcript:
@@ -838,6 +852,10 @@ def register_agent_handler(
                 chat_id,
                 reply,
                 message_id,
+                typing=(
+                    settings.typing_presence_min_s,
+                    settings.typing_presence_max_s,
+                ),
             )
         except openai.APIConnectionError as exc:
             # Provider unreachable — a transient outage, not a bug. The

@@ -71,6 +71,9 @@ DELIVERY_TOOLS = frozenset(
         "send_message",
         "send_image",
         "send_video",
+        "send_voice",
+        "send_sticker",
+        "send_file",
         "forward_message",
         "react_to_message",
     }
@@ -169,7 +172,8 @@ def delivery_content(envelope: dict[str, Any]) -> str:
 
     Text sends keep their full text; media/file sends and forwards keep
     a short bracketed marker (with the caption when present); reactions
-    keep their emoji.
+    keep their emoji. Voice notes and stickers get their own markers so
+    the model's self-history says what the chat actually heard/saw.
     """
     if text := envelope.get("text"):
         return str(text)
@@ -182,8 +186,26 @@ def delivery_content(envelope: dict[str, Any]) -> str:
     caption = str(envelope.get("caption") or "").strip()
     if url := envelope.get("url"):
         return f"[media: {url}] {caption}".strip()
-    if mimetype := envelope.get("mimetype"):
-        return f"[file: {mimetype}] {caption}".strip()
+    return _typed_marker(envelope, caption) or _forwarded_marker(envelope)
+
+
+def _typed_marker(envelope: dict[str, Any], caption: str) -> str:
+    """The collapse marker for a delivered file of a known kind."""
+    mimetype = str(envelope.get("mimetype") or "")
+    if mimetype.startswith("audio/"):
+        return f"[voice note: {mimetype}]"
+    if marker := _MIME_MARKERS.get(mimetype):
+        return marker
+    return f"[file: {mimetype}] {caption}".strip() if mimetype else ""
+
+
+#: Collapse markers for delivered files the chat experiences as more
+#: than a document — a WebP is just a sticker, never a "file".
+_MIME_MARKERS: dict[str, str] = {"image/webp": "[sticker]"}
+
+
+def _forwarded_marker(envelope: dict[str, Any]) -> str:
+    """The collapse marker of a forwarded message, else ""."""
     if message_id := envelope.get("message_id"):
         return f"[forwarded {message_id}]"
     return ""

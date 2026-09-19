@@ -440,6 +440,8 @@ class RecordingWaha(WahaClient):
         self.sent: list[tuple[str, str, str, list[str] | None]] = []
         self.sent_files: list[tuple[str, str, dict[str, Any], str | None]] = []
         self.sent_videos: list[tuple[str, str, dict[str, Any], str | None, bool]] = []
+        self.typing_calls: list[tuple[str, str, bool]] = []
+        self.seen_chats: list[tuple[str, str]] = []
         self.reactions: list[tuple[str, str]] = []
         self.video_bytes = b""
 
@@ -501,6 +503,14 @@ class RecordingWaha(WahaClient):
     ) -> str:
         self.sent_videos.append((session, chat_id, file, caption, convert))
         return f"true_{chat_id}_SENTVIDEO{len(self.sent_videos)}"
+
+    @override
+    def set_typing(self, session: str, chat_id: str, typing: bool) -> None:
+        self.typing_calls.append((session, chat_id, typing))
+
+    @override
+    def send_seen(self, session: str, chat_id: str) -> None:
+        self.seen_chats.append((session, chat_id))
 
     @override
     def send_reaction(self, session: str, message_id: str, reaction: str) -> None:

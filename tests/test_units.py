@@ -6,6 +6,7 @@ functions. No servers needed except the wire block, which uses a mock
 transport, not a port.
 """
 
+import asyncio
 import base64
 import json
 import shutil
@@ -95,6 +96,7 @@ from wahabot.core.persistence import (
     persistable,
     save_memory,
 )
+from wahabot.core.presence import clear_typing, mark_seen, typing_pause
 from wahabot.core.transcribe import fetch_transcript, is_transcribable_mimetype
 from wahabot.core.waha import WahaClient
 from wahabot.reactions import is_own_message_id
@@ -577,6 +579,95 @@ def test_send_video_payloads() -> None:
         assert isinstance(video_file(str(Path(tmpdir) / "missing.mp4"), 1024), str)
 
 
+def test_mark_seen_swallows_failures() -> None:
+    """mark_seen never raises: a presence hiccup must not kill a run."""
+    waha = unittest.mock.Mock()
+    waha.send_seen.side_effect = httpx.ConnectError("waha gone")
+    mark_seen(waha, SESSION, CHAT_ID)  # must not raise
+    waha.send_seen.assert_called_once_with(SESSION, CHAT_ID)
+
+
+def test_typing_pause_disabled() -> None:
+    """min_s <= 0 skips the whole routine — no typing call, no wait."""
+    waha = unittest.mock.Mock()
+    typing_pause(waha, SESSION, CHAT_ID, "hello", min_s=0.0, max_s=3.0)
+    waha.set_typing.assert_not_called()
+
+
+def test_typing_pause_start_wait_order() -> None:
+    """Normal pass: typing on, then a scaled wait; the reply follows."""
+    waha = unittest.mock.Mock()
+    order: list[str] = []
+
+    def record(session: str, chat_id: str, typing: bool) -> None:
+        order.append("on" if typing else "off")
+
+    waha.set_typing.side_effect = record
+    with unittest.mock.patch("wahabot.core.presence.time.sleep") as sleep:
+        typing_pause(waha, SESSION, CHAT_ID, "a" * 400, min_s=0.5, max_s=3.0)
+        (delay,), _ = sleep.call_args
+    assert 0.5 <= delay <= 3.0  # length-scaled, clamped to the window
+    assert order == ["on"]  # left ON: the send itself clears the indicator
+    sleep.assert_called_once()
+
+
+def test_typing_pause_failure_never_raises() -> None:
+    """startTyping raising skips the wait and stays quiet."""
+    waha = unittest.mock.Mock()
+    waha.set_typing.side_effect = httpx.ConnectError("waha gone")
+    with unittest.mock.patch("wahabot.core.presence.time.sleep") as sleep:
+        typing_pause(waha, SESSION, CHAT_ID, "hello", min_s=0.1, max_s=3.0)
+    sleep.assert_not_called()  # the early return path: no wait without typing
+
+
+def test_clear_typing_swallows_failures() -> None:
+    """clear_typing never raises — it runs on an error path already."""
+    waha = unittest.mock.Mock()
+    waha.set_typing.side_effect = httpx.ConnectError("waha gone")
+    clear_typing(waha, SESSION, CHAT_ID)  # must not raise
+    waha.set_typing.assert_called_once_with(SESSION, CHAT_ID, False)
+
+
+def test_deliver_chat_text_clears_typing_on_send_failure() -> None:
+    """A send that raises after typing-on clears the indicator on the way out.
+
+    The landed message normally clears "typing…"; a failed send never
+    lands, so ``deliver_chat_text`` must clear it itself — and never
+    mask the original error doing so.
+    """
+
+    class FailingSendWaha(WahaClient):
+        """A WAHA whose roster works but text sends always fail."""
+
+        def __init__(self) -> None:
+            super().__init__(base_url="http://waha.invalid", api_key="k")
+            self.typing: list[bool] = []
+
+        @override
+        def get_chat_overview(self, session: str, chat_id: str) -> Any:
+            return {"id": chat_id, "participants": []}
+
+        @override
+        def set_typing(self, session: str, chat_id: str, typing: bool) -> None:
+            self.typing.append(typing)
+
+        @override
+        def send_text(
+            self,
+            session: str,
+            chat_id: str,
+            text: str,
+            reply_to: str | None = None,
+            mentions: list[str] | None = None,
+        ) -> str:
+            raise httpx.ConnectError("waha gone")
+
+    waha = FailingSendWaha()
+    with pytest.raises(httpx.ConnectError):
+        deliver_chat_text(waha, SESSION, CHAT_ID, "hello", typing=(0.1, 0.2))
+    assert waha.typing == [True, False]  # lit, then cleared best-effort
+
+
 def test_probe_media_url_refuses_malformed() -> None:
     assert "not an http(s) URL" in (probe_media_url("not a url") or "")
     assert "not an http(s) URL" in (probe_media_url("ftp://x/y.png") or "")
@@ -666,6 +757,9 @@ def test_waha_wire_shapes() -> None:
     )
     wire_waha.forward_message(SESSION, CHAT_ID, "false_message")
     wire_waha.send_reaction(SESSION, "false_message", "")
+    wire_waha.set_typing(SESSION, CHAT_ID, True)
+    wire_waha.set_typing(SESSION, CHAT_ID, False)
+    wire_waha.send_seen(SESSION, CHAT_ID)
 
     (
         send_request,
@@ -675,6 +769,9 @@ def test_waha_wire_shapes() -> None:
         video_request,
         forward_request,
         reaction_request,
+        typing_on_request,
+        typing_off_request,
+        seen_request,
     ) = waha_requests
     assert (
         send_request.url.path == "/api/sendText"
@@ -709,6 +806,12 @@ def test_waha_wire_shapes() -> None:
         and json.loads(forward_request.content)["messageId"] == "false_message"
         and reaction_request.url.path == "/api/reaction"
         and json.loads(reaction_request.content)["reaction"] == ""
+        and typing_on_request.url.path == "/api/startTyping"
+        and json.loads(typing_on_request.content)
+        == {"session": SESSION, "chatId": CHAT_ID}
+        and typing_off_request.url.path == "/api/stopTyping"
+        and seen_request.url.path == "/api/sendSeen"
+        and json.loads(seen_request.content) == {"session": SESSION, "chatId": CHAT_ID}
     )
     wire_waha._client.close()  # pyright: ignore[reportPrivateUsage]
 
@@ -1014,7 +1117,6 @@ def test_remember_strips_thinking_separator(unit_settings: Settings) -> None:
     separator — the stored prefix costs tokens every turn and teaches
     the model to keep emitting it.
     """
-    import asyncio
 
     from llama_index.core.base.llms.types import (
         ChatMessage,
@@ -1062,7 +1164,6 @@ def test_remember_drops_lone_emoji_reply(unit_settings: Settings) -> None:
     receives it: the conversion happens handler-side. Multi-emoji
     strings are real chat text and must stay.
     """
-    import asyncio
 
     from llama_index.core.base.llms.types import (
         ChatMessage,
@@ -1537,7 +1638,6 @@ def test_chat_visible_text_filters_leaked_tokens() -> None:
 
 def test_remember_filters_undelivered_leak(unit_settings: Settings) -> None:
     """``remember`` stores nothing when the final text is a leaked token."""
-    import asyncio
 
     from llama_index.core.base.llms.types import ChatResponse
     from llama_index.core.memory import ChatMemoryBuffer

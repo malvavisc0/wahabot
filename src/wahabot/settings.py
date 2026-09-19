@@ -110,6 +110,25 @@ class Settings(BaseSettings):
     #: outruns a document; WAHA's ffmpeg transcode still handles the
     #: format, the cap only bounds the request size).
     max_video_upload_bytes: int = 64 * 1024 * 1024
+    #: Local audio larger than this is rejected by the send_voice tool
+    #: (same base64/JSON constraint; a voice note longer than a few
+    #: minutes is wrong for the chat anyway).
+    max_voice_upload_bytes: int = 16 * 1024 * 1024
+    #: Local sticker files larger than this are rejected by the
+    #: send_sticker tool. WhatsApp stickers are small WebP stills;
+    #: 1 MB is already generous.
+    max_sticker_bytes: int = 1024 * 1024
+
+    #: Human-like presence: show "typing…" for a moment before the
+    #: run's reply goes out, so sub-second answers stop reading as
+    #: machine-fast. The delay scales with the reply's length and is
+    #: randomized inside [min, max]. 0 in both disables the feature.
+    typing_presence_min_s: float = 0.0
+    typing_presence_max_s: float = 3.0
+    #: Mark incoming messages as seen before the run starts (and even
+    #: when the run ends silent) — what a member who read the chat
+    #: does. Failures are swallowed (presence must never break a run).
+    send_seen: bool = True
 
     #: WhisperX transcription service (base URL, e.g. http://host:9191).
     #: Empty disables voice-note transcription entirely (the feature is

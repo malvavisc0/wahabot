@@ -384,7 +384,12 @@ async def handle_message(
     # runs bind their own targets and never see each other's. The
     # binding resets before returning, so the *target itself* is
     # returned alongside the reply for the caller's latch checks.
-    target = RunTarget(session=event.session, chat_id=chat_id, armed=armed)
+    typing = (
+        (settings.typing_presence_min_s, settings.typing_presence_max_s)
+        if settings is not None
+        else None
+    )
+    target = RunTarget(session=event.session, chat_id=chat_id, armed=armed, typing=typing)
     token = bind_target(target)
     try:
         result = await agent.run(input=user_msg, image_blocks=image_blocks, ctx=ctx)

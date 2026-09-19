@@ -48,6 +48,7 @@ from wahabot.ai.tools.schemas import (
 )
 from wahabot.core.echoes import remember_self_echo
 from wahabot.core.jid import chat_from_message_id, roster_entries, same_chat
+from wahabot.core.presence import clear_typing, typing_pause
 from wahabot.core.waha import WahaClient
 from wahabot.status import state as _status_state
 
@@ -133,6 +134,21 @@ _VIDEO_MIME_BY_EXT: dict[str, str] = {
     ".avi": "video/x-msvideo",
     ".mkv": "video/x-matroska",
     ".ogv": "video/ogg",
+}
+
+#: Extension → MIME mapping for audio sent as voice notes. WAHA's ffmpeg
+#: pass (``convert: true``) transcodes to opus, but the declared mimetype
+#: must still be a real audio type.
+_AUDIO_MIME_BY_EXT: dict[str, str] = {
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".ogg": "audio/ogg",
+    ".oga": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".wav": "audio/wav",
+    ".flac": "audio/flac",
+    ".webm": "audio/webm",
 }
 
 #: Seconds to spend probing a media URL before sending it. Fabricated or
@@ -228,6 +244,9 @@ class RunTarget:
     sent: str = ""
     reacted: str = ""
     armed: bool = False
+    #: Typing-presence window (``(min_s, max_s)``) from settings; None
+    #: or min<=0 disables the indicator for this run's text sends.
+    typing: tuple[float, float] | None = None
 
     @classmethod
     def from_dict(cls, holder: dict[str, str]) -> RunTarget:
@@ -515,7 +534,13 @@ def send_message(waha: WahaClient) -> BaseTool:
                 return error(id_error)
         log_action_reason("send_message", reason, chat=chat_id)
         sent_id, merged = deliver_chat_text(
-            waha, session, chat_id, text, reply_to=reply_to, mentions=mentions
+            waha,
+            session,
+            chat_id,
+            text,
+            reply_to=reply_to,
+            mentions=mentions,
+            typing=target.typing,
         )
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
@@ -1057,6 +1082,23 @@ def local_file(path: str, max_file_bytes: int) -> dict[str, Any] | str:
     }
 
 
+def sticker_file(name_or_url: str, max_file_bytes: int) -> dict[str, Any] | str:
+    """A WAHA sticker payload for a URL or local path, or an error string.
+
+    Typed with the image MIME map (stickers are WebP stills); a local
+    ``.webp``/``.png`` must not ride the wire stamped
+    ``application/octet-stream``.
+    """
+    if "://" in name_or_url:
+        return remote_file(name_or_url, _IMAGE_MIME_BY_EXT, "image/webp")
+    loaded = local_file(name_or_url, max_file_bytes)
+    if isinstance(loaded, str):
+        return loaded
+    return loaded | {
+        "mimetype": infer_mimetype(name_or_url, _IMAGE_MIME_BY_EXT, "image/webp")
+    }
+
+
 def video_file(name_or_url: str, max_file_bytes: int) -> dict[str, Any] | str:
     """A WAHA video payload for a URL or local path, or an error string.
 
@@ -1404,6 +1446,7 @@ def deliver_chat_text(
     text: str,
     reply_to: str | None = None,
     mentions: list[str] | None = None,
+    typing: tuple[float, float] | None = None,
 ) -> tuple[str, list[str]]:
     """Send text with the full delivery treatment.
 
@@ -1415,16 +1458,34 @@ def deliver_chat_text(
     produce a literal ``@<number>`` that tags nobody. Explicit
     *mentions* JIDs merge in ahead of resolved ones.
 
+    *typing* — a ``(min_s, max_s)`` window from settings — adds the
+    human-presence prelude: show "typing…", wait a length-scaled
+    random moment (``None`` or ``min <= 0`` skips it). It lives here
+    because both delivery paths must type alike; the caller passes the
+    settings values, keeping this module settings-free.
+
     Returns ``(sent_id, merged_mentions)`` — the id of the sent message
     ("" when the response carried none) and the merged JID list, so a
     caller with a use for either (the tool's envelope, the echo
     guard's id) gets them without a second API call.
     """
-    roster = chat_roster(waha, session, chat_id)
-    merged = ordered_merge(mentions or [], resolve_mentions(text, roster))
-    sent_id = waha.send_text(
-        session, chat_id, text, reply_to=reply_to, mentions=merged or None
+    indicator = (
+        typing_pause(waha, session, chat_id, text, typing[0], typing[1])
+        if typing is not None
+        else False
     )
+    try:
+        roster = chat_roster(waha, session, chat_id)
+        merged = ordered_merge(mentions or [], resolve_mentions(text, roster))
+        sent_id = waha.send_text(
+            session, chat_id, text, reply_to=reply_to, mentions=merged or None
+        )
+    except Exception:
+        # The send that would have cleared the indicator never landed;
+        # best-effort clear it here, never masking the original error.
+        if indicator:
+            clear_typing(waha, session, chat_id)
+        raise
     return sent_id, merged
 
 
