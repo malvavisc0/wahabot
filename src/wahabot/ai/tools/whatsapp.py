@@ -1427,8 +1427,9 @@ def fetch_chat_messages(waha: WahaClient) -> BaseTool:
             "serialized `id`, `body`, sender and media info): `count` is "
             "how many were found, `returned` how many fit (oldest are "
             "dropped when `truncated` is true — raise limit to look "
-            "further back). The ids let you forward or react to a "
-            "message. limit caps the number of messages fetched. "
+            "further back). The ids let you quote (send_message's "
+            "reply_to), forward or react to a message. limit caps the "
+            "number of messages fetched. "
             "Operator commands may pass chat to read the target the "
             "instruction names; chat runs must omit it."
         ),
