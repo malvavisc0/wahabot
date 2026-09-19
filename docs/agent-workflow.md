@@ -322,6 +322,27 @@ redeliveries cannot trigger a retry storm. A bare note in a `mentioned`
 group is skipped before any download. Empty `WAHABOT_TRANSCRIBE_URL`
 disables the whole path.
 
+## Speaking replies (TTS)
+
+The outbound counterpart: `send_voice` takes `text` (primary form) and
+speaks it. `core/tts.py` POSTs the OpenAI speech shape
+(`{tts_url}/v1/audio/speech`, `model: tts-1`, `response_format: mp3`)
+with the **voice and delivery direction resolved from config per
+language** — `WAHABOT_TTS_VOICES` maps language codes to voice ids,
+`WAHABOT_TTS_INSTRUCT` maps them to the frozen `instruct` line (empty
+entry = omit the key), and `WAHABOT_TTS_DEFAULT_LANGUAGE` backs
+unmapped languages. The model names only the language (when the
+reply's isn't the chat's obvious one); it never picks a voice or a
+style — fewer knobs, no drift. The synthesized mp3 rides the send as
+a `VoiceBinaryFile` without touching disk, under the same
+`max_voice_upload_bytes` cap as any local upload, and WAHA's
+`convert: true` transcodes it to a playable opus note. Synthesis is
+fail-soft: unconfigured (`WAHABOT_TTS_URL` empty), failed, oversized,
+or empty-audio returns an error envelope so the model falls back to a
+text reply in the same run — never a crash, never a silent hole. The
+url/path relay forms are unchanged. Design rationale and the voice
+audition live in `docs/plans/tts-integration.md`.
+
 ## Beyond the chat turn: commands, reactions, session health
 
 Three event flows sit outside the plain message → reply pipeline:
@@ -708,16 +729,14 @@ and fall back to kwargs, or it will silently see zero.
   a non-delivery round after a completed delivery). The counter resets
   at every run start.
 - The workflow's delivery set (`DELIVERY_TOOLS` in `workflow.py`) is
-  `send_message`, `send_image`, `forward_message`, and `react_to_message`.
-  They share a single delivery latch and collectively deliver **at most
-  once per run**: after a successful send, further delivery calls return
-  an error envelope instead of sending, so a looping model cannot spam
-  the chat even below the round limit. `react_to_message` is likewise
-  bounded to one reaction per run. `send_file` is **not** part of this
-  set: it enforces its own once-per-run latch in the run-scoped target
-  (a second call errors out), but the workflow treats its result as an
-  ordinary tool result — no delivery gate, no collapse, no
-  post-delivery text drop.
+  `send_message`, `send_image`, `send_video`, `send_voice`,
+  `send_sticker`, `send_file`, `forward_message`, and
+  `react_to_message`. They share a single delivery latch and
+  collectively deliver **at most once per run**: after a successful
+  send, further delivery calls return an error envelope instead of
+  sending, so a looping model cannot spam the chat even below the
+  round limit. `react_to_message` is likewise bounded to one reaction
+  per run.
 - `stay_silent` is the explicit exit for "no reply": the system prompt
   tells the model to call it instead of writing an empty string (which
   small models tend to replace with narration like "I'll stay silent
@@ -734,7 +753,9 @@ and fall back to kwargs, or it will silently see zero.
   see is preserved by collapsing the delivery tool group into one plain
   assistant message holding the delivered content — the sent text for
   `send_message`, the emoji for `react_to_message`, a bracketed marker
-  (with caption) for `send_image`/`forward_message` — so the
+  (with the caption) for `send_image`/`send_file`/`forward_message`,
+  `[voice note: …]` for `send_voice`, `[sticker]` for `send_sticker` —
+  so the
   model keeps sight of what it already said instead of re-answering.
   The wrap-up call after a completed delivery is subject to the same
   drop. Research runs (no delivery tool) keep their final answer.

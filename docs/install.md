@@ -51,6 +51,11 @@ Key env vars:
 | `WAHABOT_TRANSCRIBE_TIMEOUT` | Per-request transcription timeout (s) | `300` |
 | `WAHABOT_MAX_AUDIO_BYTES` | Per-voice-note download cap | `26214400` |
 | `WAHABOT_TRANSCRIBE_LANGUAGE` | Language passed to /transcribe (`auto` = detect) | `auto` |
+| `WAHABOT_TTS_URL` | OpenAI-compatible TTS base URL behind `send_voice(text=…)` (empty = off) | — |
+| `WAHABOT_TTS_TIMEOUT` | Per-request synthesis timeout (s) | `120` |
+| `WAHABOT_TTS_VOICES` | JSON map of language code → voice id | `{"en":"vd_british_male_casual","de":"vd_german_male_casual","es":"vd_spanish_male"}` |
+| `WAHABOT_TTS_INSTRUCT` | JSON map of language code → frozen delivery instruct (empty = omit) | `{"en":"","de":"","es":"spoken casually, like teasing a friend in a group chat"}` |
+| `WAHABOT_TTS_DEFAULT_LANGUAGE` | Language fallback when the reply's has no voice-map entry | `en` |
 | `WAHABOT_WEB_SEARCH_MAX_RESULTS` | Default web search results | `5` |
 | `WAHABOT_WEB_SEARCH_TIMEOUT` | webserp subprocess and `visit_url` fetch timeout (s) | `30` |
 | `WAHABOT_WEB_SEARCH_PROXY` | Optional proxy for webserp | — |

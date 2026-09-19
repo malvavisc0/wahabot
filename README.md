@@ -36,6 +36,7 @@ Every tool answers with a small JSON envelope — `{"ok": true, ...}` or `{"ok":
 
 - **Photos** are downloaded, attached to that turn's LLM call, then discarded — chat memory stays text-only, no megabyte payloads rotting in the rolling buffer.
 - **Voice notes** are transcribed by a WhisperX service (`WAHABOT_TRANSCRIBE_URL`) and arrive as `[voice note] <transcript>` — the bot hears what was said without being asked. Off when the URL is empty.
+- **It can talk back.** `send_voice` with `text` synthesizes the reply in the bot's own voice (OpenAI-compatible TTS service, `WAHABOT_TTS_URL`): the model writes the line, the configured voice speaks it — answering a voice note in kind without typing a word. Voices and delivery style are per-language operator config (`WAHABOT_TTS_VOICES` / `WAHABOT_TTS_INSTRUCT`), never model-picked. Off when the URL is empty; the url/path relay forms keep working either way.
 - **Videos** are understood as frames + spoken track (`WAHABOT_VIDEO`): evenly spaced stills are captioned by the vision model, the audio goes to WhisperX, and the turn carries `(video shows: …) [audio: "…"]` as a durable text anchor. The frames ride the first LLM call only; needs ffmpeg on PATH (the Docker image ships it).
 - **Albums** arrive as a container plus N images; the handler buffers them and runs the agent once, all images attached.
 - **Bare image links** in text are sniffed out, fetched, and shown to the model too.
@@ -90,7 +91,7 @@ Info: wahabot 0.7.3 (Python 3.14.6)
 Info: Session: default
 Info: LLM: gpt-4o-mini @ https://api.openai.com/v1
 Info: Memory: 8000 token ceiling
-Info: Features: vision, video, no-shell, no-transcribe
+Info: Features: vision, video, no-shell, no-transcribe, no-tts
 Info: Webhook: http://0.0.0.0:8080/api/webhook/default
 Info: WAHA session default is live as My Name (4917...@c.us)
 Info: Loaded session config from data/sessions/default.json: 0 whitelisted, 0 blacklisted, group_participation=mentioned
