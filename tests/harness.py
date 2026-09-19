@@ -163,6 +163,69 @@ VideoResponse = {
     "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
 }
 
+#: Fifth scenario: the model answers a voice note with send_voice (URL form).
+VoiceResponse = {
+    "id": "chatcmpl-smoke-5",
+    "object": "chat.completion",
+    "created": 1788525834,
+    "model": "smoke-model",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_voice_1",
+                        "type": "function",
+                        "function": {
+                            "name": "send_voice",
+                            "arguments": json.dumps(
+                                {"url": "http://files.invalid/q5/note.mp3"}
+                            ),
+                        },
+                    }
+                ],
+            },
+            "finish_reason": "tool_calls",
+        }
+    ],
+    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+}
+
+
+#: Sixth scenario: the model replies with a sticker via send_sticker (URL form).
+StickerResponse = {
+    "id": "chatcmpl-smoke-6",
+    "object": "chat.completion",
+    "created": 1788525835,
+    "model": "smoke-model",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_sticker_1",
+                        "type": "function",
+                        "function": {
+                            "name": "send_sticker",
+                            "arguments": json.dumps(
+                                {"url": "http://files.invalid/q6/laugh.webp"}
+                            ),
+                        },
+                    }
+                ],
+            },
+            "finish_reason": "tool_calls",
+        }
+    ],
+    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+}
+
 #: Fence regression: the model (misleadingly instructed by a chat
 #: participant) tries to send to a chat outside the conversation.
 FenceRefusalResponse = {
@@ -440,6 +503,8 @@ class RecordingWaha(WahaClient):
         self.sent: list[tuple[str, str, str, list[str] | None]] = []
         self.sent_files: list[tuple[str, str, dict[str, Any], str | None]] = []
         self.sent_videos: list[tuple[str, str, dict[str, Any], str | None, bool]] = []
+        self.sent_voices: list[tuple[str, str, dict[str, Any], bool]] = []
+        self.sent_stickers: list[tuple[str, str, dict[str, Any]]] = []
         self.typing_calls: list[tuple[str, str, bool]] = []
         self.seen_chats: list[tuple[str, str]] = []
         self.reactions: list[tuple[str, str]] = []
@@ -503,6 +568,29 @@ class RecordingWaha(WahaClient):
     ) -> str:
         self.sent_videos.append((session, chat_id, file, caption, convert))
         return f"true_{chat_id}_SENTVIDEO{len(self.sent_videos)}"
+
+    @override
+    def send_voice(
+        self,
+        session: str,
+        chat_id: str,
+        file: dict[str, Any],
+        reply_to: str | None = None,
+        convert: bool = True,
+    ) -> str:
+        self.sent_voices.append((session, chat_id, file, convert))
+        return f"true_{chat_id}_SENTVOICE{len(self.sent_voices)}"
+
+    @override
+    def send_sticker(
+        self,
+        session: str,
+        chat_id: str,
+        file: dict[str, Any],
+        reply_to: str | None = None,
+    ) -> str:
+        self.sent_stickers.append((session, chat_id, file))
+        return f"true_{chat_id}_SENTSTICKER{len(self.sent_stickers)}"
 
     @override
     def set_typing(self, session: str, chat_id: str, typing: bool) -> None:

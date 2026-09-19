@@ -43,7 +43,9 @@ from wahabot.ai.tools.schemas import (
     SendFileSchema,
     SendImageSchema,
     SendMessageSchema,
+    SendStickerSchema,
     SendVideoSchema,
+    SendVoiceSchema,
     StaySilentSchema,
 )
 from wahabot.core.echoes import remember_self_echo
@@ -84,12 +86,16 @@ __all__ = [
     "send_file",
     "send_image",
     "send_message",
+    "send_sticker",
     "send_video",
+    "send_voice",
     "sender_names",
     "slim_message",
     "stay_silent",
+    "sticker_file",
     "summarize_chat",
     "video_file",
+    "voice_file",
 ]
 
 
@@ -1080,6 +1086,177 @@ def local_file(path: str, max_file_bytes: int) -> dict[str, Any] | str:
         "filename": local.name,
         "data": base64.b64encode(data).decode(),
     }
+
+
+def send_voice(waha: WahaClient, max_audio_upload_bytes: int) -> BaseTool:
+    """Build a tool that sends a voice note to a chat.
+
+    Two sources, matching WAHA's ``sendVoice`` file shapes: a public
+    ``url`` (``VoiceRemoteFile``) or a local ``path``
+    (``VoiceBinaryFile`` — read, capped at *max_audio_upload_bytes*
+    and base64-encoded, e.g. a shell-tool render). WAHA transcodes with
+    ffmpeg (``convert: true``) so the result arrives as a playable opus
+    voice note.
+    """
+
+    def send_voice_fn(
+        url: str | None = None,
+        path: str | None = None,
+        chat: str | None = None,
+        reason: str = "",
+    ) -> str:
+        """Send a voice note to a WhatsApp chat.
+
+        Args:
+            url: Public URL of the audio to send (WAHA downloads and
+                transcodes it).
+            path: Local path of an audio file you created (e.g. with
+                the shell tool); read and sent as base64.
+            chat: Optional chat id; operator commands only. Omit to
+                send to the current chat.
+            reason: One short sentence justifying this send (goes to
+                the operator's log, never to the chat).
+        """
+        target = current_target()
+        if target.sent:
+            return error(
+                f"message already sent this run (to {target.sent}); do not send again"
+            )
+        chat_id, fence_error = fenced_chat(chat, target)
+        if fence_error:
+            return error(fence_error)
+        session = target.session
+        if not session or not chat_id:
+            return error("no active conversation context")
+        if bool(url) == bool(path):
+            return error("pass exactly one of url or path")
+        if url:
+            probe_error = probe_media_url(str(url))
+            if probe_error:
+                return error(probe_error)
+        log_action_reason("send_voice", reason, chat=chat_id)
+        file = voice_file(str(url) if url else str(path), max_audio_upload_bytes)
+        if isinstance(file, str):
+            return error(file)
+        sent_id = waha.send_voice(session, chat_id, file=file)
+        delivered_to_self(chat_id, sent_id)
+        target.sent = chat_id
+        return ok(
+            chat=chat_id,
+            mimetype=file["mimetype"],
+            filename=file.get("filename") or "",
+        )
+
+    return FunctionTool.from_defaults(
+        fn=send_voice_fn,
+        fn_schema=SendVoiceSchema,
+        name="send_voice",
+        description=(
+            "Send a voice note to the current WhatsApp chat — from a public "
+            "url, or a local path for audio you created (e.g. with the shell "
+            "tool). WAHA transcodes it with ffmpeg, so common formats (mp3, "
+            "m4a, wav, ...) arrive as a playable voice note. Best for short "
+            "casual replies where typing would be too formal, or when "
+            "answering a voice note in kind. A URL must come from the "
+            "message, a tool result, or the operator's instruction — never "
+            "invented or guessed; unfetchable links are refused. Operator "
+            "commands may pass chat to reach the target the instruction "
+            "names; chat runs must omit it. Send at most once per run. "
+            "Pass reason: one short sentence saying why (logged for the "
+            "operator, never shown)."
+        ),
+    )
+
+
+def voice_file(name_or_url: str, max_file_bytes: int) -> dict[str, Any] | str:
+    """A WAHA voice payload for a URL or local path, or an error string.
+
+    Same shape as :func:`video_file` but typed with the audio MIME map;
+    a shell-tool render (``.mp3``, ``.wav``) must not ride the wire
+    stamped ``application/octet-stream``.
+    """
+    if "://" in name_or_url:
+        return remote_file(name_or_url, _AUDIO_MIME_BY_EXT, "audio/mpeg")
+    loaded = local_file(name_or_url, max_file_bytes)
+    if isinstance(loaded, str):
+        return loaded
+    return loaded | {
+        "mimetype": infer_mimetype(name_or_url, _AUDIO_MIME_BY_EXT, "audio/mpeg")
+    }
+
+
+def send_sticker(waha: WahaClient, max_sticker_bytes: int) -> BaseTool:
+    """Build a tool that sends a sticker (WebP) to a chat.
+
+    Stickers are WhatsApp's pure-reaction medium — a lone sticker is
+    the group-chat equivalent of a punchline, and unlike a lone emoji
+    in text it is a legitimate *message*, not a misfired reaction.
+    Same two sources as the other media tools: public ``url`` or
+    local ``path`` (capped at *max_sticker_bytes*).
+    """
+
+    def send_sticker_fn(
+        url: str | None = None,
+        path: str | None = None,
+        chat: str | None = None,
+        reason: str = "",
+    ) -> str:
+        """Send a sticker (WebP image) to a WhatsApp chat.
+
+        Args:
+            url: Public URL of the WebP sticker to send.
+            path: Local path of a WebP image you created (e.g. with
+                the shell tool); read and sent as base64.
+            chat: Optional chat id; operator commands only. Omit to
+                send to the current chat.
+            reason: One short sentence justifying this send (goes to
+                the operator's log, never to the chat).
+        """
+        target = current_target()
+        if target.sent:
+            return error(
+                f"message already sent this run (to {target.sent}); do not send again"
+            )
+        chat_id, fence_error = fenced_chat(chat, target)
+        if fence_error:
+            return error(fence_error)
+        session = target.session
+        if not session or not chat_id:
+            return error("no active conversation context")
+        if bool(url) == bool(path):
+            return error("pass exactly one of url or path")
+        if url:
+            probe_error = probe_media_url(str(url))
+            if probe_error:
+                return error(probe_error)
+        log_action_reason("send_sticker", reason, chat=chat_id)
+        file = sticker_file(str(url) if url else str(path), max_sticker_bytes)
+        if isinstance(file, str):
+            return error(file)
+        sent_id = waha.send_sticker(session, chat_id, file=file)
+        delivered_to_self(chat_id, sent_id)
+        target.sent = chat_id
+        return ok(chat=chat_id, mimetype=file["mimetype"])
+
+    return FunctionTool.from_defaults(
+        fn=send_sticker_fn,
+        fn_schema=SendStickerSchema,
+        name="send_sticker",
+        description=(
+            "Send a sticker (WebP image) to the current WhatsApp chat — "
+            "from a public url, or a local path for one you created "
+            "(e.g. with the shell tool; ImageMagick can convert a picture "
+            "to WebP). Stickers are the chat's pure-reaction medium — a "
+            "fitting reply to another sticker or a joke that needs no "
+            "words. A URL must come from the message, a tool result, or "
+            "the operator's instruction — never invented or guessed; "
+            "unfetchable links are refused. Operator commands may pass "
+            "chat to reach the target the instruction names; chat runs "
+            "must omit it. Send at most once per run. Pass reason: one "
+            "short sentence saying why (logged for the operator, never "
+            "shown)."
+        ),
+    )
 
 
 def sticker_file(name_or_url: str, max_file_bytes: int) -> dict[str, Any] | str:

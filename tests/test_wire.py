@@ -35,7 +35,9 @@ from tests.harness import (
     FirstResponse,
     RecordingWaha,
     SecondResponse,
+    StickerResponse,
     VideoResponse,
+    VoiceResponse,
     album_events,
     chat_event,
     data_url_payload,
@@ -943,6 +945,82 @@ def test_send_video_wire(bot: Bot) -> None:
         }
         and v_caption == "the clip"
         and v_convert is True
+    )
+
+
+def test_send_voice_wire(bot: Bot) -> None:
+    llm = bot.stack.llm
+    llm.override = VoiceResponse
+    voice_reply_event = waha_event()
+    voice_reply_event["payload"]["id"] = f"false_{CHAT_ID}_SENDVOICE"
+    voice_reply_event["payload"]["body"] = "kai answer this with a voice note"
+    bot.post(voice_reply_event)
+    assert _wait(lambda: len(bot.waha.sent_voices) >= 1)
+    assert len(bot.waha.sent_voices) == 1
+    v_session, v_chat, v_file, v_convert = bot.waha.sent_voices[0]
+    assert (
+        v_session == SESSION
+        and v_chat == CHAT_ID
+        and v_file
+        == {
+            "mimetype": "audio/mpeg",
+            "url": "http://files.invalid/q5/note.mp3",
+            "filename": "note.mp3",
+        }
+        and v_convert is True
+    )
+    assert len(bot.waha.sent) == 0  # the latch: no text rode along too
+
+
+def test_send_sticker_wire(bot: Bot) -> None:
+    llm = bot.stack.llm
+    llm.override = StickerResponse
+    sticker_reply_event = waha_event()
+    sticker_reply_event["payload"]["id"] = f"false_{CHAT_ID}_SENDSTICKER"
+    sticker_reply_event["payload"]["body"] = "kai reply with a sticker"
+    bot.post(sticker_reply_event)
+    assert _wait(lambda: len(bot.waha.sent_stickers) >= 1)
+    assert len(bot.waha.sent_stickers) == 1
+    s_session, s_chat, s_file = bot.waha.sent_stickers[0]
+    assert (
+        s_session == SESSION
+        and s_chat == CHAT_ID
+        and s_file
+        == {
+            "mimetype": "image/webp",
+            "url": "http://files.invalid/q6/laugh.webp",
+            "filename": "laugh.webp",
+        }
+    )
+    assert len(bot.waha.sent) == 0
+
+
+def test_voice_delivery_collapses_in_memory(bot: Bot) -> None:
+    """A voice send's tool group folds into a plain assistant turn.
+
+    ``send_voice``/``send_sticker``/``send_file`` are delivery tools:
+    after the send, memory must mirror the chat — one plain assistant
+    message, no raw tool-call scaffolding left for the next run.
+    """
+    llm = bot.stack.llm
+    llm.override = VoiceResponse
+    voice_reply_event = waha_event("VOICECOLLAPSE")
+    voice_reply_event["payload"]["body"] = "kai answer this with a voice note"
+    bot.post(voice_reply_event)
+    assert _wait(lambda: len(bot.waha.sent_voices) >= 1)
+
+    async def memory_contents() -> list[Any]:
+        ctx = handlers_contexts[(SESSION, CHAT_ID)]
+        memory = await ctx.store.get("memory")
+        return await memory.aget_all()
+
+    messages = asyncio.run(memory_contents())
+    assert any(
+        m.role == MessageRole.ASSISTANT and "[voice note: audio/mpeg]" in str(m.content)
+        for m in messages
+    ), [str(m.content) for m in messages]
+    assert not any(m.role == MessageRole.TOOL for m in messages), (
+        "delivery scaffolding must not survive the run"
     )
 
 

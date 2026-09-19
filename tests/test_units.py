@@ -78,8 +78,10 @@ from wahabot.ai.tools.whatsapp import (
     roster_entries,
     search_matches,
     sender_names,
+    sticker_file,
     summarize_chat,
     video_file,
+    voice_file,
 )
 from wahabot.ai.video import extract_frames, join_anchor, probe_duration, video_marker
 from wahabot.cli import build_forget_event
@@ -579,6 +581,64 @@ def test_send_video_payloads() -> None:
         assert isinstance(video_file(str(Path(tmpdir) / "missing.mp4"), 1024), str)
 
 
+def test_send_voice_payloads() -> None:
+    """The voice payloads for both send_voice sources.
+
+    A URL must carry the audio MIME (not a guessed type) and the path's
+    basename; a local file must be re-typed from the document default to
+    ``audio/mpeg`` — a shell-tool ``.mp3`` must not ride the wire stamped
+    ``application/octet-stream``. Oversize/missing paths come back as the
+    shared error-string shape, same as ``send_file``.
+    """
+    remote = voice_file("http://files.invalid/q5/note.mp3", max_file_bytes=1024)
+    assert not isinstance(remote, str)
+    assert remote == {
+        "mimetype": "audio/mpeg",
+        "url": "http://files.invalid/q5/note.mp3",
+        "filename": "note.mp3",
+    }
+    remote_ogg = voice_file("http://files.invalid/q5/note.opus", max_file_bytes=1024)
+    assert not isinstance(remote_ogg, str)
+    assert remote_ogg["mimetype"] == "audio/ogg"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mp3 = Path(tmpdir) / "out.mp3"
+        mp3.write_bytes(b"\xff\xf3 smoke mpeg frames")
+        local = voice_file(str(mp3), max_file_bytes=1024)
+        assert not isinstance(local, str)
+        assert local["mimetype"] == "audio/mpeg"
+        assert local["filename"] == "out.mp3"
+        assert base64.b64decode(local["data"]).startswith(b"\xff\xf3")
+        assert isinstance(voice_file(str(mp3), max_file_bytes=4), str)
+        assert isinstance(voice_file(str(Path(tmpdir) / "missing.mp3"), 1024), str)
+
+
+def test_send_sticker_payloads() -> None:
+    """The sticker payloads for both send_sticker sources.
+
+    Stickers are WebP stills: a URL must carry the image MIME map, a
+    local ``.webp``/``.png`` must not ride the wire stamped
+    ``application/octet-stream``. Oversize/missing paths come back as
+    the shared error-string shape.
+    """
+    remote = sticker_file("http://files.invalid/q6/laugh.webp", max_file_bytes=1024)
+    assert not isinstance(remote, str)
+    assert remote == {
+        "mimetype": "image/webp",
+        "url": "http://files.invalid/q6/laugh.webp",
+        "filename": "laugh.webp",
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+        webp = Path(tmpdir) / "smile.webp"
+        webp.write_bytes(b"RIFF\x00\x00\x00WEBPVP8 smoke")
+        local = sticker_file(str(webp), max_file_bytes=1024)
+        assert not isinstance(local, str)
+        assert local["mimetype"] == "image/webp"
+        assert local["filename"] == "smile.webp"
+        assert base64.b64decode(local["data"]).startswith(b"RIFF")
+        assert isinstance(sticker_file(str(webp), max_file_bytes=4), str)
+        assert isinstance(sticker_file(str(Path(tmpdir) / "missing.webp"), 1024), str)
+
+
 def test_mark_seen_swallows_failures() -> None:
     """mark_seen never raises: a presence hiccup must not kill a run."""
     waha = unittest.mock.Mock()
@@ -752,6 +812,10 @@ def test_waha_wire_shapes() -> None:
     wire_waha.fetch_chat_messages(SESSION, "123 456@g.us", limit=7)
     wire_waha.send_image(SESSION, CHAT_ID, {"url": "https://x.invalid/a.png"}, "image")
     wire_waha.send_file(SESSION, CHAT_ID, {"url": "https://x.invalid/a.pdf"}, "file")
+    wire_waha.send_voice(
+        SESSION, CHAT_ID, {"mimetype": "audio/mpeg", "url": "https://x.invalid/a.mp3"}
+    )
+    wire_waha.send_sticker(SESSION, CHAT_ID, {"mimetype": "image/webp", "data": "AAAA"})
     wire_waha.send_video(
         SESSION, CHAT_ID, {"url": "https://x.invalid/a.mp4"}, "video", convert=False
     )
@@ -766,6 +830,8 @@ def test_waha_wire_shapes() -> None:
         read_request,
         image_request,
         file_request,
+        voice_request,
+        sticker_request,
         video_request,
         forward_request,
         reaction_request,
@@ -806,6 +872,21 @@ def test_waha_wire_shapes() -> None:
         and json.loads(forward_request.content)["messageId"] == "false_message"
         and reaction_request.url.path == "/api/reaction"
         and json.loads(reaction_request.content)["reaction"] == ""
+        and voice_request.url.path == "/api/sendVoice"
+        and json.loads(voice_request.content)
+        == {
+            "session": SESSION,
+            "chatId": CHAT_ID,
+            "file": {"mimetype": "audio/mpeg", "url": "https://x.invalid/a.mp3"},
+            "convert": True,
+        }
+        and sticker_request.url.path == "/api/sendSticker"
+        and json.loads(sticker_request.content)
+        == {
+            "session": SESSION,
+            "chatId": CHAT_ID,
+            "file": {"mimetype": "image/webp", "data": "AAAA"},
+        }
         and typing_on_request.url.path == "/api/startTyping"
         and json.loads(typing_on_request.content)
         == {"session": SESSION, "chatId": CHAT_ID}

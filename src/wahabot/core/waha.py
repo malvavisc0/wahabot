@@ -267,6 +267,53 @@ class WahaClient:
         response.raise_for_status()
         return sent_message_id(response)
 
+    def send_voice(
+        self,
+        session: str,
+        chat_id: str,
+        file: dict[str, Any],
+        reply_to: str | None = None,
+        convert: bool = True,
+    ) -> str:
+        """Send a voice note; returns its serialized id ("" if unknown).
+
+        ``file`` is a WAHA ``VoiceRemoteFile`` (``{mimetype, url}``) or
+        ``VoiceBinaryFile`` (``{mimetype, data, filename?}``), per
+        ``POST /api/sendVoice``. ``convert`` (required by the schema)
+        tells WAHA to run ffmpeg so the note arrives as a playable
+        opus voice message, not a plain audio attachment.
+        """
+        body: dict[str, Any] = {
+            "session": session,
+            "chatId": chat_id,
+            "file": file,
+            "convert": convert,
+        }
+        if reply_to:
+            body["reply_to"] = reply_to
+        response = self._client.post(f"{API_PREFIX}/sendVoice", json=body)
+        response.raise_for_status()
+        return sent_message_id(response)
+
+    def send_sticker(
+        self,
+        session: str,
+        chat_id: str,
+        file: dict[str, Any],
+        reply_to: str | None = None,
+    ) -> str:
+        """Send a sticker (WebP); returns its serialized id ("" if unknown).
+
+        ``file`` is a WAHA ``RemoteFile`` (``{mimetype, url}``) or
+        ``BinaryFile`` (``{mimetype, data}``), per ``POST /api/sendSticker``.
+        """
+        body: dict[str, Any] = {"session": session, "chatId": chat_id, "file": file}
+        if reply_to:
+            body["reply_to"] = reply_to
+        response = self._client.post(f"{API_PREFIX}/sendSticker", json=body)
+        response.raise_for_status()
+        return sent_message_id(response)
+
     def set_typing(self, session: str, chat_id: str, typing: bool) -> None:
         """Show or clear the "typing…" indicator in a chat.
 

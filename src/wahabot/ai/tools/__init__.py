@@ -30,7 +30,9 @@ from wahabot.ai.tools.whatsapp import (
     send_file,
     send_image,
     send_message,
+    send_sticker,
     send_video,
+    send_voice,
     stay_silent,
 )
 from wahabot.core.waha import WahaClient
@@ -66,6 +68,8 @@ def build_default_tools(
         send_image(waha),
         send_file(waha, settings.max_file_bytes),
         send_video(waha, settings.max_video_upload_bytes),
+        send_voice(waha, settings.max_voice_upload_bytes),
+        send_sticker(waha, settings.max_sticker_bytes),
         fetch_chat_messages(waha),
         get_chat(waha),
         search_messages(waha),

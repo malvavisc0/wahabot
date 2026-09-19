@@ -224,6 +224,42 @@ class SendVideoSchema(BaseModel):
     reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
+class SendVoiceSchema(BaseModel):
+    """Send a voice note to a WhatsApp chat."""
+
+    url: str | None = Field(
+        default=None,
+        description=(
+            "Public URL of the audio to send as a voice note. Pass url XOR path."
+        ),
+    )
+    path: str | None = Field(
+        default=None,
+        description=(
+            "Local path of an audio file you created (sent as base64). Pass path XOR url."
+        ),
+    )
+    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
+
+
+class SendStickerSchema(BaseModel):
+    """Send a sticker (WebP image) to a WhatsApp chat."""
+
+    url: str | None = Field(
+        default=None,
+        description="Public URL of the WebP sticker to send. Pass url XOR path.",
+    )
+    path: str | None = Field(
+        default=None,
+        description=(
+            "Local path of a WebP image you created (sent as base64). Pass path XOR url."
+        ),
+    )
+    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
+
+
 class WebSearchSchema(BaseModel):
     """Search the web via the webserp metasearch CLI."""
 
