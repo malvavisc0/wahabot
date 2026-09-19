@@ -1001,6 +1001,7 @@ def test_send_voice_speaks_text(bot: Bot) -> None:
     v_session, v_chat, v_file, v_convert = tts_bot.waha.sent_voices[0]
     assert v_session == SESSION and v_chat == CHAT_ID and v_convert is True
     assert v_file["mimetype"] == "audio/mpeg"
+    assert v_file["filename"] == "voice-note.mp3"  # required by the wire schema
     assert base64.b64decode(v_file["data"]) == TTS_MP3
     assert len(tts_bot.waha.sent) == 0  # the latch: no text rode along
 

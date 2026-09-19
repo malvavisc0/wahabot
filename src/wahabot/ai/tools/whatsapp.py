@@ -1207,10 +1207,13 @@ def voice_payload(audio: bytes) -> dict[str, Any]:
 
     No disk touch: the bytes the TTS service returned ride straight to
     the send as base64. The synthesized form is always mp3
-    (``response_format``), so the mimetype is fixed.
+    (``response_format``), so the mimetype is fixed; the filename is
+    required by the wire schema (WAHA's convert path names its temp
+    file from it).
     """
     return {
         "mimetype": "audio/mpeg",
+        "filename": "voice-note.mp3",
         "data": base64.b64encode(audio).decode(),
     }
 
