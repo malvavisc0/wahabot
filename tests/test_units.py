@@ -1291,7 +1291,7 @@ def test_sender_names_reads_notify_name() -> None:
             self,
             _session: str,
             _chat_id: str,
-            limit: int = 100,  # pyright: ignore[reportUnusedParameter]
+            limit: int = 100,
         ) -> list[dict[str, Any]]:
             return [
                 {
@@ -1349,7 +1349,10 @@ def test_remember_strips_thinking_separator(unit_settings: Settings) -> None:
     async def stored_texts() -> list[str]:
         wf = FunctionCallingAgentWorkflow(llm=load_llm(unit_settings))
         ctx = Context(wf)
-        await ctx.store.set("memory", ChatMemoryBuffer.from_defaults())
+        await ctx.store.set(
+            "memory",
+            ChatMemoryBuffer.from_defaults(),  # pyright: ignore[reportUnknownMemberType]
+        )
         message = ChatMessage(
             role=MessageRole.ASSISTANT,
             blocks=[
@@ -1395,7 +1398,10 @@ def test_remember_drops_lone_emoji_reply(unit_settings: Settings) -> None:
     async def stored_count(reply: str) -> int:
         wf = FunctionCallingAgentWorkflow(llm=load_llm(unit_settings))
         ctx = Context(wf)
-        await ctx.store.set("memory", ChatMemoryBuffer.from_defaults())
+        await ctx.store.set(
+            "memory",
+            ChatMemoryBuffer.from_defaults(),  # pyright: ignore[reportUnknownMemberType]
+        )
         message = ChatMessage(role=MessageRole.ASSISTANT, blocks=[TextBlock(text=reply)])
         await FunctionCallingAgentWorkflow.remember(
             wf, ctx, ChatResponse(message=message), []
@@ -1594,6 +1600,70 @@ def test_log_action_reason() -> None:
     assert warnings[0][1] == {"tool": "stay_silent", "suffix": ""}
 
 
+def test_every_tool_takes_a_reason() -> None:
+    """Every bundled tool exposes a ``reason`` parameter end to end.
+
+    The operator's audit goal — read the log and know what the bot did
+    and why — needs the model to justify every call. ``reason`` must
+    ride the schema (so the LLM sees it) and the function (so the call
+    executes); a tool missing either breaks the audit trail silently.
+    """
+    import inspect
+
+    from wahabot.ai.tools import build_default_tools
+    from wahabot.core.waha import WahaClient
+
+    settings = Settings(
+        waha_url="http://x",
+        waha_api_key="k",
+        webhook_hmac_key="h",
+        shell_tool=True,
+    )
+    tools = build_default_tools(WahaClient("http://x", "k"), settings)
+    assert tools, "no tools built"
+    for tool in tools:
+        name = tool.metadata.name
+        schema = tool.metadata.fn_schema
+        assert schema is not None and "reason" in schema.model_fields, (
+            f"{name}: schema missing reason"
+        )
+        fn = cast(Any, tool).fn
+        assert "reason" in inspect.signature(fn).parameters, (
+            f"{name}: function missing reason"
+        )
+
+
+def test_tool_call_log_extra() -> None:
+    """The per-call log context: reason first, then args; gaps flagged.
+
+    A missing reason must be visible as such — the audit line's whole
+    job is answering "why", so a call the model never justified prints
+    ``reason: (model gave none)`` instead of quietly looking bare.
+    """
+    from llama_index.core.tools import ToolSelection
+
+    from wahabot.ai.workflow import tool_call_log_extra
+
+    def call(name: str, **kwargs: Any) -> ToolSelection:
+        return ToolSelection(tool_id="id", tool_name=name, tool_kwargs=kwargs)
+
+    assert (
+        tool_call_log_extra(
+            call("run_shell_command", command="docker logs wahabot", reason="check crash")
+        )
+        == " (reason: check crash; args: command='docker logs wahabot')"
+    )
+    assert tool_call_log_extra(call("web_search", query="python 3.14")) == (
+        " (reason: (model gave none); args: query='python 3.14')"
+    )
+    assert tool_call_log_extra(call("recent_chats")) == (" (reason: (model gave none))")
+    # A lone reason with no other arguments: no trailing args part.
+    assert (
+        tool_call_log_extra(call("stay_silent", reason="banter between others"))
+        == " (reason: banter between others)"
+    )
+
+
 def test_is_silence_narration_catches_leaked_tool_token() -> None:
     """A leaked ``stay_silent`` tool token is silence chatter, not an answer.
 
@@ -1666,7 +1736,7 @@ def _group_waha() -> Any:
             self,
             _session: str,
             _chat_id: str,
-            limit: int = 100,  # pyright: ignore[reportUnusedParameter]
+            limit: int = 100,
         ) -> list[dict[str, Any]]:
             return [
                 {
@@ -1709,7 +1779,7 @@ def _conflicting_waha() -> Any:
             self,
             _session: str,
             _chat_id: str,
-            limit: int = 100,  # pyright: ignore[reportUnusedParameter]
+            limit: int = 100,
         ) -> list[dict[str, Any]]:
             return [
                 {
@@ -1864,7 +1934,10 @@ def test_remember_filters_undelivered_leak(unit_settings: Settings) -> None:
     async def stored() -> list[Any]:
         wf = FunctionCallingAgentWorkflow(llm=load_llm(unit_settings))
         ctx = Context(wf)
-        await ctx.store.set("memory", ChatMemoryBuffer.from_defaults())
+        await ctx.store.set(
+            "memory",
+            ChatMemoryBuffer.from_defaults(),  # pyright: ignore[reportUnknownMemberType]
+        )
         for text in ("stay_silent", "I'll stay silent here"):
             message = ChatMessage(role=MessageRole.ASSISTANT, content=text)
             await FunctionCallingAgentWorkflow.remember(

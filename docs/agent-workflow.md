@@ -473,26 +473,27 @@ refusal.
 |---|---|---|---|
 | `send_message` | `chat?`, `text`, `reply_to?`, `mentions?`, `reason?` | `POST /api/sendText` | Send a text (current chat, or operator-named target); `reply_to` quotes a message; `mentions` tags contacts; once per run (shared latch) |
 | `stay_silent` | `reason?` | — | End the run with no reply at all (terminal: the workflow stops before executing it) |
-| `escalate` | `report` | `POST /api/sendText` (to the bot's own chat) | Forward a report to the operator's self-chat — for "I want a human" requests, complaints, reports. No `chat` parameter (target is fixed); once per chat per hour (cooldown); writes the report itself, never pastes the person's words; refused on operator runs (a command already talks to the operator) |
+| `escalate` | `report`, `reason?` | `POST /api/sendText` (to the bot's own chat) | Forward a report to the operator's self-chat — for "I want a human" requests, complaints, reports. No `chat` parameter (target is fixed); once per chat per hour (cooldown); writes the report itself, never pastes the person's words; refused on operator runs (a command already talks to the operator) |
 | `react_to_message` | `message_id`, `reaction`, `reason?` | `PUT /api/reaction` | Emoji-react to a message (empty = remove); once per run |
 | `send_image` | `url`, `caption?`, `chat?`, `reason?` | `POST /api/sendImage` | Send an image from a URL (probed pre-send; 404/410 refused); once per run (shared latch) |
 | `send_file` | `url?`, `path?`, `caption?`, `filename?`, `chat?`, `reason?` | `POST /api/sendFile` | Send a document (PDF, etc.) from a URL (probed like `send_image`) or a local file; once per run (shared latch) |
-| `fetch_chat_messages` | `chat?`, `limit?` | `GET /api/{session}/chats/{chatId}/messages` | Read recent chat messages (JSON `messages` list) |
-| `get_chat` | `chat?` | `POST /api/{session}/chats/overview` | Chat metadata (name, participants, …) |
-| `search_messages` | `query`, `chat?`, `limit?` | `GET /api/messages` (local filter) | Find recent messages by text / media |
+| `fetch_chat_messages` | `chat?`, `limit?`, `reason?` | `GET /api/{session}/chats/{chatId}/messages` | Read recent chat messages (JSON `messages` list) |
+| `get_chat` | `chat?`, `reason?` | `POST /api/{session}/chats/overview` | Chat metadata (name, participants, …) |
+| `search_messages` | `query`, `chat?`, `limit?`, `reason?` | `GET /api/messages` (local filter) | Find recent messages by text / media |
 | `forward_message` | `message_id`, `chat?`, `reason?` | `POST /api/forwardMessage` | Forward a message to a chat; once per run (shared latch) |
-| `resolve_chat` | `name` | `GET /api/{session}/chats`, `GET /api/contacts/all` | Operator-only: resolve a person/group name to chat JIDs (exact match first, then substring; ≤5 candidates) |
-| `recent_chats` | `limit?` | `GET /api/{session}/chats` | Operator-only: list the newest conversations (each `{id, name}`), for instructions that go by recency instead of name |
+| `resolve_chat` | `name`, `reason?` | `GET /api/{session}/chats`, `GET /api/contacts/all` | Operator-only: resolve a person/group name to chat JIDs (exact match first, then substring; ≤5 candidates) |
+| `recent_chats` | `limit?`, `reason?` | `GET /api/{session}/chats` | Operator-only: list the newest conversations (each `{id, name}`), for instructions that go by recency instead of name |
 
-Every WhatsApp-facing action tool (the sends, `forward_message`,
-`react_to_message`, `stay_silent`) takes an optional `reason`: one short
-sentence justifying the action. It is log-only — `log_action_reason`
-(`whatsapp.py`) writes it to the operator's log (INFO; a missing reason
-logs a WARNING) and nothing else — never delivered to a chat, never fed
-back to the model. It is an observability and self-restraint knob:
-naming *why* forces the model to articulate its judgment in
-`judicious` group mode, and gives every send an audit trail for prompt
-tuning.
+Every tool takes an optional `reason`: one short sentence justifying
+the call. It is log-only — `log_action_reason` (`whatsapp.py`) writes
+the delivery/silence reasons to the operator's log (INFO; a missing
+reason logs a WARNING), and the workflow's per-call line
+(`run_tool_call` in `workflow.py`) prints every call's reason and
+arguments — a missing reason shows as `reason: (model gave none)`.
+Nothing else — never delivered to a chat, never fed back to the model.
+It is an observability and self-restraint knob: naming *why* forces
+the model to articulate its judgment in `judicious` group mode, and
+gives every call an audit trail for prompt tuning.
 
 All tool implementations live under `src/wahabot/ai/tools/` (WhatsApp
 tools in `whatsapp.py`, external tools in `external.py`); the
@@ -578,10 +579,10 @@ JSON envelope (`{"ok": ...}`) and never raise.
 
 | Tool | Params | Source | Purpose |
 |---|---|---|---|
-| `web_search` | `query`, `max_results?` | `webserp` CLI | Metasearch (Google/DuckDuckGo/Brave/…) — no API key |
-| `visit_url` | `url` | `curl_cffi` | Fetch a page's visible text with a real Chrome TLS fingerprint (avoids blocks) |
-| `fetch_current_stock_price` | `ticker` | `yfinance` | Current price + day change for stock/ETF/crypto |
-| `get_youtube_transcript` | `url` | `youtube-transcript-api` | Video captions as text (needs captions on; returns inline, truncated) |
+| `web_search` | `query`, `max_results?`, `reason?` | `webserp` CLI | Metasearch (Google/DuckDuckGo/Brave/…) — no API key |
+| `visit_url` | `url`, `reason?` | `curl_cffi` | Fetch a page's visible text with a real Chrome TLS fingerprint (avoids blocks) |
+| `fetch_current_stock_price` | `ticker`, `reason?` | `yfinance` | Current price + day change for stock/ETF/crypto |
+| `get_youtube_transcript` | `url`, `reason?` | `youtube-transcript-api` | Video captions as text (needs captions on; returns inline, truncated) |
 
 Ticker normalization handles lowercase, `BTCUSD`/`BTC/USD` → `BTC-USD`.
 `web_search` shells out to the `webserp` CLI (from the `webserp` package);

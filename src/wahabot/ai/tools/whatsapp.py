@@ -355,12 +355,12 @@ _REASON_LOG_CAP = 200
 def log_action_reason(tool: str, reason: str, **context: Any) -> None:
     """Log the model's justification for a delivery/silence decision.
 
-    The WhatsApp-facing tools take an optional ``reason``: naming *why*
-    the model is speaking (or staying quiet) forces the choice to be
-    articulated — the judicious group mode lives or dies by it — and
-    gives the operator an audit trail of every send. Log-only: the
-    reason never reaches a chat. An omitted reason is worth its own
-    warning: it usually means the model acted on reflex.
+    Every tool takes an optional ``reason``: naming *why* the model is
+    acting forces the choice to be articulated — the judicious group
+    mode lives or dies by it — and gives the operator an audit trail of
+    every send. Log-only: the reason never reaches a chat. An omitted
+    reason is worth its own warning: it usually means the model acted
+    on reflex.
     """
     suffix = f" {context}" if context else ""
     if not reason.strip():
@@ -680,13 +680,15 @@ def escalate(waha: WahaClient, channel: EscalationChannel) -> BaseTool:
     could NOT be forwarded, never the opposite.
     """
 
-    def escalate_fn(report: str) -> str:
+    def escalate_fn(report: str, reason: str = "") -> str:
         """Forward a report from this chat to the bot's operator.
 
         Args:
             report: What to tell the operator — who is asking (name),
                 which chat, what they need. Written by you, not a raw
                 quote of the person's words.
+            reason: One short sentence justifying this escalation
+                (logged for the operator, never shown).
         """
         if not report.strip():
             return error("empty report text")
@@ -1399,13 +1401,19 @@ def fit_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
 def fetch_chat_messages(waha: WahaClient) -> BaseTool:
     """Build a tool that fetches recent messages from a chat."""
 
-    def fetch_chat_messages_fn(chat: str | None = None, limit: int = 20) -> str:
+    def fetch_chat_messages_fn(
+        chat: str | None = None,
+        limit: int = 20,
+        reason: str = "",
+    ) -> str:
         """Fetch recent messages from a chat.
 
         Args:
             chat: Optional chat id; operator commands only. Omit to
                 fetch from the current chat.
             limit: Max messages to return (default 20).
+            reason: One short sentence justifying this fetch (logged
+                for the operator, never shown).
         """
         target = current_target()
         chat_id, fence_error = fenced_chat(chat, target)
@@ -1442,12 +1450,14 @@ def fetch_chat_messages(waha: WahaClient) -> BaseTool:
 def get_chat(waha: WahaClient) -> BaseTool:
     """Build a tool that returns metadata about a chat."""
 
-    def get_chat_fn(chat: str | None = None) -> str:
+    def get_chat_fn(chat: str | None = None, reason: str = "") -> str:
         """Get metadata about a chat (name, participants count, ...).
 
         Args:
             chat: Optional chat id; operator commands only. Omit for
                 the current chat.
+            reason: One short sentence justifying this lookup (logged
+                for the operator, never shown).
         """
         target = current_target()
         chat_id, fence_error = fenced_chat(chat, target)
@@ -1724,6 +1734,7 @@ def search_messages(waha: WahaClient) -> BaseTool:
         query: str,
         chat: str | None = None,
         limit: int = 20,
+        reason: str = "",
     ) -> str:
         """Search a chat's recent messages containing a text substring.
 
@@ -1734,6 +1745,8 @@ def search_messages(waha: WahaClient) -> BaseTool:
             chat: Optional chat id to scope the search; operator
                 commands only. Omit to search the current chat.
             limit: Max matches to return (default 20).
+            reason: One short sentence justifying this search (logged
+                for the operator, never shown).
         """
         if not query.strip():
             return error("query is required")
@@ -1785,11 +1798,13 @@ def resolve_chat(waha: WahaClient) -> BaseTool:
     gets a refusal, not the bot's contact book.
     """
 
-    def resolve_chat_fn(name: str = "") -> str:
+    def resolve_chat_fn(name: str = "", reason: str = "") -> str:
         """Resolve a person or group name to chat JIDs.
 
         Args:
             name: The person or group name to look up.
+            reason: One short sentence justifying this lookup (logged
+                for the operator, never shown).
         """
         target = current_target()
         if not operator_run(target):
@@ -1841,11 +1856,13 @@ def recent_chats(waha: WahaClient) -> BaseTool:
     cannot make anyway.
     """
 
-    def recent_chats_fn(limit: int = 10) -> str:
+    def recent_chats_fn(limit: int = 10, reason: str = "") -> str:
         """List the most recent WhatsApp conversations.
 
         Args:
             limit: How many conversations to return (default 10).
+            reason: One short sentence justifying this lookup (logged
+                for the operator, never shown).
         """
         target = current_target()
         if not operator_run(target):

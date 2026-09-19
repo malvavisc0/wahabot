@@ -28,11 +28,11 @@ CHAT_DESCRIPTION = (
 )
 
 REASON_DESCRIPTION = (
-    "One short sentence justifying this action to the operator's log — "
-    "why this reply/reaction now, e.g. 'directly asked by name', "
-    "'question addressed to @<other member>, not for me' (for "
-    "stay_silent). Not shown to the chat; never quote message text or "
-    "metadata in it."
+    "One short sentence justifying this tool call to the operator's log — "
+    "why you are making it, e.g. 'directly asked by name', 'need the "
+    "message id to quote it', 'question addressed to @<other member>, "
+    "not for me' (for stay_silent). Not shown to the chat; never quote "
+    "message text or metadata in it."
 )
 
 
@@ -120,12 +120,14 @@ class FetchChatMessagesSchema(BaseModel):
         default=20,
         description="Max messages to return (default 20).",
     )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class GetChatSchema(BaseModel):
     """Get metadata (name, participants, ...) about a WhatsApp chat."""
 
     chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class SearchMessagesSchema(BaseModel):
@@ -139,6 +141,7 @@ class SearchMessagesSchema(BaseModel):
         default=20,
         description="Max matches to return (default 20).",
     )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class ForwardMessageSchema(BaseModel):
@@ -160,6 +163,7 @@ class ResolveChatSchema(BaseModel):
             "Matched case-insensitively against chat and contact names."
         ),
     )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class RecentChatsSchema(BaseModel):
@@ -169,6 +173,7 @@ class RecentChatsSchema(BaseModel):
         default=10,
         description="How many conversations to return (default 10).",
     )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class EscalateSchema(BaseModel):
@@ -182,6 +187,7 @@ class EscalateSchema(BaseModel):
             "quote of the person's words."
         ),
     )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class SendFileSchema(BaseModel):
@@ -290,6 +296,7 @@ class WebSearchSchema(BaseModel):
             "Optional max results to return. Defaults to the configured limit if omitted."
         ),
     )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class FetchStockPriceSchema(BaseModel):
@@ -298,6 +305,7 @@ class FetchStockPriceSchema(BaseModel):
     ticker: str = Field(
         description=("A stock, ETF or crypto symbol, e.g. `AAPL`, `MSFT`, or `BTC-USD`."),
     )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class GetYoutubeTranscriptSchema(BaseModel):
@@ -306,6 +314,7 @@ class GetYoutubeTranscriptSchema(BaseModel):
     url: str = Field(
         description="A YouTube video URL, e.g. `https://youtube.com/watch?v=...`.",
     )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class VisitUrlSchema(BaseModel):
@@ -314,6 +323,7 @@ class VisitUrlSchema(BaseModel):
     url: str = Field(
         description="The web page URL to visit.",
     )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
 class ShellCommandSchema(BaseModel):
@@ -326,3 +336,4 @@ class ShellCommandSchema(BaseModel):
             "stdin is closed — the command must not wait for input."
         ),
     )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)

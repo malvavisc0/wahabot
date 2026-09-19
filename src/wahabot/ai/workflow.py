@@ -99,6 +99,35 @@ def tool_call_key(tool_call: ToolSelection) -> str:
     return f"{tool_call.tool_name}:{sorted(kwargs.items())}"
 
 
+#: How many chars of a tool call's rendered arguments reach the log: an
+#: audit line, not a transcript. The reason kwarg stays uncapped up to
+#: this budget — it is the justification, and action tools cap theirs at
+#: 200 chars anyway (``_REASON_LOG_CAP``).
+_ARGS_LOG_CAP = 300
+
+
+def tool_call_log_extra(tool_call: ToolSelection) -> str:
+    """The per-call context for the ``run_tool_call`` log lines.
+
+    The reason kwarg first when present (the model's *why*), then the
+    remaining arguments (the *what* — a shell command, a search
+    query). A missing reason is flagged in place: the operator's audit
+    goal is "read the log and know why", so a call the model never
+    justified must be visible as such, not just shorter. Empty for a
+    bare call with no arguments at all.
+    """
+    kwargs = dict(tool_call.tool_kwargs)
+    parts: list[str] = []
+    if reason := str(kwargs.pop("reason", "")).strip():
+        parts.append(f"reason: {reason[:_ARGS_LOG_CAP]}")
+    else:
+        parts.append("reason: (model gave none)")
+    if kwargs:
+        args = ", ".join(f"{k}={v!r}" for k, v in sorted(kwargs.items()))
+        parts.append(f"args: {args[:_ARGS_LOG_CAP]}")
+    return f" ({'; '.join(parts)})" if parts else ""
+
+
 async def run_tool_call(
     tools_by_name: dict[str, BaseTool], tool_call: ToolSelection
 ) -> ChatMessage:
@@ -114,11 +143,14 @@ async def run_tool_call(
     envelopes.
 
     Each call is logged: one INFO line with its outcome (completed,
-    unknown), or WARNING with the exception when the tool raised — tool
-    failures are what gets grepped for, so they carry the error detail.
+    unknown) and its context (the reason when the model gave one, the
+    remaining arguments), or WARNING with the exception when the tool
+    raised — tool failures are what gets grepped for, so they carry
+    the error detail.
     """
     tool = tools_by_name.get(tool_call.tool_name)
     kwargs = {"tool_call_id": tool_call.tool_id, "name": tool_call.tool_name}
+    extra = tool_call_log_extra(tool_call)
     failure: Exception | None = None
     if tool is None:
         content = f"Tool {tool_call.tool_name} does not exist"
@@ -135,11 +167,17 @@ async def run_tool_call(
             failure = exc
     if failure is not None:
         logger.warning(
-            "Tool call {tool} failed: {exc}", tool=tool_call.tool_name, exc=failure
+            "Tool call {tool}{extra} failed: {exc}",
+            tool=tool_call.tool_name,
+            extra=extra,
+            exc=failure,
         )
     else:
         logger.info(
-            "Tool call {tool}: {outcome}", tool=tool_call.tool_name, outcome=outcome
+            "Tool call {tool}{extra}: {outcome}",
+            tool=tool_call.tool_name,
+            extra=extra,
+            outcome=outcome,
         )
     return ChatMessage(role="tool", content=content, additional_kwargs=kwargs)
 

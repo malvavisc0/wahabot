@@ -224,11 +224,13 @@ a loop of LLM calls in which the model can use tools, ending in one of:
 The loop has a round limit; if the model keeps calling tools without
 concluding, the run is cut and the model is nudged to decide.
 
-Every action tool (sends, reaction, forward, silence) takes a `reason`:
-one short sentence justifying the action, written to the operator's log
-and never delivered to the chat. In `judicious` mode these lines are
-the audit trail of the model's restraint — greppable per chat, and a
-missing reason shows up as a WARNING.
+Every tool (sends, reaction, forward, silence, and the research tools
+alike) takes a `reason`: one short sentence justifying the call,
+written to the operator's log and never delivered to the chat. In
+`judicious` mode these lines are the audit trail of the model's
+restraint — greppable per chat, and a missing reason shows up as a
+WARNING (or `reason: (model gave none)` on the workflow's per-call
+line).
 
 Silence is a first-class outcome: the system prompt explicitly forbids
 narrating the decision ("I'll stay silent", "No response") — the bot

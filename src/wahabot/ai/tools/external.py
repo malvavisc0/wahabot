@@ -34,13 +34,17 @@ __all__ = [
 def web_search_builder(settings: Settings) -> BaseTool:
     """Build the web search tool bound to settings."""
 
-    def web_search_fn(query: str, max_results: int | None = None) -> str:
+    def web_search_fn(
+        query: str, max_results: int | None = None, reason: str = ""
+    ) -> str:
         """Search the web.
 
         Args:
             query: The search query text.
             max_results: Optional max results to return; defaults to the
                 configured limit.
+            reason: One short sentence justifying this search (logged
+                for the operator, never shown).
         """
         return web_search(settings, query, max_results=max_results)
 
@@ -51,7 +55,9 @@ def web_search_builder(settings: Settings) -> BaseTool:
         description=(
             "Search the web and return a JSON envelope with `results` "
             "(title, url, snippet, engine). Use to answer questions "
-            "needing up-to-date or external information."
+            "needing up-to-date or external information. Pass reason: "
+            "one short sentence saying why (logged for the operator, "
+            "never shown)."
         ),
     )
 
@@ -59,7 +65,7 @@ def web_search_builder(settings: Settings) -> BaseTool:
 def shell_builder(settings: Settings) -> BaseTool:
     """Build the shell execution tool bound to settings."""
 
-    def shell_command_fn(command: str) -> str:
+    def shell_command_fn(command: str, reason: str = "") -> str:
         return shell_command(settings, command)
 
     return FunctionTool.from_defaults(
@@ -74,7 +80,9 @@ def shell_builder(settings: Settings) -> BaseTool:
             "system state, installing or running utilities. Commands time "
             "out after "
             f"{int(settings.shell_timeout)}s and output is truncated past "
-            f"{settings.shell_max_output} chars — keep them quick and quiet."
+            f"{settings.shell_max_output} chars — keep them quick and "
+            "quiet. Pass reason: one short sentence saying why (logged "
+            "for the operator, never shown)."
         ),
     )
 
@@ -82,7 +90,7 @@ def shell_builder(settings: Settings) -> BaseTool:
 def stock_price_builder() -> BaseTool:
     """Build the current-stock-price tool."""
 
-    def stock_price_fn(ticker: str) -> str:
+    def stock_price_fn(ticker: str, reason: str = "") -> str:
         return fetch_current_stock_price(ticker)
 
     return FunctionTool.from_defaults(
@@ -92,7 +100,9 @@ def stock_price_builder() -> BaseTool:
         description=(
             "Fetch the current price of a stock, ETF or crypto ticker "
             "(e.g. AAPL, BTC-USD) as a JSON envelope with price, currency "
-            "and day change. Use for price and day-change questions."
+            "and day change. Use for price and day-change questions. "
+            "Pass reason: one short sentence saying why (logged for the "
+            "operator, never shown)."
         ),
     )
 
@@ -100,7 +110,7 @@ def stock_price_builder() -> BaseTool:
 def visit_url_builder(settings: Settings) -> BaseTool:
     """Build the website-fetching tool bound to settings."""
 
-    def visit_url_fn(url: str) -> str:
+    def visit_url_fn(url: str, reason: str = "") -> str:
         return visit_url(settings, url)
 
     return FunctionTool.from_defaults(
@@ -113,7 +123,9 @@ def visit_url_builder(settings: Settings) -> BaseTool:
             "of a specific URL. This reads the page only — it cannot "
             "watch videos or play media: for a reel/short/video link you "
             "get the title, description and comments around it, so say "
-            "you read the page, never that you watched the video."
+            "you read the page, never that you watched the video. "
+            "Pass reason: one short sentence saying why (logged for the "
+            "operator, never shown)."
         ),
     )
 
@@ -121,7 +133,7 @@ def visit_url_builder(settings: Settings) -> BaseTool:
 def youtube_transcript_builder() -> BaseTool:
     """Build the YouTube transcript tool."""
 
-    def youtube_transcript_fn(url: str) -> str:
+    def youtube_transcript_fn(url: str, reason: str = "") -> str:
         return get_youtube_transcript(url)
 
     return FunctionTool.from_defaults(
@@ -133,6 +145,7 @@ def youtube_transcript_builder() -> BaseTool:
             "envelope with `text` (plus `video_id`, `segments`, "
             "`duration_s`, `truncated`). Use to extract the spoken "
             "content of a video for summarization. Only works when "
-            "captions are available."
+            "captions are available. Pass reason: one short sentence "
+            "saying why (logged for the operator, never shown)."
         ),
     )
