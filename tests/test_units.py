@@ -152,6 +152,34 @@ def test_llm_endpoint_down_classification() -> None:
     assert not llm_endpoint_down(ValueError("unrelated bug"))
 
 
+def test_load_llm_auto_cache_flag(unit_settings: Settings) -> None:
+    """``load_llm`` sends the Requesty auto_cache flag only when enabled.
+
+    The flag rides ``extra_body.requesty`` (merged into the request body
+    verbatim) and must not disturb the sampling extras that are always
+    there.
+    """
+
+    from wahabot.ai.workflow import ObservableOpenAILike, load_llm
+
+    def extra_body(settings: Settings) -> dict[str, Any]:
+        llm = cast(ObservableOpenAILike, load_llm(settings))
+        return llm.additional_kwargs["extra_body"]
+
+    sampling = {
+        "top_k": unit_settings.llm_top_k,
+        "min_p": unit_settings.llm_min_p,
+        "repetition_penalty": unit_settings.llm_repetition_penalty,
+    }
+    off = extra_body(unit_settings)
+    assert off == sampling
+    assert "requesty" not in off
+
+    on = extra_body(unit_settings.model_copy(update={"llm_auto_cache": True}))
+    assert on["requesty"] == {"auto_cache": True}
+    assert {k: v for k, v in on.items() if k != "requesty"} == sampling
+
+
 def test_pill_mention_wakes_bot() -> None:
     event = WahaEvent(
         id="e1",

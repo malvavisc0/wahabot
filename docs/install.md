@@ -25,6 +25,7 @@ Key env vars:
 | `WAHABOT_LLM_PRESENCE_PENALTY` | Presence penalty (raise toward 2 if the model ever repeats itself) | `0.0` |
 | `WAHABOT_LLM_REPETITION_PENALTY` | Repetition penalty | `1.0` |
 | `WAHABOT_LLM_REASONING_EFFORT` | Reasoning effort for thinking models (`low`/`medium`/`high`; empty = provider default) | — |
+| `WAHABOT_LLM_AUTO_CACHE` | Ask the gateway to prompt-cache requests (Requesty `auto_cache`; cached-prefix pricing for providers that support it) | `false` |
 | `WAHABOT_LLM_TIMEOUT` | Per-request LLM HTTP timeout (s; client retries disabled) | `60` |
 | `WAHABOT_RUN_TIMEOUT` | Server-side cap on one agent run (s; 0 = unlimited) | `120` |
 | `WAHABOT_TOOL_ROUND_LIMIT` | Max LLM→tool round trips per run (one final tool-free call past the limit) | `50` |

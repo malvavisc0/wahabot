@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     #: Reasoning effort for thinking models ("low", "medium", "high");
     #: empty omits the parameter and lets the provider default decide.
     llm_reasoning_effort: str = ""
+    #: Ask the gateway to prompt-cache the request (Requesty's
+    #: ``requesty.auto_cache`` body field). Harmless for providers
+    #: that cache automatically; an explicit opt-in for ones that
+    #: need a breakpoint (e.g. Anthropic routed through the
+    #: gateway).
+    llm_auto_cache: bool = False
     #: Per-request HTTP timeout (seconds) for LLM calls; must stay below
     #: the workflow timeout so a hung provider fails fast and clean.
     llm_timeout: float = 60.0

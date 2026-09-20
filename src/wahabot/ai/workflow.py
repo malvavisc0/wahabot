@@ -962,6 +962,13 @@ def load_llm(settings: Settings) -> FunctionCallingLLM:
     }
     if settings.llm_reasoning_effort:
         kwargs["reasoning_effort"] = settings.llm_reasoning_effort
+    if settings.llm_auto_cache:
+        # Requesty gateway flag: adds explicit cache breakpoints on the
+        # largest content blocks, so repeated prefixes (the system
+        # prompt, early history) are billed at cached rates.
+        extra_body = dict(kwargs.get("extra_body", {}))
+        extra_body["requesty"] = {"auto_cache": True}
+        kwargs["extra_body"] = extra_body
     return ObservableOpenAILike(
         model=settings.llm_model,
         api_base=settings.llm_api_base,

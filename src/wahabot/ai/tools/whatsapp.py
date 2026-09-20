@@ -568,12 +568,10 @@ def send_message(waha: WahaClient) -> BaseTool:
         fn_schema=SendMessageSchema,
         name="send_message",
         description=(
-            "Send a text reply in the current chat. Quote a specific "
-            "message via reply_to (ids come from the [message id: …] "
-            "note or fetch_chat_messages). To @-mention someone, write "
-            "their @<number> token in the text exactly as the chat "
-            "shows it; roster members named that way are tagged "
-            "automatically. One send per run."
+            "Send a text reply in the current chat. reply_to quotes a "
+            "message (ids from [message id: …] or fetch_chat_messages). "
+            "Write @<number> to @-mention; roster members named that way "
+            "are tagged. One send per run."
         ),
     )
 
@@ -813,10 +811,10 @@ def send_image(waha: WahaClient) -> BaseTool:
         fn_schema=SendImageSchema,
         name="send_image",
         description=(
-            "Send an image from a public URL to the current chat. The "
-            "URL must come from the message, a tool result, or the "
-            "operator's instruction — never invented; unfetchable "
-            "links are refused. One send per run."
+            "Send an image from a public URL to the current chat. URL "
+            "must come from the message, a tool result, or the "
+            "operator's instruction — never invented; unfetchable links "
+            "are refused. One send per run."
         ),
     )
 
@@ -884,10 +882,9 @@ def send_video(waha: WahaClient, max_file_bytes: int) -> BaseTool:
         fn_schema=SendVideoSchema,
         name="send_video",
         description=(
-            "Send a video — from a public url, or a local path. WAHA "
-            "transcodes with ffmpeg, so common formats arrive "
-            "playable. The URL rule of send_image applies. One send "
-            "per run."
+            "Send a video from a public url or local path. WAHA "
+            "transcodes with ffmpeg so common formats arrive playable. "
+            "The URL rule of send_image applies. One send per run."
         ),
     )
 
@@ -968,9 +965,8 @@ def send_file(waha: WahaClient, max_file_bytes: int) -> BaseTool:
         fn_schema=SendFileSchema,
         name="send_file",
         description=(
-            "Send a document (PDF, ...) — from a public url, or a local "
-            "path. The URL rule of send_image "
-            "applies. One send per run."
+            "Send a document (PDF, ...) from a public url or local path. "
+            "The URL rule of send_image applies. One send per run."
         ),
     )
 
@@ -1091,13 +1087,11 @@ def send_voice(
         name="send_voice",
         description=(
             "Send a voice note. Primary form: pass text and the bot "
-            "speaks it in its own voice — use when the reply should be "
-            "heard, not read (a voice note answered in kind, a joke "
-            "that lands better spoken). Pass language when it differs "
-            "from the chat's obvious one. Relay forms: a public url, "
-            "or a local path; exactly one of "
-            "text/url/path. The URL rule of send_image applies. One "
-            "send per run."
+            "speaks it in its own voice — for replies that should be "
+            "heard, not read; pass language when it differs from the "
+            "chat's. Relay forms: a public url or local path. Exactly "
+            "one of text/url/path. URL rule as send_image. One send "
+            "per run."
         ),
     )
 
@@ -1186,9 +1180,9 @@ def send_sticker(waha: WahaClient, max_sticker_bytes: int) -> BaseTool:
         name="send_sticker",
         description=(
             "Send a sticker (WebP) — the chat's pure-reaction medium, "
-            "fitting for another sticker or a joke that needs no "
-            "words. From a public url, or a local path. The URL "
-            "rule of send_image applies. One send per run."
+            "fitting for another sticker or a joke needing no words. "
+            "From a public url or local path. URL rule as send_image. "
+            "One send per run."
         ),
     )
 
