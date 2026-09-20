@@ -672,7 +672,14 @@ class RecordingWaha(WahaClient):
 
 
 def smoke_settings(data_dir: Path, llm_base: str) -> Settings:
-    """Settings for a run; `_env_file=None` never touches the real .env."""
+    """Settings for a run; `_env_file=None` never touches the real .env.
+
+    The Langfuse fields are pinned empty because pydantic-settings
+    still reads process env vars even with `_env_file=None` — a
+    developer shell with real LANGFUSE_* keys would otherwise arm the
+    OTel exporter and every test run would ship fake-LLM traces to
+    the real Langfuse instance.
+    """
     return Settings(
         webhook_hmac_key="smoke-hmac-key",
         waha_url="http://waha.invalid",
@@ -683,6 +690,9 @@ def smoke_settings(data_dir: Path, llm_base: str) -> Settings:
         session=SESSION,
         data_dir=data_dir,
         transcribe_url="http://whisper.invalid",
+        langfuse_public_key="",
+        langfuse_secret_key="",
+        langfuse_tracing_environment="test",
         _env_file=None,
     )
 
