@@ -713,12 +713,12 @@ def test_operator_command(bot: Bot) -> None:
         response_id="chatcmpl-smoke-cmd",
         created=1788525834,
     )
-    command = build_command_event(SESSION, "send the plan to Familia")
+    command = build_command_event(SESSION, "send the plan to Family")
     bot.post(command)
     assert _wait(lambda: len(llm.requests) >= 1)
     command_turns = [m for m in llm.requests[0]["messages"] if m.get("role") == "user"]
     assert any(
-        "[operator command] send the plan to Familia" in str(m.get("content", ""))
+        "[operator command] send the plan to Family" in str(m.get("content", ""))
         for m in command_turns
     )
     assert len(llm.requests[0]["messages"]) <= 3

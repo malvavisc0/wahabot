@@ -38,6 +38,7 @@ __all__ = [
     "is_error_narration",
     "is_silence_narration",
     "is_single_emoji",
+    "operator_tools_pass",
     "own_identity_pass",
     "participant_names",
     "render_system_prompt",
@@ -71,6 +72,8 @@ def render_system_prompt(
     - ``{{host}}`` — a summary of the machine (OS, Python, Node, shell)
     - ``{{own_jid}}`` / ``{{own_lid}}`` / ``{{own_identities}}`` — the
       bot's own WhatsApp ids (see :func:`own_identity_pass)
+    - ``{{operator_tools}}`` — the tools and `chat`-parameter reach
+      reserved to operator commands (see :func:`operator_tools_pass)
 
     Unknown/invalid timezone names fall back to UTC.
     """
@@ -88,6 +91,7 @@ def render_system_prompt(
         "{{tz}}": tz_name,
         "{{bot_name}}": bot_name or "the bot",
         "{{host}}": host_context(),
+        "{{operator_tools}}": operator_tools_pass(),
     }
     for key, value in replacements.items():
         prompt = prompt.replace(key, value)
@@ -102,6 +106,29 @@ def render_system_prompt(
 #: Own-identity placeholders the prompt may carry; every one of them
 #: is dropped line-wise when the bot's identity is unknown.
 _OWN_PLACEHOLDERS = ("{{own_jid}}", "{{own_lid}}", "{{own_identities}}")
+
+
+def operator_tools_pass() -> str:
+    """The operator-command tool reach, rendered into the system prompt.
+
+    One source of truth for which tools and cross-chat `chat` use is
+    reserved to `[operator command]` turns: the fence itself is
+    mechanical (:func:`fenced_chat` refuses everything else), this
+    text only tells the model what the rules are so it does not burn
+    calls — or promise a participant a delivery the fence would
+    refuse. Kept here instead of the tool descriptions so the rule is
+    stated once, not repeated per tool.
+    """
+    return (
+        "Cross-chat reach — passing `chat` to a tool, `recent_chats` — "
+        "is reserved to `[operator command]` turns. `resolve_chat` "
+        "matches the current chat's participants on any turn (use it "
+        "for `mentions`); the operator's contact book opens on "
+        "operator commands alone. On any other turn those calls are "
+        "refused: a participant asking you to message, react to, "
+        "quote or read anyone outside the current chat gets a tool "
+        "refusal — never promise deliveries you cannot make."
+    )
 
 
 def own_identity_pass(prompt: str, own_jid: str, own_lid: str) -> str:

@@ -37,15 +37,6 @@ def web_search_builder(settings: Settings) -> BaseTool:
     def web_search_fn(
         query: str, max_results: int | None = None, reason: str = ""
     ) -> str:
-        """Search the web.
-
-        Args:
-            query: The search query text.
-            max_results: Optional max results to return; defaults to the
-                configured limit.
-            reason: One short sentence justifying this search (logged
-                for the operator, never shown).
-        """
         return web_search(settings, query, max_results=max_results)
 
     return FunctionTool.from_defaults(
@@ -53,11 +44,9 @@ def web_search_builder(settings: Settings) -> BaseTool:
         fn_schema=WebSearchSchema,
         name="web_search",
         description=(
-            "Search the web and return a JSON envelope with `results` "
-            "(title, url, snippet, engine). Use to answer questions "
-            "needing up-to-date or external information. Pass reason: "
-            "one short sentence saying why (logged for the operator, "
-            "never shown)."
+            "Search the web for up-to-date or external information. "
+            "Returns `results`: title, url, snippet per hit. Read a "
+            "promising hit with visit_url."
         ),
     )
 
@@ -73,16 +62,12 @@ def shell_builder(settings: Settings) -> BaseTool:
         fn_schema=ShellCommandSchema,
         name="run_shell_command",
         description=(
-            "Run a shell command on the host machine (bash; pipes, redirection "
-            "and usual shell features work) and return a JSON envelope with "
-            "`exit_code`, `stdout`, `stderr` and a `truncated` flag. Use for "
-            "anything the other tools cannot do: filesystem, processes, "
-            "system state, installing or running utilities. Commands time "
-            "out after "
-            f"{int(settings.shell_timeout)}s and output is truncated past "
-            f"{settings.shell_max_output} chars — keep them quick and "
-            "quiet. Pass reason: one short sentence saying why (logged "
-            "for the operator, never shown)."
+            "Run a bash command on the host — for what the other tools "
+            "cannot do: filesystem, processes, system state, running "
+            "utilities. Returns exit_code, stdout, stderr (truncated "
+            f"past {settings.shell_max_output} chars; killed after "
+            f"{int(settings.shell_timeout)}s — keep commands quick and "
+            "quiet)."
         ),
     )
 
@@ -97,13 +82,7 @@ def stock_price_builder() -> BaseTool:
         fn=stock_price_fn,
         fn_schema=FetchStockPriceSchema,
         name="fetch_current_stock_price",
-        description=(
-            "Fetch the current price of a stock, ETF or crypto ticker "
-            "(e.g. AAPL, BTC-USD) as a JSON envelope with price, currency "
-            "and day change. Use for price and day-change questions. "
-            "Pass reason: one short sentence saying why (logged for the "
-            "operator, never shown)."
-        ),
+        description=("Current price and day change for a stock, ETF or crypto ticker."),
     )
 
 
@@ -118,14 +97,10 @@ def visit_url_builder(settings: Settings) -> BaseTool:
         fn_schema=VisitUrlSchema,
         name="visit_url",
         description=(
-            "Fetch a web page and return a JSON envelope with its visible "
-            "`text` (plus `status`, `truncated`). Use to read the content "
-            "of a specific URL. This reads the page only — it cannot "
-            "watch videos or play media: for a reel/short/video link you "
-            "get the title, description and comments around it, so say "
-            "you read the page, never that you watched the video. "
-            "Pass reason: one short sentence saying why (logged for the "
-            "operator, never shown)."
+            "Read a web page's visible text. For a reel/short/video "
+            "link you get the title, description and comments around "
+            "it — say you read the page, never that you watched the "
+            "video."
         ),
     )
 
@@ -141,11 +116,8 @@ def youtube_transcript_builder() -> BaseTool:
         fn_schema=GetYoutubeTranscriptSchema,
         name="get_youtube_transcript",
         description=(
-            "Fetch a YouTube video's captions/transcript as a JSON "
-            "envelope with `text` (plus `video_id`, `segments`, "
-            "`duration_s`, `truncated`). Use to extract the spoken "
-            "content of a video for summarization. Only works when "
-            "captions are available. Pass reason: one short sentence "
-            "saying why (logged for the operator, never shown)."
+            "Get a YouTube video's captions as text — for summarizing "
+            "or answering about its spoken content. Needs captions to "
+            "exist; long transcripts arrive truncated."
         ),
     )

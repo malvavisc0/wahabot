@@ -615,8 +615,8 @@ def test_synthesize_unmapped_no_default(unit_settings: Settings) -> None:
 
 def test_search_matches_ranking() -> None:
     roster = [
-        {"id": "1@g.us", "name": "Familia"},
-        {"id": "2@c.us", "name": "familia domingo"},
+        {"id": "1@g.us", "name": "Family"},
+        {"id": "2@c.us", "name": "Family Schmit"},
         {"id": "3@c.us", "name": "Ana"},
         {"id": "4@g.us", "name": "Work"},
         {
@@ -625,11 +625,11 @@ def test_search_matches_ranking() -> None:
                 "user": "1809-1373",
                 "_serialized": "1809-1373@g.us",
             },
-            "name": "Familia",
+            "name": "Family",
         },
         {"id": "", "name": "no id, dropped"},
     ]
-    matches = search_matches(roster, "FAMILIA")
+    matches = search_matches(roster, "Family")
     assert [m["id"] for m in matches] == ["1@g.us", "1809-1373@g.us", "2@c.us"]
     assert all(set(m) == {"id", "name"} for m in matches)
 
@@ -646,10 +646,10 @@ def test_chat_display_name_resolves_and_fails_soft() -> None:
 
 
 def test_command_event_shape() -> None:
-    command = build_command_event(SESSION, "send the plan to Familia")
+    command = build_command_event(SESSION, "send the plan to Family")
     command_payload = cast(dict[str, Any], command["payload"])
     assert command["event"] == "command"
-    assert command_payload["body"] == "[operator command] send the plan to Familia"
+    assert command_payload["body"] == "[operator command] send the plan to Family"
     assert cast(dict[str, Any], command_payload["_data"])["notifyName"] == "operator"
 
 
@@ -1474,6 +1474,120 @@ def test_mention_tokens() -> None:
     text = "Para @111222333444555 y @491555000001@c.us, no @ana ni mail@x.com"
     assert mention_tokens(text) == ["111222333444555", "491555000001@c.us"]
     assert mention_tokens("no ats here") == []
+
+
+def test_operator_tools_placeholder_renders() -> None:
+    """``{{operator_tools}}`` in the system prompt renders the fence rules.
+
+    The operator-only reach (cross-chat `chat`, `resolve_chat`,
+    `recent_chats`) is stated once in the prompt instead of being
+    repeated in every tool description — the render must substitute it
+    and never leave the placeholder verbatim, on any turn.
+    """
+    from wahabot.ai.context import render_system_prompt
+
+    out = render_system_prompt("Rules:\n{{operator_tools}}")
+    assert "reserved to `[operator command]` turns" in out
+    assert "{{operator_tools}}" not in out
+    # A prompt not carrying the placeholder is untouched.
+    plain = render_system_prompt("You are {{bot_name}}.")
+    assert "operator command" not in plain
+
+
+def test_resolve_chat_chat_run_matches_roster() -> None:
+    """A chat run resolves names against the chat's own roster only.
+
+    The contact book and chat list never enter a chat-run search: the
+    search space is the current chat's participants (the people the
+    asker already shares a conversation with), so a participant cannot
+    enumerate the operator's contacts. A match returns JID+name for
+    mentions; a miss says the name is not in *this chat*.
+    """
+    import json as _json
+
+    from wahabot.ai.tools.whatsapp import (
+        RunTarget,
+        bind_target,
+        reset_target,
+        resolve_chat,
+    )
+
+    class RosterWaha:
+        def get_chat_overview(self, session: str, chat_id: str) -> Any:
+            return {
+                "id": chat_id,
+                "participants": [
+                    {"id": "111222333444555@lid"},
+                    {"id": "491555000001@c.us", "name": "Smoke Sender"},
+                ],
+            }
+
+        def fetch_chat_messages(
+            self, session: str, chat_id: str, limit: int = 50
+        ) -> list[dict[str, Any]]:
+            return [
+                {
+                    "participant": "111222333444555@lid",
+                    "_data": {"notifyName": "Alex Rivers"},
+                }
+            ]
+
+    tool = cast(Any, resolve_chat(cast(Any, RosterWaha()))).fn
+    token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID))
+    try:
+        hit = _json.loads(tool(name="alexander"))
+        miss = _json.loads(tool(name="Family"))
+        outsider = _json.loads(tool(name="kai's operator friend"))
+    finally:
+        reset_target(token)
+    assert hit["ok"] and hit["matches"] == [
+        {"id": "111222333444555@lid", "name": "Alex Rivers"}
+    ]
+    assert not miss["ok"] and "no participant in this chat" in miss["error"]
+    assert not outsider["ok"]
+
+
+def test_resolve_chat_operator_run_searches_contacts() -> None:
+    """An operator run keeps the full contact-book search.
+
+    ``wahabot tell`` commands resolve against the operator's chat list
+    first (contacts as fallback) — the fence opens for the trusted
+    channel alone, so the cross-chat JIDs the send tools need stay
+    reachable exactly there.
+    """
+    import json as _json
+
+    from wahabot.ai.tools.whatsapp import (
+        OPERATOR_ARMED,
+        OPERATOR_KEY,
+        RunTarget,
+        bind_target,
+        reset_target,
+        resolve_chat,
+    )
+
+    class ContactBookWaha:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def list_chats(self, session: str) -> list[dict[str, Any]]:
+            self.calls.append("chats")
+            return []
+
+        def list_contacts(self, session: str) -> list[dict[str, Any]]:
+            self.calls.append("contacts")
+            return [{"id": "491999999999@c.us", "name": "Family"}]
+
+    waha = ContactBookWaha()
+    tool = cast(Any, resolve_chat(cast(Any, waha))).fn
+    token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID, armed=True))
+    try:
+        hit = _json.loads(tool(name="Family"))
+    finally:
+        reset_target(token)
+    assert hit["ok"] and hit["matches"] == [{"id": "491999999999@c.us", "name": "Family"}]
+    assert waha.calls == ["chats", "contacts"]
+    assert OPERATOR_KEY and OPERATOR_ARMED == "armed"
 
 
 def test_resolve_mentions() -> None:

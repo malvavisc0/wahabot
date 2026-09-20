@@ -870,7 +870,9 @@ def write_session_config(settings: Settings) -> None:
         "whitelist": [],
         "blacklist": [],
         "goal": "",
-        "system_prompt": "You are {{bot_name}} texting on WhatsApp.",
+        "system_prompt": (
+            "You are {{bot_name}} texting on WhatsApp.\n{{operator_tools}}"
+        ),
         "bot_name": "kai",
         "bot_mention_regex": "@?kai",
         "group_participation": "mentioned",

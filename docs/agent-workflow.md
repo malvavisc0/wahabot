@@ -481,12 +481,15 @@ refusal.
 | `get_chat` | `chat?`, `reason?` | `POST /api/{session}/chats/overview` | Chat metadata (name, participants, …) |
 | `search_messages` | `query`, `chat?`, `limit?`, `reason?` | `GET /api/messages` (local filter) | Find recent messages by text / media |
 | `forward_message` | `message_id`, `chat?`, `reason?` | `POST /api/forwardMessage` | Forward a message to a chat; once per run (shared latch) |
-| `resolve_chat` | `name`, `reason?` | `GET /api/{session}/chats`, `GET /api/contacts/all` | Operator-only: resolve a person/group name to chat JIDs (exact match first, then substring; ≤5 candidates) |
+| `resolve_chat` | `name`, `reason?` | `GET /api/{session}/chats/{chatId}/overview`, `GET /api/messages` (chat runs); `GET /api/{session}/chats`, `GET /api/contacts/all` (operator) | Resolve a name to chat JIDs — operator runs search the operator's chat list/contacts; chat runs match only the current chat's roster (mention help), never the contact book |
 | `recent_chats` | `limit?`, `reason?` | `GET /api/{session}/chats` | Operator-only: list the newest conversations (each `{id, name}`), for instructions that go by recency instead of name |
 
-Every tool takes an optional `reason`: one short sentence justifying
-the call. It is log-only — `log_action_reason` (`whatsapp.py`) writes
-the delivery/silence reasons to the operator's log (INFO; a missing
+Every tool takes an optional `reason`: one short sentence in third
+person stating what the call does and why — the action and its
+substance, never first-person narration like "I need to read the
+message" (good: "url quoted by the user needs reading"). It is
+log-only — `log_action_reason` (`whatsapp.py`) writes the
+delivery/silence reasons to the operator's log (INFO; a missing
 reason logs a WARNING), and the workflow's per-call line
 (`run_tool_call` in `workflow.py`) prints every call's reason and
 arguments — a missing reason shows as `reason: (model gave none)`.
@@ -553,14 +556,14 @@ Underneath it calls WAHA `PUT /api/reaction` (see
 | `fetch_chat_messages(chat=None, limit=20)` | Recent messages as a JSON `messages` list, each entry carrying its serialized `id` (for react/forward), body, sender and media info |
 | `get_chat(chat=None)` | Chat metadata summary (name, participant count + JIDs, …) via `/chats/overview` |
 | `search_messages(query, chat=None, limit=20)` | Find recent messages containing a text substring |
-| `resolve_chat(name)` | Operator-only: resolve a person/group name to chat JIDs — chats first, contacts as fallback; the answer to "send it to *Familia*" |
+| `resolve_chat(name)` | Resolve a person/group name to chat JIDs — operator runs: chats first, contacts as fallback (the answer to "send it to *Family*"); chat runs: the current chat's own participants only (mention help — never the contact book) |
 | `recent_chats(limit=10)` | Operator-only: the newest conversations as `{id, name}` pairs; the answer to "summarize my latest 5 chats" |
 
 ```python
 fetch_chat_messages(limit=10)  # read the current conversation
 get_chat(chat="1234567890@g.us")  # group metadata
 search_messages(query="invoice", chat="1234567890@g.us")
-resolve_chat(name="Familia")  # → matches: [{id, name}, …]
+resolve_chat(name="Family")  # → matches: [{id, name}, …]
 recent_chats(limit=5)  # → chats: [{id, name}, …] newest first
 ```
 

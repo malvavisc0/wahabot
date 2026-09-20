@@ -50,7 +50,7 @@ Every tool answers with a small JSON envelope — `{"ok": true, ...}` or `{"ok":
 
 ```bash
 uv run wahabot tell "send a message to Ana: the deploy is done"
-uv run wahabot tell "search the latest news about elon musk and send a summary to the group Familia"
+uv run wahabot tell "search the latest news about elon musk and send a summary to the group Family"
 ```
 
 The agent runs the instruction with its full toolset over the operator's own rolling history — commands share one conversation, so follow-ups ("now send that to the second group") work without restating context. No whitelist applies, no chat's history is touched, and names resolve to the right person or group automatically. The result lands in WhatsApp, not in your terminal.

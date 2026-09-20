@@ -259,7 +259,7 @@ chat as a bogus reply.
 
 Every WhatsApp tool that accepts a `chat` argument, a serialized
 message id (`reply_to`, `react_to_message`, `forward_message`), or a
-name to resolve (`resolve_chat`, `recent_chats`) is fenced on
+conversation list to browse (`recent_chats`) is fenced on
 chat-triggered runs: the current conversation is the only target
 allowed. Cross-chat reach — messaging, forwarding to, or reading
 another person or group — is reserved for operator commands
@@ -267,6 +267,10 @@ another person or group — is reserved for operator commands
 instructions are the one trusted source of cross-chat intent. A
 participant asking the bot to deliver or snoop outside the chat gets
 a tool refusal envelope, and a refusal never produces a delivery.
+`resolve_chat` is the one scoped exception: a chat run resolves names
+against the current chat's own participants (so it can find a JID to
+@-mention), never the operator's contact book; `recent_chats` stays
+operator-only outright.
 The one exception is `escalate`, which has no aimable target at all:
 it always lands in the operator's own self-chat, at most once per
 chat per hour.

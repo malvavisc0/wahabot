@@ -412,7 +412,7 @@ def post_signed_event(
 @app.command()
 def tell(
     text: str = typer.Argument(
-        help='Instruction for the agent, e.g. "send a summary to the group Familia".'
+        help='Instruction for the agent, e.g. "send a summary to the group Family".'
     ),
     host: str = typer.Option(
         None, "--host", "-h", help="Webhook host. [default: WAHABOT_HOST]"
