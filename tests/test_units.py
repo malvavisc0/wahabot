@@ -15,7 +15,7 @@ import time
 import unittest.mock
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast, override
+from typing import Any, ClassVar, cast, override
 
 import httpx
 import openai
@@ -471,6 +471,231 @@ def test_video_urls_skip_youtube() -> None:
     assert video_urls(
         "https://youtu.be/dQw4w9WgXcQ then https://insta.example/reel/abc", 2
     ) == ["https://insta.example/reel/abc"]
+
+
+def _fake_ydl(info: dict[str, Any] | None) -> Any:
+    """A YoutubeDL stand-in whose extract_info returns *info*."""
+
+    class FakeYDL:
+        def __init__(self, opts: dict[str, Any]) -> None:
+            self.opts = opts
+
+        def __enter__(self) -> FakeYDL:
+            return self
+
+        def __exit__(self, *exc: Any) -> None:
+            return None
+
+        def extract_info(
+            self, url: str, download: bool, process: bool
+        ) -> dict[str, Any] | None:
+            assert download is False
+            assert process is False
+            return info
+
+    return FakeYDL
+
+
+def test_visit_url_media_returns_video_meta(unit_settings: Settings) -> None:
+    """A media-host URL resolves to the yt-dlp metadata envelope."""
+    from wahabot.ai.tools.visit_url import visit_url
+
+    info = {
+        "title": "dog steals taco",
+        "description": "a heist in three acts",
+        "uploader": "camiloromero",
+        "duration": 32,
+        "view_count": 1_200_000,
+        "id": "DdXprrXGx5e",
+    }
+    with unittest.mock.patch(
+        "wahabot.ai.tools.visit_url.yt_dlp.YoutubeDL", _fake_ydl(info)
+    ):
+        result = json.loads(visit_url(unit_settings, "https://www.instagram.com/p/abc/"))
+    assert result == {
+        "ok": True,
+        "source": "yt-dlp",
+        "kind": "video",
+        "url": "https://www.instagram.com/p/abc/",
+        "title": "dog steals taco",
+        "description": "a heist in three acts",
+        "uploader": "camiloromero",
+        "duration_s": 32,
+        "view_count": 1_200_000,
+        "id": "DdXprrXGx5e",
+    }
+
+
+def test_visit_url_media_falls_back_to_html(unit_settings: Settings) -> None:
+    """An unresolvable media URL still takes the HTML path."""
+    from wahabot.ai.tools.visit_url import visit_url
+
+    failing = _fake_ydl(None)
+    fetched: list[str] = []
+
+    class FakeResponse:
+        url = "https://www.instagram.com/p/abc/"
+        status_code = 200
+        text = "<html>Log In Sign Up</html>"
+        headers: ClassVar[dict[str, str]] = {"content-type": "text/html"}
+
+    def fake_fetch(url: str, settings: Settings) -> FakeResponse:
+        fetched.append(url)
+        return FakeResponse()
+
+    with (
+        unittest.mock.patch("wahabot.ai.tools.visit_url.yt_dlp.YoutubeDL", failing),
+        unittest.mock.patch("wahabot.ai.tools.visit_url._fetch", fake_fetch),
+    ):
+        result = json.loads(visit_url(unit_settings, "https://www.instagram.com/p/abc/"))
+    assert fetched == ["https://www.instagram.com/p/abc/"]
+    assert result["ok"] is True
+    assert result["status"] == 200
+    assert "Log In Sign Up" in result["text"]
+
+
+def test_visit_url_media_skips_playlist_info(unit_settings: Settings) -> None:
+    """A multi-item post describes itself: caption, uploader, item count.
+
+    The trace URL (d60f06bb…) is an Instagram post with three videos;
+    format processing dies on it ("No video formats found") but the raw
+    extractor dict still carries the post's caption — so a playlist
+    shape must resolve, not refuse.
+    """
+    from wahabot.ai.tools.visit_url import visit_url
+
+    info = {
+        "title": "Post by camiloromero",
+        "description": "a political caption",
+        "uploader": "camiloromero",
+        "entries": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+        "id": "DdXprrXGx5e",
+    }
+    with unittest.mock.patch(
+        "wahabot.ai.tools.visit_url.yt_dlp.YoutubeDL", _fake_ydl(info)
+    ):
+        result = json.loads(visit_url(unit_settings, "https://www.instagram.com/p/abc/"))
+    assert result == {
+        "ok": True,
+        "source": "yt-dlp",
+        "kind": "video",
+        "url": "https://www.instagram.com/p/abc/",
+        "title": "Post by camiloromero",
+        "description": "a political caption",
+        "uploader": "camiloromero",
+        "duration_s": None,
+        "view_count": None,
+        "id": "DdXprrXGx5e",
+    }
+
+
+def test_visit_url_plain_page_skips_yt_dlp(unit_settings: Settings) -> None:
+    """A non-media URL never touches yt-dlp; the HTML path runs."""
+    from wahabot.ai.tools.visit_url import visit_url
+
+    def explode(opts: Any) -> Any:
+        raise AssertionError("yt-dlp must not be constructed for a plain page")
+
+    class FakeResponse:
+        url = "https://example.com/a"
+        status_code = 200
+        text = "just words"
+        headers: ClassVar[dict[str, str]] = {"content-type": "text/html"}
+
+    with (
+        unittest.mock.patch("wahabot.ai.tools.visit_url.yt_dlp.YoutubeDL", explode),
+        unittest.mock.patch(
+            "wahabot.ai.tools.visit_url._fetch",
+            lambda url, settings: FakeResponse(),
+        ),
+    ):
+        result = json.loads(visit_url(unit_settings, "https://example.com/a"))
+    assert result["ok"] is True
+    assert result["text"] == "just words"
+
+
+def test_visit_url_media_bare_info_retries_processed(unit_settings: Settings) -> None:
+    """A bare raw dict (Facebook share redirect) retries format processing.
+
+    The raw tier alone returns url/id with no title — an all-null
+    envelope masquerading as success that blocks the HTML fallback.
+    The processed retry must reach the real metadata.
+    """
+
+    class RetryYDL:
+        calls: ClassVar[list[str]] = []
+
+        def __init__(self, opts: dict[str, Any]) -> None:
+            return None
+
+        def __enter__(self) -> RetryYDL:
+            return self
+
+        def __exit__(self, *exc: Any) -> None:
+            return None
+
+        def extract_info(
+            self, url: str, download: bool = True, process: bool = True
+        ) -> dict[str, Any] | None:
+            assert download is False
+            RetryYDL.calls.append("raw" if not process else "processed")
+            if not process:
+                return {"id": "1Do4fWrozJ", "url": url, "webpage_url": url}
+            return {
+                "title": "Bad robot fo' lifes",
+                "uploader": "RizzBot",
+                "duration": 27.333,
+                "id": "1Do4fWrozJ",
+            }
+
+    from wahabot.ai.tools.visit_url import visit_url
+
+    with unittest.mock.patch("wahabot.ai.tools.visit_url.yt_dlp.YoutubeDL", RetryYDL):
+        result = json.loads(
+            visit_url(unit_settings, "https://www.facebook.com/share/r/x/")
+        )
+    assert RetryYDL.calls == ["raw", "processed"]
+    assert result["title"] == "Bad robot fo' lifes"
+    assert result["uploader"] == "RizzBot"
+    assert result["duration_s"] == 27.333
+
+
+def test_visit_url_media_downloader_error_falls_back(unit_settings: Settings) -> None:
+    """A DownloadError in extract_info falls through to the HTML path."""
+
+    class ExplodingYDL:
+        def __init__(self, opts: dict[str, Any]) -> None:
+            return None
+
+        def __enter__(self) -> ExplodingYDL:
+            return self
+
+        def __exit__(self, *exc: Any) -> None:
+            return None
+
+        def extract_info(
+            self, url: str, download: bool = True, process: bool = True
+        ) -> dict[str, Any]:
+            raise RuntimeError("Requested format is not available")
+
+    from wahabot.ai.tools.visit_url import visit_url
+
+    class FakeResponse:
+        url = "https://www.instagram.com/p/abc/"
+        status_code = 200
+        text = "<html>wall</html>"
+        headers: ClassVar[dict[str, str]] = {"content-type": "text/html"}
+
+    with (
+        unittest.mock.patch("wahabot.ai.tools.visit_url.yt_dlp.YoutubeDL", ExplodingYDL),
+        unittest.mock.patch(
+            "wahabot.ai.tools.visit_url._fetch",
+            lambda url, settings: FakeResponse(),
+        ),
+    ):
+        result = json.loads(visit_url(unit_settings, "https://www.instagram.com/p/abc/"))
+    assert result["ok"] is True
+    assert result["status"] == 200
 
 
 def test_video_media_kind_guard() -> None:

@@ -97,10 +97,11 @@ def visit_url_builder(settings: Settings) -> BaseTool:
         fn_schema=VisitUrlSchema,
         name="visit_url",
         description=(
-            "Read a web page's visible text. For a reel/short/video "
-            "link you get the title, description and comments around "
-            "it — say you read the page, never that you watched the "
-            "video."
+            "Read a web page's visible text. For Instagram/Facebook/"
+            "TikTok/YouTube and similar video links you get the video's "
+            "real metadata (title, description, uploader, duration, "
+            "views) — say you have the video's info, never that you "
+            "watched the video."
         ),
     )
 

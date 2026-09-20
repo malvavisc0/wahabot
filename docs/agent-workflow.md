@@ -583,7 +583,7 @@ JSON envelope (`{"ok": ...}`) and never raise.
 | Tool | Params | Source | Purpose |
 |---|---|---|---|
 | `web_search` | `query`, `max_results?`, `reason?` | `webserp` CLI | Metasearch (Google/DuckDuckGo/Brave/…) — no API key |
-| `visit_url` | `url`, `reason?` | `curl_cffi` | Fetch a page's visible text with a real Chrome TLS fingerprint (avoids blocks) |
+| `visit_url` | `url`, `reason?` | `curl_cffi` / yt-dlp | Fetch a page's visible text with a real Chrome TLS fingerprint (avoids blocks); media/video links (Instagram, Facebook, TikTok, YouTube…) resolve to the video's yt-dlp metadata (title, description, uploader, duration, views) instead of the login wall |
 | `fetch_current_stock_price` | `ticker`, `reason?` | `yfinance` | Current price + day change for stock/ETF/crypto |
 | `get_youtube_transcript` | `url`, `reason?` | `youtube-transcript-api` | Video captions as text (needs captions on; returns inline, truncated) |
 
