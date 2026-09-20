@@ -1040,6 +1040,41 @@ def test_send_voice_text_synthesis_failure_degrades_to_text(bot: Bot) -> None:
     assert tts_bot.waha.sent[0][2] == "smoke final answer"
 
 
+def test_send_voice_send_failure_degrades_to_text(bot: Bot) -> None:
+    """A failed WAHA send returns an error envelope; the run survives.
+
+    Fail-soft contract for the delivery hop itself: a WAHA HTTP error
+    (the 500 the log shows) must not crash the tool — the model gets
+    the fall-back envelope and answers in writing, and the delivery
+    latch stays open so the text reply can land.
+    """
+    tts_bot = bot.rebuild(tts_url="http://tts.invalid")
+    llm = tts_bot.stack.llm
+    llm.override = VoiceTextResponse
+    request = httpx.Request("POST", "http://waha.invalid/api/sendVoice")
+    failure = unittest.mock.patch.object(
+        tts_bot.waha,
+        "send_voice",
+        side_effect=httpx.HTTPStatusError(
+            "Server error '500 Internal Server Error'",
+            request=request,
+            response=httpx.Response(500, request=request),
+        ),
+    )
+    synthesis = unittest.mock.patch(
+        "wahabot.ai.tools.whatsapp.synthesize", return_value=TTS_MP3
+    )
+    with failure, synthesis:
+        voice_event = waha_event("VOICESENDFAIL")
+        voice_event["payload"]["body"] = "kai answer with your voice"
+        tts_bot.post(voice_event)
+    assert _wait(lambda: len(llm.requests) >= 2)  # the envelope looped back
+    assert tts_bot.waha.sent_voices == []  # the gate: no voice landed
+    # Fail-soft: the run survives and the model's fallback text still lands.
+    assert _wait(lambda: len(tts_bot.waha.sent) >= 1)
+    assert tts_bot.waha.sent[0][2] == "smoke final answer"
+
+
 def test_send_sticker_wire(bot: Bot) -> None:
     llm = bot.stack.llm
     llm.override = StickerResponse
@@ -1061,6 +1096,91 @@ def test_send_sticker_wire(bot: Bot) -> None:
         }
     )
     assert len(bot.waha.sent) == 0
+
+
+def test_delivery_send_failures_degrade_to_text(bot: Bot) -> None:
+    """Every delivery tool survives a failed WAHA send.
+
+    The fail-soft contract is a property of the whole delivery set:
+    whichever tool the model picked, a WAHA error (the 500 the log
+    shows) must degrade to the fall-back envelope — the model then
+    answers in writing — never crash the run. One representative send
+    per tool; the mock fails the first call only, so the fallback
+    text's own send lands and proves the latch stayed open.
+    """
+    cases: list[tuple[str, str, dict[str, Any], str | None]] = [
+        ("send_message", "send_text", {"text": "tool text that must not land"}, None),
+        ("send_image", "send_image", {"url": "https://x.invalid/a.png"}, None),
+        ("send_video", "send_video", {"url": "https://x.invalid/a.mp4"}, "sent_videos"),
+        ("send_file", "send_file", {"url": "https://x.invalid/a.pdf"}, "sent_files"),
+        (
+            "send_sticker",
+            "send_sticker",
+            {"url": "https://x.invalid/a.webp"},
+            "sent_stickers",
+        ),
+        ("send_voice", "send_voice", {"url": "https://x.invalid/a.mp3"}, "sent_voices"),
+        (
+            "forward_message",
+            "forward_message",
+            {"message_id": f"false_{CHAT_ID}_SMOKEREPLY"},
+            None,
+        ),
+        (
+            "react_to_message",
+            "send_reaction",
+            {"message_id": f"false_{CHAT_ID}_SMOKEREPLY", "reaction": "👍"},
+            "reactions",
+        ),
+    ]
+    for tool, waha_method, args, record in cases:
+        _run_failing_delivery_case(bot, tool, waha_method, args, record)
+
+
+def _run_failing_delivery_case(
+    bot: Bot,
+    tool: str,
+    waha_method: str,
+    args: dict[str, Any],
+    record: str | None,
+) -> None:
+    """One delivery tool's WAHA send fails; the run must degrade to text.
+
+    The mock fails the tool's send on the first call only, then
+    delegates to the recording method, so the model's fallback text
+    lands for real and proves the delivery latch stayed open.
+    """
+    failing_bot = bot.rebuild()
+    llm = failing_bot.stack.llm
+    llm.clear()  # agent_round counts every request ever recorded
+    llm.override = tool_call_response(
+        tool,
+        {"reason": "wire test", **args},
+        call_id=f"call_{tool}_fail",
+        response_id=f"chatcmpl-{tool}-fail",
+    )
+    calls = {"count": 0}
+    real_method = getattr(type(failing_bot.waha), waha_method)
+
+    def flaky_send(*call_args: Any, **call_kw: Any) -> str:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise httpx.ConnectError("waha gone")
+        return cast(str, real_method(failing_bot.waha, *call_args, **call_kw))
+
+    with unittest.mock.patch.object(
+        type(failing_bot.waha), waha_method, side_effect=flaky_send
+    ):
+        failing_bot.post(waha_event(f"{tool.upper()}FAIL"))
+    assert _wait(lambda: calls["count"] >= 1), tool  # the tool's send raised
+    assert _wait(lambda: len(llm.requests) >= 2), tool  # the envelope looped back
+    if record is not None:  # the tool's own send never landed
+        assert not getattr(failing_bot.waha, record), (tool, record)
+    if tool == "send_message":  # the failed tool text must not ride along
+        assert all(entry[2] != args["text"] for entry in failing_bot.waha.sent), tool
+    # Fail-soft: the run survives and the model's fallback text lands.
+    assert _wait(lambda: len(failing_bot.waha.sent) >= 1), tool
+    assert failing_bot.waha.sent[-1][2] == "smoke final answer", tool
 
 
 def test_voice_delivery_collapses_in_memory(bot: Bot) -> None:

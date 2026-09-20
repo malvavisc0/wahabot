@@ -395,6 +395,19 @@ def delivered_to_self(chat_id: str, sent_id: str) -> None:
     track_self_echo(sent_id, "Delivery")
 
 
+def send_failed_envelope(tool: str, chat_id: str, exc: Exception) -> str:
+    """The fail-soft envelope for a delivery whose WAHA send raised.
+
+    Every delivery tool funnels its WAHA call through this on error: the
+    run must survive a dead WAHA (500s, timeouts) and the model must be
+    told what to do instead — answer in text — not left staring at a
+    raw exception. The delivery latch stays open (nothing landed), so
+    the fallback send works on the next model round.
+    """
+    logger.warning("{tool} failed in {chat}: {exc}", tool=tool, chat=chat_id, exc=exc)
+    return error(f"{tool} failed — send your reply as text instead")
+
+
 #: The refusal envelope text for a chat run aiming outside its chat.
 #: Model-facing: tells the model what it may do instead of guessing.
 _FENCE_ERROR = (
@@ -524,15 +537,18 @@ def send_message(waha: WahaClient) -> BaseTool:
             if id_error:
                 return error(id_error)
         log_action_reason("send_message", reason, chat=chat_id)
-        sent_id, merged = deliver_chat_text(
-            waha,
-            session,
-            chat_id,
-            text,
-            reply_to=reply_to,
-            mentions=mentions,
-            typing=target.typing,
-        )
+        try:
+            sent_id, merged = deliver_chat_text(
+                waha,
+                session,
+                chat_id,
+                text,
+                reply_to=reply_to,
+                mentions=mentions,
+                typing=target.typing,
+            )
+        except Exception as exc:
+            return send_failed_envelope("send_message", chat_id, exc)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
         fields: dict[str, Any] = {
@@ -733,7 +749,10 @@ def react_to_message(waha: WahaClient) -> BaseTool:
         if id_error:
             return error(id_error)
         log_action_reason("react_to_message", reason, message_id=message_id)
-        waha.send_reaction(session, message_id, reaction)
+        try:
+            waha.send_reaction(session, message_id, reaction)
+        except Exception as exc:
+            return send_failed_envelope("react_to_message", message_id, exc)
         target.reacted = message_id
         return ok(message_id=message_id, reaction=reaction, removed=not reaction)
 
@@ -776,12 +795,15 @@ def send_image(waha: WahaClient) -> BaseTool:
             return error(probe_error)
         log_action_reason("send_image", reason, chat=chat_id)
         mimetype = infer_image_mimetype(url)
-        sent_id = waha.send_image(
-            session,
-            chat_id,
-            file={"mimetype": mimetype, "url": url},
-            caption=caption,
-        )
+        try:
+            sent_id = waha.send_image(
+                session,
+                chat_id,
+                file={"mimetype": mimetype, "url": url},
+                caption=caption,
+            )
+        except Exception as exc:
+            return send_failed_envelope("send_image", chat_id, exc)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
         return ok(chat=chat_id, url=url, mimetype=mimetype, caption=caption)
@@ -842,7 +864,12 @@ def send_video(waha: WahaClient, max_file_bytes: int) -> BaseTool:
         file = video_file(str(url) if url else str(path), max_file_bytes)
         if isinstance(file, str):
             return error(file)
-        sent_id = waha.send_video(session, chat_id, file=file, caption=caption or None)
+        try:
+            sent_id = waha.send_video(
+                session, chat_id, file=file, caption=caption or None
+            )
+        except Exception as exc:
+            return send_failed_envelope("send_video", chat_id, exc)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
         return ok(
@@ -923,7 +950,10 @@ def send_file(waha: WahaClient, max_file_bytes: int) -> BaseTool:
             return error(file)
         if filename:
             file["filename"] = filename
-        sent_id = waha.send_file(session, chat_id, file=file, caption=caption or None)
+        try:
+            sent_id = waha.send_file(session, chat_id, file=file, caption=caption or None)
+        except Exception as exc:
+            return send_failed_envelope("send_file", chat_id, exc)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
         return ok(
@@ -1043,7 +1073,10 @@ def send_voice(
             file = voice_file(str(url) if url else str(path), max_audio_upload_bytes)
             if isinstance(file, str):
                 return error(file)
-        sent_id = waha.send_voice(session, chat_id, file=file)
+        try:
+            sent_id = waha.send_voice(session, chat_id, file=file)
+        except Exception as exc:
+            return send_failed_envelope("send_voice", chat_id, exc)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
         return ok(
@@ -1139,7 +1172,10 @@ def send_sticker(waha: WahaClient, max_sticker_bytes: int) -> BaseTool:
         file = sticker_file(str(url) if url else str(path), max_sticker_bytes)
         if isinstance(file, str):
             return error(file)
-        sent_id = waha.send_sticker(session, chat_id, file=file)
+        try:
+            sent_id = waha.send_sticker(session, chat_id, file=file)
+        except Exception as exc:
+            return send_failed_envelope("send_sticker", chat_id, exc)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
         return ok(chat=chat_id, mimetype=file["mimetype"])
@@ -1768,7 +1804,10 @@ def forward_message(waha: WahaClient) -> BaseTool:
         if id_error:
             return error(id_error)
         log_action_reason("forward_message", reason, chat=chat_id)
-        sent_id = waha.forward_message(session, chat_id, message_id)
+        try:
+            sent_id = waha.forward_message(session, chat_id, message_id)
+        except Exception as exc:
+            return send_failed_envelope("forward_message", chat_id, exc)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
         return ok(message_id=message_id, chat=chat_id)
