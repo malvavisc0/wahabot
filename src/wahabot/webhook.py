@@ -60,12 +60,27 @@ async def dispatch(event: WahaEvent) -> None:
     ``message*`` events other than ``message.reaction`` (``message``,
     ``message.any``, engine-specific variants) share the ``message``
     registry, mirroring the original catch-all routing.
+
+    A handler exception is contained: it is logged once, in full, and
+    the remaining handlers for the event still run. An event that one
+    handler failed on must not become a webhook 500 — WAHA treats a
+    non-200 as a failed delivery and re-sends the event, turning a
+    transient handler error into an endless redelivery loop, and a
+    crash mid-dispatch would silently drop the other handlers.
     """
     event_type = event.event
     if event_type.startswith("message") and event_type != "message.reaction":
         event_type = "message"
     for handler in _registries[event_type]:
-        await handler(event)
+        try:
+            await handler(event)
+        except Exception:
+            logger.exception(
+                "Handler {handler} failed for {event} event {id}",
+                handler=getattr(handler, "__name__", handler),
+                event=event.event,
+                id=event.payload.get("id", event.id),
+            )
 
 
 @app.post("/api/webhook/{session}")

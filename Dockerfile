@@ -1,9 +1,45 @@
-# wahabot webhook server image; meant to be run via docker compose.
-FROM astral/uv:python3.14-trixie
+# wahabot webhook server image; built once, installed from a wheel.
+# Two stages: a builder that builds the wheel, and a slim runtime that
+# only installs the wheel (no source copy, no build toolchain at runtime).
 
-# OCI annotations. Docker build args set at build time (build-push-action
-# passes IMAGE_REVISION=github.sha, IMAGE_CREATED, IMAGE_VERSION); their
-# defaults below make a plain `docker build .` succeed too.
+FROM astral/uv:python3.14-trixie AS builder
+
+ARG IMAGE_TITLE="wahabot"
+ARG IMAGE_DESCRIPTION="WhatsApp bot bridge on the WAHA HTTP API"
+ARG IMAGE_LICENSES=MIT
+ARG IMAGE_SOURCE="https://github.com/malvavisc0/wahabot"
+ARG IMAGE_VERSION
+ARG IMAGE_REVISION
+ARG IMAGE_CREATED
+LABEL org.opencontainers.image.title="${IMAGE_TITLE}" \
+      org.opencontainers.image.description="${IMAGE_DESCRIPTION}" \
+      org.opencontainers.image.licenses="${IMAGE_LICENSES}" \
+      org.opencontainers.image.source="${IMAGE_SOURCE}" \
+      org.opencontainers.image.version="${IMAGE_VERSION:-0.0.0}" \
+      org.opencontainers.image.revision="${IMAGE_REVISION:-unknown}" \
+      org.opencontainers.image.created="${IMAGE_CREATED:-unknown}"
+
+SHELL ["/bin/bash", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /build
+
+# Only the pieces the build backend needs (pyproject/uv.lock/README/LICENSE
+# are the sdist/wheel inputs; src is what gets packaged into the wheel).
+COPY pyproject.toml uv.lock .python-version ./
+COPY src ./src
+COPY README.md LICENSE ./
+RUN --mount=type=cache,target=/root/.cache/uv,uid=0,gid=0 \
+    uv build --wheel -o /build/dist
+
+
+FROM astral/uv:python3.14-trixie AS runtime
+
 ARG IMAGE_TITLE="wahabot"
 ARG IMAGE_DESCRIPTION="WhatsApp bot bridge on the WAHA HTTP API"
 ARG IMAGE_LICENSES=MIT
@@ -62,11 +98,13 @@ COPY pyproject.toml uv.lock .python-version ./
 RUN --mount=type=cache,target=/root/.cache/uv,uid=0,gid=0 \
     uv sync --frozen --no-install-project --no-dev
 
-# Project layer: install wahabot itself.
-COPY src ./src
-COPY README.md LICENSE ./
+# Project layer: install wahabot itself from the built wheel (no source
+# files land in the runtime image). Copy keeps the versioned wheel name —
+# `uv pip install` rejects a bare `wahabot.whl` (no version in the name).
+COPY --from=builder /build/dist/wahabot-*.whl /tmp/
 RUN --mount=type=cache,target=/root/.cache/uv,uid=0,gid=0 \
-    uv sync --frozen --no-dev
+    uv pip install --python /app/.venv/bin/python /tmp/wahabot-*.whl \
+    && rm -f /tmp/wahabot-*.whl
 
 EXPOSE 8080
 CMD ["wahabot", "serve"]

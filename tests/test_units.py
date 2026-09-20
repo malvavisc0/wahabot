@@ -2133,3 +2133,40 @@ def test_purge_script_drops_leaked_tokens() -> None:
     kept2, dropped2 = purge.purge_buffer(again)
     assert dropped2 == 0
     assert [str(m.content) for m in kept2] == ["[Ana] q1\n[Ana] q2", "real answer"]
+
+
+def test_dispatch_contains_handler_failure() -> None:
+    """A failing handler is contained: logged, other handlers still run.
+
+    Regression for the unhandled traceback that reached uvicorn's
+    ServerErrorMiddleware: a handler crash must not 500 the webhook
+    (WAHA redelivers non-200s → endless loop) or drop the event's
+    other handlers.
+    """
+    import wahabot.webhook as webhook_module
+    from tests.harness import reset_handlers
+
+    reset_handlers()
+    try:
+        calls: list[str] = []
+
+        async def boom(_event: WahaEvent) -> None:
+            calls.append("boom")
+            raise RuntimeError("handler exploded")
+
+        async def after(_event: WahaEvent) -> None:
+            calls.append("after")
+
+        webhook_module.on_message(boom)
+        webhook_module.on_message(after)
+        event = WahaEvent(
+            id="evt_test_containment",
+            timestamp=1,
+            event="message",
+            session="default",
+            payload={"id": "msg_test_containment", "from": CHAT_ID},
+        )
+        asyncio.run(webhook_module.dispatch(event))
+        assert calls == ["boom", "after"]
+    finally:
+        reset_handlers()
