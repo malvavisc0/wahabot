@@ -7,7 +7,6 @@ import time
 from collections.abc import Callable
 from typing import Any, cast
 
-import openai
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.llms.function_calling import FunctionCallingLLM
 from llama_index.core.memory import ChatMemoryBuffer
@@ -51,7 +50,12 @@ from wahabot.core.presence import mark_seen
 from wahabot.core.transcribe import fetch_transcript, transcribe_voice_note
 from wahabot.core.waha import MediaTooLargeError, WahaClient
 from wahabot.settings import Settings
-from wahabot.status import session_healthy
+from wahabot.status import (
+    llm_endpoint_down,
+    mark_llm_recovered,
+    mark_llm_unreachable,
+    session_healthy,
+)
 from wahabot.status import state as status_state
 from wahabot.webhook import on_forget, on_message
 
@@ -808,13 +812,18 @@ def register_agent_handler(
                         waha=waha,
                     )
                 await persist_memory(settings, event.session, chat_id, ctx)
-                if target.sent or target.reacted:
-                    logger.info(
-                        "Agent decision for {chat_id}: delivered via tool",
-                        chat_id=chat_id,
-                    )
-                    log_final_text(chat_id, reply)
-                    return
+                delivered = bool(target.sent or target.reacted)
+            # The provider answered: flip the LLM health flag back up
+            # (once-per-transition notify) outside the chat lock, so
+            # the notify send never serializes this chat's next run.
+            await mark_llm_recovered(waha, event.session)
+            if delivered:
+                logger.info(
+                    "Agent decision for {chat_id}: delivered via tool",
+                    chat_id=chat_id,
+                )
+                log_final_text(chat_id, reply)
+                return
             if not reply or not reply.strip():
                 logger.info("Agent decision for {chat_id}: stay silent", chat_id=chat_id)
                 return
@@ -857,18 +866,15 @@ def register_agent_handler(
                     settings.typing_presence_max_s,
                 ),
             )
-        except openai.APIConnectionError as exc:
-            # Provider unreachable — a transient outage, not a bug. The
-            # seen marker is dropped so WAHA's redelivery retries, but
-            # there's nothing to debug: log a one-line warning.
-            forget_seen(message_id)
-            logger.warning(
-                "LLM endpoint unreachable for {id} in {chat_id}; dropped marker: {exc}",
-                id=message_id,
-                chat_id=chat_id,
-                exc=exc,
-            )
-        except Exception:
+        except Exception as exc:
+            if llm_endpoint_down(exc):
+                # Provider (or its proxy) unreachable — a transient
+                # outage, not a bug. The seen marker is dropped so
+                # WAHA's redelivery retries; the once-per-transition
+                # operator notify lives in status.
+                forget_seen(message_id)
+                await mark_llm_unreachable(waha, event.session, exc)
+                return
             # Allow WAHA's redelivery of this message to be reprocessed.
             forget_seen(message_id)
             logger.exception(

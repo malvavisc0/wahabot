@@ -58,6 +58,7 @@ from wahabot.status import (
     seed_health,
     set_session_health,
 )
+from wahabot.status import state as status_state
 
 
 def webhook_app() -> Any:
@@ -192,6 +193,7 @@ def _reset_registries() -> Iterator[None]:
     roster_cache.clear()
     reset_albums()
     set_session_health("WORKING")
+    status_state.llm_healthy = True
     yield
     reset_handlers()
     _echoes.clear()
@@ -202,6 +204,7 @@ def _reset_registries() -> Iterator[None]:
     runs_contexts.clear()
     roster_cache.clear()
     reset_albums()
+    status_state.llm_healthy = True
 
 
 @pytest.fixture()

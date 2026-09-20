@@ -7,12 +7,19 @@ can never be delivered. This module tracks session health (seeded from
 ``GET /api/sessions/{session}`` at startup, updated by every
 ``session.status`` event), mutes message/command handling while the
 session is down, and notifies the operator once per transition.
+
+The same pattern guards the LLM endpoint: an unreachable provider
+fails every run, so the first outage-class failure (connection error,
+or a 5xx from a dead proxy in front of the provider) flips the health
+flag and notifies the operator once (not once per dropped message),
+and the first successful reply flips it back.
 """
 
 import asyncio
 from dataclasses import dataclass
 from typing import Any
 
+import openai
 from loguru import logger
 
 from wahabot.core.echoes import remember_self_echo
@@ -31,6 +38,10 @@ class SessionState:
     healthy: bool = True
     operator_jid: str = ""
     operator_lid: str = ""
+    #: LLM endpoint reachability: False while every run fails with
+    #: ``APIConnectionError``. Once-per-transition notify, like the
+    #: session flag — an outage must not spam the operator per message.
+    llm_healthy: bool = True
 
 
 state = SessionState()
@@ -39,6 +50,11 @@ state = SessionState()
 def session_healthy() -> bool:
     """True while the WAHA session is WORKING."""
     return state.healthy
+
+
+def llm_healthy() -> bool:
+    """True while the LLM endpoint is believed reachable."""
+    return state.llm_healthy
 
 
 def set_session_health(status: str) -> None:
@@ -152,3 +168,53 @@ async def notify_operator(
         remember_self_echo(sent_id)
     except Exception as exc:
         logger.warning("Operator notification failed: {exc}", exc=exc)
+
+
+def llm_endpoint_down(exc: Exception) -> bool:
+    """Whether *exc* means the LLM endpoint (or its proxy) is unreachable.
+
+    ``APIConnectionError`` covers DNS, refused and dropped connections.
+    A reverse proxy in front of the provider answers instead when it is
+    the one that is down — a 502/503/504 ``APIStatusError`` — which must
+    classify the same: the runs it fails are just as lost, and the
+    operator notification exists for exactly this class of outage.
+    """
+    if isinstance(exc, openai.APIConnectionError):
+        return True
+    return isinstance(exc, openai.APIStatusError) and exc.status_code >= 500
+
+
+async def mark_llm_unreachable(waha: WahaClient, session: str, exc: Exception) -> None:
+    """Flip the LLM health flag down and notify the operator once.
+
+    Called from the failure handlers of the chat and command paths on
+    an outage-class exception: the first failure of an outage
+    transitions the flag and sends the 🟠 notification; later failures
+    (every message that arrives while the provider is down) only log —
+    the operator already knows, and the chat path's dropped seen
+    markers let WAHA's redelivery retry once the provider is back.
+    """
+    logger.warning(
+        "LLM endpoint unreachable ({exc}); operator notified, messages await redelivery",
+        exc=exc,
+    )
+    if state.llm_healthy:
+        state.llm_healthy = False
+        await notify_operator(
+            waha,
+            session,
+            "LLM endpoint unreachable — replies paused until it recovers",
+            kind="down",
+        )
+
+
+async def mark_llm_recovered(waha: WahaClient, session: str) -> None:
+    """Flip the LLM health flag back up and notify the operator once.
+
+    Called after any run completes against the provider: the first
+    success after an outage transitions the flag and sends the 🔵
+    notification; the steady state stays silent.
+    """
+    if not state.llm_healthy:
+        state.llm_healthy = True
+        await notify_operator(waha, session, "LLM endpoint recovered", kind="up")

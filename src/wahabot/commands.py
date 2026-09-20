@@ -26,7 +26,12 @@ from wahabot.core.models import WahaEvent
 from wahabot.core.runs import chat_lock, context_for, persist_memory
 from wahabot.core.waha import WahaClient
 from wahabot.settings import Settings
-from wahabot.status import session_healthy
+from wahabot.status import (
+    llm_endpoint_down,
+    mark_llm_recovered,
+    mark_llm_unreachable,
+    session_healthy,
+)
 from wahabot.webhook import on_command
 
 #: Prefix marking an agent turn as an operator command (the session
@@ -104,9 +109,21 @@ async def run_command(
             # channel; the fence in the WhatsApp tools opens for this run
             # alone (the arming flag rides the run's own target binding,
             # so a concurrent chat run can never inherit it).
-            reply, target = await handle_message(
-                event, agent, ctx=ctx, settings=settings, waha=waha, armed=True
-            )
+            try:
+                reply, target = await handle_message(
+                    event, agent, ctx=ctx, settings=settings, waha=waha, armed=True
+                )
+            except Exception as exc:
+                # Same outage classification as the chat path. Commands
+                # have no seen marker to drop (their ids are unique), so
+                # the duties are the flag flip and the notify — and the
+                # exception re-raises: the self-chat caller drops its
+                # own seen marker so the command retries on redelivery,
+                # exactly like every other command failure.
+                if llm_endpoint_down(exc):
+                    await mark_llm_unreachable(waha, event.session, exc)
+                raise
+            await mark_llm_recovered(waha, event.session)
         await persist_memory(settings, event.session, OPERATOR_CHAT_ID, ctx)
     reply = (reply or "").strip()
     if not reply and target.sent and target.sent != OPERATOR_CHAT_ID:

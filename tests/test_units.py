@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, cast, override
 
 import httpx
+import openai
 import pytest
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.memory import ChatMemoryBuffer
@@ -105,7 +106,7 @@ from wahabot.core.tts import synthesize
 from wahabot.core.waha import WahaClient
 from wahabot.reactions import is_own_message_id
 from wahabot.settings import Settings
-from wahabot.status import session_healthy, set_session_health
+from wahabot.status import llm_endpoint_down, session_healthy, set_session_health
 
 
 @pytest.fixture()
@@ -126,6 +127,29 @@ def test_jid_string() -> None:
     assert jid_string({"user": "1464", "server": "lid"}) == "1464@lid"
     assert jid_string("x@c.us") == "x@c.us"
     assert jid_string(None) == ""
+
+
+def test_llm_endpoint_down_classification() -> None:
+    """Outage classification: connection failures and proxy 5xx only.
+
+    A dead provider raises ``APIConnectionError``; a dead reverse proxy
+    in front of it answers 502/503/504 instead — both must count as
+    endpoint-down. A 4xx (bad request, bad key) is the bot's or the
+    operator's bug, not an outage: it keeps the traceback path.
+    """
+    request = httpx.Request("POST", "http://llm.invalid/v1/chat/completions")
+
+    def status_error(code: int) -> openai.APIStatusError:
+        response = httpx.Response(code, request=request)
+        return openai.APIStatusError(f"error {code}", response=response, body=None)
+
+    assert llm_endpoint_down(openai.APIConnectionError(request=request))
+    assert llm_endpoint_down(openai.APITimeoutError(request=request))
+    for code in (500, 502, 503, 504):
+        assert llm_endpoint_down(status_error(code)), code
+    for code in (400, 401, 404, 429):
+        assert not llm_endpoint_down(status_error(code)), code
+    assert not llm_endpoint_down(ValueError("unrelated bug"))
 
 
 def test_pill_mention_wakes_bot() -> None:

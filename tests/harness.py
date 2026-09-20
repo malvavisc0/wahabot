@@ -28,7 +28,7 @@ from typing import Any, cast, override
 
 import httpx
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 import wahabot.webhook as webhook_module
 from wahabot.core.waha import WahaClient
@@ -478,7 +478,9 @@ class FakeLlm:
     ``override`` scripts the first agent-turn answer of a scenario, and
     ``selector`` routes every agent request through a callable when the
     round counter cannot tell interleaved runs apart (the concurrency
-    checks). The app closure reads these attributes, never module
+    checks). ``fail_status`` (0 = off) answers every request with that
+    HTTP status instead, simulating a dead proxy in front of the
+    provider. The app closure reads these attributes, never module
     globals, so a test sets ``fake_llm.override = …`` directly and the
     ``global`` declarations of the old script disappear.
     """
@@ -487,6 +489,7 @@ class FakeLlm:
         self.requests: list[dict[str, Any]] = []
         self.override: dict[str, Any] | None = None
         self.selector: Any = None
+        self.fail_status = 0
 
     def is_caption_request(self, body: dict[str, Any]) -> bool:
         """True when a captured request is the image captioner, not an agent run."""
@@ -501,6 +504,7 @@ class FakeLlm:
         self.requests.clear()
         self.override = None
         self.selector = None
+        self.fail_status = 0
 
 
 def _make_llm_app(llm: FakeLlm) -> FastAPI:
@@ -508,8 +512,12 @@ def _make_llm_app(llm: FakeLlm) -> FastAPI:
     app = FastAPI()
 
     @app.post("/v1/chat/completions")
-    async def create(body: dict[str, Any]) -> dict[str, Any]:
+    async def create(body: dict[str, Any]) -> Any:
         llm.requests.append(body)
+        if llm.fail_status:
+            # A dead proxy answers before the provider ever sees the
+            # request; the body argument is irrelevant to the failure.
+            raise HTTPException(status_code=llm.fail_status)
         if llm.is_caption_request(body):
             return CaptionResponse
         if llm.selector is not None:

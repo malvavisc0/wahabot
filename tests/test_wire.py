@@ -1413,6 +1413,99 @@ def test_recovery_recaptures_operator_jid(bot: Bot) -> None:
     assert status_state.operator_lid == "491555000000@lid"
 
 
+def test_llm_outage_notifies_operator_once(bot: Bot) -> None:
+    """A dead LLM endpoint flips the health flag and notifies once.
+
+    The operator gets one 🟠 in the self-chat for the whole outage —
+    not one per dropped message — and WAHA redeliveries still retry
+    (seen marker dropped). Recovery on the first successful run sends
+    exactly one 🔵. Both outage shapes covered: connection refused and
+    a dead proxy answering 502.
+    """
+    dead_bot = bot.rebuild(llm_api_base="http://127.0.0.1:1/v1")
+    from wahabot.status import llm_healthy
+
+    for i in range(3):  # three messages while the provider is down
+        dead_bot.post(waha_event(f"LLMDOWN{i}"))
+    assert _wait(lambda: not llm_healthy())
+    # exactly one 🟠 notify for the outage, aimed at the self-chat
+    assert _wait(
+        lambda: any(
+            entry[1] == ME_JID and "LLM endpoint unreachable" in entry[2]
+            for entry in dead_bot.waha.sent
+        )
+    )
+    outage_notes = [
+        entry for entry in dead_bot.waha.sent if "LLM endpoint unreachable" in entry[2]
+    ]
+    assert len(outage_notes) == 1
+    # the chat itself got nothing — no reply could be produced
+    assert all(entry[1] != CHAT_ID for entry in dead_bot.waha.sent)
+    # redelivery is still possible: seen markers were dropped
+    assert not seen_recently(f"false_{CHAT_ID}_LLMDOWN0")
+
+    live_bot = bot.rebuild()  # provider back up (same session-scoped fake)
+    llm = live_bot.stack.llm
+    llm.clear()
+    live_bot.post(waha_event("LLMUP"))
+    assert _wait(lambda: len(live_bot.waha.sent) >= 2)  # reply + 🔵 recovery
+    assert any(
+        entry[1] == ME_JID and "LLM endpoint recovered" in entry[2]
+        for entry in live_bot.waha.sent
+    ), live_bot.waha.sent
+    assert llm_healthy()
+    # steady state: a further successful run sends no extra 🔵
+    sent_after_recovery = len(live_bot.waha.sent)
+    live_bot.post(waha_event("LLMUP2"))
+    assert _wait(lambda: len(live_bot.waha.sent) > sent_after_recovery)
+    assert (
+        len(
+            [
+                entry
+                for entry in live_bot.waha.sent
+                if "LLM endpoint recovered" in entry[2]
+            ]
+        )
+        == 1
+    )
+
+
+def test_llm_proxy_502_notifies_operator(bot: Bot) -> None:
+    """A dead proxy's 502 classifies as endpoint-down: notify, no spam.
+
+    The connection-refused shape is covered by the outage test; this
+    one pins the proxy shape — an HTTP 502 must reach the same 🟠
+    branch, never the per-message traceback path.
+    """
+    llm = bot.stack.llm
+    llm.fail_status = 502
+    try:
+        bot.post(waha_event("LLM502"))
+        assert _wait(
+            lambda: any(
+                entry[1] == ME_JID and "LLM endpoint unreachable" in entry[2]
+                for entry in bot.waha.sent
+            )
+        )
+        from wahabot.status import llm_healthy as healthy
+
+        assert not healthy()
+        assert all(entry[1] != CHAT_ID for entry in bot.waha.sent)
+        # 4xx is a bug, not an outage: the traceback path, no notify
+        seen_notify = len(
+            [e for e in bot.waha.sent if "LLM endpoint unreachable" in e[2]]
+        )
+        llm.fail_status = 400
+        bot.post(waha_event("LLM400"))
+        assert _wait(lambda: len(llm.requests) >= 2)
+        assert (
+            len([e for e in bot.waha.sent if "LLM endpoint unreachable" in e[2]])
+            == seen_notify
+        )
+    finally:
+        llm.fail_status = 0
+
+
 def test_persistent_memory_roundtrip_wire(bot: Bot) -> None:
     llm = bot.stack.llm
     PC = "5553333333-5553333333@g.us"
