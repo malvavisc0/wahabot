@@ -1,5 +1,6 @@
 """CLI entrypoints and commands for wahabot."""
 
+import datetime
 import hashlib
 import hmac
 import json
@@ -9,6 +10,7 @@ import uuid
 from collections.abc import Sequence
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -24,6 +26,7 @@ from rich.text import Text
 from wahabot.ai.context import render_system_prompt
 from wahabot.commands import build_command_event, register_command_handler
 from wahabot.core.access import load_session_config
+from wahabot.core.audit import audit_dir
 from wahabot.core.waha import WahaClient
 from wahabot.handlers import register_agent_handler, register_forget_handler
 from wahabot.reactions import register_reaction_handler
@@ -506,6 +509,84 @@ def build_forget_event(session: str, chat_id: str) -> dict[str, object]:
         "me": None,
         "payload": {"chat_id": chat_id},
     }
+
+
+def escalation_entries(directory: Path, since: datetime.date) -> list[dict[str, Any]]:
+    """Escalation entries from the audit journal, newest first.
+
+    Day files iterate newest-first (they are date-named) and each
+    file's lines are reversed (appends are oldest-first), so the result
+    is newest-first across days — not only within one. Corrupt lines
+    are skipped — a half-written tail must not hide the readable rows
+    above it — and so are files whose name is not an ISO date, which
+    must not crash the listing.
+    """
+    if not directory.is_dir():
+        return []
+    entries: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("*.jsonl"), reverse=True):
+        try:
+            day = datetime.date.fromisoformat(path.stem)
+        except ValueError:
+            continue
+        if day < since:
+            continue
+        day_entries: list[dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("kind") == "escalation":
+                day_entries.append(entry)
+        entries.extend(reversed(day_entries))
+    return entries
+
+
+def escalation_rows(entries: list[dict[str, Any]]) -> Table:
+    """The escalation table: when, chat, report, status — foldable."""
+    table = Table(box=None, show_header=True, pad_edge=False)
+    for column in ("when", "chat", "report", "status"):
+        table.add_column(column, overflow="fold")
+    for entry in entries:
+        table.add_row(
+            str(entry.get("at", "")),
+            str(entry.get("chat_id", "")),
+            str(entry.get("report", "")),
+            str(entry.get("status", "")),
+        )
+    return table
+
+
+@app.command()
+def escalations(
+    session: str = typer.Option(
+        None, "--session", "-s", help="WAHA session name. [default: WAHABOT_SESSION]"
+    ),
+    days: int = typer.Option(
+        7, "--days", "-d", help="How many days back to list (audit journal files)."
+    ),
+) -> None:
+    """List the bot's escalations from the audit journal.
+
+    Each confirmed ``escalate`` tool call is persisted with status
+    "open"; this reads the audit journal's escalation entries, newest
+    first. The durable record the chat notification scrolled away.
+    """
+    settings = get_settings()
+    # Read-only view: never mutate the process-wide cached settings
+    # (``--session`` picks the audit directory here, nothing else).
+    session_name = session or settings.session
+    # The journal's day files are named by the writer's UTC date, so
+    # the day cutoff is computed in UTC too — a local-today boundary
+    # would hide or show a file around midnight depending on the
+    # host's timezone.
+    since = datetime.datetime.now(tz=datetime.UTC).date() - datetime.timedelta(days=days)
+    entries = escalation_entries(audit_dir(settings.data_dir, session_name), since)
+    if not entries:
+        console.print(f"[dim]No escalations in the last {days} day(s).[/]")
+        return
+    console.print(escalation_rows(entries))
 
 
 def main() -> None:

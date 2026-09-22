@@ -13,6 +13,7 @@ are unchanged, and the cached artifacts become instance attributes on
 ``RecordingWaha``.
 """
 
+import asyncio
 import contextlib
 import hashlib
 import hmac
@@ -480,9 +481,12 @@ class FakeLlm:
     round counter cannot tell interleaved runs apart (the concurrency
     checks). ``fail_status`` (0 = off) answers every request with that
     HTTP status instead, simulating a dead proxy in front of the
-    provider. The app closure reads these attributes, never module
-    globals, so a test sets ``fake_llm.override = …`` directly and the
-    ``global`` declarations of the old script disappear.
+    provider, and ``hang_seconds`` (0 = off) sleeps before answering,
+    simulating a healthy-but-slow provider for timeout tests (paired
+    with a tiny ``llm_timeout`` so the client's budget fires). The app
+    closure reads these attributes, never module globals, so a test
+    sets ``fake_llm.override = …`` directly and the ``global``
+    declarations of the old script disappear.
     """
 
     def __init__(self) -> None:
@@ -490,6 +494,7 @@ class FakeLlm:
         self.override: dict[str, Any] | None = None
         self.selector: Any = None
         self.fail_status = 0
+        self.hang_seconds = 0.0
 
     def is_caption_request(self, body: dict[str, Any]) -> bool:
         """True when a captured request is the image captioner, not an agent run."""
@@ -505,6 +510,7 @@ class FakeLlm:
         self.override = None
         self.selector = None
         self.fail_status = 0
+        self.hang_seconds = 0.0
 
 
 def _make_llm_app(llm: FakeLlm) -> FastAPI:
@@ -514,6 +520,11 @@ def _make_llm_app(llm: FakeLlm) -> FastAPI:
     @app.post("/v1/chat/completions")
     async def create(body: dict[str, Any]) -> Any:
         llm.requests.append(body)
+        if llm.hang_seconds:
+            # A slow generation: the connection is healthy, nothing is
+            # sent until the sleep ends — the client's per-request
+            # timeout (a tiny llm_timeout in tests) fires mid-sleep.
+            await asyncio.sleep(llm.hang_seconds)
         if llm.fail_status:
             # A dead proxy answers before the provider ever sees the
             # request; the body argument is irrelevant to the failure.
@@ -555,6 +566,8 @@ class RecordingWaha(WahaClient):
         self.seen_chats: list[tuple[str, str]] = []
         self.reactions: list[tuple[str, str]] = []
         self.video_bytes = b""
+        #: What ``get_session`` answers — the probe path's WAHA view.
+        self.session_status = "WORKING"
 
     @override
     def get_chat_overview(self, session: str, chat_id: str) -> Any:
@@ -663,8 +676,14 @@ class RecordingWaha(WahaClient):
 
     @override
     def get_session(self, session: str) -> dict[str, Any]:
-        """Session info for the health seed: live and WORKING."""
-        return {"name": session, "status": "WORKING"}
+        """Session info for health seeds and recovery probes.
+
+        ``session_status`` is the live answer (WORKING by default) —
+        a test flips it to simulate WAHA hanging in a dead state and
+        flipping back without ever emitting the status event, which is
+        exactly what the recovery poller exists for.
+        """
+        return {"name": session, "status": self.session_status}
 
     @override
     def get_me(self, session: str) -> dict[str, Any]:

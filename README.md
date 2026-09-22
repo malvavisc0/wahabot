@@ -63,7 +63,7 @@ kAI do this and send a message to Roy
 
 Only a matching message sent to the bot's own self-chat is treated this way — the bot's reply comes back as a quote-reply in that same chat. A voice note works too: speak "kAI do this…" and it transcribes and runs like the typed command. Messages you type from the bot account in other chats remain memory-only, and the bot never re-triggers on its own replies.
 
-Chat participants have one sanctioned way to reach you: the `escalate` tool. When someone asks for a human, reports a problem, or complains about the bot, it forwards a bot-written report to your self-chat — once per chat per hour, never pasting the person's words (so hidden instructions can't ride the channel).
+Chat participants have one sanctioned way to reach you: the `escalate` tool. When someone asks for a human, reports a problem, or complains about the bot, it forwards a bot-written report to your self-chat — once per chat per hour, never pasting the person's words (so hidden instructions can't ride the channel). Every confirmed escalation is also journaled to `data/audit/<session>/<date>.jsonl` with status `open`, so `wahabot escalations` lists them after the chat notification scrolled away.
 
 Operator commands are also the **only** runs with cross-chat reach: tools refuse to send, forward, react to, quote or read outside the current conversation on any chat-triggered run — `chat` JIDs and serialized message ids alike — so a group participant can never make the bot DM or spy on someone else. `resolve_chat` and `recent_chats` (the contact roster and chat list) refuse to run at all outside operator commands.
 

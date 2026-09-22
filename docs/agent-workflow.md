@@ -384,7 +384,44 @@ Three event flows sit outside the plain message → reply pipeline:
   healthy. `status.py` seeds the flag from `GET /api/sessions/{session}`
   at startup, mutes message/command handling while unhealthy (before
   the seen-marker, so WAHA redelivery retries after recovery), and
-  notifies the operator's own WhatsApp on transitions.
+  notifies the operator's own WhatsApp on transitions. Recovery is
+  active, not only event-driven: WAHA's engines do not reliably emit
+  the matching `WORKING` event on their own reconnect, so while muted
+  a background poller asks `GET /api/sessions/{session}` every 15 s,
+  and every muted incoming message or command gets a one-off probe of
+  the same endpoint — webhooks being delivered at all is itself
+  evidence the session is back. The 🔵 recovery notification is
+  retried (3 attempts, 2 s backoff) because the send races WhatsApp's
+  own reconnection.
+- **LLM failure classes**: run paths distinguish three failure
+  classes. An **outage** (connection error, or a 5xx from a dead
+  proxy in front of the provider) flips the LLM health flag and
+  notifies the operator once per transition ("LLM provider is
+  unreachable — replies paused"); the first successful run flips it
+  back with a 🔵. A **timeout** (`WAHABOT_LLM_TIMEOUT`, 60 s default;
+  `APITimeoutError`) is *not* an outage — the endpoint may be healthy
+  and still generating — so the flag stays up and the operator gets
+  one 🟠 per slow stretch naming the budget and the knob; a success
+  re-arms the latch. Both classes drop the seen marker so WAHA's
+  redelivery retries the lost run. Anything else is a **bug**: full
+  traceback, no notification.
+
+## Audit journal
+
+Every bot action is appended as one JSON object per line to
+`data/audit/<session>/<YYYY-MM-DD>.jsonl` (`core/audit.py`): tool
+calls (name, capped arguments, outcome read from the tool's `ok`
+envelope — a refused or failed send journals as `failed`, never as a
+success), final replies, silences (including dropped lone emoji),
+tool-delivered runs, reactions, escalations (with `status: "open"`),
+operator command replies, and `send_failed` rows for sends that
+raised. Records for actions that send are written only *after* the
+send succeeded — a failed send never leaves an audit row claiming the
+chat was answered. Writes are fail-soft (disk errors are logged and
+swallowed) and string fields cap at 300 chars. Day files are named by
+UTC date. `wahabot escalations [--days N]` lists the escalation
+entries newest-first; corrupt tail lines and non-date files are
+skipped.
 
 ## LLM observability (Langfuse)
 
@@ -473,7 +510,7 @@ refusal.
 |---|---|---|---|
 | `send_message` | `chat?`, `text`, `reply_to?`, `mentions?`, `reason?` | `POST /api/sendText` | Send a text (current chat, or operator-named target); `reply_to` quotes a message; `mentions` tags contacts; once per run (shared latch) |
 | `stay_silent` | `reason?` | — | End the run with no reply at all (terminal: the workflow stops before executing it) |
-| `escalate` | `report`, `reason?` | `POST /api/sendText` (to the bot's own chat) | Forward a report to the operator's self-chat — for "I want a human" requests, complaints, reports. No `chat` parameter (target is fixed); once per chat per hour (cooldown); writes the report itself, never pastes the person's words; refused on operator runs (a command already talks to the operator) |
+| `escalate` | `report`, `reason?` | `POST /api/sendText` (to the bot's own chat) | Forward a report to the operator's self-chat — for "I want a human" requests, complaints, reports. No `chat` parameter (target is fixed); once per chat per hour (cooldown); writes the report itself, never pastes the person's words; refused on operator runs (a command already talks to the operator). A confirmed send also persists a durable `escalation` record in the audit journal (status `open`; `wahabot escalations` lists them) |
 | `react_to_message` | `message_id`, `reaction`, `reason?` | `PUT /api/reaction` | Emoji-react to a message (empty = remove); once per run |
 | `send_image` | `url`, `caption?`, `chat?`, `reason?` | `POST /api/sendImage` | Send an image from a URL (probed pre-send; 404/410 refused); once per run (shared latch) |
 | `send_file` | `url?`, `path?`, `caption?`, `filename?`, `chat?`, `reason?` | `POST /api/sendFile` | Send a document (PDF, etc.) from a URL (probed like `send_image`) or a local file; once per run (shared latch) |

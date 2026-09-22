@@ -273,7 +273,10 @@ against the current chat's own participants (so it can find a JID to
 operator-only outright.
 The one exception is `escalate`, which has no aimable target at all:
 it always lands in the operator's own self-chat, at most once per
-chat per hour.
+chat per hour. A confirmed escalation also leaves a durable record in
+the audit journal (`data/audit/<session>/<date>.jsonl`, status
+`open`), which `wahabot escalations` lists after the chat
+notification scrolled away.
 
 Tool results come back as JSON envelopes — `{"ok": true, …}` or
 `{"ok": false, "error": "…"}` — never as raised exceptions; failures

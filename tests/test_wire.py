@@ -67,6 +67,7 @@ from wahabot.core.persistence import load_memory, memory_file
 from wahabot.core.runs import contexts as handlers_contexts
 from wahabot.handlers import seen_recently
 from wahabot.reactions import forget_reaction_notes as _forget_notes
+from wahabot.status import disarm_recovery_poller
 from wahabot.status import state as status_state
 
 # Zero-seconds polling cap for the async runs: un-comment to tighten.
@@ -89,6 +90,28 @@ def _wait(pred: Callable[[], bool], timeout: float = POLL_TIMEOUT) -> bool:
             return True
         time.sleep(0.05)
     return pred()
+
+
+def _audit_entries(bot: Bot, kind: str, chat_id: str) -> list[dict[str, Any]]:
+    """The bot's audit journal entries of *kind* in *chat_id*, as dicts."""
+    import datetime as _dt
+
+    from wahabot.core.audit import audit_dir
+
+    directory = audit_dir(bot.settings.data_dir, bot.settings.session)
+    day = _dt.datetime.now(tz=_dt.UTC).strftime("%Y-%m-%d")
+    path = directory / f"{day}.jsonl"
+    if not path.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            entry: dict[str, Any] = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("kind") == kind and entry.get("chat_id") == chat_id:
+            entries.append(entry)
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +563,10 @@ def test_album_vision(bot: Bot) -> None:
     llm = bot.stack.llm
     for album_event in album_events():
         bot.post(album_event)
-    assert _wait(lambda: len(llm.requests) >= 1)
+    # Wait for the whole album run, not the first caption request: the
+    # agent request lands last, and gating on an earlier request made
+    # the assertions below race the run.
+    assert _wait(lambda: sum(1 for r in llm.requests if not is_caption_request(r)) >= 1)
 
     caption_requests = [r for r in llm.requests if is_caption_request(r)]
     agent_requests = [r for r in llm.requests if not is_caption_request(r)]
@@ -600,7 +626,9 @@ def test_burst_assembles_one_turn(bot: Bot) -> None:
     Three rapid messages from one DM sender — the roadmap's leak
     example — must produce a single agent run whose user turn carries
     all three bodies joined, not three premature runs. The read
-    receipt still fires per message at arrival.
+    receipt still fires per message at arrival. Every original message
+    id is preserved exactly once (roadmap requirement 5: quoting,
+    audit and evidence links survive the merge).
     """
     llm = bot.stack.llm
     # Short windows so the test doesn't wait the production 8s; the
@@ -630,6 +658,18 @@ def test_burst_assembles_one_turn(bot: Bot) -> None:
     assert "there is a leak" in turn_text
     assert "flat 3B" in turn_text
     assert "near the panel" in turn_text
+    # Every buffered message id is stamped exactly once, in order, in
+    # the same serialized form the single-message path stamps — the
+    # model can quote or react to each original message. The anchor's
+    # id rides the note once (not duplicated by a per-part annotation).
+    for i in range(3):
+        mid = f"false_{chat}_BURST{i}"
+        assert turn_text.count(f"[message id: {mid}]") == 1, (
+            f"anchor/member id {mid} not stamped exactly once:\n{turn_text}"
+        )
+    assert (
+        turn_text.index("BURST0") < turn_text.index("BURST1") < turn_text.index("BURST2")
+    )
 
 
 def test_burst_disabled_runs_per_message(bot: Bot) -> None:
@@ -1406,6 +1446,10 @@ def test_reaction_fold_in(bot: Bot) -> None:
 
 def test_session_health_mute(bot: Bot) -> None:
     llm = bot.stack.llm
+    # WAHA's API must agree the session is down from the start: the
+    # FAILED event arms the recovery poller, whose first probe runs
+    # immediately and would otherwise see WORKING and unmute.
+    bot.waha.session_status = "FAILED"
     status_down = {
         "id": "evt-smoke-status-down",
         "timestamp": int(time.time()),
@@ -1420,6 +1464,9 @@ def test_session_health_mute(bot: Bot) -> None:
 
     assert not session_healthy()
 
+    # WAHA's API still agrees the session is down: a muted message
+    # probes recovery, and a WORKING answer would unmute mid-test.
+    bot.waha.session_status = "FAILED"
     muted = waha_event()
     muted["payload"]["id"] = f"false_{CHAT_ID}_MUTED"
     muted["payload"]["body"] = "kai while muted"
@@ -1431,6 +1478,7 @@ def test_session_health_mute(bot: Bot) -> None:
     status_up = dict(status_down)
     status_up["id"] = "evt-smoke-status-up"
     status_up["payload"] = {"name": SESSION, "status": "WORKING"}
+    bot.waha.session_status = "WORKING"
     bot.post(status_up)
     time.sleep(0.2)
     assert session_healthy()
@@ -1461,6 +1509,198 @@ def test_recovery_recaptures_operator_jid(bot: Bot) -> None:
     assert status_state.operator_lid == "491555000000@lid"
 
 
+def test_poller_recovers_silent_waha(bot: Bot) -> None:
+    """The poller unmutes the bot when WAHA recovers WITHOUT the event.
+
+    The production hang this exists for: WAHA's engine stops emitting
+    events (half-dead socket) and never sends the WORKING
+    session.status — previously the bot stayed muted until a human
+    restarted the internet. The poller asks GET /api/sessions directly;
+    once WAHA answers WORKING there, the flag flips, the 🔵 recovery
+    notify goes out (retried), and the poller disarms.
+    """
+    from wahabot import status as status_module
+    from wahabot.status import recovery_poller_armed, session_healthy
+
+    status_module.RECOVERY_POLL_S = 0.2  # fast ticks for the test
+    try:
+        # WAHA is down — its API AND its event agree for now.
+        bot.waha.session_status = "FAILED"
+        # FAILED event arms the poller automatically.
+        bot.post(
+            {
+                "id": "evt-poller-down",
+                "timestamp": int(time.time()),
+                "event": "session.status",
+                "session": SESSION,
+                "me": None,
+                "payload": {"name": SESSION, "status": "FAILED"},
+            }
+        )
+        assert _wait(lambda: not session_healthy())
+        assert _wait(recovery_poller_armed)
+        # WAHA reconnects underneath — but the status event is LOST
+        # (the hang). The API answers WORKING on the next probe.
+        bot.waha.session_status = "WORKING"
+        assert _wait(lambda: session_healthy(), timeout=5)
+        # Recovery notified the operator, exactly once.
+        assert _wait(
+            lambda: any(
+                entry[1] == ME_JID and "WhatsApp session recovered" in entry[2]
+                for entry in bot.waha.sent
+            ),
+            timeout=5,
+        )
+        recovered_notes = [
+            entry for entry in bot.waha.sent if "WhatsApp session recovered" in entry[2]
+        ]
+        assert len(recovered_notes) == 1
+        # The poller stopped: nothing keeps probing a healthy session.
+        assert not recovery_poller_armed()
+        # A redelivered message now flows (the bot answered below).
+        llm = bot.stack.llm
+        llm.clear()
+        bot.post(waha_event("POSTRECOVERY"))
+        assert _wait(lambda: any(entry[1] == CHAT_ID for entry in bot.waha.sent))
+    finally:
+        status_module.RECOVERY_POLL_S = 15.0
+        disarm_recovery_poller()
+
+
+def test_muted_message_probes_recovery(bot: Bot) -> None:
+    """A message arriving while muted probes WAHA once — no poller needed.
+
+    Webhook delivery is itself evidence the session may be back; the
+    probe (GET /api/sessions) decides. Here the API says WORKING while
+    no status event ever arrives — the message-triggered probe alone
+    unmutes the bot and notifies.
+    """
+    from wahabot.status import session_healthy
+
+    bot.waha.session_status = "FAILED"  # the poller's first probe must miss
+    bot.post(
+        {
+            "id": "evt-probe-down",
+            "timestamp": int(time.time()),
+            "event": "session.status",
+            "session": SESSION,
+            "me": None,
+            "payload": {"name": SESSION, "status": "FAILED"},
+        }
+    )
+    assert _wait(lambda: not session_healthy())
+    # The status event went missing; WAHA's API now answers WORKING.
+    bot.waha.session_status = "WORKING"
+    bot.post(waha_event("MUTEDPROBE"))
+    assert _wait(lambda: session_healthy(), timeout=5)
+    assert _wait(
+        lambda: any(
+            entry[1] == ME_JID and "WhatsApp session recovered" in entry[2]
+            for entry in bot.waha.sent
+        ),
+        timeout=5,
+    )
+
+
+def test_muted_command_probes_recovery(bot: Bot) -> None:
+    """A command arriving while muted probes WAHA, like a message does.
+
+    Commands carry no seen marker, so the mute branch has nothing to
+    drop — but it must still run the same recovery probe as the
+    message path, or an operator command during a silent-WAHA hang
+    would be dropped where a chat message would have unmuted the bot.
+    """
+    from wahabot.status import session_healthy
+
+    bot.waha.session_status = "FAILED"  # the poller's first probe must miss
+    bot.post(
+        {
+            "id": "evt-cmd-probe-down",
+            "timestamp": int(time.time()),
+            "event": "session.status",
+            "session": SESSION,
+            "me": None,
+            "payload": {"name": SESSION, "status": "FAILED"},
+        }
+    )
+    assert _wait(lambda: not session_healthy())
+    # The status event went missing; WAHA's API now answers WORKING.
+    bot.waha.session_status = "WORKING"
+    bot.post(build_command_event(SESSION, "kai are you there"))
+    assert _wait(lambda: session_healthy(), timeout=5)
+    assert _wait(
+        lambda: any(
+            entry[1] == ME_JID and "WhatsApp session recovered" in entry[2]
+            for entry in bot.waha.sent
+        ),
+        timeout=5,
+    )
+
+
+def test_recovery_notify_retries_until_sent(bot: Bot) -> None:
+    """A recovery notify racing WhatsApp's reconnect retries, not vanish.
+
+    The first two send attempts fail (WhatsApp still settling); the
+    third lands. The old single-shot swallow lost exactly this message.
+    """
+    import wahabot.status as status_module
+    from wahabot.status import NOTIFY_BACKOFF_S, session_healthy
+
+    status_module.NOTIFY_BACKOFF_S = 0.1  # fast backoff for the test
+    real_send_text = bot.waha.send_text
+    try:
+        bot.waha.session_status = "FAILED"  # poller probes must miss
+        bot.post(
+            {
+                "id": "evt-retry-down",
+                "timestamp": int(time.time()),
+                "event": "session.status",
+                "session": SESSION,
+                "me": None,
+                "payload": {"name": SESSION, "status": "FAILED"},
+            }
+        )
+        assert _wait(lambda: not session_healthy())
+        attempts = {"n": 0}
+        real_send_text = bot.waha.send_text
+
+        def flaky_send_text(
+            session: str,
+            chat_id: str,
+            text: str,
+            reply_to: str | None = None,
+            mentions: list[str] | None = None,
+        ) -> str:
+            if "WhatsApp session recovered" in text and attempts["n"] < 2:
+                attempts["n"] += 1
+                raise httpx.HTTPError("WhatsApp still settling")
+            return real_send_text(session, chat_id, text, reply_to, mentions)
+
+        bot.waha.send_text = flaky_send_text  # type: ignore[method-assign]
+        bot.post(
+            {
+                "id": "evt-retry-up",
+                "timestamp": int(time.time()),
+                "event": "session.status",
+                "session": SESSION,
+                "me": None,
+                "payload": {"name": SESSION, "status": "WORKING"},
+            }
+        )
+        assert _wait(lambda: session_healthy())
+        assert _wait(
+            lambda: any(
+                entry[1] == ME_JID and "WhatsApp session recovered" in entry[2]
+                for entry in bot.waha.sent
+            ),
+            timeout=5,
+        )
+        assert attempts["n"] == 2  # both failures were retried past
+    finally:
+        status_module.NOTIFY_BACKOFF_S = NOTIFY_BACKOFF_S
+        bot.waha.send_text = real_send_text  # type: ignore[method-assign]
+
+
 def test_llm_outage_notifies_operator_once(bot: Bot) -> None:
     """A dead LLM endpoint flips the health flag and notifies once.
 
@@ -1479,12 +1719,12 @@ def test_llm_outage_notifies_operator_once(bot: Bot) -> None:
     # exactly one 🟠 notify for the outage, aimed at the self-chat
     assert _wait(
         lambda: any(
-            entry[1] == ME_JID and "LLM endpoint unreachable" in entry[2]
+            entry[1] == ME_JID and "LLM provider is unreachable" in entry[2]
             for entry in dead_bot.waha.sent
         )
     )
     outage_notes = [
-        entry for entry in dead_bot.waha.sent if "LLM endpoint unreachable" in entry[2]
+        entry for entry in dead_bot.waha.sent if "LLM provider is unreachable" in entry[2]
     ]
     assert len(outage_notes) == 1
     # the chat itself got nothing — no reply could be produced
@@ -1498,7 +1738,7 @@ def test_llm_outage_notifies_operator_once(bot: Bot) -> None:
     live_bot.post(waha_event("LLMUP"))
     assert _wait(lambda: len(live_bot.waha.sent) >= 2)  # reply + 🔵 recovery
     assert any(
-        entry[1] == ME_JID and "LLM endpoint recovered" in entry[2]
+        entry[1] == ME_JID and "LLM provider is back" in entry[2]
         for entry in live_bot.waha.sent
     ), live_bot.waha.sent
     assert llm_healthy()
@@ -1507,15 +1747,63 @@ def test_llm_outage_notifies_operator_once(bot: Bot) -> None:
     live_bot.post(waha_event("LLMUP2"))
     assert _wait(lambda: len(live_bot.waha.sent) > sent_after_recovery)
     assert (
-        len(
-            [
-                entry
-                for entry in live_bot.waha.sent
-                if "LLM endpoint recovered" in entry[2]
-            ]
-        )
+        len([entry for entry in live_bot.waha.sent if "LLM provider is back" in entry[2]])
         == 1
     )
+
+
+def test_llm_timeout_notifies_operator_once(bot: Bot) -> None:
+    """A slow generation times out with the timeout message, not the outage.
+
+    The provider is healthy but still generating when the per-request
+    budget fires: the operator's 🟠 must say the call timed out (with
+    the knob to raise), never "endpoint unreachable — replies
+    paused". One notify per slow stretch (the latch), the outage flag
+    stays healthy, seen markers drop for redelivery, and a success
+    after the slow stretch resets the latch.
+    """
+    from wahabot.status import llm_healthy
+
+    slow_bot = bot.rebuild(llm_timeout=0.3)
+    llm = slow_bot.stack.llm
+    llm.hang_seconds = 5.0
+    try:
+        slow_bot.post(waha_event("LLMSLOW0"))
+        assert _wait(
+            lambda: any(
+                entry[1] == ME_JID and "timed out after 0s" in entry[2]
+                for entry in slow_bot.waha.sent
+            ),
+            timeout=15,
+        )
+        timeout_notes = [
+            entry for entry in slow_bot.waha.sent if "timed out after" in entry[2]
+        ]
+        assert len(timeout_notes) == 1
+        # The notification is the timeout message, never the outage one.
+        assert all("unreachable" not in entry[2] for entry in timeout_notes)
+        # A timeout is not an outage: the health flag never flipped.
+        assert llm_healthy()
+        # The chat got no reply — the run died — but redelivery stays
+        # possible: the seen marker was dropped.
+        assert all(entry[1] != CHAT_ID for entry in slow_bot.waha.sent)
+        assert not seen_recently(f"false_{CHAT_ID}_LLMSLOW0")
+        # Second slow call while the latch is held: quiet, not a new 🟠.
+        slow_bot.post(waha_event("LLMSLOW1"))
+        time.sleep(2)
+        assert len([e for e in slow_bot.waha.sent if "timed out after" in e[2]]) == 1
+
+        # Provider answers fast again: the reply lands and the next
+        # timeout (if one ever happens) would notify afresh.
+        llm.hang_seconds = 0.0
+        fast_bot = bot.rebuild(llm_timeout=0.3)
+        fast_llm = fast_bot.stack.llm
+        fast_llm.clear()
+        fast_bot.post(waha_event("LLMFAST"))
+        assert _wait(lambda: len(fast_bot.waha.sent) >= 1)
+        assert any(entry[1] == CHAT_ID for entry in fast_bot.waha.sent)
+    finally:
+        llm.hang_seconds = 0.0
 
 
 def test_llm_proxy_502_notifies_operator(bot: Bot) -> None:
@@ -1531,7 +1819,7 @@ def test_llm_proxy_502_notifies_operator(bot: Bot) -> None:
         bot.post(waha_event("LLM502"))
         assert _wait(
             lambda: any(
-                entry[1] == ME_JID and "LLM endpoint unreachable" in entry[2]
+                entry[1] == ME_JID and "LLM provider is unreachable" in entry[2]
                 for entry in bot.waha.sent
             )
         )
@@ -1541,13 +1829,13 @@ def test_llm_proxy_502_notifies_operator(bot: Bot) -> None:
         assert all(entry[1] != CHAT_ID for entry in bot.waha.sent)
         # 4xx is a bug, not an outage: the traceback path, no notify
         seen_notify = len(
-            [e for e in bot.waha.sent if "LLM endpoint unreachable" in e[2]]
+            [e for e in bot.waha.sent if "LLM provider is unreachable" in e[2]]
         )
         llm.fail_status = 400
         bot.post(waha_event("LLM400"))
         assert _wait(lambda: len(llm.requests) >= 2)
         assert (
-            len([e for e in bot.waha.sent if "LLM endpoint unreachable" in e[2]])
+            len([e for e in bot.waha.sent if "LLM provider is unreachable" in e[2]])
             == seen_notify
         )
     finally:
@@ -1797,6 +2085,12 @@ def test_escalate_delivery(bot: Bot) -> None:
         for _, chat, text, _ in bot.waha.sent
         if chat == ME_JID
     )
+    # The confirmed escalation left a durable record in the audit
+    # journal — the row the CLI's `escalations` command reads.
+    assert _wait(lambda: _audit_entries(bot, "escalation", PC) != [])
+    entries = _audit_entries(bot, "escalation", PC)
+    assert entries[0]["status"] == "open"
+    assert "human" in entries[0]["report"]
 
 
 def test_escalate_cooldown(bot: Bot) -> None:
@@ -1827,7 +2121,61 @@ def test_escalate_cooldown(bot: Bot) -> None:
     assert "cooldown" in cooldown_feedback
 
 
-def test_escalate_fail_soft() -> None:
+def test_journal_covers_every_path(bot: Bot) -> None:
+    """Album, silence and command decisions all reach the audit journal.
+
+    The roadmap's "journal everything": an album reply (previously
+    inline, unjournaled), a tool-delivered run, and an operator
+    command's reply each leave their audit row.
+    """
+    # Album reply via the shared finish path: SecondResponse makes the
+    # final text the answer, quote-replied to the album container.
+    album_bot = bot.rebuild(typing_presence_min_s=0.0, typing_presence_max_s=0.0)
+    album_bot.stack.llm.override = SecondResponse
+    for album_event in album_events():
+        album_bot.post(album_event)
+    assert _wait(lambda: len(album_bot.waha.sent) >= 1)
+    assert _wait(lambda: _audit_entries(album_bot, "reply", CHAT_ID) != [])
+    # The album path journals the same kinds as the single path —
+    # a delivered_via_tool album run must not leave a "reply" row too.
+    assert _audit_entries(album_bot, "silence", CHAT_ID) == []
+
+    # Operator command reply journaled as its own kind.
+    cmd_bot = album_bot.rebuild()
+    cmd_bot.stack.llm.clear()
+    cmd_bot.stack.llm.override = SecondResponse
+    self_event = waha_event("CMDFINAL")
+    self_event["payload"]["id"] = f"true_{ME_JID}_CMDFINAL"
+    self_event["payload"]["_data"]["id"] = {"_serialized": f"true_{ME_JID}_CMDFINAL"}
+    self_event["payload"]["from"] = ME_JID
+    self_event["payload"]["fromMe"] = True
+    self_event["payload"]["body"] = "kai just answer me"
+    cmd_bot.post(self_event)
+    assert _wait(lambda: _audit_entries(cmd_bot, "operator_reply", "operator") != [])
+
+
+def test_journal_records_send_failure_not_fake_reply(bot: Bot) -> None:
+    """A failed final-reply send leaves a send_failed row, not a reply row.
+
+    The audit record follows the confirmed send (the escalation
+    standard): a WAHA failure during the final-text send must not
+    journal a "reply" the chat never saw.
+    """
+    failing_bot = bot.rebuild()
+    failing_bot.stack.llm.override = SecondResponse
+
+    def boom(*_args: object, **_kwargs: object) -> str:
+        raise httpx.HTTPError("WAHA is down")
+
+    failing_bot.waha.send_text = boom  # type: ignore[method-assign]
+    failing_bot.post(waha_event())
+    assert _wait(lambda: _audit_entries(failing_bot, "send_failed", CHAT_ID) != [])
+    assert _audit_entries(failing_bot, "reply", CHAT_ID) == []
+
+
+def test_escalate_fail_soft(tmp_path: Path) -> None:
+    from wahabot.settings import Settings
+
     ME_JID = "491555000000@c.us"
     status_state.operator_jid = ME_JID
     failing_waha = RecordingWaha()
@@ -1839,7 +2187,18 @@ def test_escalate_fail_soft() -> None:
     down_channel = EscalationChannel()
     assert down_channel.operator_jid == ME_JID
 
-    esc_tool = build_escalate(failing_waha, down_channel)
+    # The send fails before any audit write, so a throwaway settings
+    # (data_dir under tmp_path) satisfies the now-required parameter.
+    settings = Settings(
+        webhook_hmac_key="k",
+        waha_url="http://waha.invalid",
+        waha_api_key="k",
+        llm_api_base="http://llm.invalid",
+        llm_api_key="k",
+        data_dir=tmp_path,
+        _env_file=None,
+    )
+    esc_tool = build_escalate(failing_waha, down_channel, settings)
     esc_fn = cast(Any, esc_tool).fn
     PC = "5553333333-5553333333@g.us"
     token = bind_target({"session": SESSION, "chat_id": PC, "sent": "", "reacted": ""})

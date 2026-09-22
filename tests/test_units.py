@@ -8,6 +8,7 @@ transport, not a port.
 
 import asyncio
 import base64
+import datetime
 import json
 import shutil
 import tempfile
@@ -107,7 +108,12 @@ from wahabot.core.tts import synthesize
 from wahabot.core.waha import WahaClient
 from wahabot.reactions import is_own_message_id
 from wahabot.settings import Settings
-from wahabot.status import llm_endpoint_down, session_healthy, set_session_health
+from wahabot.status import (
+    llm_call_timed_out,
+    llm_endpoint_down,
+    session_healthy,
+    set_session_health,
+)
 
 
 @pytest.fixture()
@@ -136,7 +142,10 @@ def test_llm_endpoint_down_classification() -> None:
     A dead provider raises ``APIConnectionError``; a dead reverse proxy
     in front of it answers 502/503/504 instead — both must count as
     endpoint-down. A 4xx (bad request, bad key) is the bot's or the
-    operator's bug, not an outage: it keeps the traceback path.
+    operator's bug, not an outage: it keeps the traceback path. A
+    timeout is neither: the endpoint may be healthy and still
+    generating, so it never claims "unreachable" — its own classifier
+    (:func:`llm_call_timed_out`) owns it.
     """
     request = httpx.Request("POST", "http://llm.invalid/v1/chat/completions")
 
@@ -145,12 +154,35 @@ def test_llm_endpoint_down_classification() -> None:
         return openai.APIStatusError(f"error {code}", response=response, body=None)
 
     assert llm_endpoint_down(openai.APIConnectionError(request=request))
-    assert llm_endpoint_down(openai.APITimeoutError(request=request))
+    # A timeout subclasses APIConnectionError but is NOT an outage:
+    # the provider may still be generating on a healthy endpoint.
+    assert not llm_endpoint_down(openai.APITimeoutError(request=request))
     for code in (500, 502, 503, 504):
         assert llm_endpoint_down(status_error(code)), code
     for code in (400, 401, 404, 429):
         assert not llm_endpoint_down(status_error(code)), code
     assert not llm_endpoint_down(ValueError("unrelated bug"))
+
+
+def test_llm_call_timed_out_classification() -> None:
+    """The timeout classifier matches APITimeoutError and nothing else.
+
+    A timeout means the request lived out its per-request budget —
+    fatal to the run, but with a different operator message than an
+    outage. Connection errors and 5xx belong to the outage
+    classifier, plain bugs to neither.
+    """
+    request = httpx.Request("POST", "http://llm.invalid/v1/chat/completions")
+
+    def status_error(code: int) -> openai.APIStatusError:
+        response = httpx.Response(code, request=request)
+        return openai.APIStatusError(f"error {code}", response=response, body=None)
+
+    assert llm_call_timed_out(openai.APITimeoutError(request=request))
+    assert not llm_call_timed_out(openai.APIConnectionError(request=request))
+    assert not llm_call_timed_out(status_error(502))
+    assert not llm_call_timed_out(status_error(400))
+    assert not llm_call_timed_out(ValueError("unrelated bug"))
 
 
 def test_load_llm_auto_cache_flag(unit_settings: Settings) -> None:
@@ -465,6 +497,8 @@ def test_burst_hold_cap() -> None:
                 "id": mid,
                 "from": CHAT_ID,
                 "body": "more",
+                "participant": "4915…@c.us",
+                "fromMe": False,
                 "_data": {"type": "chat"},
             },
         )
@@ -505,6 +539,207 @@ def test_burst_rejects_unconfigured() -> None:
         payload={"id": "m1", "from": CHAT_ID, "body": "leak"},
     )
     assert bursts.add_message(event) is False
+
+
+def test_burst_flush_logs_hold_metrics(tmp_path: Path) -> None:
+    """The flush log carries the burst's size and hold duration."""
+    from loguru import logger as _logger
+
+    from wahabot.ai import bursts
+
+    logged: list[str] = []
+
+    def sink(message: Any) -> None:
+        logged.append(str(message))
+
+    handler_id = _logger.add(sink, level="INFO")
+    try:
+
+        async def scenario() -> None:
+            bursts.reset()
+
+            async def noop(buffer: object) -> None:
+                return None
+
+            bursts.set_completion_handler(noop)
+            bursts.configure(inactivity_s=0.2, hold_cap_s=5.0)
+            assert bursts.add_message(
+                WahaEvent(
+                    id="e-hold",
+                    timestamp=1,
+                    event="message",
+                    session=SESSION,
+                    me={},
+                    payload={
+                        "id": "m1",
+                        "from": CHAT_ID,
+                        "body": "leak",
+                        "participant": "4915…@c.us",
+                        "fromMe": False,
+                    },
+                )
+            )
+            await asyncio.sleep(0.3)
+            assert not bursts.pending(CHAT_ID)
+            bursts.set_completion_handler(None)
+
+        asyncio.run(scenario())
+    finally:
+        _logger.remove(handler_id)
+    # The roadmap's tuning data: the operator grepping logs after a
+    # week must find size and hold per burst — both in one line.
+    burst_lines = [line for line in logged if "Burst complete" in line]
+    assert len(burst_lines) == 1, f"expected exactly one flush line, got {burst_lines}"
+    line = burst_lines[0]
+    assert "1 message(s)" in line
+    assert "held " in line
+    # The hold was recorded as a number of seconds (0.2s window plus
+    # scheduling slack); the unit test pins the format, not the value.
+    hold = float(line.split("held ", 1)[1].split("s", 1)[0])
+    assert hold >= 0.2
+
+
+def test_audit_save_action_and_caps(tmp_path: Path) -> None:
+    """save_action appends JSONL under data/audit/<session>/ and caps fields."""
+    from wahabot.core.audit import save_action
+
+    save_action(
+        tmp_path, SESSION, "reply", chat_id=CHAT_ID, reply="x" * 500, message_id="m1"
+    )
+    day = datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d")
+    path = tmp_path / "audit" / SESSION / f"{day}.jsonl"
+    entry = json.loads(path.read_text(encoding="utf-8").strip())
+    assert entry["kind"] == "reply"
+    assert entry["chat_id"] == CHAT_ID
+    assert entry["message_id"] == "m1"
+    # The 500-char reply was capped to the 300-char audit budget.
+    assert len(entry["reply"]) == 300
+    assert entry["at"]
+
+
+def test_audit_write_never_raises(tmp_path: Path) -> None:
+    """A read-only audit dir is logged and swallowed, not raised."""
+    from wahabot.core.audit import save_action
+
+    locked = tmp_path / "audit"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        save_action(locked.parent, SESSION, "silence", chat_id=CHAT_ID)
+    finally:
+        locked.chmod(0o700)
+
+
+def test_tool_outcome_detects_enveloped_failures() -> None:
+    """The audit ok flag reads the tool envelope, not the wrapper prefix.
+
+    Tools report failures as ``{"ok": false, ...}`` envelopes — a
+    refused escalation, a failed send, a fence refusal — which the
+    old "Encountered error" prefix check journaled as successes.
+    """
+    from wahabot.ai.workflow import tool_outcome, tool_outcome_ok
+
+    assert tool_outcome('{"ok": true, "chat": "c"}') == "completed"
+    assert tool_outcome_ok('{"ok": true, "chat": "c"}')
+    assert tool_outcome('{"ok": false, "error": "cooldown"}') == "failed"
+    assert not tool_outcome_ok('{"ok": false, "error": "cooldown"}')
+    assert tool_outcome("Encountered error in tool call: boom") == "failed"
+    assert not tool_outcome_ok("Encountered error in tool call: boom")
+    assert tool_outcome("Tool nope does not exist") == "unknown"
+    assert not tool_outcome_ok("Tool nope does not exist")
+    # A non-JSON success payload (defensive: some tools return prose)
+    # reads as completed, never crashes the audit.
+    assert tool_outcome("done") == "completed"
+
+
+def test_burst_refuses_unresolvable_sender() -> None:
+    """A group message with no participant/author never buffers.
+
+    An empty sender key would pool unrelated participants into one
+    shared buffer — a silent isolation break. The caller runs the
+    event through the normal single-message path instead.
+    """
+    from wahabot.ai import bursts
+
+    async def scenario() -> None:
+        bursts.reset()
+        bursts.configure(inactivity_s=0.2, hold_cap_s=5.0)
+        event = WahaEvent(
+            id="e-no-sender",
+            timestamp=1,
+            event="message",
+            session=SESSION,
+            me={},
+            payload={"id": "m1", "from": CHAT_ID, "body": "leak"},
+        )
+        assert bursts.add_message(event) is False
+        assert not bursts.pending(CHAT_ID)
+        await asyncio.sleep(0.3)
+        assert not bursts.pending(CHAT_ID)
+
+    asyncio.run(scenario())
+    bursts.reset()
+
+
+def test_escalation_cli_rows(tmp_path: Path) -> None:
+    """escalation_entries filters by kind and date, newest first."""
+    from wahabot.cli import escalation_entries
+    from wahabot.core.audit import save_action
+
+    # The writer stamps day files in UTC, so the since boundary is a
+    # UTC date too.
+    today = datetime.datetime.now(tz=datetime.UTC).date()
+    save_action(tmp_path, SESSION, "escalation", chat_id="chat-a", report="first")
+    save_action(tmp_path, SESSION, "reply", chat_id="chat-b", reply="not an escalation")
+    save_action(tmp_path, SESSION, "escalation", chat_id="chat-c", report="second")
+    entries = escalation_entries(tmp_path / "audit" / SESSION, today)
+    assert [entry["chat_id"] for entry in entries] == ["chat-c", "chat-a"]
+
+
+def test_escalation_cli_rows_across_days(tmp_path: Path) -> None:
+    """Newest first across day files, not only within one.
+
+    Files iterate newest-first, appends oldest-first — a single
+    end-flip interleaves days wrongly (yesterday's last entry would
+    outrank today's). Each file's entries must be reversed before
+    joining the newest-first file order.
+    """
+    from wahabot.cli import escalation_entries
+
+    directory = tmp_path / "audit" / SESSION
+    directory.mkdir(parents=True)
+
+    def day_file(name: str, rows: list[tuple[str, str]]) -> None:
+        lines = [
+            json.dumps({"kind": "escalation", "at": f"{name}T{hour}:00", "chat_id": chat})
+            for hour, chat in rows
+        ]
+        (directory / f"{name}.jsonl").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+
+    yesterday = (
+        datetime.datetime.now(tz=datetime.UTC).date() - datetime.timedelta(days=1)
+    ).isoformat()
+    today = datetime.datetime.now(tz=datetime.UTC).date().isoformat()
+    day_file(yesterday, [("08", "old-early"), ("10", "old-late")])
+    day_file(today, [("09", "new-early"), ("11", "new-late")])
+    # A corrupt line (half-written tail) and a stray non-date file
+    # must not hide the readable rows or crash the listing.
+    with (directory / f"{yesterday}.jsonl").open("a", encoding="utf-8") as tail:
+        tail.write('{"kind": "escalation", "at": "trunc')
+    (directory / "stray-notes.jsonl").write_text(
+        json.dumps({"kind": "escalation", "chat_id": "stray"}) + "\n",
+        encoding="utf-8",
+    )
+    since = datetime.datetime.now(tz=datetime.UTC).date() - datetime.timedelta(days=7)
+    entries = escalation_entries(directory, since)
+    assert [entry["chat_id"] for entry in entries] == [
+        "new-late",
+        "new-early",
+        "old-late",
+        "old-early",
+    ]
 
 
 def test_message_kind_audio_and_mimetype_guard() -> None:
@@ -727,12 +962,12 @@ def test_visit_url_plain_page_skips_yt_dlp(unit_settings: Settings) -> None:
         text = "just words"
         headers: ClassVar[dict[str, str]] = {"content-type": "text/html"}
 
+    def fake_fetch(url: str, settings: Settings) -> Any:
+        return FakeResponse()
+
     with (
         unittest.mock.patch("wahabot.ai.tools.visit_url.yt_dlp.YoutubeDL", explode),
-        unittest.mock.patch(
-            "wahabot.ai.tools.visit_url._fetch",
-            lambda url, settings: FakeResponse(),
-        ),
+        unittest.mock.patch("wahabot.ai.tools.visit_url._fetch", fake_fetch),
     ):
         result = json.loads(visit_url(unit_settings, "https://example.com/a"))
     assert result["ok"] is True
@@ -811,12 +1046,12 @@ def test_visit_url_media_downloader_error_falls_back(unit_settings: Settings) ->
         text = "<html>wall</html>"
         headers: ClassVar[dict[str, str]] = {"content-type": "text/html"}
 
+    def fake_fetch(url: str, settings: Settings) -> Any:
+        return FakeResponse()
+
     with (
         unittest.mock.patch("wahabot.ai.tools.visit_url.yt_dlp.YoutubeDL", ExplodingYDL),
-        unittest.mock.patch(
-            "wahabot.ai.tools.visit_url._fetch",
-            lambda url, settings: FakeResponse(),
-        ),
+        unittest.mock.patch("wahabot.ai.tools.visit_url._fetch", fake_fetch),
     ):
         result = json.loads(visit_url(unit_settings, "https://www.instagram.com/p/abc/"))
     assert result["ok"] is True

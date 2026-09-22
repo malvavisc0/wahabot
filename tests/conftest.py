@@ -55,6 +55,7 @@ from wahabot.reactions import (
     register_reaction_handler,
 )
 from wahabot.status import (
+    disarm_recovery_poller,
     register_session_status_handler,
     seed_health,
     set_session_health,
@@ -195,7 +196,9 @@ def _reset_registries() -> Iterator[None]:
     reset_albums()
     bursts_module.reset()
     set_session_health("WORKING")
+    disarm_recovery_poller()
     status_state.llm_healthy = True
+    status_state.llm_timeout_notified = False
     yield
     reset_handlers()
     _echoes.clear()
@@ -208,6 +211,8 @@ def _reset_registries() -> Iterator[None]:
     reset_albums()
     bursts_module.reset()
     status_state.llm_healthy = True
+    status_state.llm_timeout_notified = False
+    disarm_recovery_poller()
 
 
 @pytest.fixture()

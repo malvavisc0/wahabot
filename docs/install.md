@@ -107,6 +107,7 @@ uv run wahabot sessions list                            # list session configs
 uv run wahabot sessions view [--name N] [--raw] [--plain] # show a config, prompt rendered
 uv run wahabot tell "<instruction>" [--session S]       # operator command to the agent
 uv run wahabot forget "<chat-jid>" [--session S]        # wipe one chat's persistent memory
+uv run wahabot escalations [--session S] [--days N]     # list escalations from the audit journal
 uv run wahabot serve [--host H] [--port P] [--reload]   # webhook server
 ```
 
