@@ -383,6 +383,130 @@ def test_album_reassembly() -> None:
     assert not add_album_image(image_event)
 
 
+def test_burst_buffer_state_machine() -> None:
+    """Burst buffering: hold, extend, isolate senders, cap, complete."""
+
+    from wahabot.ai import bursts
+
+    def burst_event(
+        mid: str, body: str, participant: str | None = None, chat: str = CHAT_ID
+    ) -> WahaEvent:
+        payload: dict[str, Any] = {
+            "id": mid,
+            "from": chat,
+            "body": body,
+            "_data": {"type": "chat"},
+        }
+        if participant is not None:
+            payload["participant"] = participant
+            payload["fromMe"] = False
+        return WahaEvent(
+            id=f"evt-{mid}",
+            timestamp=1,
+            event="message",
+            session=SESSION,
+            me={},
+            payload=payload,
+        )
+
+    async def scenario() -> None:
+        bursts.reset()
+        completed: list[str] = []
+
+        async def record(buffer: bursts.BurstBuffer) -> None:
+            completed.append(":".join(buffer.ids()))
+
+        bursts.set_completion_handler(record)
+        # Short windows keep the test fast; the cap is measured from
+        # the first message, so 0.3s inactivity + 0.6s cap exercises
+        # both deadlines.
+        bursts.configure(inactivity_s=0.3, hold_cap_s=0.6)
+
+        key = bursts.burst_key(burst_event("m1", "leak", participant="4915…@c.us"))
+        assert key == (SESSION, CHAT_ID, "4915…@c.us")
+
+        # 1: first message opens the buffer.
+        assert bursts.add_message(burst_event("m1", "leak", participant="4915…@c.us"))
+        # 2: a different participant never joins or extends it.
+        other = burst_event("m2", "I also say something", participant="4916…@c.us")
+        assert bursts.burst_key(other) == (SESSION, CHAT_ID, "4916…@c.us")
+        assert bursts.add_message(other)
+        # 3: same sender extends the window (re-spawned timer).
+        assert bursts.add_message(burst_event("m3", "flat 3B", participant="4915…@c.us"))
+        # 4: a DM sender keys on the chat id itself.
+        dm = burst_event("dm1", "hello", chat="4915…@c.us")
+        assert bursts.burst_key(dm) == (SESSION, "4915…@c.us", "4915…@c.us")
+        assert bursts.add_message(dm)
+
+        # Inactivity window (0.3s) elapses with no new arrivals: three
+        # buffers complete — each sender's burst carries only its own
+        # messages (a different participant never joins the first).
+        await asyncio.sleep(0.5)
+        assert sorted(completed) == ["dm1", "m1:m3", "m2"]
+        assert not bursts.pending(CHAT_ID)
+        bursts.set_completion_handler(None)
+
+    asyncio.run(scenario())
+
+
+def test_burst_hold_cap() -> None:
+    """The cap fires the flush mid-burst even while the sender keeps typing."""
+
+    from wahabot.ai import bursts
+
+    def burst_event(mid: str) -> WahaEvent:
+        return WahaEvent(
+            id=f"evt-{mid}",
+            timestamp=1,
+            event="message",
+            session=SESSION,
+            me={},
+            payload={
+                "id": mid,
+                "from": CHAT_ID,
+                "body": "more",
+                "_data": {"type": "chat"},
+            },
+        )
+
+    async def scenario() -> None:
+        bursts.reset()
+        flushed: list[int] = []
+
+        async def record(buffer: bursts.BurstBuffer) -> None:
+            flushed.append(len(buffer.messages))
+
+        bursts.set_completion_handler(record)
+        # A cap shorter than the inactivity window: the cap must win.
+        bursts.configure(inactivity_s=5.0, hold_cap_s=0.25)
+        assert bursts.add_message(burst_event("m1"))
+        # Keep extending the window with arrivals — the cap still fires.
+        await asyncio.sleep(0.15)
+        assert bursts.add_message(burst_event("m2"))
+        await asyncio.sleep(0.2)
+        assert flushed and flushed[0] == 2
+        bursts.set_completion_handler(None)
+        assert len(flushed) == 1
+
+    asyncio.run(scenario())
+
+
+def test_burst_rejects_unconfigured() -> None:
+    """Without configure() the buffer refuses to consume messages."""
+    from wahabot.ai import bursts
+
+    bursts.reset()
+    event = WahaEvent(
+        id="e-unconfigured",
+        timestamp=1,
+        event="message",
+        session=SESSION,
+        me={},
+        payload={"id": "m1", "from": CHAT_ID, "body": "leak"},
+    )
+    assert bursts.add_message(event) is False
+
+
 def test_message_kind_audio_and_mimetype_guard() -> None:
     ptt = WahaEvent(
         id="e5",

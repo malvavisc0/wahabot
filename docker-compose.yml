@@ -25,6 +25,11 @@ services:
       WAHABOT_VIDEO: ${WAHABOT_VIDEO:-true}
       WAHABOT_MAX_VIDEO_BYTES: ${WAHABOT_MAX_VIDEO_BYTES:-67108864}
       WAHABOT_VIDEO_FRAMES: ${WAHABOT_VIDEO_FRAMES:-6}
+      # Multi-message burst assembly — one agent turn per same-sender
+      # burst (off keeps the pre-burst per-message behavior).
+      WAHABOT_BURST_ENABLED: ${WAHABOT_BURST_ENABLED:-false}
+      WAHABOT_BURST_INACTIVITY_S: ${WAHABOT_BURST_INACTIVITY_S:-8.0}
+      WAHABOT_BURST_HOLD_CAP_S: ${WAHABOT_BURST_HOLD_CAP_S:-30.0}
       # Optional.
       WAHABOT_TIMEZONE: ${WAHABOT_TIMEZONE:-UTC}
       WAHABOT_LOG_LEVEL: ${WAHABOT_LOG_LEVEL:-INFO}

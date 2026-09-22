@@ -594,6 +594,54 @@ def test_album_reply_types_before_sending(bot: Bot) -> None:
     assert typing_bot.waha.sent[0][2] == "smoke final answer"
 
 
+def test_burst_assembles_one_turn(bot: Bot) -> None:
+    """A same-sender burst becomes ONE agent turn, not one run per line.
+
+    Three rapid messages from one DM sender — the roadmap's leak
+    example — must produce a single agent run whose user turn carries
+    all three bodies joined, not three premature runs. The read
+    receipt still fires per message at arrival.
+    """
+    llm = bot.stack.llm
+    # Short windows so the test doesn't wait the production 8s; the
+    # inactivity reset logic is the same at any scale.
+    burst_bot = bot.rebuild(
+        burst_enabled=True,
+        burst_inactivity_s=0.4,
+        burst_hold_cap_s=5.0,
+        send_seen=False,
+    )
+    llm = burst_bot.stack.llm
+    chat = "491555000001@c.us"
+    for i, line in enumerate(["there is a leak", "flat 3B", "near the panel"]):
+        burst_bot.post(chat_event(body=line, mid=f"BURST{i}", chat=chat))
+    assert _wait(lambda: len(llm.requests) >= 2)
+    # One agent run = the tool-call round plus the final round (the
+    # fake LLM's FirstResponse delivers via send_message). Per-message
+    # runs would already have produced six requests by now.
+    agent_requests = [r for r in llm.requests if not is_caption_request(r)]
+    assert len(agent_requests) == 2
+    user_turns = [m for m in agent_requests[0]["messages"] if m.get("role") == "user"]
+    turn_text = (
+        user_turns[-1]["content"]
+        if isinstance(user_turns[-1]["content"], str)
+        else str(user_turns[-1]["content"])
+    )
+    assert "there is a leak" in turn_text
+    assert "flat 3B" in turn_text
+    assert "near the panel" in turn_text
+
+
+def test_burst_disabled_runs_per_message(bot: Bot) -> None:
+    """burst_enabled=False keeps the pre-burst behavior: one run each."""
+    plain_bot = bot.rebuild(burst_enabled=False)
+    llm = plain_bot.stack.llm
+    chat = "491555000001@c.us"
+    for i in range(2):
+        plain_bot.post(chat_event(body=f"line {i}", mid=f"NOBURST{i}", chat=chat))
+    assert _wait(lambda: len(llm.requests) >= 2)
+
+
 @requires_ffmpeg
 def test_video_understanding(bot: Bot) -> None:
     llm = bot.stack.llm

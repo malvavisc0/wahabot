@@ -136,6 +136,21 @@ class Settings(BaseSettings):
     #: does. Failures are swallowed (presence must never break a run).
     send_seen: bool = True
 
+    #: Multi-message burst assembly (see docs/plans/commercial-roadmap.md,
+    #: "Multi-Message Turns"): hold same-sender messages in a per-chat
+    #: buffer so "leak" + "flat 3B" + [video] becomes one agent turn.
+    #: Off → every message runs the agent immediately (pre-burst
+    #: behavior). Ships off so existing deployments keep their
+    #: behavior until they opt in.
+    burst_enabled: bool = False
+    #: Seconds of inactivity after the latest buffered message before
+    #: the burst flushes. Reset by every same-sender message, so a
+    #: gap-y burst still holds; tuned from measured live bursts.
+    burst_inactivity_s: float = 8.0
+    #: Total hold cap from the FIRST buffered message (anti-abuse
+    #: ceiling): a sender cannot defer the bot's response indefinitely.
+    burst_hold_cap_s: float = 30.0
+
     #: WhisperX transcription service (base URL, e.g. http://host:9191).
     #: Empty disables voice-note transcription entirely (the feature is
     #: on only when the URL is set).

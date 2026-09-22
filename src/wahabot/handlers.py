@@ -14,6 +14,7 @@ from llama_index.core.workflow import Context
 from loguru import logger
 from PIL import Image
 
+from wahabot.ai import bursts
 from wahabot.ai.albums import (
     AlbumBuffer,
     add_album_image,
@@ -141,6 +142,62 @@ def log_final_text(chat_id: str, reply: str) -> None:
             chat_id=chat_id,
             reply=reply[:500],
         )
+
+
+async def finish_agent_reply(
+    waha: WahaClient,
+    session: str,
+    chat_id: str,
+    message_id: str,
+    reply: str,
+    delivered: bool,
+    settings: Settings,
+    emoji_reaction: bool = False,
+) -> None:
+    """Deliver a finished run's reply text, or record why not.
+
+    Shared post-run decision of the single-message and burst paths:
+    tool-delivered runs log their dropped final text; silence stays
+    silent; anything else is quote-replied to *message_id* with the
+    typing presence. A lone emoji is not an answer — the burst path
+    drops it as silence, while the single-message path
+    (``emoji_reaction``) randomly converts it into a reaction (~50 %).
+    """
+    if delivered:
+        log_final_text(chat_id, reply)
+        return
+    if not reply or not reply.strip():
+        logger.info("Agent decision for {chat_id}: stay silent", chat_id=chat_id)
+        return
+    if is_single_emoji(reply):
+        emoji = reply.strip()
+        if emoji_reaction and random.random() < 0.5:
+            logger.info(
+                "Converting lone emoji to reaction on {mid}: {emoji}",
+                mid=message_id,
+                emoji=emoji,
+            )
+            await asyncio.to_thread(waha.send_reaction, session, message_id, emoji)
+            return
+        logger.info(
+            "Dropping lone emoji as silence for {chat_id}: {reply!r}",
+            chat_id=chat_id,
+            reply=reply,
+        )
+        return
+    logger.info("Replying to {chat_id}: {reply}", chat_id=chat_id, reply=reply[:500])
+    await asyncio.to_thread(
+        deliver_chat_text,
+        waha,
+        session,
+        chat_id,
+        reply,
+        message_id,
+        typing=(
+            settings.typing_presence_min_s,
+            settings.typing_presence_max_s,
+        ),
+    )
 
 
 async def send_self_reply(waha: WahaClient, command: WahaEvent, reply: str) -> None:
@@ -462,6 +519,10 @@ def register_agent_handler(
     config = load_session_config(settings.access_config)
     config_reloader = SessionConfigReloader(settings.access_config)
     enable_langfuse(settings)
+    if settings.burst_enabled:
+        bursts.configure(settings.burst_inactivity_s, settings.burst_hold_cap_s)
+    else:
+        bursts.set_completion_handler(None)
 
     async def run_album(buffer: AlbumBuffer) -> None:
         """Run the agent once over a completed album, all images attached.
@@ -568,6 +629,171 @@ def register_agent_handler(
             )
 
     set_completion_handler(run_album)
+
+    async def run_burst(buffer: bursts.BurstBuffer) -> None:
+        """Run the agent once over a completed burst, all messages joined.
+
+        Fire-and-forget from the burst buffer, so failures must be
+        caught here or they would die silently in an unretrieved task:
+        the exception is logged with traceback and every buffered
+        message's seen marker is dropped so WAHA's redelivery
+        reprocesses them through the normal path — a burst never
+        disappears, mirroring the single-message and album paths.
+        """
+        try:
+            await deliver_burst_reply(buffer)
+        except Exception as exc:
+            for burst_id in buffer.ids():
+                forget_seen(burst_id)
+            if llm_endpoint_down(exc):
+                # Same contract as the chat path: an outage-class
+                # failure notifies the operator (once per transition)
+                # and the dropped seen markers let WAHA's redelivery
+                # retry the whole burst once the provider is back.
+                await mark_llm_unreachable(waha, buffer.key[0], exc)
+                return
+            logger.exception(
+                "Failed to handle burst in {chat_id}",
+                chat_id=buffer.key[1],
+            )
+
+    async def prepare_burst_media(
+        burst_event: WahaEvent,
+        images: list[dict[str, Any]],
+    ) -> str | None:
+        """One buffered message's media prep; its text body, or None.
+
+        Matches the single-message path exactly — voice transcription,
+        image download + caption, video frames + transcript — plus the
+        URL-video path a plain text line can carry. Mutates the event's
+        body (transcript / video marker) and appends image blocks; all
+        stages are fail-soft like their single-message twins.
+        """
+        body = None
+        if message_kind(burst_event) == "audio" and settings.transcribe_url:
+            transcript = await transcribe_voice_note(burst_event, waha, settings)
+            if transcript:
+                burst_event.payload["body"] = f"[voice note] {transcript}"
+        body = extract_text(burst_event)
+        if message_kind(burst_event) in ("image", "sticker") and settings.vision:
+            media = image_media(burst_event)
+            if media is not None:
+                image = await asyncio.to_thread(
+                    download_image,
+                    waha,
+                    media,
+                    str(burst_event.payload.get("id", "")),
+                    settings.max_image_bytes,
+                )
+                if image is not None:
+                    # Caption before the lock: the vision call must
+                    # not extend the serialized agent-run section.
+                    captions = await caption_images(
+                        agent.llm, [image], semaphore=agent.llm_semaphore
+                    )
+                    image["caption"] = captions[0]
+                    images.append(image)
+        if message_kind(burst_event) in ("video", "ptv") and settings.video:
+            video = (
+                await prepare_video(
+                    burst_event, waha, settings, agent.llm, agent.llm_semaphore
+                )
+                if settings.vision
+                else None
+            )
+            if video is not None:
+                burst_event.payload["body"] = join_anchor(body or "", video["marker"])
+                body = burst_event.payload["body"]
+                images.extend(video["frames"])
+        url_video = None
+        if (
+            settings.video
+            and settings.vision
+            and settings.max_url_videos > 0
+            and message_kind(burst_event) not in ("video", "ptv")
+            and body
+        ):
+            # A media URL in a text line gets the same frames +
+            # transcript treatment as a forwarded video — the
+            # single-message path (prepare_url_video) runs only when
+            # no WAHA video attached, so the same exclusion holds.
+            url_video = await prepare_url_video(
+                settings, agent.llm, agent.llm_semaphore, body
+            )
+            if url_video is not None:
+                body = join_anchor(body, url_video["marker"])
+                burst_event.payload["body"] = body
+                images.extend(url_video["frames"])
+        return body
+
+    async def deliver_burst_reply(buffer: bursts.BurstBuffer) -> None:
+        """Prepare each buffered message's media, run the agent once.
+
+        One ``handle_message`` call over a merged turn whose text joins
+        every message's body — each part annotated with its original
+        message id so quoting, audit and evidence links survive the
+        merge (roadmap "Multi-Message Turns", requirement 5). Media
+        rides as image blocks; quote/reply targets the LAST buffered
+        message (the natural anchor for a reply to a burst).
+        """
+        if not buffer.messages:
+            return
+        last = buffer.messages[-1]
+        chat_id = buffer.key[1]
+        images: list[dict[str, Any]] = []
+        parts: list[str] = []
+        for burst_event in buffer.messages:
+            body = await prepare_burst_media(burst_event, images)
+            if body is None:
+                continue
+            if burst_event is last:
+                # The anchor's own id rides handle_message's
+                # message_id_note on the merged event — annotating it
+                # here too would duplicate it in the turn text. Safe
+                # to skip: a per-part note only ever fires when
+                # payload.id is non-empty, and message_id_note falls
+                # back to that same payload.id, so the id is always
+                # stamped exactly once.
+                parts.append(body)
+                continue
+            part_id = str(burst_event.payload.get("id", ""))
+            parts.append(f"{body}\n[message id: {part_id}]" if part_id else body)
+        if not parts and not images:
+            logger.debug("Burst in {chat_id} yielded no usable content", chat_id=chat_id)
+            return
+        merged = last.model_copy(deep=True)
+        merged.payload["id"] = str(last.payload.get("id", ""))
+        merged.payload["body"] = "\n".join(parts)
+        merged.payload["hasMedia"] = bool(images)
+        # A burst turn must not inherit one member's quote context —
+        # the quoted-message context of any single member is its
+        # member's context, not the burst's.
+        merged.payload.pop("replyTo", None)
+        merged.payload.get("_data", {}).pop("quotedMsg", None)
+        message_id = str(last.payload.get("id", ""))
+        async with chat_lock(merged.session, chat_id):
+            ctx = await context_for(merged.session, chat_id, agent, settings)
+            with chat_trace_attributes(chat_id):
+                reply, target = await handle_message(
+                    merged,
+                    agent,
+                    ctx=ctx,
+                    images=images or None,
+                    settings=settings,
+                    waha=waha,
+                )
+            await persist_memory(settings, merged.session, chat_id, ctx)
+            delivered = bool(target.sent or target.reacted)
+        # The provider answered: flip the LLM health flag back up
+        # (once-per-transition notify) outside the chat lock — the
+        # burst path shares the single-message path's contract.
+        await mark_llm_recovered(waha, merged.session)
+        await finish_agent_reply(
+            waha, merged.session, chat_id, message_id, reply, delivered, settings
+        )
+
+    if settings.burst_enabled:
+        bursts.set_completion_handler(run_burst)
 
     def render_prompt() -> str:
         """Re-render ``{{date}}``/``{{time}}`` and pick up config edits.
@@ -741,10 +967,20 @@ def register_agent_handler(
             # The read receipt answers *their* message, not the bot's
             # reply — it goes out even when the run later stays silent.
             # Runs before the media prep so long downloads can't delay
-            # it into meaninglessness.
+            # it into meaninglessness. Also before burst buffering:
+            # holding the message must never hold the read receipt.
             await asyncio.to_thread(
                 mark_seen, waha, event.session, str(event.payload["from"])
             )
+        if settings.burst_enabled and bursts.is_bufferable(event):
+            # Burst assembly: hold this message for its sender's window
+            # instead of running the agent now. Only messages that
+            # already passed every gate above reach here (the doc's
+            # "only messages that would wake the bot enter the
+            # buffer"); albums never reach this line (the album
+            # branches above), and unknown kinds run the pre-burst path.
+            bursts.add_message(event)
+            return
         if message_kind(event) == "audio" and settings.transcribe_url:
             transcript = await transcribe_voice_note(event, waha, settings)
             if transcript:
@@ -823,49 +1059,15 @@ def register_agent_handler(
                     "Agent decision for {chat_id}: delivered via tool",
                     chat_id=chat_id,
                 )
-                log_final_text(chat_id, reply)
-                return
-            if not reply or not reply.strip():
-                logger.info("Agent decision for {chat_id}: stay silent", chat_id=chat_id)
-                return
-            if is_single_emoji(reply):
-                # Model output a lone emoji as text instead of calling
-                # react_to_message or stay_silent.  Randomly convert it
-                # into a reaction (~50 %) or drop it as silence.
-                emoji = reply.strip()
-                if random.random() < 0.5:
-                    logger.info(
-                        "Converting lone emoji to reaction on {mid}: {emoji}",
-                        mid=message_id,
-                        emoji=emoji,
-                    )
-                    await asyncio.to_thread(
-                        waha.send_reaction,
-                        event.session,
-                        message_id,
-                        emoji,
-                    )
-                else:
-                    logger.info(
-                        "Dropping lone emoji as silence for {chat_id}: {reply!r}",
-                        chat_id=chat_id,
-                        reply=reply,
-                    )
-                return
-            logger.info(
-                "Replying to {chat_id}: {reply}", chat_id=chat_id, reply=reply[:500]
-            )
-            await asyncio.to_thread(
-                deliver_chat_text,
+            await finish_agent_reply(
                 waha,
                 event.session,
                 chat_id,
-                reply,
                 message_id,
-                typing=(
-                    settings.typing_presence_min_s,
-                    settings.typing_presence_max_s,
-                ),
+                reply,
+                delivered,
+                settings,
+                emoji_reaction=True,
             )
         except Exception as exc:
             if llm_endpoint_down(exc):

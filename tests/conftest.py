@@ -35,6 +35,7 @@ from tests.harness import (
     smoke_settings,
     write_session_config,
 )
+from wahabot.ai import bursts as bursts_module
 from wahabot.ai.albums import reset as reset_albums
 from wahabot.ai.context import roster_cache
 from wahabot.commands import register_command_handler
@@ -192,6 +193,7 @@ def _reset_registries() -> Iterator[None]:
     runs_contexts.clear()
     roster_cache.clear()
     reset_albums()
+    bursts_module.reset()
     set_session_health("WORKING")
     status_state.llm_healthy = True
     yield
@@ -204,6 +206,7 @@ def _reset_registries() -> Iterator[None]:
     runs_contexts.clear()
     roster_cache.clear()
     reset_albums()
+    bursts_module.reset()
     status_state.llm_healthy = True
 
 

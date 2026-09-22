@@ -685,8 +685,12 @@ def smoke_settings(data_dir: Path, llm_base: str) -> Settings:
     The Langfuse fields are pinned empty because pydantic-settings
     still reads process env vars even with `_env_file=None` — a
     developer shell with real LANGFUSE_* keys would otherwise arm the
-    OTel exporter and every test run would ship fake-LLM traces to
-    the real Langfuse instance.
+    OTel exporter and every test run would ship fake-LLM traces to the
+    real Langfuse instance.
+
+    Burst assembly is pinned OFF so single-message wire tests keep the
+    immediate-run semantics they assert; the burst tests opt in via
+    ``bot.rebuild(burst_enabled=True, …)`` with short windows.
     """
     return Settings(
         webhook_hmac_key="smoke-hmac-key",
@@ -698,6 +702,7 @@ def smoke_settings(data_dir: Path, llm_base: str) -> Settings:
         session=SESSION,
         data_dir=data_dir,
         transcribe_url="http://whisper.invalid",
+        burst_enabled=False,
         langfuse_public_key="",
         langfuse_secret_key="",
         langfuse_tracing_environment="test",
