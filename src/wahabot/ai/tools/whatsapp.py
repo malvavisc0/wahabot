@@ -48,6 +48,7 @@ from wahabot.ai.tools.schemas import (
     SendVoiceSchema,
     StaySilentSchema,
 )
+from wahabot.core.audit import save_action
 from wahabot.core.echoes import remember_self_echo
 from wahabot.core.jid import chat_from_message_id, roster_entries, same_chat
 from wahabot.core.presence import clear_typing, typing_pause
@@ -650,7 +651,9 @@ class EscalationChannel:
         self._last[chat_id] = time.monotonic()
 
 
-def escalate(waha: WahaClient, channel: EscalationChannel) -> BaseTool:
+def escalate(
+    waha: WahaClient, channel: EscalationChannel, settings: Settings
+) -> BaseTool:
     """Build a tool that forwards a report from the chat to the operator.
 
     The one sanctioned way a chat run reaches the operator: the target
@@ -668,6 +671,12 @@ def escalate(waha: WahaClient, channel: EscalationChannel) -> BaseTool:
     crash the run, and the cooldown is stamped only after a confirmed
     delivery: the error envelope tells the model to say the report
     could NOT be forwarded, never the opposite.
+
+    A confirmed escalation is also persisted as a durable record
+    (``kind: "escalation"`` in the audit journal) — the seed of the
+    roadmap's case layer: an escalation becomes a row an operator can
+    review after the chat notification scrolled away, not just a
+    message.
     """
 
     def escalate_fn(report: str, reason: str = "") -> str:
@@ -709,6 +718,17 @@ def escalate(waha: WahaClient, channel: EscalationChannel) -> BaseTool:
             )
         track_self_echo(sent_id, "Escalation")
         channel.stamp(chat_id)
+        # Durable record after the confirmed send — the audit journal's
+        # fail-soft write never breaks the escalation.
+        save_action(
+            settings.data_dir,
+            target.session,
+            "escalation",
+            chat_id=chat_id,
+            report=report,
+            sent_id=sent_id,
+            status="open",
+        )
         logger.info(
             "Escalated from {chat_id} to operator: {report}",
             chat_id=chat_id,

@@ -22,7 +22,12 @@ from wahabot.ai.albums import (
     set_completion_handler,
     start_album,
 )
-from wahabot.ai.context import handle_message, is_single_emoji, render_system_prompt
+from wahabot.ai.context import (
+    handle_message,
+    is_single_emoji,
+    message_id_note,
+    render_system_prompt,
+)
 from wahabot.ai.messages import (
     bot_jids,
     extract_text,
@@ -42,6 +47,7 @@ from wahabot.ai.video import caption_video, extract_frames, join_anchor, video_m
 from wahabot.ai.vision import caption_images
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
 from wahabot.core.access import SessionConfigReloader, load_session_config
+from wahabot.core.audit import save_action
 from wahabot.core.cache import TtlCache
 from wahabot.core.echoes import is_self_echo, remember_self_echo
 from wahabot.core.filters import chat_allowed, jid_alias_lookup
@@ -52,9 +58,10 @@ from wahabot.core.transcribe import fetch_transcript, transcribe_voice_note
 from wahabot.core.waha import MediaTooLargeError, WahaClient
 from wahabot.settings import Settings
 from wahabot.status import (
-    llm_endpoint_down,
+    classify_llm_failure,
+    llm_call_timed_out,
     mark_llm_recovered,
-    mark_llm_unreachable,
+    probe_session_recovery,
     session_healthy,
 )
 from wahabot.status import state as status_state
@@ -144,6 +151,44 @@ def log_final_text(chat_id: str, reply: str) -> None:
         )
 
 
+def journal_send_failure(
+    settings: Settings,
+    session: str,
+    chat_id: str,
+    action: str,
+    message_id: str,
+    exc: Exception,
+) -> None:
+    """Journal a failed final-reply send (roadmap: "journal everything").
+
+    The single, burst and album reply paths share this: a send that
+    raised left nothing in the chat, so the audit row must say the
+    send *failed* — never a ``reply``/``reaction`` record the chat
+    never saw (the same standard the durable escalation record set:
+    the record follows the confirmed send).
+    """
+    save_action(
+        settings.data_dir,
+        session,
+        "send_failed",
+        chat_id=chat_id,
+        action=action,
+        message_id=message_id,
+        error=str(exc),
+    )
+    logger.warning(
+        "Failed to deliver reply to {chat_id} via {action}: {exc}",
+        chat_id=chat_id,
+        action=action,
+        exc=exc,
+    )
+
+
+def album_message_id(event: WahaEvent) -> str:
+    """The album container's message id — the anchor its reply quotes."""
+    return str(event.payload.get("id", ""))
+
+
 async def finish_agent_reply(
     waha: WahaClient,
     session: str,
@@ -156,29 +201,60 @@ async def finish_agent_reply(
 ) -> None:
     """Deliver a finished run's reply text, or record why not.
 
-    Shared post-run decision of the single-message and burst paths:
-    tool-delivered runs log their dropped final text; silence stays
-    silent; anything else is quote-replied to *message_id* with the
-    typing presence. A lone emoji is not an answer — the burst path
-    drops it as silence, while the single-message path
+    Shared post-run decision of the single-message, burst and album
+    paths: tool-delivered runs log their dropped final text; silence
+    stays silent; anything else is quote-replied to *message_id* with
+    the typing presence. A lone emoji is not an answer — the burst
+    path drops it as silence, while the single-message path
     (``emoji_reaction``) randomly converts it into a reaction (~50 %).
+
+    Every branch journals its decision (roadmap: "journal everything")
+    — the audit timeline shows *why* a chat saw nothing: delivered via
+    tool, silence, or a dropped emoji. Records for actions that send
+    (``reply``, ``reaction``) are written only after the send
+    succeeded — the same standard the durable escalation record set —
+    so a failed send never leaves an audit row claiming the chat was
+    answered; its failure is journaled as ``send_failed`` instead.
     """
     if delivered:
+        logger.info(
+            "Agent decision for {chat_id}: delivered via tool",
+            chat_id=chat_id,
+        )
+        save_action(settings.data_dir, session, "delivered_via_tool", chat_id=chat_id)
         log_final_text(chat_id, reply)
         return
     if not reply or not reply.strip():
+        save_action(settings.data_dir, session, "silence", chat_id=chat_id)
         logger.info("Agent decision for {chat_id}: stay silent", chat_id=chat_id)
         return
     if is_single_emoji(reply):
         emoji = reply.strip()
-        if emoji_reaction and random.random() < 0.5:
+        if emoji_reaction and message_id and random.random() < 0.5:
             logger.info(
                 "Converting lone emoji to reaction on {mid}: {emoji}",
                 mid=message_id,
                 emoji=emoji,
             )
-            await asyncio.to_thread(waha.send_reaction, session, message_id, emoji)
+            try:
+                await asyncio.to_thread(waha.send_reaction, session, message_id, emoji)
+            except Exception as exc:
+                journal_send_failure(
+                    settings, session, chat_id, "send_reaction", message_id, exc
+                )
+                return
+            save_action(
+                settings.data_dir,
+                session,
+                "reaction",
+                chat_id=chat_id,
+                reaction=emoji,
+                message_id=message_id,
+            )
             return
+        save_action(
+            settings.data_dir, session, "silence", chat_id=chat_id, dropped_emoji=emoji
+        )
         logger.info(
             "Dropping lone emoji as silence for {chat_id}: {reply!r}",
             chat_id=chat_id,
@@ -186,17 +262,29 @@ async def finish_agent_reply(
         )
         return
     logger.info("Replying to {chat_id}: {reply}", chat_id=chat_id, reply=reply[:500])
-    await asyncio.to_thread(
-        deliver_chat_text,
-        waha,
+    try:
+        await asyncio.to_thread(
+            deliver_chat_text,
+            waha,
+            session,
+            chat_id,
+            reply,
+            message_id,
+            typing=(
+                settings.typing_presence_min_s,
+                settings.typing_presence_max_s,
+            ),
+        )
+    except Exception as exc:
+        journal_send_failure(settings, session, chat_id, "send_text", message_id, exc)
+        return
+    save_action(
+        settings.data_dir,
         session,
-        chat_id,
-        reply,
-        message_id,
-        typing=(
-            settings.typing_presence_min_s,
-            settings.typing_presence_max_s,
-        ),
+        "reply",
+        chat_id=chat_id,
+        message_id=message_id,
+        reply=reply,
     )
 
 
@@ -585,48 +673,26 @@ def register_agent_handler(
                 )
             await persist_memory(settings, event.session, chat_id, ctx)
             if target.sent or target.reacted:
-                log_final_text(chat_id, reply)
+                await finish_agent_reply(
+                    waha,
+                    event.session,
+                    chat_id,
+                    album_message_id(event),
+                    reply,
+                    True,
+                    settings,
+                )
                 return
-        if reply and reply.strip():
-            album_mid = str(event.payload.get("id", ""))
-            if is_single_emoji(reply):
-                emoji = reply.strip()
-                if random.random() < 0.5 and album_mid:
-                    logger.info(
-                        "Converting album lone emoji to reaction on {mid}: {emoji}",
-                        mid=album_mid,
-                        emoji=emoji,
-                    )
-                    await asyncio.to_thread(
-                        waha.send_reaction,
-                        event.session,
-                        album_mid,
-                        emoji,
-                    )
-                else:
-                    logger.info(
-                        "Dropping album lone emoji as silence for {chat_id}: {reply!r}",
-                        chat_id=chat_id,
-                        reply=reply,
-                    )
-                return
-            logger.info(
-                "Replying to album in {chat_id}: {reply}",
-                chat_id=chat_id,
-                reply=reply[:500],
-            )
-            await asyncio.to_thread(
-                deliver_chat_text,
-                waha,
-                event.session,
-                chat_id,
-                reply,
-                album_mid,
-                typing=(
-                    settings.typing_presence_min_s,
-                    settings.typing_presence_max_s,
-                ),
-            )
+        await finish_agent_reply(
+            waha,
+            event.session,
+            chat_id,
+            album_message_id(event),
+            reply,
+            False,
+            settings,
+            emoji_reaction=True,
+        )
 
     set_completion_handler(run_album)
 
@@ -645,17 +711,19 @@ def register_agent_handler(
         except Exception as exc:
             for burst_id in buffer.ids():
                 forget_seen(burst_id)
-            if llm_endpoint_down(exc):
-                # Same contract as the chat path: an outage-class
-                # failure notifies the operator (once per transition)
-                # and the dropped seen markers let WAHA's redelivery
-                # retry the whole burst once the provider is back.
-                await mark_llm_unreachable(waha, buffer.key[0], exc)
-                return
-            logger.exception(
-                "Failed to handle burst in {chat_id}",
-                chat_id=buffer.key[1],
+            # Same failure classes as the chat path: a timeout or an
+            # outage notifies cleanly (never the false "unreachable"
+            # narrative for a mere slow generation); anything else is
+            # a bug with the full traceback. The dropped seen markers
+            # let WAHA's redelivery retry the whole burst either way.
+            failure_class = await classify_llm_failure(
+                waha, buffer.key[0], exc, settings.llm_timeout
             )
+            if failure_class == "bug":
+                logger.exception(
+                    "Failed to handle burst in {chat_id}",
+                    chat_id=buffer.key[1],
+                )
 
     async def prepare_burst_media(
         burst_event: WahaEvent,
@@ -751,13 +819,13 @@ def register_agent_handler(
                 # message_id_note on the merged event — annotating it
                 # here too would duplicate it in the turn text. Safe
                 # to skip: a per-part note only ever fires when
-                # payload.id is non-empty, and message_id_note falls
-                # back to that same payload.id, so the id is always
-                # stamped exactly once.
+                # message_id_note finds an id, and the same lookup
+                # backs the anchor, so the id is always stamped
+                # exactly once.
                 parts.append(body)
                 continue
-            part_id = str(burst_event.payload.get("id", ""))
-            parts.append(f"{body}\n[message id: {part_id}]" if part_id else body)
+            part_id = message_id_note(burst_event).strip()
+            parts.append(f"{body}\n{part_id}" if part_id else body)
         if not parts and not images:
             logger.debug("Burst in {chat_id} yielded no usable content", chat_id=chat_id)
             return
@@ -846,9 +914,14 @@ def register_agent_handler(
         if not session_healthy():
             # Before seen_recently: a muted message must not be marked
             # seen, so WAHA's redelivery retries it after recovery.
+            # The delivery itself is evidence the session may be back
+            # (a hung WAHA emits nothing) — one cheap probe against
+            # GET /api/sessions decides; the poller arms only if the
+            # status event never arrives (register_session_status_handler).
             logger.info(
                 "Muting message {id} while WAHA session is not WORKING", id=message_id
             )
+            await probe_session_recovery(waha, event.session)
             return
         # Hot-path config: picks up whitelist/prompt/mode edits per event.
         config = config_reloader.current_config()
@@ -911,16 +984,29 @@ def register_agent_handler(
             command.payload["reply_to"] = message_id
             try:
                 reply = await run_command(command, agent, settings, waha)
-            except Exception:
+            except Exception as exc:
                 # Same contract as the chat path: drop the seen marker
                 # so WAHA's redelivery retries the command. Accepted
                 # trade-off: a command that crashed *after* a tool
                 # delivery already went out will deliver it again on
                 # the retry (the at-most-once send latch is per-run) —
                 # the alternative, never retrying, loses the command
-                # outright.
+                # outright. A timeout gets the clean one-line failure
+                # (the 60s default's chained httpx/openai traceback is
+                # noise for a mere slow generation); anything else
+                # keeps the full traceback a bug deserves.
                 forget_seen(message_id)
-                logger.exception("Failed to handle self-chat command {id}", id=message_id)
+                if llm_call_timed_out(exc):
+                    detail = (
+                        f"LLM call timed out after {settings.llm_timeout}s on"
+                        f" self-chat command {message_id} ({settings.llm_model} via"
+                        f" {settings.llm_api_base}); dropped for redelivery"
+                    )
+                    logger.warning("{detail}", detail=detail)
+                else:
+                    logger.exception(
+                        "Failed to handle self-chat command {id}", id=message_id
+                    )
                 return
             try:
                 await send_self_reply(waha, command, reply)
@@ -1054,11 +1140,6 @@ def register_agent_handler(
             # (once-per-transition notify) outside the chat lock, so
             # the notify send never serializes this chat's next run.
             await mark_llm_recovered(waha, event.session)
-            if delivered:
-                logger.info(
-                    "Agent decision for {chat_id}: delivered via tool",
-                    chat_id=chat_id,
-                )
             await finish_agent_reply(
                 waha,
                 event.session,
@@ -1070,16 +1151,18 @@ def register_agent_handler(
                 emoji_reaction=True,
             )
         except Exception as exc:
-            if llm_endpoint_down(exc):
-                # Provider (or its proxy) unreachable — a transient
-                # outage, not a bug. The seen marker is dropped so
-                # WAHA's redelivery retries; the once-per-transition
-                # operator notify lives in status.
-                forget_seen(message_id)
-                await mark_llm_unreachable(waha, event.session, exc)
-                return
-            # Allow WAHA's redelivery of this message to be reprocessed.
+            # Clean failure classes first: a timeout gets one concise
+            # line (the chained httpx/openai traceback is noise for a
+            # mere slow generation), an outage the operator notify —
+            # both with the seen-marker drop so WAHA's redelivery
+            # retries; the run is just as lost either way. Anything
+            # else is a bug: full traceback, also redeliverable.
+            failure_class = await classify_llm_failure(
+                waha, event.session, exc, settings.llm_timeout
+            )
             forget_seen(message_id)
+            if failure_class != "bug":
+                return
             logger.exception(
                 "Failed to handle message {id} in {chat_id} {detail}",
                 id=message_id,

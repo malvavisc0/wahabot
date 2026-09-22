@@ -45,6 +45,7 @@ from wahabot.ai.history import (
 )
 from wahabot.ai.messages import TURN_HANDLED_KWARG
 from wahabot.ai.tools.whatsapp import current_target, log_action_reason
+from wahabot.core.audit import save_action
 from wahabot.settings import Settings
 
 __all__ = [
@@ -180,6 +181,35 @@ async def run_tool_call(
             outcome=outcome,
         )
     return ChatMessage(role="tool", content=content, additional_kwargs=kwargs)
+
+
+def tool_outcome(content: str) -> str:
+    """The audit outcome of a finished tool call: completed/failed/unknown.
+
+    Every tool reports failures as the ``{"ok": false, ...}``
+    envelope (``wahabot.ai.tools.envelope``), so the envelope is the
+    authoritative signal — not the workflow's exception wrapper alone,
+    which would journal a refused or failed send (an ``ok: false``
+    envelope) as a success.
+    """
+    if content.startswith("Encountered error in tool call:"):
+        return "failed"
+    if content.startswith("Tool ") and content.endswith(" does not exist"):
+        return "unknown"
+    try:
+        envelope: Any = json.loads(content)
+    except json.JSONDecodeError:
+        return "completed"
+    if isinstance(envelope, dict):
+        record: dict[str, Any] = envelope
+        if record.get("ok") is False:
+            return "failed"
+    return "completed"
+
+
+def tool_outcome_ok(content: str) -> bool:
+    """Whether a finished tool call succeeded, per :func:`tool_outcome`."""
+    return tool_outcome(content) == "completed"
 
 
 def tool_call_names(message: ChatMessage) -> list[str]:
@@ -414,6 +444,10 @@ class FunctionCallingAgentWorkflow(Workflow):
     #: instead of all hitting the endpoint at once.
     llm_semaphore: asyncio.Semaphore
 
+    #: Settings for the audit journal (data dir + session); None in
+    #: tests that build a bare workflow without settings.
+    settings: Settings | None
+
     def __init__(
         self,
         *args: Any,
@@ -424,6 +458,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         memory_token_limit: int = 8000,
         tool_round_limit: int = 50,
         max_concurrent_llm: int = 4,
+        settings: Settings | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -434,7 +469,31 @@ class FunctionCallingAgentWorkflow(Workflow):
         self.memory_token_limit = memory_token_limit
         self.tool_round_limit = tool_round_limit
         self.llm_semaphore = asyncio.Semaphore(max_concurrent_llm)
+        self.settings = settings
         assert self.llm.metadata.is_function_calling_model
+
+    def audit(self, kind: str, **fields: Any) -> None:
+        """Journal one bot action (roadmap: "journal everything").
+
+        Fail-soft by construction (``save_action`` swallows disk
+        errors), so auditing never breaks a run. No-op without
+        settings — bare test workflows stay silent. The chat id comes
+        from the run-scoped target binding when one is active; tool
+        threads run inside a bound run, so it always is there.
+        """
+        if self.settings is None:
+            return
+        try:
+            chat_id = current_target().chat_id
+        except RuntimeError:
+            chat_id = ""
+        save_action(
+            self.settings.data_dir,
+            self.settings.session,
+            kind,
+            chat_id=chat_id,
+            **fields,
+        )
 
     def rendered_system_prompt(self) -> str | None:
         """The system prompt with ``prompt_renderer`` applied when set."""
@@ -914,13 +973,36 @@ class FunctionCallingAgentWorkflow(Workflow):
             ev.tool_calls, key=lambda call: call.tool_name in DELIVERY_TOOLS
         )
         tool_msgs = [
-            await run_tool_call(tools_by_name, tool_call) for tool_call in ordered_calls
+            await self.run_and_audit_tool_call(tools_by_name, tool_call)
+            for tool_call in ordered_calls
         ]
         memory = await ctx.store.get("memory")
         for msg in tool_msgs:
             await memory.aput(msg)
         await ctx.store.set("memory", memory)
         return InputEvent(input=await self.chat_history(ctx))
+
+    async def run_and_audit_tool_call(
+        self, tools_by_name: dict[str, BaseTool], tool_call: ToolSelection
+    ) -> ChatMessage:
+        """Run one tool call and journal it (roadmap: "journal everything").
+
+        The audit entry carries the tool name, its arguments (the
+        model's *why* included), and the outcome — the fields the
+        operator console's future audit timeline will read. Tool
+        output is capped by the audit module; the full output stays
+        in the run's memory.
+        """
+        message = await run_tool_call(tools_by_name, tool_call)
+        kwargs = dict(tool_call.tool_kwargs)
+        self.audit(
+            "tool_call",
+            tool=tool_call.tool_name,
+            args={key: str(value)[:300] for key, value in kwargs.items()},
+            ok=tool_outcome_ok(str(message.content or "")),
+            outcome=tool_outcome(str(message.content or "")),
+        )
+        return message
 
 
 class ObservableOpenAILike(OpenAILike):
@@ -1006,4 +1088,5 @@ def build_agent(
         timeout=settings.run_timeout or None,
         memory_token_limit=settings.memory_token_limit,
         tool_round_limit=settings.tool_round_limit,
+        settings=settings,
     )
