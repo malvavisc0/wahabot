@@ -63,6 +63,10 @@ class BurstBuffer:
         """The buffered messages' ids, in arrival order."""
         return [str(event.payload.get("id", "")) for event in self.messages]
 
+    def hold_seconds(self) -> float:
+        """Time from the first buffered message to now (monotonic)."""
+        return time.monotonic() - self.first_seen
+
 
 #: Open burst buffers, keyed by (session, chat_id, sender). The sender
 #: is the normalized participant JID in groups (LID groups report
@@ -133,10 +137,18 @@ def add_message(event: WahaEvent) -> bool:
     so a long burst hits the hold cap even while the sender keeps
     typing; the cap fires the flush mid-burst by design — the roadmap
     prefers an early reply over a silent wait.
+
+    Refuses events whose sender cannot be resolved (a group message
+    with neither ``participant`` nor ``_data.author``): an empty
+    sender key would pool unrelated participants into one shared
+    buffer and break per-sender isolation. The caller runs the
+    event through the normal path instead.
     """
     if _inactivity_s is None or _hold_cap_s is None:
         return False
     key = burst_key(event)
+    if not key[2]:
+        return False
     buffer = _bursts.get(key)
     if buffer is None:
         buffer = BurstBuffer(key=key, sender=key[2])
@@ -186,11 +198,18 @@ def _complete(buffer: BurstBuffer) -> None:
     """Hand a finished buffer to the completion handler, if any."""
     if _on_complete is None or not buffer.messages:
         return
+    # The roadmap's tuning data: log every burst's size and total hold
+    # duration so the pilot's live measurements — not the 8s/30s
+    # guesses — set the inactivity window and the hold cap. The hold
+    # includes the trailing inactivity window (the flush fires after
+    # it), so the sender's actual typing span is roughly
+    # ``hold - burst_inactivity_s`` — subtract the knob when tuning.
     logger.info(
-        "Burst complete in {chat_id}: {n} message(s) from {sender}",
+        "Burst complete in {chat_id}: {n} message(s) from {sender}, held {hold:.1f}s",
         chat_id=buffer.key[1],
         n=len(buffer.messages),
         sender=buffer.sender,
+        hold=buffer.hold_seconds(),
     )
     _spawn(_on_complete(buffer))
 
