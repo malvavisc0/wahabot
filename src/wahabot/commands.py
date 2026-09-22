@@ -22,14 +22,15 @@ from loguru import logger
 from wahabot.ai.context import handle_message
 from wahabot.ai.observability import chat_trace_attributes
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+from wahabot.core.audit import save_action
 from wahabot.core.models import WahaEvent
 from wahabot.core.runs import chat_lock, context_for, persist_memory
 from wahabot.core.waha import WahaClient
 from wahabot.settings import Settings
 from wahabot.status import (
-    llm_endpoint_down,
+    classify_llm_failure,
     mark_llm_recovered,
-    mark_llm_unreachable,
+    probe_session_recovery,
     session_healthy,
 )
 from wahabot.webhook import on_command
@@ -91,7 +92,9 @@ async def run_command(
     the caller send it back to the operator's "message yourself" chat
     via ``reply_chat_id``. When the run delivered via a tool instead,
     the caller gets a short delivered-notice so the console is never
-    silent about where the answer went.
+    silent about where the answer went. Either way the decision is
+    journaled to the audit file (roadmap: "journal everything") — an
+    operator command is a bot action too.
     """
     instruction = str(event.payload.get("body", "")).strip()
     if not instruction:
@@ -114,14 +117,13 @@ async def run_command(
                     event, agent, ctx=ctx, settings=settings, waha=waha, armed=True
                 )
             except Exception as exc:
-                # Same outage classification as the chat path. Commands
+                # Same failure classification as the chat path. Commands
                 # have no seen marker to drop (their ids are unique), so
-                # the duties are the flag flip and the notify — and the
-                # exception re-raises: the self-chat caller drops its
-                # own seen marker so the command retries on redelivery,
-                # exactly like every other command failure.
-                if llm_endpoint_down(exc):
-                    await mark_llm_unreachable(waha, event.session, exc)
+                # the duties are the notifies — and the exception
+                # re-raises: the self-chat caller drops its own seen
+                # marker so the command retries on redelivery, exactly
+                # like every other command failure.
+                await classify_llm_failure(waha, event.session, exc, settings.llm_timeout)
                 raise
             await mark_llm_recovered(waha, event.session)
         await persist_memory(settings, event.session, OPERATOR_CHAT_ID, ctx)
@@ -129,11 +131,29 @@ async def run_command(
     if not reply and target.sent and target.sent != OPERATOR_CHAT_ID:
         name = chat_display_name(waha, event.session, target.sent)
         reply = f"✅ done — delivered to {name}"
+    # The audit row names the chat the command acted on — the tool's
+    # delivery target when one fired, else the operator context the
+    # command ran over.
+    acted_chat = target.sent or OPERATOR_CHAT_ID
     if reply:
+        save_action(
+            settings.data_dir,
+            event.session,
+            "operator_reply",
+            chat_id=acted_chat,
+            reply=reply,
+        )
         logger.info(
             "Command {id} final reply: {reply}",
             id=event.payload.get("id"),
             reply=reply[:500],
+        )
+    else:
+        save_action(
+            settings.data_dir,
+            event.session,
+            "operator_silence",
+            chat_id=acted_chat,
         )
     return reply
 
@@ -154,10 +174,15 @@ def register_command_handler(
     async def handle_command(event: WahaEvent) -> None:
         """Run one operator command (concurrently with chat runs)."""
         if not session_healthy():
+            # Same recovery probe as the message path: a delivered
+            # webhook is evidence the session may be back; a WORKING
+            # answer from GET /api/sessions unmutes. Commands carry no
+            # seen marker, so there is nothing to drop for redelivery.
             logger.info(
                 "Muting command {id} while WAHA session is not WORKING",
                 id=event.payload.get("id"),
             )
+            await probe_session_recovery(waha, event.session)
             return
         if event.session != settings.session:
             return
