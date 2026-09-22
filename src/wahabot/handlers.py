@@ -159,7 +159,7 @@ async def send_self_reply(waha: WahaClient, command: WahaEvent, reply: str) -> N
     chat_id = str(command.payload.get("reply_chat_id", ""))
     if not chat_id:
         return
-    sent_id, _ = await asyncio.to_thread(
+    sent_id, _, _ = await asyncio.to_thread(
         deliver_chat_text,
         waha,
         command.session,

@@ -65,6 +65,7 @@ from wahabot.ai.tools.whatsapp import (
     OPERATOR_ARMED,
     OPERATOR_KEY,
     chat_jid,
+    dangling_mentions,
     deliver_chat_text,
     fenced_chat,
     fenced_message_id,
@@ -1890,6 +1891,23 @@ def test_resolve_mentions() -> None:
     assert resolve_mentions("cc @999999999999", roster) == []
 
 
+def test_dangling_mentions() -> None:
+    """``dangling_mentions`` returns exactly the tokens the resolver drops."""
+    roster = ["111222333444555@lid", "491555000001@c.us"]
+    assert dangling_mentions("cc @999999999999 y @111222333444555", roster) == [
+        "999999999999"
+    ]
+    # Stylized tokens dangle — the model's failed tags. A bare @Name is
+    # not token-shaped at all (the regex never extracts it), so it
+    # neither resolves nor dangles.
+    assert dangling_mentions("hey @L@s y @Lorenzo", roster) == ["L@s"]
+    # Duplicates collapse; no tokens means nothing dangles.
+    assert dangling_mentions("@999999999999 y @999999999999", roster) == ["999999999999"]
+    assert dangling_mentions("sin tokens", roster) == []
+    # An empty roster (DMs, outages) leaves every token dangling.
+    assert dangling_mentions("cc @111222333444555", []) == ["111222333444555"]
+
+
 def test_ordered_merge() -> None:
     """Explicit mentions keep their order; resolved additions follow."""
     assert ordered_merge(
@@ -1944,15 +1962,26 @@ def test_deliver_chat_text_resolves_mentions() -> None:
 
     waha = RosterWaha()
     text = "listado vacío, @111222333444555, pero documentado"
-    sent_id, mentions = deliver_chat_text(waha, "default", "123@g.us", text)
+    sent_id, mentions, dangling = deliver_chat_text(waha, "default", "123@g.us", text)
     assert mentions == ["111222333444555@lid"]
+    assert dangling == []
     assert waha.sent == [("default", "123@g.us", text, ["111222333444555@lid"])]
     assert sent_id == "true_123@g.us_SENT1"
     # No tokens naming members: nothing to mention.
-    _, mentions = deliver_chat_text(waha, "default", "123@g.us", "sin menciones aquí")
+    _, mentions, dangling = deliver_chat_text(
+        waha, "default", "123@g.us", "sin menciones aquí"
+    )
     assert mentions == []
+    assert dangling == []
+    # A token naming nobody on the roster dangles — the send still goes
+    # out, and the caller learns which tokens tagged nobody.
+    _, mentions, dangling = deliver_chat_text(
+        waha, "default", "123@g.us", "cc @999999999999 y @L@s"
+    )
+    assert mentions == []
+    assert dangling == ["999999999999", "L@s"]
     # A roster outage fails soft: the text still goes out.
-    _, mentions = deliver_chat_text(BrokenRosterWaha(), "default", "123@g.us", text)
+    _, mentions, _ = deliver_chat_text(BrokenRosterWaha(), "default", "123@g.us", text)
     assert mentions == []
 
 

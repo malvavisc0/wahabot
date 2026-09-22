@@ -538,7 +538,7 @@ def send_message(waha: WahaClient) -> BaseTool:
                 return error(id_error)
         log_action_reason("send_message", reason, chat=chat_id)
         try:
-            sent_id, merged = deliver_chat_text(
+            sent_id, merged, dangling = deliver_chat_text(
                 waha,
                 session,
                 chat_id,
@@ -560,6 +560,12 @@ def send_message(waha: WahaClient) -> BaseTool:
             fields["warning"] = (
                 "no `@name` in the text — WhatsApp pairs each mention JID "
                 "with an `@<name>` token, so nobody was notified"
+            )
+        elif dangling:
+            fields["warning"] = (
+                f"{' and '.join(f'`@{t}`' for t in dangling)} name no "
+                "member of this chat — nobody was notified; resolve_chat "
+                "the person and write `@<user-part>` to tag them"
             )
         return ok(**fields)
 
@@ -1487,6 +1493,23 @@ def resolve_mentions(text: str, roster: list[str]) -> list[str]:
     return resolved
 
 
+def dangling_mentions(text: str, roster: list[str]) -> list[str]:
+    """*text*'s ``@``-tokens naming nobody on *roster*, in token order.
+
+    The counterpart of :func:`resolve_mentions`: the tokens it drops.
+    A dangling token is the model's failed attempt to tag someone —
+    ``@Lorenzo`` for a member whose JID it never looked up, or a
+    stylized ``@L@s`` — and the send's way to tell the model so (the
+    envelope warning), since WhatsApp tags nobody for them.
+    """
+    by_user = {jid.split("@", 1)[0] for jid in roster}
+    return [
+        token
+        for token in dict.fromkeys(mention_tokens(text))
+        if token.split("@", 1)[0] not in by_user
+    ]
+
+
 def chat_roster(waha: WahaClient, session: str, chat_id: str) -> list[str]:
     """The chat's participant JIDs (empty for DMs and unreadable chats).
 
@@ -1535,7 +1558,7 @@ def deliver_chat_text(
     reply_to: str | None = None,
     mentions: list[str] | None = None,
     typing: tuple[float, float] | None = None,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[str]]:
     """Send text with the full delivery treatment.
 
     Every text delivery — the ``send_message`` tool and the handler's
@@ -1552,9 +1575,10 @@ def deliver_chat_text(
     because both delivery paths must type alike; the caller passes the
     settings values, keeping this module settings-free.
 
-    Returns ``(sent_id, merged_mentions)`` — the id of the sent message
-    ("" when the response carried none) and the merged JID list, so a
-    caller with a use for either (the tool's envelope, the echo
+    Returns ``(sent_id, merged_mentions, dangling)`` — the id of the
+    sent message ("" when the response carried none), the merged JID
+    list, and the ``@``-tokens that named no roster member, so a
+    caller with a use for any of them (the tool's envelope, the echo
     guard's id) gets them without a second API call.
     """
     indicator = (
@@ -1565,6 +1589,7 @@ def deliver_chat_text(
     try:
         roster = chat_roster(waha, session, chat_id)
         merged = ordered_merge(mentions or [], resolve_mentions(text, roster))
+        dangling = dangling_mentions(text, roster)
         sent_id = waha.send_text(
             session, chat_id, text, reply_to=reply_to, mentions=merged or None
         )
@@ -1574,7 +1599,7 @@ def deliver_chat_text(
         if indicator:
             clear_typing(waha, session, chat_id)
         raise
-    return sent_id, merged
+    return sent_id, merged, dangling
 
 
 def search_messages(waha: WahaClient) -> BaseTool:
