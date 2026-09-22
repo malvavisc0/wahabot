@@ -28,7 +28,11 @@ from wahabot.core.waha import WahaClient
 from wahabot.handlers import register_agent_handler, register_forget_handler
 from wahabot.reactions import register_reaction_handler
 from wahabot.settings import Settings, get_settings, setup_logging
-from wahabot.status import register_session_status_handler, seed_health
+from wahabot.status import (
+    own_identity,
+    register_session_status_handler,
+    seed_health,
+)
 
 app = typer.Typer(
     name="wahabot",
@@ -266,6 +270,19 @@ def session_list() -> None:
     console.print(_kv_table(rows))
 
 
+def identity_kwargs(settings: Settings) -> dict[str, str]:
+    """The account's own ids for `sessions view`, fetched from WAHA.
+
+    The live handler (``register_agent_handler``) renders with ids
+    from ``status.state``; the view has no runtime state, so it asks
+    WAHA the same way. Unreachable WAHA or a dead session yields
+    empty strings — the prompt render then drops the identity lines,
+    exactly as a mid-recovery server would.
+    """
+    waha = WahaClient(base_url=settings.waha_url, api_key=settings.waha_api_key)
+    return own_identity(waha, settings.session)
+
+
 @sessions_app.command("view")
 def session_view(
     name: str = typer.Option(
@@ -288,7 +305,12 @@ def session_view(
     prompt = config.system_prompt
     if not raw:
         prompt = render_system_prompt(
-            prompt, settings.timezone, config.bot_name, config.goal
+            prompt,
+            settings.timezone,
+            config.bot_name,
+            config.goal,
+            operator_name=config.operator_name,
+            **identity_kwargs(settings),
         )
     console.print(
         _kv_table(
@@ -296,6 +318,7 @@ def session_view(
                 ("session", settings.session),
                 ("group_participation", config.group_participation),
                 ("bot_name", _dash(config.bot_name)),
+                ("operator_name", _dash(config.operator_name)),
                 ("bot_mention_regex", _dash(config.bot_mention_regex)),
                 ("whitelist", _format_list(config.whitelist)),
                 ("blacklist", _format_list(config.blacklist)),

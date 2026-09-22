@@ -588,6 +588,7 @@ def register_agent_handler(
             current.goal,
             own_jid=status_state.operator_jid,
             own_lid=status_state.operator_lid,
+            operator_name=current.operator_name,
         )
 
     # Per-agent escalation state (per-chat cooldowns; the operator JID

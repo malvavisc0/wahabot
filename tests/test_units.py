@@ -2306,6 +2306,25 @@ def test_render_system_prompt_drops_own_jid_line_when_unknown() -> None:
     assert "keep" in out
 
 
+def test_render_system_prompt_substitutes_operator_name() -> None:
+    out = render_system_prompt("Defer to {{operator_name}}.", operator_name="Ada")
+    assert out == "Defer to Ada."
+
+
+def test_render_system_prompt_operator_name_empty_falls_back() -> None:
+    out = render_system_prompt("Defer to {{operator_name}}.")
+    assert out == "Defer to the operator."
+    out = render_system_prompt("Defer to {{operator_name}}.", operator_name="  ")
+    assert out == "Defer to the operator."
+
+
+def test_render_system_prompt_operator_name_in_goal() -> None:
+    out = render_system_prompt(
+        "Rules.", goal="Serve {{operator_name}}", operator_name="Ada"
+    )
+    assert out.startswith("Goal: Serve Ada\n\n")
+
+
 def test_chat_visible_text_filters_leaked_tokens() -> None:
     assert chat_visible_text("stay_silent") == ""
     assert chat_visible_text('{"error": {"message": "boom"}}') == ""

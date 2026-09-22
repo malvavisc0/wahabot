@@ -93,6 +93,26 @@ def seed_health(waha: WahaClient, session: str) -> str:
     return status
 
 
+def own_identity(waha: WahaClient, session: str) -> dict[str, str]:
+    """The account's own ids (``own_jid``/``own_lid``) from WAHA, or empty.
+
+    One fetch shared by every consumer of the account identity: the
+    operator-alert capture at startup/recovery and the CLI's rendered
+    prompt view. A failed fetch returns an empty dict — callers decide
+    what an unknown identity means (status keeps its last value; the
+    prompt render drops the identity lines).
+    """
+    try:
+        me = waha.get_me(session)
+    except Exception as exc:
+        logger.warning("Could not fetch own identity: {exc}", exc=exc)
+        return {}
+    own = str(me.get("id") or "")
+    if not own:
+        return {}
+    return {"own_jid": own, "own_lid": str(me.get("lid") or "")}
+
+
 def capture_operator_target(waha: WahaClient, session: str) -> None:
     """Remember the bot's own JID as the operator-notification target.
 
@@ -102,20 +122,16 @@ def capture_operator_target(waha: WahaClient, session: str) -> None:
     tracking keyed on the same JID) would stay wedged for the process
     lifetime.
     """
-    try:
-        me = waha.get_me(session)
-    except Exception as exc:
-        logger.warning("Could not fetch own JID for operator alerts: {exc}", exc=exc)
+    identity = own_identity(waha, session)
+    if not identity:
         return
-    own = str(me.get("id") or "")
-    if own:
-        state.operator_jid = own
-        state.operator_lid = str(me.get("lid") or "")
-        logger.info(
-            "Operator identity: jid={jid} lid={lid}",
-            jid=own,
-            lid=state.operator_lid or "unknown",
-        )
+    state.operator_jid = identity["own_jid"]
+    state.operator_lid = identity["own_lid"]
+    logger.info(
+        "Operator identity: jid={jid} lid={lid}",
+        jid=state.operator_jid,
+        lid=state.operator_lid or "unknown",
+    )
 
 
 def register_session_status_handler(waha: WahaClient, session: str) -> None:

@@ -55,6 +55,7 @@ def render_system_prompt(
     goal: str = "",
     own_jid: str = "",
     own_lid: str = "",
+    operator_name: str = "",
 ) -> str:
     """Substitute date/time/name/host placeholders in the system prompt.
 
@@ -69,6 +70,8 @@ def render_system_prompt(
     - ``{{time}}`` — time only, e.g. ``14:05``
     - ``{{tz}}`` — the timezone name, e.g. ``UTC``
     - ``{{bot_name}}`` — the bot's display name, e.g. ``Kai``
+    - ``{{operator_name}}`` — the human owning the account the bot
+      runs on, e.g. ``Ada``; empty renders as ``the operator``
     - ``{{host}}`` — a summary of the machine (OS, Python, Node, shell)
     - ``{{own_jid}}`` / ``{{own_lid}}`` / ``{{own_identities}}`` — the
       bot's own WhatsApp ids (see :func:`own_identity_pass)
@@ -90,6 +93,7 @@ def render_system_prompt(
         "{{time}}": now.strftime("%H:%M"),
         "{{tz}}": tz_name,
         "{{bot_name}}": bot_name or "the bot",
+        "{{operator_name}}": operator_name.strip() or "the operator",
         "{{host}}": host_context(),
         "{{operator_tools}}": operator_tools_pass(),
     }

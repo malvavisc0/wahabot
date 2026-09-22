@@ -15,7 +15,11 @@ class SessionConfig(BaseModel):
     always ignored, regardless of the whitelist.
 
     ``bot_name`` is the bot's display name used to detect when a group
-    message is aimed at it (e.g. "Kai"). ``goal`` is an optional
+    message is aimed at it (e.g. "Kai"). ``operator_name`` is the
+    human who owns the WhatsApp account the bot runs on; exposed to
+    the prompt via the ``{{operator_name}}`` placeholder so the bot
+    can defer questions meant for that human (empty renders "the
+    operator"). ``goal`` is an optional
     statement of what the bot should aim for; when set it is prepended
     to the rendered system prompt. ``group_participation``
     controls whether/how the bot joins group conversations:
@@ -34,6 +38,7 @@ class SessionConfig(BaseModel):
     bot_name: str | None = None
     bot_mention_regex: str | None = None
     group_participation: str = "mentioned"
+    operator_name: str = ""
 
 
 def load_session_config(path: Path) -> SessionConfig:
