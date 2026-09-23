@@ -356,12 +356,19 @@ async def handle_message(
     settings: Settings | None = None,
     waha: WahaClient | None = None,
     armed: bool = False,
+    pinned_note: str = "",
 ) -> tuple[str, RunTarget]:
     """Run the agent workflow over an incoming message event.
 
     Returns ``(reply, target)``: the run's final text and its delivery
     target (``sent``/``reacted`` latches), so the caller can tell a
     delivered run from a text reply without touching run-scoped state.
+
+    ``pinned_note`` carries turn-scoped ground truth the *caller*
+    resolved before the run (see :mod:`wahabot.ai.resolve`): it rides
+    the turn text — never memory — so the model starts from facts a
+    mixed history cannot infer (the real chat a command named, its real
+    last message). Empty for every chat-run caller.
 
     ``image`` (single) or ``images`` (an album, already downloaded)
     carry image bytes (``data`` + ``mimetype``); they ride along as
@@ -397,6 +404,7 @@ async def handle_message(
         text = f"{text} {marker}".strip()
     user_msg = text + message_id_note(event)
     user_msg += reply_context_section(message_replies_to(event), names)
+    user_msg += pinned_note
     image_blocks = [
         ImageBlock(
             image=img["data"],

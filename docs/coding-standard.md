@@ -68,6 +68,23 @@ framework registrations it cannot see. Check for a registration site
 before deleting; real dead code (never-read fields, zero-call-site
 functions) goes out in the same pass.
 
+## PII
+Never use or commit PII — not in code, tests, docs, plans, fixtures,
+examples, or commit messages. PII is any real person's or chat's data:
+names, group titles, JIDs, phone numbers, message bodies, voice-note
+transcripts, trace/session ids tied to a person. Rules:
+
+- Tests, docstrings, and examples use fictional identities only
+  ("Bridge Club", `491555000001@c.us`-style JIDs, invented bodies).
+  This applies even when the fixture is "just" a name: a real group
+  title or contact name in a test is still that person's data.
+- Incident write-ups describe the failure; they do not name the
+  people or reproduce their messages. Real evidence stays in local,
+  untracked artifacts (incident notes, `data/`, exports).
+- Before committing anything touched by a real conversation, grep the
+  diff for names/JIDs you saw in it: `git diff | rg -i "<name|jid>"`.
+  If it came from a chat, it does not go in the repo.
+
 ## Priority
 Clean, simple, maintainable code. Nothing else.
 

@@ -52,6 +52,7 @@ from wahabot.ai.messages import (
     video_media,
 )
 from wahabot.ai.observability import _mask_value  # pyright: ignore[reportPrivateUsage]
+from wahabot.ai.resolve import chat_context_note, resolve_last_message
 from wahabot.ai.tools.url_videos import video_urls
 from wahabot.ai.tools.whatsapp import (
     _DOC_MIME_BY_EXT as DOC_MIME_BY_EXT,  # pyright: ignore[reportPrivateUsage]
@@ -1274,8 +1275,8 @@ def test_search_matches_ranking() -> None:
 def test_chat_display_name_resolves_and_fails_soft() -> None:
     """The delivered-notice renders names; WAHA down falls back to the JID."""
     waha = unittest.mock.Mock()
-    waha.get_chat_overview.return_value = {"id": CHAT_ID, "name": "Las Engineers"}
-    assert chat_display_name(waha, SESSION, CHAT_ID) == f"Las Engineers ({CHAT_ID})"
+    waha.get_chat_overview.return_value = {"id": CHAT_ID, "name": "Book Circle"}
+    assert chat_display_name(waha, SESSION, CHAT_ID) == f"Book Circle ({CHAT_ID})"
     waha.get_chat_overview.return_value = {"id": CHAT_ID}
     assert chat_display_name(waha, SESSION, CHAT_ID) == CHAT_ID
     waha.get_chat_overview.side_effect = httpx.ConnectError("waha gone")
@@ -1288,6 +1289,164 @@ def test_command_event_shape() -> None:
     assert command["event"] == "command"
     assert command_payload["body"] == "[operator command] send the plan to Family"
     assert cast(dict[str, Any], command_payload["_data"])["notifyName"] == "operator"
+
+
+class _PinWaha:
+    """The chat-list/messages surface the resolver needs, faked.
+
+    ``list_chats`` mimics the operator's conversation list (newest
+    first); ``fetch_chat_messages`` returns canned slimmable messages.
+    ``fetched`` records which chat was read, so tests can assert the
+    resolver looked at the *named* chat, not the newest one.
+    """
+
+    def __init__(self, messages: list[dict[str, Any]] | None = None) -> None:
+        self.messages = messages or []
+        self.fetched: list[str] = []
+
+    def list_chats(self, session: str, limit: int = 200) -> list[dict[str, Any]]:
+        return [
+            {"id": CHAT_ID, "name": "Bridge Club"},
+            {"id": FOREIGN_JID, "name": "Nadia"},
+        ]
+
+    def list_contacts(self, session: str, limit: int = 500) -> list[dict[str, Any]]:
+        return []
+
+    def fetch_chat_messages(
+        self, session: str, chat_id: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        self.fetched.append(chat_id)
+        return self.messages
+
+
+_PIN_MESSAGES = [
+    {
+        "id": f"false_{CHAT_ID}_OLD1",
+        "from": FOREIGN_JID,
+        "body": "older message",
+    },
+    {
+        "id": f"false_{CHAT_ID}_LAST",
+        "from": FOREIGN_JID,
+        "body": "cual es la disponibilidad del salon para el viernes",
+    },
+]
+
+
+def test_resolve_last_message_pins_named_chat() -> None:
+    """The chat a command names resolves to its own real last message.
+
+    The incident's failure shape: even with a fresher, unrelated
+    conversation in the list, a command naming a chat must resolve to
+    *that* chat and fetch *its* last message — the ground truth the
+    shared operator history cannot provide.
+    """
+    waha = _PinWaha(_PIN_MESSAGES)
+    outcome = resolve_last_message(
+        cast(Any, waha), SESSION, "responde el ultimo mensaje en Bridge Club"
+    )
+    assert outcome is not None
+    assert outcome.chat_id == CHAT_ID
+    assert outcome.chat_name == "Bridge Club"
+    assert outcome.candidates == ()
+    assert waha.fetched == [CHAT_ID]
+    assert outcome.last_message is not None
+    assert outcome.last_message["id"] == f"false_{CHAT_ID}_LAST"
+
+
+def test_resolve_last_message_no_named_chat() -> None:
+    """A command naming no known chat resolves to nothing.
+
+    No pin, no fetch: the command runs exactly as before, so 'what is
+    the CPU temperature' (the command the incident's answer belonged
+    to) never drags an unrelated chat into the turn.
+    """
+    waha = _PinWaha(_PIN_MESSAGES)
+    assert (
+        resolve_last_message(cast(Any, waha), SESSION, "how are the temperatures doing?")
+        is None
+    )
+    assert waha.fetched == []
+
+
+def test_resolve_last_message_ambiguous_keeps_candidates() -> None:
+    """Several chats sharing the name surface as candidates.
+
+    The resolver cannot know which 'Nadia' the operator means — but
+    instead of guessing it presents every match with its JID, so the
+    model picks from evidence instead of inferring from history.
+    """
+
+    class TwoNadias(_PinWaha):
+        def list_chats(self, session: str, limit: int = 200) -> list[dict[str, Any]]:
+            return [
+                {"id": FOREIGN_JID, "name": "Nadia"},
+                {"id": "491555000002@c.us", "name": "Nadia Ferrer"},
+            ]
+
+    outcome = resolve_last_message(
+        cast(Any, TwoNadias()), SESSION, "responde a Nadia Ferrer"
+    )
+    assert outcome is not None
+    ids = [m["id"] for m in outcome.candidates]
+    assert len(ids) == 2
+    # Longest name first: the most specific mention outranks a bare
+    # substring of another chat's name.
+    assert ids[0] == "491555000002@c.us"
+    assert outcome.chat_id == "491555000002@c.us"
+
+
+def test_resolve_last_message_fetch_fails_soft() -> None:
+    """An unreadable chat still resolves — without a pinned message."""
+
+    class Unreadable(_PinWaha):
+        def fetch_chat_messages(
+            self, session: str, chat_id: str, limit: int = 50
+        ) -> list[dict[str, Any]]:
+            raise RuntimeError("engine hiccup")
+
+    outcome = resolve_last_message(
+        cast(Any, Unreadable()), SESSION, "responde en Bridge Club"
+    )
+    assert outcome is not None
+    assert outcome.chat_id == CHAT_ID
+    assert outcome.last_message is None
+    note = chat_context_note(outcome)
+    assert "could not be fetched" in note
+    assert "fetch_chat_messages" in note
+
+
+def test_resolve_last_message_chats_down_contacts_fallback() -> None:
+    """A dead chat list falls back to the contact book."""
+
+    class ChatsDown(_PinWaha):
+        def list_chats(self, session: str, limit: int = 200) -> list[dict[str, Any]]:
+            raise RuntimeError("chats endpoint down")
+
+        def list_contacts(self, session: str, limit: int = 500) -> list[dict[str, Any]]:
+            return [{"id": FOREIGN_JID, "name": "Nadia"}]
+
+    outcome = resolve_last_message(cast(Any, ChatsDown()), SESSION, "responde a Nadia")
+    assert outcome is not None
+    assert outcome.chat_id == FOREIGN_JID
+
+
+def test_chat_context_note_shape() -> None:
+    """The pinned note names the chat, carries the message id, and
+    instructs the model to treat it as ground truth — the antidote to
+    history-inferred targets from the incident."""
+    waha = _PinWaha(_PIN_MESSAGES)
+    outcome = resolve_last_message(
+        cast(Any, waha), SESSION, "responde el ultimo mensaje en Bridge Club"
+    )
+    assert outcome is not None
+    note = chat_context_note(outcome)
+    assert note.startswith("\n[chat context]")
+    assert "Bridge Club" in note and CHAT_ID in note
+    assert f"false_{CHAT_ID}_LAST" in note
+    assert "reply_to" in note
+    assert "do not infer the target from conversation history" in note
 
 
 def test_own_message_id_detection() -> None:

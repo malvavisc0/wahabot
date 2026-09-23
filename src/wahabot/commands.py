@@ -11,9 +11,14 @@ own rolling history (context key ``"operator"``): commands share one
 conversation, LRU-evicted and persisted like any chat's, so follow-ups
 ("now send that to the second group") work without restating context.
 No chat's memory is touched — the instruction *names* its targets —
-and no gates apply.
+and no gates apply. Because that shared history is channel-agnostic,
+a command that names a chat also gets that chat's *real* last message
+pinned into its turn before the model reasons (see
+:mod:`wahabot.ai.resolve`): "the last message in <chat>" is resolved by
+code, never inferred from mixed memory.
 """
 
+import asyncio
 import time
 import uuid
 
@@ -21,6 +26,7 @@ from loguru import logger
 
 from wahabot.ai.context import handle_message
 from wahabot.ai.observability import chat_trace_attributes
+from wahabot.ai.resolve import chat_context_note, resolve_last_message
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.audit import save_action
 from wahabot.core.models import WahaEvent
@@ -105,6 +111,18 @@ async def run_command(
         id=event.payload.get("id"),
         instruction=instruction[:200],
     )
+    # Ground truth before the model: when the command names a chat,
+    # resolve it against the operator's chat list and pin that chat's
+    # real last message into the turn (docs/bug-report-wrong-message-
+    # voice-note.md). The shared operator history is channel-agnostic
+    # — it cannot answer "the last message in <chat>" — so the note
+    # replaces the inference, not supplements it. A command naming no
+    # chat resolves to nothing and runs unchanged. Failures are
+    # swallowed inside: pinning is best-effort, never a blocker.
+    resolved = await asyncio.to_thread(
+        resolve_last_message, waha, event.session, instruction
+    )
+    pinned_note = chat_context_note(resolved) if resolved else ""
     async with chat_lock(event.session, OPERATOR_CHAT_ID):
         ctx = await context_for(event.session, OPERATOR_CHAT_ID, agent, settings)
         with chat_trace_attributes("operator-command"):
@@ -114,7 +132,13 @@ async def run_command(
             # so a concurrent chat run can never inherit it).
             try:
                 reply, target = await handle_message(
-                    event, agent, ctx=ctx, settings=settings, waha=waha, armed=True
+                    event,
+                    agent,
+                    ctx=ctx,
+                    settings=settings,
+                    waha=waha,
+                    armed=True,
+                    pinned_note=pinned_note,
                 )
             except Exception as exc:
                 # Same failure classification as the chat path. Commands
