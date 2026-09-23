@@ -1,0 +1,62 @@
+# CI: the repo's quality gate, run on every push and PR to master.
+#
+# Mirrors docs/coding-standard.md's "run after every change" list:
+# lint, format check, type check, the full test suite, plus radon's
+# complexity budget and vulture's dead-code suspects. A failure on
+# any step fails the build — nothing publishes or merges on red.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # uv with the project's pinned Python (3.14+); the lockfile makes
+      # the environment reproducible.
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Lint (ruff check)
+        run: uv run ruff check src tests
+
+      - name: Format (ruff format --check)
+        run: uv run ruff format --check src tests
+
+      - name: Type check (basedpyright)
+        run: uv run basedpyright src/wahabot
+
+      - name: Tests (pytest)
+        run: uv run pytest
+
+      # Complexity budget: no block ranked C or worse (coding-standard's
+      # hard rule). The grep must find nothing.
+      - name: Complexity (radon, no C+ blocks)
+        run: |
+          uv run radon cc src -s | tee radon.out
+          if grep -qE -- '\- (C|D|E|F) ' radon.out; then
+            echo "::error::complexity budget exceeded — C+ blocks found" >&2
+            exit 1
+          fi
+
+      # Dead-code suspects. 60% confidence yields framework-registration
+      # false positives (typer commands, workflow steps, FastAPI routes),
+      # so this step reports but does not fail — the coding standard
+      # treats hits as suspects to check, not verdicts.
+      - name: Dead code (vulture, advisory)
+        run: uvx --python 3.14 vulture src/ --min-confidence 60
+        continue-on-error: true
