@@ -15,7 +15,11 @@ from wahabot.ai.history import (
     is_silence_narration,
     is_single_emoji,
 )
-from wahabot.ai.messages import jid_string, message_replies_to
+from wahabot.ai.messages import (
+    addressed_note,
+    jid_string,
+    message_replies_to,
+)
 from wahabot.ai.tools.url_images import fetch_url_images, image_urls
 from wahabot.ai.tools.whatsapp import (
     RunTarget,
@@ -357,6 +361,8 @@ async def handle_message(
     waha: WahaClient | None = None,
     armed: bool = False,
     pinned_note: str = "",
+    bot_name: str | None = None,
+    bot_mention_regex: str | None = None,
 ) -> tuple[str, RunTarget]:
     """Run the agent workflow over an incoming message event.
 
@@ -369,6 +375,13 @@ async def handle_message(
     the turn text — never memory — so the model starts from facts a
     mixed history cannot infer (the real chat a command named, its real
     last message). Empty for every chat-run caller.
+
+    ``bot_name``/``bot_mention_regex`` (the session config's identity
+    pair) render the addressed-mention marker into a group turn whose
+    text names the bot (:func:`addressed_note`): the wake gate already
+    decided the message is for the bot, and the marker tells the model
+    so it never re-derives — and misreads — that fact. Absent both, no
+    marker (operator commands, tests).
 
     ``image`` (single) or ``images`` (an album, already downloaded)
     carry image bytes (``data`` + ``mimetype``); they ride along as
@@ -405,6 +418,7 @@ async def handle_message(
     user_msg = text + message_id_note(event)
     user_msg += reply_context_section(message_replies_to(event), names)
     user_msg += pinned_note
+    user_msg += addressed_note(event, bot_name, bot_mention_regex)
     image_blocks = [
         ImageBlock(
             image=img["data"],

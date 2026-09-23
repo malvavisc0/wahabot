@@ -259,3 +259,31 @@ def replies_to_bot(
         return False
     reply: dict[str, Any] = quoted
     return bool(jid_string(reply.get("participant")) in bot_jids(event))
+
+
+def addressed_note(
+    event: WahaEvent,
+    bot_name: str | None = None,
+    bot_mention_regex: str | None = None,
+) -> str:
+    """The turn-level proof that this message explicitly addressed the bot.
+
+    The wake gate decides mechanically (regex name match, tagged JID, or
+    quote of a bot message) but the model never sees that decision —
+    in ``judicious`` groups every message wakes it, so being awake proves
+    nothing and the model re-derives "am I addressed?" from text alone.
+    A flash-model with a room history of "@kai, stay silent" commands
+    then pattern-matches the wrong way and stays silent on a genuine
+    mention. This note hands the gate's verdict over as turn context —
+    the same evidence-not-inference cure as the operator pin — so a
+    literal mention can never lose to a vibe.
+
+    DM turns carry no note (every DM is for the bot); so do unmentioned
+    group turns — the silence default stays the model's call there.
+    """
+    payload = event.payload
+    if not str(payload.get("from", "")).endswith("@g.us") or payload.get("fromMe"):
+        return ""
+    if not bot_mentioned(event, bot_name, bot_mention_regex):
+        return ""
+    return "\n[you were addressed: this message names you — it is for you]"

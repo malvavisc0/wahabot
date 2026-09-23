@@ -669,7 +669,14 @@ def register_agent_handler(
             ctx = await context_for(event.session, chat_id, agent, settings)
             with chat_trace_attributes(chat_id):
                 reply, target = await handle_message(
-                    event, agent, ctx=ctx, images=downloaded, settings=settings, waha=waha
+                    event,
+                    agent,
+                    ctx=ctx,
+                    images=downloaded,
+                    settings=settings,
+                    waha=waha,
+                    bot_name=config_reloader.current_config().bot_name,
+                    bot_mention_regex=config_reloader.current_config().bot_mention_regex,
                 )
             await persist_memory(settings, event.session, chat_id, ctx)
             if target.sent or target.reacted:
@@ -842,6 +849,11 @@ def register_agent_handler(
         async with chat_lock(merged.session, chat_id):
             ctx = await context_for(merged.session, chat_id, agent, settings)
             with chat_trace_attributes(chat_id):
+                # The burst's LAST member's mention decides the
+                # addressed marker: it is the reply anchor, and a
+                # mention in an earlier member already rode its own
+                # gate pass to reach the buffer.
+                current = config_reloader.current_config()
                 reply, target = await handle_message(
                     merged,
                     agent,
@@ -849,6 +861,8 @@ def register_agent_handler(
                     images=images or None,
                     settings=settings,
                     waha=waha,
+                    bot_name=current.bot_name,
+                    bot_mention_regex=current.bot_mention_regex,
                 )
             await persist_memory(settings, merged.session, chat_id, ctx)
             delivered = bool(target.sent or target.reacted)
@@ -1133,6 +1147,8 @@ def register_agent_handler(
                         images=video_frames(video, url_video),
                         settings=settings,
                         waha=waha,
+                        bot_name=config.bot_name,
+                        bot_mention_regex=config.bot_mention_regex,
                     )
                 await persist_memory(settings, event.session, chat_id, ctx)
                 delivered = bool(target.sent or target.reacted)
