@@ -98,7 +98,34 @@ to at least set a `system_prompt`:
 The `system_prompt` is the bot's entire personality. Write it like you're
 describing a friend, not a service. The model will mirror whatever tone you set.
 
-### Other commands
+## Startup banner
+
+`wahabot serve` prints a short banner so one glance tells you what's
+running: version + Python, session name, LLM model/endpoint, memory
+token ceiling, and enabled features (vision / video / shell /
+transcription / langfuse). It then logs the WAHA session's live
+identity, the loaded session config summary, and the toolset the agent
+was built with:
+
+```
+Info: wahabot 0.7.3 (Python 3.14.6)
+Info: Session: default
+Info: LLM: gpt-4o-mini @ https://api.openai.com/v1
+Info: Memory: 8000 token ceiling
+Info: Features: vision, video, no-shell, no-transcribe, no-tts
+Info: Webhook: http://0.0.0.0:8080/api/webhook/default
+Info: WAHA session default is live as My Name (4917...@c.us)
+Info: Loaded session config from data/sessions/default.json: 0 whitelisted, 0 blacklisted, group_participation=mentioned
+Info: Agent ready: fetch_chat_messages, forward_message, ...
+```
+
+For a machine-readable dump of every `WAHABOT_*` value (secrets
+redacted) use `uv run wahabot config`. The shell tool shows up only
+with `WAHABOT_SHELL_TOOL=true`, Langfuse tracing only when the
+`LANGFUSE_*` keys are set, and the `Agent ready` line lists exactly
+what the model can call this session.
+
+## Other commands
 
 ```bash
 uv run wahabot version                                  # show the version
