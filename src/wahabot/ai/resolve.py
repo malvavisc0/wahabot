@@ -24,7 +24,8 @@ from typing import Any
 
 from loguru import logger
 
-from wahabot.ai.tools.whatsapp import fit_messages, slim_message
+from wahabot.ai.messages import jid_string
+from wahabot.ai.tools.whatsapp import slim_message
 from wahabot.core.waha import WahaClient
 
 __all__ = ["chat_context_note", "resolve_last_message"]
@@ -64,7 +65,7 @@ def resolve_last_message(
     if not named:
         return None
     best = named[0]
-    chat_id, chat_name = str(best["id"]), str(best["name"])
+    chat_id, chat_name = jid_string(best["id"]), str(best["name"])
     outcome = ResolvedChat(
         chat_id=chat_id,
         chat_name=chat_name,
@@ -79,13 +80,11 @@ def resolve_last_message(
             exc=exc,
         )
         return outcome
-    slimmed = [slim_message(m) for m in messages]
-    fitted = fit_messages(slimmed)
-    if fitted["messages"]:
+    if messages:
         outcome = ResolvedChat(
             chat_id=chat_id,
             chat_name=chat_name,
-            last_message=fitted["messages"][-1],
+            last_message=slim_message(messages[0]),
             candidates=outcome.candidates,
         )
     return outcome
@@ -120,9 +119,9 @@ def named_chats(waha: WahaClient, session: str, instruction: str) -> list[dict[s
 def _entries_named(entries: list[dict[str, Any]], text: str) -> list[dict[str, Any]]:
     """The subset of *entries* whose name appears in the lowercased *text*."""
     return [
-        {"id": e.get("id", ""), "name": str(e.get("name", ""))}
+        {"id": jid_string(e.get("id", "")), "name": str(e.get("name", ""))}
         for e in entries
-        if e.get("id") and str(e.get("name", "")).casefold() in text
+        if jid_string(e.get("id")) and str(e.get("name", "")).casefold() in text
     ]
 
 

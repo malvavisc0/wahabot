@@ -1278,20 +1278,20 @@ _LIST_ENVELOPE_BUDGET = 1800
 def fit_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
     """The most recent whole messages that fit the envelope budget.
 
-    Newest messages are the most useful, so the list keeps the tail.
-    ``count`` stays the total fetched (the model should know how much
-    exists); ``returned`` is what actually fits, and ``truncated``
-    flags the cut. The envelope is always valid JSON.
+    WAHA returns messages newest-first, so the list keeps the head
+    (the newest messages are the useful ones). ``count`` stays the
+    total fetched (the model should know how much exists);
+    ``returned`` is what actually fits, and ``truncated`` flags the
+    cut. The envelope is always valid JSON.
     """
     kept: list[dict[str, Any]] = []
     used = 0
-    for message in reversed(messages):
+    for message in messages:
         item = json.dumps(message, ensure_ascii=False)
         if kept and used + len(item) > _LIST_ENVELOPE_BUDGET:
             break
         kept.append(message)
         used += len(item)
-    kept.reverse()
     return {
         "messages": kept,
         "count": len(messages),
@@ -1323,13 +1323,13 @@ def fetch_chat_messages(waha: WahaClient) -> BaseTool:
         fn_schema=FetchChatMessagesSchema,
         name="fetch_chat_messages",
         description=(
-            "Read the current chat's recent messages. Your history "
-            "already covers recent turns — use this only for message "
-            "ids or media details you no longer have. Each message "
-            "carries its serialized `id`, body, sender and media info; "
-            "ids let you quote, forward or react. Oldest messages are "
-            "dropped when `truncated` is true — raise limit to look "
-            "further back."
+            "Read the current chat's recent messages, newest first. "
+            "Your history already covers recent turns — use this only "
+            "for message ids or media details you no longer have. Each "
+            "message carries its serialized `id`, body, sender and "
+            "media info; ids let you quote, forward or react. Oldest "
+            "messages are dropped when `truncated` is true — raise "
+            "limit to look further back."
         ),
     )
 

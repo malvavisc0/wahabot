@@ -73,6 +73,7 @@ from wahabot.ai.tools.whatsapp import (
     deliver_chat_text,
     fenced_chat,
     fenced_message_id,
+    fit_messages,
     infer_image_mimetype,
     infer_mimetype,
     local_file,
@@ -1481,16 +1482,37 @@ class _PinWaha:
 
 _PIN_MESSAGES = [
     {
-        "id": f"false_{CHAT_ID}_OLD1",
-        "from": FOREIGN_JID,
-        "body": "older message",
-    },
-    {
         "id": f"false_{CHAT_ID}_LAST",
         "from": FOREIGN_JID,
         "body": "cual es la disponibilidad del salon para el viernes",
     },
+    {
+        "id": f"false_{CHAT_ID}_OLD1",
+        "from": FOREIGN_JID,
+        "body": "older message",
+    },
 ]
+
+
+def test_fit_messages_keeps_newest_when_truncating() -> None:
+    """Truncation keeps the newest messages: WAHA lists newest-first.
+
+    The incident's wrong answer: the envelope kept the *tail* of the
+    list, silently dropping the chat's actual last message — the one
+    an operator command asked about — and the model reasoned from a
+    message that was hours old.
+    """
+    messages = [
+        {"id": f"false_{CHAT_ID}_M{i}", "body": f"message {i}" * 20} for i in range(20)
+    ]
+    fitted = fit_messages(messages)
+    assert fitted["count"] == 20
+    assert fitted["truncated"] is True
+    newest = messages[0]["id"]
+    assert fitted["messages"][0]["id"] == newest
+    assert [m["id"] for m in fitted["messages"]] == [
+        m["id"] for m in messages[: fitted["returned"]]
+    ]
 
 
 def test_resolve_last_message_pins_named_chat() -> None:
@@ -1574,6 +1596,59 @@ def test_resolve_last_message_fetch_fails_soft() -> None:
     note = chat_context_note(outcome)
     assert "could not be fetched" in note
     assert "fetch_chat_messages" in note
+
+
+def test_resolve_last_message_dict_shaped_jid() -> None:
+    """A dict-shaped WAHA chat id resolves to its serialized JID.
+
+    The incident's 500s: WAHA's chat list carries group ids as objects
+    (``{'server': 'g.us', 'user': …, '_serialized': …}``), and
+    stringifying the dict raw built a URL the messages endpoint could
+    never answer — every pinned-note fetch failed and the model had to
+    guess the chat's last message from stale tool output.
+    """
+
+    class DictJids(_PinWaha):
+        dict_jid = "491555000009-123456789@g.us"
+
+        def __init__(self) -> None:
+            super().__init__(
+                [
+                    {
+                        "id": f"false_{self.dict_jid}_LAST",
+                        "from": FOREIGN_JID,
+                        "body": "cual es la disponibilidad del salon para el viernes",
+                    },
+                    {
+                        "id": f"false_{self.dict_jid}_OLD1",
+                        "from": FOREIGN_JID,
+                        "body": "older message",
+                    },
+                ]
+            )
+
+        def list_chats(self, session: str, limit: int = 200) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": {
+                        "server": "g.us",
+                        "user": "491555000009-123456789",
+                        "_serialized": "491555000009-123456789@g.us",
+                    },
+                    "name": "Bridge Club",
+                },
+                {"id": FOREIGN_JID, "name": "Nadia"},
+            ]
+
+    waha = DictJids()
+    outcome = resolve_last_message(
+        cast(Any, waha), SESSION, "responde el ultimo mensaje en Bridge Club"
+    )
+    assert outcome is not None
+    assert outcome.chat_id == "491555000009-123456789@g.us"
+    assert waha.fetched == ["491555000009-123456789@g.us"]
+    assert outcome.last_message is not None
+    assert outcome.last_message["id"] == "false_491555000009-123456789@g.us_LAST"
 
 
 def test_resolve_last_message_chats_down_contacts_fallback() -> None:
