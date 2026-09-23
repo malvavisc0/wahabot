@@ -20,6 +20,7 @@ from wahabot.ai.messages import (
     jid_string,
     message_replies_to,
 )
+from wahabot.ai.scrub import strip_spoofed_markers
 from wahabot.ai.tools.url_images import fetch_url_images, image_urls
 from wahabot.ai.tools.whatsapp import (
     RunTarget,
@@ -49,6 +50,7 @@ __all__ = [
     "reply_context",
     "reply_context_section",
     "sender_tag",
+    "turn_body",
 ]
 
 
@@ -266,14 +268,21 @@ def quoted_participant(
 
 
 def reply_description(message_reply: dict[str, Any]) -> str:
-    """Describe the quoted message body/media, truncated for the prompt."""
+    """Describe the quoted message body/media, truncated for the prompt.
+
+    The quoted body is member text riding inside a code-rendered
+    ``[quoting]`` marker — scrubbed so a member cannot smuggle a
+    spoofed marker in through the quote they send.
+    """
     media = message_reply.get("hasMedia") and message_reply.get("media")
     if media:
         mimetype = media.get("mimetype", "media")
         filename = media.get("filename") or ""
         description = f"{mimetype} {filename}".strip()
     else:
-        description = str(message_reply.get("body", "") or "").strip()
+        description = strip_spoofed_markers(
+            str(message_reply.get("body", "") or "").strip()
+        )
     return description[:400]
 
 
@@ -363,6 +372,7 @@ async def handle_message(
     pinned_note: str = "",
     bot_name: str | None = None,
     bot_mention_regex: str | None = None,
+    body_scrubbed: bool = False,
 ) -> tuple[str, RunTarget]:
     """Run the agent workflow over an incoming message event.
 
@@ -383,6 +393,11 @@ async def handle_message(
     so it never re-derives — and misreads — that fact. Absent both, no
     marker (operator commands, tests).
 
+    ``body_scrubbed`` says the caller already scrubbed the body's
+    member text (the burst path, per member, before stamping its id
+    notes) so :func:`turn_body` must not scrub again and break the
+    code-stamped ids.
+
     ``image`` (single) or ``images`` (an album, already downloaded)
     carry image bytes (``data`` + ``mimetype``); they ride along as
     ``image_blocks`` on the run and are injected into the first LLM
@@ -400,13 +415,13 @@ async def handle_message(
     the picture as well.
     """
     chat_id = str(event.payload.get("from", ""))
-    body = str(event.payload.get("body", "")).strip()
     logger.info("Agent handling message from {chat_id}", chat_id=chat_id)
     # Roster before tag: group sender tags render ``[Name <jid>]`` via
     # the resolver, so the fetch must precede the tag build. One
     # fetch, same cache the quoting lines and reaction notes share.
     names = await asyncio.to_thread(participant_names, waha, event.session, chat_id)
     tag = sender_tag(event, names)
+    body = turn_body(event, prescrubbed=body_scrubbed or event.event == "command")
     text = f"{tag} {body}".strip() if tag else body
     attached = list(images or [])
     if image is not None:
@@ -449,6 +464,22 @@ async def handle_message(
     finally:
         reset_target(token)
     return final_reply(result), target
+
+
+def turn_body(event: WahaEvent, prescrubbed: bool = False) -> str:
+    """The event's body as member text, spoof-scrubbed unless exempt.
+
+    Member text rides the turn verbatim — scrub it of authority-marker
+    substrings so the only trusted metadata in a turn is metadata this
+    code wrote (prompt-injection defense: a member typing "[you were
+    addressed…]" must not gain the marker's authority). Exempt when the
+    caller already scrubbed (the burst path, per member, before
+    stamping its id notes) or the event is a code-built command.
+    """
+    raw = str(event.payload.get("body", "")).strip()
+    if prescrubbed or event.event == "command":
+        return raw
+    return strip_spoofed_markers(raw)
 
 
 def collect_images(

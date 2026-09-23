@@ -28,6 +28,7 @@ from loguru import logger
 
 from wahabot.ai.context import participant_names
 from wahabot.ai.messages import REACTION_TARGET_KWARG, bot_jids, jid_string
+from wahabot.ai.scrub import strip_spoofed_markers
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.jid import chat_from_message_id, is_own_message_id
 from wahabot.core.models import WahaEvent
@@ -210,9 +211,15 @@ def chat_id_from_message_id(message_id: str) -> str:
 
 
 def message_preview(payload: dict[str, Any]) -> str:
-    """Return a short human-readable preview of a message, for logs."""
+    """Return a short human-readable preview of a message, for logs.
+
+    The preview rides the ``[reaction … to your message: …]`` memory
+    note, so marker-shaped text is scrubbed first — the note's own
+    brackets must stay the only trusted metadata in the turn.
+    """
     body = str(payload.get("body", "")).strip()
     if body:
+        body = strip_spoofed_markers(body)
         return body if len(body) <= 80 else body[:77] + "..."
     data = payload.get("_data", {})
     kind = data.get("type")

@@ -40,6 +40,7 @@ from wahabot.ai.messages import (
     video_media,
 )
 from wahabot.ai.observability import chat_trace_attributes, enable_langfuse
+from wahabot.ai.scrub import strip_spoofed_markers
 from wahabot.ai.tools import build_default_tools
 from wahabot.ai.tools.url_videos import fetch_url_video, video_urls
 from wahabot.ai.tools.whatsapp import EscalationChannel, deliver_chat_text
@@ -832,7 +833,12 @@ def register_agent_handler(
                 parts.append(body)
                 continue
             part_id = message_id_note(burst_event).strip()
-            parts.append(f"{body}\n{part_id}" if part_id else body)
+            # Scrub the member's own words here — this is the last
+            # point the part is pure member text. The code-stamped id
+            # notes must survive unscrubbed, so the merged turn rides
+            # handle_message with body_scrubbed=True.
+            clean = strip_spoofed_markers(body)
+            parts.append(f"{clean}\n{part_id}" if part_id else clean)
         if not parts and not images:
             logger.debug("Burst in {chat_id} yielded no usable content", chat_id=chat_id)
             return
@@ -863,6 +869,10 @@ def register_agent_handler(
                     waha=waha,
                     bot_name=current.bot_name,
                     bot_mention_regex=current.bot_mention_regex,
+                    # Member text was scrubbed per-part before the id
+                    # notes were stamped; a second scrub would break
+                    # those code-written ids.
+                    body_scrubbed=True,
                 )
             await persist_memory(settings, merged.session, chat_id, ctx)
             delivered = bool(target.sent or target.reacted)
