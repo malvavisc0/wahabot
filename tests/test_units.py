@@ -2633,7 +2633,10 @@ def test_every_tool_takes_a_reason() -> None:
         waha_url="http://x",
         waha_api_key="k",
         webhook_hmac_key="h",
+        llm_api_base="http://llm.invalid",
+        llm_api_key="k",
         shell_tool=True,
+        _env_file=None,
     )
     tools = build_default_tools(WahaClient("http://x", "k"), settings)
     assert tools, "no tools built"
@@ -2988,15 +2991,18 @@ def test_remember_filters_undelivered_leak(unit_settings: Settings) -> None:
     assert asyncio.run(stored()) == ["real words"]
 
 
+#: Local-only maintenance tooling (scripts/ is gitignored); the purge
+#: test exercises it on a developer checkout and skips in CI, where
+#: the script never exists.
+_PURGE_SCRIPT = Path("scripts/purge_leaked_silence.py")
+
+
+@pytest.mark.skipif(not _PURGE_SCRIPT.exists(), reason="scripts/ is local-only")
 def test_purge_script_drops_leaked_tokens() -> None:
     """The purge script produces sanitized, alternating history."""
     import importlib.util
-    from pathlib import Path
 
-    spec = importlib.util.spec_from_file_location(
-        "purge_leaked_silence",
-        Path("scripts/purge_leaked_silence.py"),
-    )
+    spec = importlib.util.spec_from_file_location("purge_leaked_silence", _PURGE_SCRIPT)
     assert spec is not None and spec.loader is not None
     purge = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(purge)
