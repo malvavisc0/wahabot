@@ -41,6 +41,7 @@ from wahabot.ai.context import (
 )
 from wahabot.ai.history import chat_visible_text
 from wahabot.ai.messages import (
+    addressed_note,
     bot_jids,
     bot_mentioned,
     is_group_addressed,
@@ -277,6 +278,83 @@ def test_dm_bypasses_participation() -> None:
         payload={"from": "491555000001@c.us", "body": "hello"},
     )
     assert is_group_addressed(dm, participation="never")
+
+
+def test_addressed_note_marks_named_group_mention() -> None:
+    """The wake gate's verdict rides the turn as a bracketed marker.
+
+    The stay-silent-on-a-mention failure: the gate matched the name,
+    the model re-derived address-ness from text and vibes, and got it
+    wrong with a room history full of "@kai stay silent" commands.
+    The marker hands the gate's decision over, so a literal mention
+    can never lose to an inference.
+    """
+    named = WahaEvent(
+        id="e-named",
+        timestamp=1,
+        event="message",
+        session=SESSION,
+        me={"id": "491555000000@c.us"},
+        payload={
+            "from": CHAT_ID,
+            "participant": "491555000001@c.us",
+            "body": "@kai, crea un meme del millenial starter pack",
+        },
+    )
+    note = addressed_note(named, bot_name="kAI")
+    assert note.startswith("\n[you were addressed:")
+    assert "it is for you" in note
+
+
+def test_addressed_note_absent_when_unaddressed() -> None:
+    """No marker without a mention — the silence default stays the
+    model's call on unaddressed group turns, and DMs never carry one
+    (every DM is for the bot)."""
+    unaddressed = _addressed_event()
+    assert addressed_note(unaddressed, bot_name="kai") == ""
+    dm = WahaEvent(
+        id="dm2",
+        timestamp=1,
+        event="message",
+        session=SESSION,
+        me={},
+        payload={"from": "491555000001@c.us", "body": "@kai hello"},
+    )
+    assert addressed_note(dm, bot_name="kai") == ""
+
+
+def test_addressed_note_tagged_jid_and_regex_mention() -> None:
+    """Both mention paths render the marker: the configured regex and
+    a tagged JID in mentionedJidList."""
+    regex_event = WahaEvent(
+        id="e-regex",
+        timestamp=1,
+        event="message",
+        session=SESSION,
+        me={"id": "491555000000@c.us"},
+        payload={
+            "from": CHAT_ID,
+            "participant": "491555000001@c.us",
+            "body": "hey @kAI hazte el meme",
+        },
+    )
+    assert addressed_note(
+        regex_event, bot_mention_regex=r"(?i)(?<![a-z@])@?k[aā]i(?![a-z])"
+    )
+    tagged = WahaEvent(
+        id="e-tagged",
+        timestamp=1,
+        event="message",
+        session=SESSION,
+        me={"id": "491555000000@c.us", "lid": "491555000000@lid"},
+        payload={
+            "from": CHAT_ID,
+            "participant": "491555000001@c.us",
+            "body": "sin nombre pero etiquetado",
+            "_data": {"mentionedJidList": [{"_serialized": "491555000000@lid"}]},
+        },
+    )
+    assert addressed_note(tagged, bot_name="kai")
 
 
 def _chat_event() -> WahaEvent:
@@ -2331,7 +2409,7 @@ def test_resolve_chat_chat_run_matches_roster() -> None:
     tool = cast(Any, resolve_chat(cast(Any, RosterWaha()))).fn
     token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID))
     try:
-        hit = _json.loads(tool(name="alexander"))
+        hit = _json.loads(tool(name="alex rivers"))
         miss = _json.loads(tool(name="Family"))
         outsider = _json.loads(tool(name="kai's operator friend"))
     finally:
