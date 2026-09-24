@@ -69,8 +69,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #  media/PDF/OCR : ffmpeg, poppler, ImageMagick + Ghostscript, exiftool, webp, fonts
 #  docs/convert  : pandoc, qpdf
 #  archive/util  : zip, unzip, 7-zip, xz, file, ripgrep, jq, sqlite3, git, curl
-#  toolchain     : build-essential, cmake, ninja, pkg-config, gdb
+#  toolchain     : build-essential, cmake, ninja-build, pkg-config, gdb
 #  node          : nodejs + npm (trixie LTS)
+# When adding a binary here, add it to _ADVERTISED_BINARIES in
+# src/wahabot/core/host.py so the {{host}} prompt block lists it for
+# run_shell_command (that list is presence-probed, so it is safe to
+# over-list).
 # No --mount=type=cache for apt: buildx builds amd64+arm64 concurrently and
 # they would share the same cache target, so apt's lock at /var/lib/apt/lists/lock
 # is grabbed by two builds at once and the second fails (exit 100). Layer caching

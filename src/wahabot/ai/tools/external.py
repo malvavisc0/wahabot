@@ -1,17 +1,18 @@
 """External research and host tools for the function calling agent.
 
-Builders for tools that reach outside WhatsApp: web search, page fetch,
-stock prices, YouTube transcripts and the (opt-in) shell. Each binds the
-shared settings and wraps a plain function from its own module, keeping
-the "return the JSON envelope, never raise" contract.
+Builders for tools that reach outside WhatsApp: web search, page fetch
+and the (opt-in) shell. Each binds the shared settings and wraps a plain
+function from its own module, keeping the "return the JSON envelope,
+never raise" contract. The 7b merge (docs/bug-report-2c665d8.md) also
+*dropped* two niche tools: stock prices now come through web_search
+results like any other fact, and YouTube transcripts are inlined by
+``visit_url`` via yt-dlp's caption tracks. Neither niche warranted its
+own schema and tokens.
 """
 
 from llama_index.core.tools import BaseTool, FunctionTool
 
-from wahabot.ai.tools.finance import fetch_current_stock_price
 from wahabot.ai.tools.schemas import (
-    FetchStockPriceSchema,
-    GetYoutubeTranscriptSchema,
     ShellCommandSchema,
     VisitUrlSchema,
     WebSearchSchema,
@@ -19,15 +20,12 @@ from wahabot.ai.tools.schemas import (
 from wahabot.ai.tools.shell import shell_command
 from wahabot.ai.tools.visit_url import visit_url
 from wahabot.ai.tools.web_search import web_search
-from wahabot.ai.tools.youtube import get_youtube_transcript
 from wahabot.settings import Settings
 
 __all__ = [
     "shell_builder",
-    "stock_price_builder",
     "visit_url_builder",
     "web_search_builder",
-    "youtube_transcript_builder",
 ]
 
 
@@ -64,25 +62,13 @@ def shell_builder(settings: Settings) -> BaseTool:
         description=(
             "Run a bash command on the host — for what the other tools "
             "cannot do: filesystem, processes, system state, running "
-            "utilities. Returns exit_code, stdout, stderr (truncated "
+            "utilities. The system prompt's Host block lists the "
+            "available binaries; use those, do not guess others. "
+            "Returns exit_code, stdout, stderr (truncated "
             f"past {settings.shell_max_output} chars; killed after "
             f"{int(settings.shell_timeout)}s — keep commands quick and "
             "quiet)."
         ),
-    )
-
-
-def stock_price_builder() -> BaseTool:
-    """Build the current-stock-price tool."""
-
-    def stock_price_fn(ticker: str, reason: str = "") -> str:
-        return fetch_current_stock_price(ticker)
-
-    return FunctionTool.from_defaults(
-        fn=stock_price_fn,
-        fn_schema=FetchStockPriceSchema,
-        name="fetch_current_stock_price",
-        description=("Current price and day change for a stock, ETF or crypto ticker."),
     )
 
 
@@ -100,25 +86,10 @@ def visit_url_builder(settings: Settings) -> BaseTool:
             "Read a web page's visible text. For Instagram/Facebook/"
             "TikTok/YouTube and similar video links you get the video's "
             "real metadata (title, description, uploader, duration, "
-            "views) — say you have the video's info, never that you "
-            "watched the video."
-        ),
-    )
-
-
-def youtube_transcript_builder() -> BaseTool:
-    """Build the YouTube transcript tool."""
-
-    def youtube_transcript_fn(url: str, reason: str = "") -> str:
-        return get_youtube_transcript(url)
-
-    return FunctionTool.from_defaults(
-        fn=youtube_transcript_fn,
-        fn_schema=GetYoutubeTranscriptSchema,
-        name="get_youtube_transcript",
-        description=(
-            "Get a YouTube video's captions as text — for summarizing "
-            "or answering about its spoken content. Needs captions to "
-            "exist; long transcripts arrive truncated."
+            "views). A YouTube link with captions also carries its "
+            "`transcript` — the spoken content, so you can summarize or "
+            "answer about the video itself; `transcript_truncated` true "
+            "means only the first part fit. Say you have the video's "
+            "info or captions, never that you watched the video."
         ),
     )

@@ -11,6 +11,8 @@ envelope``): ``{"ok": true, ...}`` on success, ``{"ok": false,
 "error": "..."}`` on failure.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 #: Shared ``chat`` parameter description: a bare JID, never a message id.
@@ -58,51 +60,6 @@ class ReactToMessageSchema(BaseModel):
     reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
-class SendImageSchema(BaseModel):
-    """Send an image to a WhatsApp chat."""
-
-    url: str | None = Field(
-        default=None,
-        description="Public URL of the image. Never invent one. Pass url XOR path.",
-    )
-    path: str | None = Field(
-        default=None,
-        description="Local image path on the host. Pass path XOR url.",
-    )
-    caption: str = Field(default="", description="Optional caption.")
-    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
-    reason: str = Field(default="", description=REASON_DESCRIPTION)
-
-
-class FetchChatMessagesSchema(BaseModel):
-    """Fetch the most recent messages of a chat as a JSON envelope."""
-
-    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
-    limit: int = Field(default=20, description="Max messages to return.")
-    reason: str = Field(default="", description=REASON_DESCRIPTION)
-
-
-class GetChatSchema(BaseModel):
-    """Get metadata (name, participants, ...) about a WhatsApp chat."""
-
-    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
-    reason: str = Field(default="", description=REASON_DESCRIPTION)
-
-
-class SearchMessagesSchema(BaseModel):
-    """Search a chat's recent messages for a text substring."""
-
-    query: str = Field(
-        description="Text to look for in message body, media filename or mimetype."
-    )
-    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
-    limit: int = Field(
-        default=20,
-        description="Max matches to return.",
-    )
-    reason: str = Field(default="", description=REASON_DESCRIPTION)
-
-
 class ForwardMessageSchema(BaseModel):
     """Forward an existing WhatsApp message to a chat."""
 
@@ -113,17 +70,79 @@ class ForwardMessageSchema(BaseModel):
     reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
-class ResolveChatSchema(BaseModel):
-    """Resolve a person/group name to WhatsApp chat JIDs."""
+class SendMediaSchema(BaseModel):
+    """Send media (image, video, file, voice note or sticker) to a chat."""
 
-    name: str = Field(description="The person/group name to resolve, e.g. `Family`.")
+    kind: Literal["image", "video", "file", "voice", "sticker"] = Field(
+        description=(
+            "What to send. `voice` may also speak `text`; a non-square "
+            "`sticker` image is padded to square automatically."
+        )
+    )
+    url: str | None = Field(
+        default=None,
+        description=(
+            "Public URL of the media. Never invent one. Pass url XOR path XOR text."
+        ),
+    )
+    path: str | None = Field(
+        default=None,
+        description="Local media path on the host. Pass path XOR url XOR text.",
+    )
+    text: str | None = Field(
+        default=None,
+        description=(
+            "Text for `kind=voice` to speak in the bot's own voice (TTS). "
+            "Pass text XOR url XOR path."
+        ),
+    )
+    caption: str = Field(
+        default="",
+        description="Optional caption (image, video or file only).",
+    )
+    filename: str | None = Field(
+        default=None,
+        description=(
+            "Name shown to the recipient for `kind=file`; defaults to the basename."
+        ),
+    )
+    language: str | None = Field(
+        default=None,
+        description=(
+            "Language code (e.g. 'es') for `kind=voice` text when it differs "
+            "from the chat's."
+        ),
+    )
+    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
     reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
-class RecentChatsSchema(BaseModel):
-    """List the most recent WhatsApp conversations."""
+class ReadChatSchema(BaseModel):
+    """Read a chat's history, metadata or a resolved chat, by mode."""
 
-    limit: int = Field(default=10, description="How many conversations to return.")
+    mode: Literal["recent", "search", "metadata", "list", "resolve"] = Field(
+        description=(
+            "`recent` lists the newest conversations (operator-only); "
+            "`search` searches the chat's history for `query`; `metadata` "
+            "returns the chat's name/participants; `list` returns the chat's "
+            "recent messages; `resolve` matches a person/group `name` to JIDs."
+        )
+    )
+    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
+    query: str = Field(
+        default="",
+        description=(
+            "For `mode=search`: text to look for in message body, media "
+            "filename or mimetype."
+        ),
+    )
+    name: str = Field(
+        default="",
+        description=(
+            "For `mode=resolve`: the person/group name to resolve, e.g. `Family`."
+        ),
+    )
+    limit: int = Field(default=20, description="Max messages/conversations to return.")
     reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
@@ -139,89 +158,11 @@ class EscalateSchema(BaseModel):
     reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
-class SendFileSchema(BaseModel):
-    """Send a document (PDF, etc.) to a WhatsApp chat."""
-
-    url: str | None = Field(
-        default=None, description="Public URL of the document. Pass url XOR path."
-    )
-    path: str | None = Field(
-        default=None, description="Local file path on the host. Pass path XOR url."
-    )
-    caption: str = Field(default="", description="Optional caption.")
-    filename: str | None = Field(
-        default=None,
-        description="Name shown to the recipient; defaults to the basename.",
-    )
-    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
-    reason: str = Field(default="", description=REASON_DESCRIPTION)
-
-
-class SendVideoSchema(BaseModel):
-    """Send a video to a WhatsApp chat."""
-
-    url: str | None = Field(
-        default=None, description="Public URL of the video. Pass url XOR path."
-    )
-    path: str | None = Field(
-        default=None, description="Local video path on the host. Pass path XOR url."
-    )
-    caption: str = Field(default="", description="Optional caption.")
-    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
-    reason: str = Field(default="", description=REASON_DESCRIPTION)
-
-
-class SendVoiceSchema(BaseModel):
-    """Send a voice note to a WhatsApp chat."""
-
-    text: str | None = Field(default=None, description="Text the bot speaks aloud.")
-    url: str | None = Field(
-        default=None, description="Public URL of audio to relay. One of text/url/path."
-    )
-    path: str | None = Field(
-        default=None,
-        description="Local audio path on the host. One of text/url/path.",
-    )
-    language: str | None = Field(
-        default=None,
-        description="Language code (e.g. 'es') when it differs from the chat's.",
-    )
-    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
-    reason: str = Field(default="", description=REASON_DESCRIPTION)
-
-
-class SendStickerSchema(BaseModel):
-    """Send a sticker (WebP image) to a WhatsApp chat."""
-
-    url: str | None = Field(
-        default=None, description="Public URL of the WebP sticker. url XOR path."
-    )
-    path: str | None = Field(
-        default=None, description="Local WebP path on the host. path XOR url."
-    )
-    chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)
-    reason: str = Field(default="", description=REASON_DESCRIPTION)
-
-
 class WebSearchSchema(BaseModel):
     """Search the web via the webserp metasearch CLI."""
 
     query: str = Field(description="The search query text.")
     max_results: int | None = Field(default=None, description="Max results to return.")
-    reason: str = Field(default="", description=REASON_DESCRIPTION)
-
-
-class FetchStockPriceSchema(BaseModel):
-    """Fetch the current price for a stock, ETF, or crypto ticker."""
-
-    ticker: str = Field(description="Ticker, e.g. `AAPL`, `MSFT`, `BTC-USD`.")
-    reason: str = Field(default="", description=REASON_DESCRIPTION)
-
-
-class GetYoutubeTranscriptSchema(BaseModel):
-    """Fetch and format a YouTube video's captions/transcript."""
-
-    url: str = Field(description="YouTube video URL.")
     reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 

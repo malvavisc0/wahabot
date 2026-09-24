@@ -7,7 +7,7 @@ message — because a flat, channel-agnostic memory has no per-chat
 "last message" to find. This module removes the guesswork *before* the
 model starts reasoning: when a command names a chat, code resolves the
 name against the operator's chat list (contacts as fallback — the same
-precedence :func:`~wahabot.ai.tools.whatsapp.resolve_chat` uses) and
+precedence the operator ``read_chat`` resolve mode uses) and
 fetches that chat's real last message, so the run starts from the
 correct target instead of inferring it from mixed history.
 
@@ -53,7 +53,7 @@ def resolve_last_message(
     """The chat an operator command names, with its real last message.
 
     Searches the operator's chat list first, then the contact book —
-    mirroring the operator ``resolve_chat`` path, since only operator
+    mirroring the operator ``read_chat`` resolve mode, since only operator
     commands reach this code. The longest name found wins so a
     two-word chat name beats a coincidental one-word substring of
     another chat's name. On a hit, the chat's recent messages are
@@ -95,7 +95,7 @@ def named_chats(waha: WahaClient, session: str, instruction: str) -> list[dict[s
 
     The operator's whole chat list is the search space (contacts as
     fallback — including when the chat list is unreachable, mirroring
-    the operator ``resolve_chat`` path), filtered to names the
+    the operator ``read_chat`` resolve mode), filtered to names the
     instruction actually contains — case-insensitive, longest name
     first, so the most specific mention wins and ambiguous matches
     surface instead of silently resolving.
@@ -163,7 +163,7 @@ def chat_context_note(outcome: ResolvedChat) -> str:
     else:
         fallback = (
             "Its last message could not be fetched — read the chat with "
-            "`fetch_chat_messages` before replying there."
+            "`read_chat` (mode=list) before replying there."
         )
         lines.append(fallback)
     return "\n" + "\n".join(lines)

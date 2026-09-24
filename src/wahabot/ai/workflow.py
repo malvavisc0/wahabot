@@ -86,15 +86,14 @@ _POST_DELIVERY_WRAP_UP_PROMPT = (
 )
 
 #: The tools that deliver content to a chat; each latches the shared
-#: holder at most once per run.
+#: holder at most once per run. The five media kinds live behind the
+#: single ``send_media`` tool (its ``kind`` argument), so the set keys
+#: on that name and the one-delivery latch holds across all five kinds
+#: (docs/bug-report-2c665d8.md, bug 7b).
 DELIVERY_TOOLS = frozenset(
     {
         "send_message",
-        "send_image",
-        "send_video",
-        "send_voice",
-        "send_sticker",
-        "send_file",
+        "send_media",
         "forward_message",
         "react_to_message",
     }
@@ -1231,8 +1230,8 @@ class FunctionCallingAgentWorkflow(Workflow):
     def drop_post_delivery_text(self, response: ChatResponse) -> ChatResponse:
         """Empty *response* when a delivery tool already fired this run.
 
-        A final text after ``send_message``/``send_image``/
-        ``forward_message``/``react_to_message`` succeeded was never
+        A final text after a delivery tool (``send_message``/``send_media``/
+        ``forward_message``/``react_to_message``) succeeded was never
         sent to the chat — the one-delivery latch already fired — so it
         must not be returned (the handler would send it as a second
         reply) nor stored in memory (memory mirrors the chat; the

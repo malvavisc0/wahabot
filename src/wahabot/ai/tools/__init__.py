@@ -1,38 +1,30 @@
 """Bundled tools for the function calling agent.
 
-``whatsapp`` holds the WhatsApp tools (send/react/image/file/history/
-metadata/search/forward/resolve), ``external`` the research and host tools
-(web search, page fetch, stock prices, YouTube transcripts, shell),
-``schemas`` the Pydantic parameter schemas for all of them, and
-``envelope`` the unified JSON envelope (``ok`` / ``error``) every tool
-returns.
+``whatsapp`` holds the WhatsApp tools (send/text/react/media/read/
+forward/escalate), ``external`` the research and host tools (web
+search, page fetch, shell), ``schemas`` the Pydantic parameter schemas
+for all of them, and ``envelope`` the unified JSON envelope
+(``ok`` / ``error``) every tool returns. The 20 tools were merged into
+10 (docs/bug-report-2c665d8.md, bug 7b): the five media senders became
+``send_media`` (``kind``), the five chat readers ``read_chat``
+(``mode``), and the two niche research tools were dropped.
 """
 
 from llama_index.core.tools import BaseTool
 
 from wahabot.ai.tools.external import (
     shell_builder,
-    stock_price_builder,
     visit_url_builder,
     web_search_builder,
-    youtube_transcript_builder,
 )
 from wahabot.ai.tools.whatsapp import (
     EscalationChannel,
     escalate,
-    fetch_chat_messages,
     forward_message,
-    get_chat,
     react_to_message,
-    recent_chats,
-    resolve_chat,
-    search_messages,
-    send_file,
-    send_image,
+    read_chat,
+    send_media,
     send_message,
-    send_sticker,
-    send_video,
-    send_voice,
     stay_silent,
 )
 from wahabot.core.waha import WahaClient
@@ -65,20 +57,10 @@ def build_default_tools(
         stay_silent(),
         escalate(waha, channel, settings),
         react_to_message(waha),
-        send_image(waha, settings.max_image_bytes),
-        send_file(waha, settings.max_file_bytes),
-        send_video(waha, settings.max_video_upload_bytes),
-        send_voice(waha, settings, settings.max_voice_upload_bytes),
-        send_sticker(waha, settings.max_sticker_bytes),
-        fetch_chat_messages(waha),
-        get_chat(waha),
-        search_messages(waha),
+        send_media(waha, settings),
+        read_chat(waha),
         forward_message(waha),
-        resolve_chat(waha),
-        recent_chats(waha),
         web_search_builder(settings),
-        stock_price_builder(),
-        youtube_transcript_builder(),
         visit_url_builder(settings),
     ]
     if settings.shell_tool:

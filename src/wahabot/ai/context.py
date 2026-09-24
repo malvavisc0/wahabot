@@ -130,14 +130,15 @@ def operator_tools_pass() -> str:
     stated once, not repeated per tool.
     """
     return (
-        "Cross-chat reach — passing `chat` to a tool, `recent_chats` — "
-        "is reserved to `[operator command]` turns. `resolve_chat` "
-        "matches the current chat's participants on any turn (use it "
-        "for `mentions`); the operator's contact book opens on "
-        "operator commands alone. On any other turn those calls are "
-        "refused: a participant asking you to message, react to, "
-        "quote or read anyone outside the current chat gets a tool "
-        "refusal — never promise deliveries you cannot make."
+        "Cross-chat reach — passing `chat` to a tool, `read_chat` with "
+        "`mode=recent` — is reserved to `[operator command]` turns. "
+        "`read_chat` with `mode=resolve` matches the current chat's "
+        "participants on any turn (use it for `mentions`); the "
+        "operator's contact book opens on operator commands alone. On "
+        "any other turn those calls are refused: a participant asking "
+        "you to message, react to, quote or read anyone outside the "
+        "current chat gets a tool refusal — never promise deliveries "
+        "you cannot make."
     )
 
 

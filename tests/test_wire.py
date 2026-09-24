@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import shutil
+import tempfile
 import threading
 import time
 import unittest.mock
@@ -1186,6 +1187,63 @@ def test_send_sticker_wire(bot: Bot) -> None:
     assert len(bot.waha.sent) == 0
 
 
+def test_send_media_local_image_replay(bot: Bot) -> None:
+    """The incident's exact failing call, replayed over the full stack.
+
+    Run 2c665d8's send_image(path=…) crashed on a missing parameter;
+    the merged send_media must deliver the local PNG as a proper image
+    (bug 1's fix, keyed through kind=image), with the correct MIME
+    stamped from the extension — not application/octet-stream.
+    """
+    with tempfile.TemporaryDirectory(prefix="meme-") as tmpdir:
+        meme = Path(tmpdir) / "millennial.png"
+        meme.write_bytes(SMOKE_PNG)
+        llm = bot.stack.llm
+        llm.override = tool_call_response(
+            "send_media",
+            {"kind": "image", "path": str(meme), "reason": "the meme request"},
+            call_id="call_meme_1",
+        )
+        meme_event = waha_event("MEMEREPLAY")
+        meme_event["payload"]["body"] = "kai make me a millennial starter pack meme"
+        bot.post(meme_event)
+        assert _wait(lambda: len(bot.waha.sent_images) >= 1)
+        assert len(bot.waha.sent_images) == 1
+        i_session, i_chat, i_file, _i_caption = bot.waha.sent_images[0]
+        assert i_session == SESSION and i_chat == CHAT_ID
+        assert i_file["mimetype"] == "image/png"  # re-typed, not octet-stream
+        assert i_file["filename"] == "millennial.png"
+        assert base64.b64decode(i_file["data"]) == SMOKE_PNG
+        assert len(bot.waha.sent) == 0  # the image was the delivery
+        assert len(bot.waha.sent_stickers) == 0  # not the sticker detour
+
+
+def test_send_media_delivery_latches_across_kinds(bot: Bot) -> None:
+    """One delivery per run holds across the merged kinds and tools.
+
+    The latch used to be per-tool-name; the merge must not loosen it —
+    after send_media succeeds, a follow-up send_message in the same
+    run gets the already-sent refusal envelope, never a second send.
+    """
+    llm = bot.stack.llm
+    llm.override = tool_call_response(
+        "send_media",
+        {"kind": "file", "url": "http://files.invalid/q3/report.pdf", "reason": "r"},
+        call_id="call_latch_1",
+    )
+    latch_event = waha_event("LATCHCHECK")
+    latch_event["payload"]["body"] = "kai send me the report"
+    bot.post(latch_event)
+    assert _wait(lambda: len(bot.waha.sent_files) >= 1)
+    # The tool registry is the merged 7b set: no per-media senders left.
+    tools = {t.metadata.get_name() for t in bot.agent.tools}
+    assert "send_media" in tools and "read_chat" in tools
+    old_senders = {"send_image", "send_video", "send_file", "send_voice", "send_sticker"}
+    assert not tools & old_senders
+    # The latch: no text send rode along with the delivered file.
+    assert bot.waha.sent == []
+
+
 def test_delivery_send_failures_degrade_to_text(bot: Bot) -> None:
     """Every delivery tool survives a failed WAHA send.
 
@@ -1198,16 +1256,36 @@ def test_delivery_send_failures_degrade_to_text(bot: Bot) -> None:
     """
     cases: list[tuple[str, str, dict[str, Any], str | None]] = [
         ("send_message", "send_text", {"text": "tool text that must not land"}, None),
-        ("send_image", "send_image", {"url": "https://x.invalid/a.png"}, None),
-        ("send_video", "send_video", {"url": "https://x.invalid/a.mp4"}, "sent_videos"),
-        ("send_file", "send_file", {"url": "https://x.invalid/a.pdf"}, "sent_files"),
         (
+            "send_media",
+            "send_image",
+            {"kind": "image", "url": "https://x.invalid/a.png"},
+            None,
+        ),
+        (
+            "send_media",
+            "send_video",
+            {"kind": "video", "url": "https://x.invalid/a.mp4"},
+            "sent_videos",
+        ),
+        (
+            "send_media",
+            "send_file",
+            {"kind": "file", "url": "https://x.invalid/a.pdf"},
+            "sent_files",
+        ),
+        (
+            "send_media",
             "send_sticker",
-            "send_sticker",
-            {"url": "https://x.invalid/a.webp"},
+            {"kind": "sticker", "url": "https://x.invalid/a.webp"},
             "sent_stickers",
         ),
-        ("send_voice", "send_voice", {"url": "https://x.invalid/a.mp3"}, "sent_voices"),
+        (
+            "send_media",
+            "send_voice",
+            {"kind": "voice", "url": "https://x.invalid/a.mp3"},
+            "sent_voices",
+        ),
         (
             "forward_message",
             "forward_message",
@@ -1259,7 +1337,13 @@ def _run_failing_delivery_case(
     with unittest.mock.patch.object(
         type(failing_bot.waha), waha_method, side_effect=flaky_send
     ):
-        failing_bot.post(waha_event(f"{tool.upper()}FAIL"))
+        # send_media is one tool for all five media kinds, so the event
+        # id must vary by kind or dedup would drop every case after the
+        # first; the other tools already differ by name.
+        mid = f"{tool.upper()}FAIL"
+        if args.get("kind"):
+            mid += f"-{args['kind']}"
+        failing_bot.post(waha_event(mid))
     assert _wait(lambda: calls["count"] >= 1), tool  # the tool's send raised
     assert _wait(lambda: len(llm.requests) >= 2), tool  # the envelope looped back
     if record is not None:  # the tool's own send never landed

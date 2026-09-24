@@ -107,22 +107,22 @@ class Settings(BaseSettings):
     #: machinery, so a link like "watch this instagram reel URL" shows
     #: the model frames + a transcript just like a forwarded video.
     max_url_videos: int = 1
-    #: Local files larger than this are rejected by the send_file tool
-    #: (base64 inflates ~4/3x and the whole file rides one JSON request);
-    #: 16 MB matches WhatsApp's own document limit.
+    #: Local files larger than this are rejected by the send_media tool
+    #: (kind=file) — base64 inflates ~4/3x and the whole file rides one
+    #: JSON request; 16 MB matches WhatsApp's own document limit.
     max_file_bytes: int = 16 * 1024 * 1024
-    #: Local videos larger than this are rejected by the send_video tool
-    #: (same base64/JSON constraint, but a shell-tool render easily
-    #: outruns a document; WAHA's ffmpeg transcode still handles the
-    #: format, the cap only bounds the request size).
+    #: Local videos larger than this are rejected by the send_media tool
+    #: (kind=video) — same base64/JSON constraint, but a shell-tool
+    #: render easily outruns a document; WAHA's ffmpeg transcode still
+    #: handles the format, the cap only bounds the request size.
     max_video_upload_bytes: int = 64 * 1024 * 1024
-    #: Local audio larger than this is rejected by the send_voice tool
-    #: (same base64/JSON constraint; a voice note longer than a few
-    #: minutes is wrong for the chat anyway).
+    #: Local audio larger than this is rejected by the send_media tool
+    #: (kind=voice) — same base64/JSON constraint; a voice note longer
+    #: than a few minutes is wrong for the chat anyway.
     max_voice_upload_bytes: int = 16 * 1024 * 1024
     #: Local sticker files larger than this are rejected by the
-    #: send_sticker tool. WhatsApp stickers are small WebP stills;
-    #: 1 MB is already generous.
+    #: send_media tool (kind=sticker). WhatsApp stickers are small WebP
+    #: stills; 1 MB is already generous.
     max_sticker_bytes: int = 1024 * 1024
 
     #: Human-like presence: show "typing…" for a moment before the
@@ -165,9 +165,9 @@ class Settings(BaseSettings):
     transcribe_language: str = "auto"
 
     #: OpenAI-compatible TTS service (base URL, e.g. http://host:8021)
-    #: behind ``send_voice(text=…)``. Empty disables voice synthesis
-    #: entirely (the tool's text form errors out; url/path relay still
-    #: works).
+    #: behind ``send_media`` (kind=voice, ``text=…``). Empty disables
+    #: voice synthesis entirely (the text form errors out; url/path
+    #: relay still works).
     tts_url: str = ""
     #: Per-request HTTP timeout (s) for synthesis; ~4 s warm, but the
     #: service documents 30-60 s cold loads.

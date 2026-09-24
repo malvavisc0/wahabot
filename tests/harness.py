@@ -96,7 +96,7 @@ SecondResponse = {
     "usage": {"prompt_tokens": 20, "completion_tokens": 4, "total_tokens": 24},
 }
 
-#: Third scenario: the model delivers a document via send_file (URL form).
+#: Third scenario: the model delivers a document via send_media (kind=file, url form).
 FileResponse = {
     "id": "chatcmpl-smoke-3",
     "object": "chat.completion",
@@ -113,9 +113,10 @@ FileResponse = {
                         "id": "call_file_1",
                         "type": "function",
                         "function": {
-                            "name": "send_file",
+                            "name": "send_media",
                             "arguments": json.dumps(
                                 {
+                                    "kind": "file",
                                     "url": "http://files.invalid/q3/report.pdf",
                                     "caption": "the report",
                                 }
@@ -130,7 +131,7 @@ FileResponse = {
     "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
 }
 
-#: Fourth scenario: the model delivers a video via send_video (URL form).
+#: Fourth scenario: the model delivers a video via send_media (kind=video, url form).
 VideoResponse = {
     "id": "chatcmpl-smoke-4",
     "object": "chat.completion",
@@ -147,9 +148,10 @@ VideoResponse = {
                         "id": "call_video_1",
                         "type": "function",
                         "function": {
-                            "name": "send_video",
+                            "name": "send_media",
                             "arguments": json.dumps(
                                 {
+                                    "kind": "video",
                                     "url": "http://files.invalid/q4/clip.mp4",
                                     "caption": "the clip",
                                 }
@@ -164,7 +166,7 @@ VideoResponse = {
     "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
 }
 
-#: Fifth scenario: the model answers a voice note with send_voice (URL form).
+#: Fifth scenario: the model answers a voice note with send_media (kind=voice, url form).
 VoiceResponse = {
     "id": "chatcmpl-smoke-5",
     "object": "chat.completion",
@@ -181,9 +183,12 @@ VoiceResponse = {
                         "id": "call_voice_1",
                         "type": "function",
                         "function": {
-                            "name": "send_voice",
+                            "name": "send_media",
                             "arguments": json.dumps(
-                                {"url": "http://files.invalid/q5/note.mp3"}
+                                {
+                                    "kind": "voice",
+                                    "url": "http://files.invalid/q5/note.mp3",
+                                }
                             ),
                         },
                     }
@@ -213,9 +218,10 @@ VoiceTextResponse = {
                         "id": "call_voice_text_1",
                         "type": "function",
                         "function": {
-                            "name": "send_voice",
+                            "name": "send_media",
                             "arguments": json.dumps(
                                 {
+                                    "kind": "voice",
                                     "text": "ya voy, un momento",
                                     "language": "es",
                                     "reason": "answering a voice note in kind",
@@ -234,7 +240,8 @@ VoiceTextResponse = {
 #: Bytes the fake TTS service returns for any synthesis request.
 TTS_MP3 = b"ID3\x03fake-tts-mp3"
 
-#: Sixth scenario: the model replies with a sticker via send_sticker (URL form).
+#: Sixth scenario: the model replies with a sticker via send_media
+#: (kind=sticker, url form).
 StickerResponse = {
     "id": "chatcmpl-smoke-6",
     "object": "chat.completion",
@@ -251,9 +258,12 @@ StickerResponse = {
                         "id": "call_sticker_1",
                         "type": "function",
                         "function": {
-                            "name": "send_sticker",
+                            "name": "send_media",
                             "arguments": json.dumps(
-                                {"url": "http://files.invalid/q6/laugh.webp"}
+                                {
+                                    "kind": "sticker",
+                                    "url": "http://files.invalid/q6/laugh.webp",
+                                }
                             ),
                         },
                     }
@@ -558,6 +568,7 @@ class RecordingWaha(WahaClient):
             base_url="http://waha.invalid", api_key="waha-key", transport=mock_transport()
         )
         self.sent: list[tuple[str, str, str, list[str] | None]] = []
+        self.sent_images: list[tuple[str, str, dict[str, Any], str | None]] = []
         self.sent_files: list[tuple[str, str, dict[str, Any], str | None]] = []
         self.sent_videos: list[tuple[str, str, dict[str, Any], str | None, bool]] = []
         self.sent_voices: list[tuple[str, str, dict[str, Any], bool]] = []
@@ -604,6 +615,17 @@ class RecordingWaha(WahaClient):
     ) -> str:
         self.sent.append((session, chat_id, text, mentions))
         return f"true_{chat_id}_SENT{len(self.sent)}"
+
+    @override
+    def send_image(
+        self,
+        session: str,
+        chat_id: str,
+        file: dict[str, Any],
+        caption: str | None = None,
+    ) -> str:
+        self.sent_images.append((session, chat_id, file, caption))
+        return f"true_{chat_id}_SENTIMAGE{len(self.sent_images)}"
 
     @override
     def send_file(

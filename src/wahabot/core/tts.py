@@ -2,7 +2,7 @@
 
 Outbound counterpart to :mod:`wahabot.core.transcribe` — perception is
 preprocessing (WhisperX on the way in), expression is a tool source
-(:func:`wahabot.ai.tools.whatsapp.send_voice` with ``text``). One
+(:func:`wahabot.ai.tools.whatsapp.send_media` kind=voice with ``text``). One
 sync function, called from the tool fn's worker thread like every
 other network call, fail-soft like presence: a synthesis failure must
 degrade to a text reply, never crash the run.

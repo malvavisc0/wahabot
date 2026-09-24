@@ -10,7 +10,12 @@ serve unauthenticated fetchers a login/consent wall, so the HTML path
 returns chrome instead of content. For those, yt-dlp's per-site
 extractors provide the video's metadata (title, description, uploader,
 duration, views) without downloading anything — see the inbound-link
-pipeline in ``url_videos`` for the heavyweight download path.
+pipeline in ``url_videos`` for the heavyweight download path. YouTube
+links additionally carry their captions inline (``transcript`` in the
+envelope): yt-dlp's extractor exposes the caption track URLs, so the
+spoken content arrives without the dropped ``get_youtube_transcript``
+tool (docs/bug-report-2c665d8.md, bug 7b) or its
+``youtube-transcript-api`` dependency.
 
 The response body is returned inline (HTML stripped, truncated), since
 wahabot has no file tools. Tools follow wahabot conventions: they return
@@ -18,9 +23,11 @@ the shared JSON envelope and never raise (failures become an ``error``
 envelope fed back to the model).
 """
 
+import json
 import re
 from typing import Any, cast
 
+import httpx
 import yt_dlp
 from curl_cffi import requests as cffi_requests
 from loguru import logger
@@ -33,10 +40,13 @@ __all__ = ["visit_url"]
 _IMPERSONATE = "chrome"
 _MAX_CHARS = 4000
 _DESCRIPTION_CHARS = 800
+_MAX_TRANSCRIPT_CHARS = 6000
 
 # Strip common non-content tags in one pass, cheaply.
 _TAG_RE = re.compile(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>|<[^>]+>", re.I)
 _WHITESPACE_RE = re.compile(r"[ \t\r\f\v]{2,}| *\n *|\n{3,}")
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
+_PARAGRAPH_SENTENCES = 3
 
 # Hosts where an HTML fetch is known to lose (login walls) or where
 # video metadata beats page text. Scoped list, not a yt-dlp support probe
@@ -60,13 +70,30 @@ _MEDIA_HOST_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: YouTube links get their captions inlined alongside the metadata.
+_YOUTUBE_HOST_RE = re.compile(
+    r"^https?://(?:[\w-]+\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/",
+    re.IGNORECASE,
+)
+
+#: The yt-dlp player client that resolves YouTube without a JS runtime:
+#: the default ``web`` client dies on format resolution ("No video
+#: formats found") — the same external constraint ``video_meta``'s
+#: raw-extract path works around — and ``android`` still returns caption
+#: track URLs with it. Verified empirically: manual captions arrive as
+#: plain ``json3`` files, auto-captions as an HLS playlist of ``vtt``
+#: segments.
+_YOUTUBE_CLIENT = "android"
+
 
 def visit_url(settings: Settings, url: str) -> str:
     """Fetch a web page and return its visible text or video metadata.
 
-    Media-host URLs resolve to the video's yt-dlp metadata (no download);
-    every other page takes the HTML path. If the metadata extraction
-    fails, the HTML path still runs — the tool never dead-ends.
+    Media-host URLs resolve to the video's yt-dlp metadata (no
+    download); YouTube links additionally carry the video's captions
+    as ``transcript`` when they exist. Every other page takes the HTML
+    path. If the metadata extraction fails, the HTML path still runs —
+    the tool never dead-ends.
 
     Args:
         url: The web page URL to visit.
@@ -75,14 +102,25 @@ def visit_url(settings: Settings, url: str) -> str:
         A JSON envelope with the page ``text`` (up to ~4000 chars), its
         final ``url``, HTTP ``status`` and a ``truncated`` flag — or, for
         a resolved video link, its ``title``/``description``/``uploader``
-        metadata. An ``error`` envelope is returned if the page could
-        not be fetched at all.
+        metadata (plus ``transcript``/``transcript_truncated`` for
+        captioned YouTube videos). An ``error`` envelope is returned if
+        the page could not be fetched at all.
     """
     if not url.strip():
         return error("url cannot be empty")
     if _MEDIA_HOST_RE.match(url):
         meta = video_meta(url, settings)
         if meta is not None:
+            tracks = cast(
+                "dict[str, list[dict[str, Any]]] | None",
+                meta.pop("_caption_tracks", None),
+            )
+            if tracks and _YOUTUBE_HOST_RE.match(url):
+                transcript = youtube_transcript(url, tracks)
+                if transcript:
+                    meta["transcript"] = transcript
+                    if len(transcript) >= _MAX_TRANSCRIPT_CHARS:
+                        meta["transcript_truncated"] = True
             return ok(source="yt-dlp", kind="video", url=url, **meta)
         # Extractor failed → the page might still be readable (e.g. a
         # private/removed post), so fall through to the HTML path.
@@ -115,6 +153,11 @@ def video_meta(url: str, settings: Settings) -> dict[str, Any] | None:
     and id where the processed one raises. Some links (Facebook share
     redirects) come back as a bare unresolved dict, so a metadata-less
     raw result retries once with format processing before giving up.
+
+    YouTube is resolved with the ``android`` player client — the
+    default ``web`` client needs a JS runtime for format resolution —
+    and its caption tracks ride along under ``_caption_tracks`` for
+    :func:`youtube_transcript` to fetch.
     """
     opts: dict[str, Any] = {
         "quiet": True,
@@ -123,6 +166,8 @@ def video_meta(url: str, settings: Settings) -> dict[str, Any] | None:
         "noplaylist": True,
         "socket_timeout": max(settings.web_search_timeout, 2.0),
     }
+    if _YOUTUBE_HOST_RE.match(url):
+        opts["extractor_args"] = {"youtube": {"player_client": [_YOUTUBE_CLIENT]}}
     if settings.web_search_proxy:
         opts["proxy"] = settings.web_search_proxy
     try:
@@ -136,7 +181,7 @@ def video_meta(url: str, settings: Settings) -> dict[str, Any] | None:
     if "entries" in info:
         info = _post_info(info)
     description = str(info.get("description") or "")[:_DESCRIPTION_CHARS]
-    return {
+    meta = {
         "title": info.get("title"),
         "description": description or None,
         "uploader": info.get("uploader") or info.get("channel"),
@@ -144,6 +189,17 @@ def video_meta(url: str, settings: Settings) -> dict[str, Any] | None:
         "view_count": info.get("view_count"),
         "id": info.get("id"),
     }
+    # Caption tracks come from the processed dict (the raw one lacks
+    # per-format caption URLs); both live on ``info`` after _extract's
+    # retry, and videos without captions carry empty dicts — drop those.
+    if _YOUTUBE_HOST_RE.match(url):
+        tracks = cast(
+            "dict[str, list[dict[str, Any]]]",
+            info.get("subtitles") or {},
+        )
+        if tracks:
+            meta["_caption_tracks"] = tracks
+    return meta
 
 
 def _extract(ydl: Any, url: str) -> dict[str, Any] | None:
@@ -188,6 +244,110 @@ def _post_info(info: dict[str, Any]) -> dict[str, Any]:
         "title": info.get("title") or f"post with {len(entries)} items",
         "duration": info.get("duration") or (total or None),
     }
+
+
+def youtube_transcript(
+    url: str, tracks: dict[str, list[dict[str, Any]]], language: str = "en"
+) -> str:
+    """The video's captions as paragraphed prose, or "" when unavailable.
+
+    *tracks* is yt-dlp's ``subtitles`` dict (manual caption tracks —
+    the ``android`` client exposes them as plain ``json3``/``vtt``/
+    ``srt`` files at fetchable URLs). A missing *language* track falls
+    back to any single available language, so non-English videos still
+    transcribe. Auto-generated captions are not in ``subtitles`` and
+    cost an HLS playlist hop; the model can still read the description,
+    so "" (not an error) is the honest answer for a caption-less video.
+    """
+    lang = next(
+        (t for name, t in sorted(tracks.items()) if name.startswith(language)),
+        None,
+    )
+    if lang is None and len(tracks) == 1:
+        lang = next(iter(tracks.values()))
+    if lang is None:
+        logger.info("No usable caption track for {url}", url=url)
+        return ""
+    ordered = [lang] + [t for t in tracks.values() if t is not lang]
+    for formats in ordered:
+        for wanted in ("json3", "srt", "vtt"):
+            track = next((f for f in formats if f.get("ext") == wanted), None)
+            if track is None:
+                continue
+            text = _fetch_captions(str(track.get("url") or ""))
+            if text:
+                return _paragraph(text if wanted == "json3" else _strip_vtt(text))
+    logger.info("Caption tracks for {url} had no fetchable format", url=url)
+    return ""
+
+
+def _fetch_captions(track_url: str) -> str:
+    """Download one caption track, "" on any failure (fail-soft)."""
+    if not track_url:
+        return ""
+    try:
+        response = httpx.get(
+            track_url,
+            timeout=10.0,
+            headers={"User-Agent": "Mozilla/5.0"},
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        return response.text
+    except Exception as exc:
+        logger.info("Caption fetch failed: {exc}", exc=exc)
+        return ""
+
+
+def _strip_vtt(vtt: str) -> str:
+    """Cue text lines from a WebVTT/SRT body, one cue per line."""
+    lines: list[str] = []
+    for line in vtt.splitlines():
+        stripped = line.strip()
+        if (
+            not stripped
+            or stripped.startswith(("WEBVTT", "#"))
+            or "-->" in stripped
+            or re.fullmatch(r"\d{1,2}:\d{2}:\d{2}[.,]\d{3}", stripped)
+            or stripped.isdigit()
+        ):
+            continue
+        lines.append(stripped)
+    return " ".join(lines)
+
+
+def _paragraph(caption_text: str) -> str:
+    """Caption text as readable paragraphed prose, truncated.
+
+    Caption fragments arrive as ~3-second snippets; joining them
+    verbatim yields mid-sentence breaks every few words. Join, collapse
+    whitespace, and break into paragraphs at sentence boundaries —
+    the same formatting the dropped transcript tool used.
+    """
+    if caption_text.lstrip().startswith("{"):
+        # json3: event objects with utf8 segments.
+        try:
+            data: dict[str, Any] = json.loads(caption_text)
+            events = data.get("events") or []
+            parts = [
+                "".join(
+                    seg.get("utf8", "") for seg in cast("list[Any]", ev.get("segs")) or []
+                )
+                for ev in cast("list[Any]", events)
+            ]
+            joined = " ".join(part.strip() for part in parts if part.strip())
+        except json.JSONDecodeError:
+            return ""
+    else:
+        joined = caption_text
+    joined = re.sub(r"\s+", " ", joined).strip()
+    sentences = _SENTENCE_END_RE.split(joined)
+    paragraphs = [
+        " ".join(sentences[i : i + _PARAGRAPH_SENTENCES]).strip()
+        for i in range(0, len(sentences), _PARAGRAPH_SENTENCES)
+    ]
+    text = "\n\n".join(p for p in paragraphs if p)
+    return text[:_MAX_TRANSCRIPT_CHARS]
 
 
 def _fetch(url: str, settings: Settings) -> Any:

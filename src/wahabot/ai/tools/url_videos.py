@@ -27,10 +27,11 @@ __all__ = ["fetch_url_video", "video_urls"]
 
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
-#: Hosts excluded from sniffing: YouTube is long-form — the
-#: ``get_youtube_transcript`` tool reads its captions directly, which
-#: beats downloading an hour of video to sample six frames. Its formats
-#: also need a JS runtime to resolve, so ``best`` often fails outright.
+#: Hosts excluded from sniffing: YouTube is long-form — downloading an
+#: hour of video to sample six frames is wasteful when the model can
+#: read the video's captions and metadata through ``visit_url`` instead.
+#: Its formats also need a JS runtime to resolve, so ``best`` often
+#: fails outright.
 _YOUTUBE_HOST_RE = re.compile(
     r"^https?://(?:[\w-]+\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/",
     re.IGNORECASE,

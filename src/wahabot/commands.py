@@ -79,7 +79,7 @@ async def run_command(
     chat gates. The run's delivery target is the event's ``from``
     ("operator") so the run behaves like a DM: the model may pass
     ``chat=…`` explicitly (a group or a person resolved via
-    ``resolve_chat``) or omit it, exactly as in a normal chat — and a
+    ``read_chat`` resolve mode) or omit it, exactly as in a normal chat — and a
     delivery latch from another run can never block this command's
     send (each run binds its own target). ``armed=True`` opens the
     cross-chat fence in the WhatsApp tools for this run alone; the

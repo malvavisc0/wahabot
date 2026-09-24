@@ -1301,8 +1301,8 @@ def test_video_urls() -> None:
 
 
 def test_video_urls_skip_youtube() -> None:
-    # YouTube stays with the get_youtube_transcript tool (full captions
-    # beat six sampled frames on long-form), so sniffing skips it.
+    # YouTube stays out of the download pipeline (captions + metadata via
+    # visit_url beat six sampled frames on long-form), so sniffing skips it.
     assert video_urls("watch https://www.youtube.com/watch?v=dQw4w9WgXcQ", 2) == []
     assert video_urls("https://youtu.be/dQw4w9WgXcQ nice", 2) == []
     assert video_urls(
@@ -1361,6 +1361,55 @@ def test_visit_url_media_returns_video_meta(unit_settings: Settings) -> None:
         "view_count": 1_200_000,
         "id": "DdXprrXGx5e",
     }
+
+
+def test_visit_url_youtube_inlines_transcript(unit_settings: Settings) -> None:
+    """A YouTube URL with captions carries the spoken content inline.
+
+    The dropped get_youtube_transcript affordance lives in visit_url
+    now (7b merge): a manual caption track rides the envelope as
+    `transcript`, and a track that exceeds the char cap is flagged
+    `transcript_truncated` instead of silently losing its tail.
+    """
+    from wahabot.ai.tools.visit_url import _MAX_TRANSCRIPT_CHARS, visit_url
+
+    long_cue = " ".join(f"Sentence {i} keeps going." for i in range(800))
+    info = {
+        "title": "a very long talk",
+        "description": "",
+        "uploader": "speaker",
+        "duration": 3600,
+        "view_count": 9,
+        "id": "long000001",
+        "subtitles": {
+            "en": [
+                {
+                    "ext": "vtt",
+                    "url": "https://captions.invalid/en.vtt",
+                }
+            ]
+        },
+    }
+    fetched: list[str] = []
+
+    def fake_captions(track_url: str) -> str:
+        fetched.append(track_url)
+        return f"WEBVTT\n\n00:00:00.000 --> 00:00:03.000\n{long_cue}"
+
+    with (
+        unittest.mock.patch(
+            "wahabot.ai.tools.visit_url.yt_dlp.YoutubeDL", _fake_ydl(info)
+        ),
+        unittest.mock.patch("wahabot.ai.tools.visit_url._fetch_captions", fake_captions),
+    ):
+        result = json.loads(
+            visit_url(unit_settings, "https://www.youtube.com/watch?v=long000001")
+        )
+    assert fetched == ["https://captions.invalid/en.vtt"]
+    assert result["ok"] is True
+    assert result["transcript"].startswith("Sentence 0 keeps going.")
+    assert result["transcript_truncated"] is True
+    assert len(result["transcript"]) == _MAX_TRANSCRIPT_CHARS
 
 
 def test_visit_url_media_falls_back_to_html(unit_settings: Settings) -> None:
@@ -1913,7 +1962,8 @@ def test_resolve_last_message_fetch_fails_soft() -> None:
     assert outcome.last_message is None
     note = chat_context_note(outcome)
     assert "could not be fetched" in note
-    assert "fetch_chat_messages" in note
+    assert "read_chat" in note
+    assert "(mode=list)" in note
 
 
 def test_resolve_last_message_dict_shaped_jid() -> None:
@@ -2180,7 +2230,7 @@ def test_send_sticker_pads_local_path_before_sending() -> None:
         RunTarget,
         bind_target,
         reset_target,
-        send_sticker,
+        send_media,
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -2188,11 +2238,12 @@ def test_send_sticker_pads_local_path_before_sending() -> None:
         Image.new("RGB", (1080, 1360), "white").save(meme, "WEBP")
         waha = unittest.mock.Mock()
         waha.send_sticker.return_value = "id"
+        settings = unittest.mock.Mock(max_sticker_bytes=1024 * 1024)
         target = RunTarget(session=SESSION, chat_id=CHAT_ID)
         token = bind_target(target)
         try:
-            tool = send_sticker(waha, 1024 * 1024)
-            out = tool(path=str(meme), reason="meme as sticker")
+            tool = send_media(waha, settings)
+            out = tool(kind="sticker", path=str(meme), reason="meme as sticker")
         finally:
             reset_target(token)
         envelope: dict[str, Any] = json.loads(cast("str", out.content))
@@ -2200,6 +2251,165 @@ def test_send_sticker_pads_local_path_before_sending() -> None:
         file = waha.send_sticker.call_args.kwargs["file"]
         with Image.open(io.BytesIO(base64.b64decode(file["data"]))) as im:
             assert im.size == (1360, 1360)
+
+
+def test_send_media_rejects_invalid_sources() -> None:
+    """The merged tool's source rules (bug 1's lesson) refuse bad args.
+
+    Zero, multiple, or misapplied sources must return an error envelope
+    naming the rule — never reach a WAHA call, never raise.
+    """
+    from wahabot.ai.tools.whatsapp import (
+        RunTarget,
+        bind_target,
+        reset_target,
+        send_media,
+    )
+
+    waha = unittest.mock.Mock()
+    waha.send_image.return_value = "id"
+    settings = unittest.mock.Mock(max_image_bytes=1024 * 1024)
+    target = RunTarget(session=SESSION, chat_id=CHAT_ID)
+    token = bind_target(target)
+    cases: list[tuple[dict[str, Any], str]] = [
+        # zero sources, known kind
+        ({"kind": "image"}, "exactly one of url, path or text"),
+        # multiple sources
+        (
+            {"kind": "image", "url": "https://x.invalid/a.png", "path": "/tmp/a.png"},
+            "exactly one of url, path or text",
+        ),
+        # text is voice-only
+        (
+            {"kind": "image", "text": "not an image"},
+            "text is only valid for kind=voice",
+        ),
+        # unknown kind
+        ({"kind": "meme", "url": "https://x.invalid/a.png"}, "unknown kind"),
+        # caption on a kind whose WAHA call has none
+        (
+            {
+                "kind": "sticker",
+                "url": "https://x.invalid/a.webp",
+                "caption": "nope",
+            },
+            "caption is not supported for kind=sticker",
+        ),
+    ]
+    try:
+        tool = send_media(waha, settings)
+        for kwargs, needle in cases:
+            out = tool(**kwargs)  # type: ignore[arg-type]
+            envelope = json.loads(str(out.content))
+            assert envelope["ok"] is False, kwargs
+            assert needle in envelope["error"], (kwargs, envelope["error"])
+    finally:
+        reset_target(token)
+    waha.send_image.assert_not_called()
+    waha.send_sticker.assert_not_called()
+
+
+def test_send_media_rejects_blank_and_dubious_sources() -> None:
+    """Blank sources are refused like missing ones, before any WAHA call.
+
+    A whitespace-only ``url``/``path``/``text`` passes a naive truthiness
+    check, and the fn must not let it through to a wire send of "" —
+    bug 1's lesson again: bad arguments get named, early.
+    """
+    from wahabot.ai.tools.whatsapp import (
+        RunTarget,
+        bind_target,
+        reset_target,
+        send_media,
+    )
+
+    waha = unittest.mock.Mock()
+    settings = unittest.mock.Mock(max_file_bytes=1024 * 1024)
+    target = RunTarget(session=SESSION, chat_id=CHAT_ID)
+    token = bind_target(target)
+    try:
+        tool = send_media(waha, settings)
+        for kwargs in (
+            {"kind": "file", "path": " "},
+            {"kind": "file", "url": " "},
+            {"kind": "voice", "text": "   "},
+        ):
+            out = tool(**kwargs)  # type: ignore[arg-type]
+            envelope = json.loads(str(out.content))
+            assert envelope["ok"] is False, kwargs
+            assert "exactly one of url, path or text" in envelope["error"], kwargs
+    finally:
+        reset_target(token)
+    waha.send_file.assert_not_called()
+    waha.send_voice.assert_not_called()
+
+
+def test_send_media_blank_source_yields_to_real_source() -> None:
+    """A whitespace-only source must not outrank a real one.
+
+    The XOR check counts non-blank sources, but the dispatch keys on
+    which argument was passed — a blank ``url`` next to a real
+    ``path`` used to win the dispatch and probe " ". Normalizing
+    blanks to None first keeps validation and dispatch agreed.
+    """
+    from wahabot.ai.tools.whatsapp import (
+        RunTarget,
+        bind_target,
+        reset_target,
+        send_media,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        doc = Path(tmpdir) / "report.pdf"
+        doc.write_bytes(b"%PDF-1.4 fake")
+        waha = unittest.mock.Mock()
+        waha.send_file.return_value = "id"
+        settings = unittest.mock.Mock(max_file_bytes=1024 * 1024)
+        target = RunTarget(session=SESSION, chat_id=CHAT_ID)
+        token = bind_target(target)
+        try:
+            tool = send_media(waha, settings)
+            out = tool(kind="file", url="   ", path=str(doc))
+            envelope: dict[str, Any] = json.loads(str(out.content))
+            assert envelope["ok"] is True, envelope
+            assert envelope["mimetype"] == "application/pdf"
+        finally:
+            reset_target(token)
+        waha.send_file.assert_called_once()
+        assert waha.send_file.call_args.kwargs["file"]["mimetype"] == "application/pdf"
+
+
+def test_read_chat_rejects_chat_in_operator_modes() -> None:
+    """mode=resolve/recent ignore chats by design; a passed `chat` is refused.
+
+    Both modes work on the whole roster/contact book, so a `chat`
+    argument is meaningless there — refuse it instead of silently
+    dropping it (bug 2's lesson: bad arguments get named).
+    """
+    import json as _json
+
+    from wahabot.ai.tools.whatsapp import (
+        RunTarget,
+        bind_target,
+        read_chat,
+        reset_target,
+    )
+
+    waha = unittest.mock.Mock()
+    target = RunTarget(session=SESSION, chat_id=CHAT_ID, armed=True)
+    token = bind_target(target)
+    try:
+        tool = cast("Any", read_chat(cast("Any", waha))).fn
+        for mode in ("resolve", "recent"):
+            out = _json.loads(tool(mode=mode, chat=CHAT_ID, name="Family"))
+            assert out["ok"] is False, mode
+            assert f"`chat` is not valid for mode={mode}" in out["error"]
+        # without `chat` the modes run their normal paths
+        ok_out = _json.loads(tool(mode="resolve", name="Family"))
+        assert ok_out["ok"] is False  # empty roster → no match, but not refused
+        assert "not valid for mode" not in ok_out["error"]
+    finally:
+        reset_target(token)
 
 
 def test_mark_seen_swallows_failures() -> None:
@@ -2753,6 +2963,55 @@ def test_host_placeholder() -> None:
     assert "- Python: " in rendered
 
 
+def test_host_lists_only_present_binaries() -> None:
+    """The Binaries line advertises what shutil.which finds — nothing else.
+
+    The model plans shell commands around this line, so a claimed-but-
+    missing binary is a prompt lie: the Dockerfile set must render,
+    and a stripped PATH must omit the line wholesale rather than list
+    names the environment lacks.
+    """
+    from wahabot.core import host as host_module
+
+    real_which = shutil.which
+
+    def which(name: str, path: Any = None) -> str | None:
+        if name in ("ffmpeg", "jq", "magick"):
+            return f"/usr/bin/{name}"
+        return real_which(name) if name == "bash" else None
+
+    with (
+        unittest.mock.patch("shutil.which", which),
+        unittest.mock.patch.dict("os.environ", {"PATH": "/usr/bin"}, clear=False),
+    ):
+        host_module.available_binaries.cache_clear()
+        host_module.host_context.cache_clear()
+        try:
+            snapshot = host_module.host_context()
+        finally:
+            host_module.available_binaries.cache_clear()
+            host_module.host_context.cache_clear()
+    assert "- Binaries: ffmpeg, magick (ImageMagick), jq" in snapshot
+    # absent binaries are not claimed
+    assert "pandoc" not in snapshot
+    assert "tesseract" not in snapshot
+
+
+def test_host_omits_binaries_line_when_none_present() -> None:
+    """A bare host renders no Binaries line at all, not an empty one."""
+    from wahabot.core import host as host_module
+
+    with unittest.mock.patch("shutil.which", return_value=None):
+        host_module.available_binaries.cache_clear()
+        host_module.host_context.cache_clear()
+        try:
+            snapshot = host_module.host_context()
+        finally:
+            host_module.available_binaries.cache_clear()
+            host_module.host_context.cache_clear()
+    assert "Binaries" not in snapshot
+
+
 def test_remember_strips_thinking_separator(unit_settings: Settings) -> None:
     """``remember`` stores the reply text without the thinking separator.
 
@@ -3066,8 +3325,8 @@ def test_resolve_chat_chat_run_matches_roster() -> None:
     from wahabot.ai.tools.whatsapp import (
         RunTarget,
         bind_target,
+        read_chat,
         reset_target,
-        resolve_chat,
     )
 
     class RosterWaha:
@@ -3090,12 +3349,12 @@ def test_resolve_chat_chat_run_matches_roster() -> None:
                 }
             ]
 
-    tool = cast(Any, resolve_chat(cast(Any, RosterWaha()))).fn
+    tool = cast(Any, read_chat(cast(Any, RosterWaha()))).fn
     token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID))
     try:
-        hit = _json.loads(tool(name="alex rivers"))
-        miss = _json.loads(tool(name="Family"))
-        outsider = _json.loads(tool(name="kai's operator friend"))
+        hit = _json.loads(tool(mode="resolve", name="alex rivers"))
+        miss = _json.loads(tool(mode="resolve", name="Family"))
+        outsider = _json.loads(tool(mode="resolve", name="kai's operator friend"))
     finally:
         reset_target(token)
     assert hit["ok"] and hit["matches"] == [
@@ -3120,8 +3379,8 @@ def test_resolve_chat_operator_run_searches_contacts() -> None:
         OPERATOR_KEY,
         RunTarget,
         bind_target,
+        read_chat,
         reset_target,
-        resolve_chat,
     )
 
     class ContactBookWaha:
@@ -3137,10 +3396,10 @@ def test_resolve_chat_operator_run_searches_contacts() -> None:
             return [{"id": "491999999999@c.us", "name": "Family"}]
 
     waha = ContactBookWaha()
-    tool = cast(Any, resolve_chat(cast(Any, waha))).fn
+    tool = cast(Any, read_chat(cast(Any, waha))).fn
     token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID, armed=True))
     try:
-        hit = _json.loads(tool(name="Family"))
+        hit = _json.loads(tool(mode="resolve", name="Family"))
     finally:
         reset_target(token)
     assert hit["ok"] and hit["matches"] == [{"id": "491999999999@c.us", "name": "Family"}]

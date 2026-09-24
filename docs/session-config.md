@@ -57,7 +57,7 @@ any code-side default.
 - `{{now}}` / `{{datetime}}` — e.g. `2026-09-02 14:30 UTC`
 - `{{tz}}` — the timezone name, e.g. `America/Santiago`
 - `{{bot_name}}` — the `bot_name` field, e.g. `Kai`
-- `{{host}}` — a snapshot of the machine the bot runs on (OS, Python, Node, shell); not timezone-dependent
+- `{{host}}` — a snapshot of the machine the bot runs on (OS, Python, Node, shell, and the available binaries the shell tool may use); not timezone-dependent
 
 ## Group participation
 

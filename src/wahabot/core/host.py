@@ -58,6 +58,47 @@ def version_of(binary: str, marker: str) -> str:
     return text.splitlines()[0].strip() if text else "unknown"
 
 
+#: Curated binaries worth advertising to the model: the Dockerfile
+#: installs this set, a smaller host installs a subset, and the host
+#: snapshot must never claim a binary the environment lacks (the model
+#: would plan a shell command around it and only learn the truth from
+#: its failure). Probed with ``shutil.which``, cached per process.
+#: Labels only where the name is not self-evident. Kept curated, not
+#: a PATH scan: a complete listing is prompt bloat for zero use.
+_ADVERTISED_BINARIES: tuple[tuple[str, str], ...] = (
+    ("ffmpeg", ""),
+    ("magick", "ImageMagick"),
+    ("pdftoppm", ""),
+    ("pdftotext", ""),
+    ("exiftool", ""),
+    ("tesseract", "OCR"),
+    ("pandoc", ""),
+    ("qpdf", ""),
+    ("7z", ""),
+    ("zip", ""),
+    ("rg", "ripgrep"),
+    ("jq", ""),
+    ("sqlite3", ""),
+    ("git", ""),
+    ("curl", ""),
+    ("yt-dlp", ""),
+    ("node", ""),
+    ("gcc", ""),
+    ("make", ""),
+    ("cmake", ""),
+)
+
+
+@cache
+def available_binaries() -> str:
+    """The advertised binaries present on PATH, comma-separated (or "")."""
+    found: list[str] = []
+    for name, label in _ADVERTISED_BINARIES:
+        if shutil.which(name):
+            found.append(f"{name} ({label})" if label else name)
+    return ", ".join(found)
+
+
 @cache
 def host_context() -> str:
     """A short immutable snapshot of the machine the bot runs on.
@@ -78,4 +119,9 @@ def host_context() -> str:
         f"- Node: {node}",
         f"- Shell: {SHELL} (what run_shell_command uses)",
     ]
+    binaries = available_binaries()
+    if binaries:
+        # The shell tool's menu: what the model may plan commands around
+        # without probing first. Absent here means "do not assume".
+        lines.append(f"- Binaries: {binaries}")
     return "\n".join(lines)
