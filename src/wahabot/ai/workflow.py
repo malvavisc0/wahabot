@@ -8,11 +8,13 @@ back in ``StopEvent.result``.
 """
 
 import asyncio
+import inspect
 import json
 from collections.abc import Callable
 from functools import partial
 from typing import Any, cast, override
 
+import pydantic
 from llama_index.core.base.llms.types import (
     ChatMessage,
     ChatResponse,
@@ -129,6 +131,89 @@ def tool_call_log_extra(tool_call: ToolSelection) -> str:
     return f" ({'; '.join(parts)})" if parts else ""
 
 
+#: A TypeError raised by the tool call carries this marker when the
+#: arguments never matched the tool's signature — the wrapper below
+#: re-raises signature failures with it so the envelope can name the
+#: offending argument instead of quoting a raw Python message.
+_SIGNATURE_MARKER = "invalid tool arguments:"
+
+
+def _tool_fn(tool: BaseTool) -> Callable[..., Any]:
+    """The wrapped tool function (FunctionTool exposes it as ``fn``)."""
+    fn = getattr(tool, "fn", None)
+    if fn is None:
+        raise TypeError("tool carries no callable function to validate")
+    return cast("Callable[..., Any]", fn)
+
+
+def validate_tool_kwargs(tool: BaseTool, tool_kwargs: dict[str, Any]) -> str | None:
+    """A model-facing error message for bad tool arguments, or None.
+
+    Two checks, cheapest first: the function signature (catches unknown
+    and missing arguments) and the pydantic schema (catches wrong
+    argument *types* the signature can't see). Both produce the
+    ``{"ok": false, "error": ...}`` envelope shape every tool already
+    uses, with the valid argument names listed so the model can retry
+    with corrected arguments — the raw ``TypeError`` it replaces named
+    no alternatives and cost a full recovery round in the send_image
+    incident (docs/bug-report-2c665d8.md, bug 2).
+    """
+    valid = _tool_argument_names(tool)
+    try:
+        inspect.signature(_tool_fn(tool)).bind(**tool_kwargs)
+    except TypeError as exc:
+        return (
+            f"invalid arguments for {tool.metadata.get_name()}: {exc}; "
+            f"valid arguments: {', '.join(valid)}"
+        )
+    schema = tool.metadata.fn_schema
+    if schema is None:
+        return None
+    try:
+        schema.model_validate(tool_kwargs)
+    except pydantic.ValidationError as exc:
+        details = "; ".join(
+            f"{'.'.join(str(loc) for loc in error['loc'])}: {error['msg']}"
+            for error in exc.errors()
+        )
+        return (
+            f"invalid arguments for {tool.metadata.get_name()}: {details}; "
+            f"valid arguments: {', '.join(valid)}"
+        )
+    return None
+
+
+def _tool_argument_names(tool: BaseTool) -> list[str]:
+    """The tool's argument names: schema fields, or the fn signature."""
+    schema = tool.metadata.fn_schema
+    if schema is not None:
+        return list(schema.model_fields)
+    return [
+        name
+        for name in inspect.signature(_tool_fn(tool)).parameters
+        if name not in ("self", "ctx", "context")
+    ]
+
+
+def tool_call_failure_envelope(tool_call: ToolSelection, exc: Exception) -> str:
+    """A model-facing failure envelope for an exception in a tool call.
+
+    Signature mismatches (the message starts with ``_SIGNATURE_MARKER``)
+    get the valid-arguments hint; every other exception keeps its
+    ``str(exc)`` — the model still needs the actual error text to
+    diagnose WAHA/network failures — but wrapped in the ``ok: false``
+    envelope so the chat template's error detector sees it (it scans
+    for ``"error":`` and misses free-form exception text entirely).
+    """
+    message = str(exc)
+    if message.startswith(_SIGNATURE_MARKER):
+        message = message[len(_SIGNATURE_MARKER) :].strip()
+    return json.dumps(
+        {"ok": False, "error": message, "tool": tool_call.tool_name},
+        ensure_ascii=False,
+    )
+
+
 async def run_tool_call(
     tools_by_name: dict[str, BaseTool], tool_call: ToolSelection
 ) -> ChatMessage:
@@ -142,6 +227,13 @@ async def run_tool_call(
     ``_data`` and fitting to a whole-message budget), so a blunt
     workflow-level char cutoff would only mangle already-curated JSON
     envelopes.
+
+    Arguments are validated against the tool's signature and schema
+    *before* the call: a mismatch returns the error envelope with the
+    valid argument names instead of letting a raw ``TypeError`` through
+    (bug 2 of docs/bug-report-2c665d8.md — the model got "unexpected
+    keyword argument 'path'" with no hint of what was valid, and burned
+    a whole round improvising a workaround).
 
     Each call is logged: one INFO line with its outcome (completed,
     unknown) and its context (the reason when the model gave one, the
@@ -157,15 +249,28 @@ async def run_tool_call(
         content = f"Tool {tool_call.tool_name} does not exist"
         outcome = "unknown"
     else:
-        try:
-            fn = partial(tool, **tool_call.tool_kwargs)
-            called = await asyncio.to_thread(fn)
-            content = called.content
-            outcome = "completed"
-        except Exception as exc:
-            content = f"Encountered error in tool call: {exc}"
+        invalid = validate_tool_kwargs(tool, dict(tool_call.tool_kwargs))
+        if invalid is not None:
+            failure = TypeError(f"{_SIGNATURE_MARKER}{invalid}")
+            content = tool_call_failure_envelope(tool_call, failure)
             outcome = "failed"
-            failure = exc
+        else:
+            try:
+                fn = partial(tool, **tool_call.tool_kwargs)
+                called = await asyncio.to_thread(fn)
+                content = called.content
+                outcome = "completed"
+            except TypeError as exc:
+                # A TypeError here is also a signature mismatch (the
+                # model's JSON decoded but the fn rejected the shape):
+                # route it through the envelope with the valid-args hint.
+                failure = TypeError(f"{_SIGNATURE_MARKER}{exc}")
+                content = tool_call_failure_envelope(tool_call, failure)
+                outcome = "failed"
+            except Exception as exc:
+                content = tool_call_failure_envelope(tool_call, exc)
+                outcome = "failed"
+                failure = exc
     if failure is not None:
         logger.warning(
             "Tool call {tool}{extra} failed: {exc}",
@@ -187,13 +292,10 @@ def tool_outcome(content: str) -> str:
     """The audit outcome of a finished tool call: completed/failed/unknown.
 
     Every tool reports failures as the ``{"ok": false, ...}``
-    envelope (``wahabot.ai.tools.envelope``), so the envelope is the
-    authoritative signal — not the workflow's exception wrapper alone,
-    which would journal a refused or failed send (an ``ok: false``
-    envelope) as a success.
+    envelope (``wahabot.ai.tools.envelope``), and since the exception
+    wrapper also produces that envelope, it is the single
+    authoritative signal for every failure path.
     """
-    if content.startswith("Encountered error in tool call:"):
-        return "failed"
     if content.startswith("Tool ") and content.endswith(" does not exist"):
         return "unknown"
     try:

@@ -23,6 +23,7 @@ import openai
 import pytest
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.memory import ChatMemoryBuffer
+from llama_index.core.tools import FunctionTool, ToolSelection
 
 from tests.harness import (
     CHAT_ID,
@@ -771,13 +772,120 @@ def test_tool_outcome_detects_enveloped_failures() -> None:
     assert tool_outcome_ok('{"ok": true, "chat": "c"}')
     assert tool_outcome('{"ok": false, "error": "cooldown"}') == "failed"
     assert not tool_outcome_ok('{"ok": false, "error": "cooldown"}')
-    assert tool_outcome("Encountered error in tool call: boom") == "failed"
-    assert not tool_outcome_ok("Encountered error in tool call: boom")
     assert tool_outcome("Tool nope does not exist") == "unknown"
     assert not tool_outcome_ok("Tool nope does not exist")
     # A non-JSON success payload (defensive: some tools return prose)
     # reads as completed, never crashes the audit.
     assert tool_outcome("done") == "completed"
+
+
+def test_run_tool_call_returns_envelope_for_bad_arguments() -> None:
+    """Bad tool arguments get a model-facing envelope, not a raw TypeError.
+
+    The send_image incident (docs/bug-report-2c665d8.md, bug 2): the
+    model passed ``path`` to a URL-only tool and got
+    "unexpected keyword argument 'path'" — no valid-arguments hint, no
+    ``ok: false`` envelope for the chat template's error detector, and a
+    full wasted recovery round. The wrapper must now validate first
+    and answer with the envelope naming the valid arguments.
+    """
+    from pydantic import BaseModel
+
+    from wahabot.ai.workflow import run_tool_call, tool_outcome
+
+    class UrlOnlySchema(BaseModel):
+        url: str | None = None
+        reason: str = ""
+
+    def url_only_fn(url: str | None = None, reason: str = "") -> str:
+        return '{"ok": true}'
+
+    tool = FunctionTool.from_defaults(
+        fn=url_only_fn,
+        fn_schema=UrlOnlySchema,
+        name="send_image",
+        description="Send an image from a URL.",
+    )
+
+    async def call(kwargs: dict[str, str]) -> str:
+        selection = ToolSelection(
+            tool_id="tc", tool_name="send_image", tool_kwargs=kwargs
+        )
+        message = await run_tool_call({"send_image": tool}, selection)
+        return str(message.content)
+
+    # Unknown argument: envelope with the valid-arguments hint.
+    content = asyncio.run(call({"path": "/tmp/x.png", "reason": "meme"}))
+    envelope = json.loads(content)
+    assert envelope["ok"] is False
+    assert "unexpected keyword argument 'path'" in envelope["error"]
+    assert "valid arguments: url, reason" in envelope["error"]
+    assert tool_outcome(content) == "failed"
+    # The chat template's error detector scans for '"error":' in the
+    # first 120 chars — the envelope must be visible to it.
+    assert '"error":' in content[:120].lower()
+
+    # Missing required argument (fn has no defaults for it).
+    def needs_id_fn(message_id: str, reason: str = "") -> str:
+        return '{"ok": true}'
+
+    class NeedsIdSchema(BaseModel):
+        message_id: str
+        reason: str = ""
+
+    strict_tool = FunctionTool.from_defaults(
+        fn=needs_id_fn,
+        fn_schema=NeedsIdSchema,
+        name="react_to_message",
+        description="React.",
+    )
+    selection = ToolSelection(
+        tool_id="tc", tool_name="react_to_message", tool_kwargs={"reason": "r"}
+    )
+    message = asyncio.run(run_tool_call({"react_to_message": strict_tool}, selection))
+    assert "missing a required argument: 'message_id'" in str(message.content)
+
+    # Wrong type: the pydantic schema catches what the signature can't.
+    selection = ToolSelection(
+        tool_id="tc",
+        tool_name="react_to_message",
+        tool_kwargs={"message_id": 123, "reason": "r"},
+    )
+    message = asyncio.run(run_tool_call({"react_to_message": strict_tool}, selection))
+    assert "message_id: Input should be a valid string" in str(message.content)
+
+
+def test_run_tool_call_wraps_runtime_exceptions_in_envelope() -> None:
+    """A tool that raises gets the ``ok: false`` envelope, with the error text.
+
+    The model still needs the actual exception message to diagnose
+    WAHA/network failures — but wrapped in the envelope so the chat
+    template's error detector (bug 2b) sees it.
+    """
+    from pydantic import BaseModel
+
+    from wahabot.ai.workflow import run_tool_call, tool_outcome
+
+    def exploding_fn(url: str | None = None, reason: str = "") -> str:
+        raise RuntimeError("WAHA connection refused")
+
+    class UrlSchema(BaseModel):
+        url: str | None = None
+        reason: str = ""
+
+    tool = FunctionTool.from_defaults(
+        fn=exploding_fn, fn_schema=UrlSchema, name="fetch_thing", description="Fetch."
+    )
+    selection = ToolSelection(
+        tool_id="tc", tool_name="fetch_thing", tool_kwargs={"url": "http://x"}
+    )
+    message = asyncio.run(run_tool_call({"fetch_thing": tool}, selection))
+    content = str(message.content)
+    envelope = json.loads(content)
+    assert envelope["ok"] is False
+    assert "WAHA connection refused" in envelope["error"]
+    assert envelope["tool"] == "fetch_thing"
+    assert tool_outcome(content) == "failed"
 
 
 def test_token_count_is_honest_not_char_equivalent() -> None:
@@ -1560,6 +1668,7 @@ def test_resolve_last_message_ambiguous_keeps_candidates() -> None:
     """
 
     class TwoNadias(_PinWaha):
+        @override
         def list_chats(self, session: str, limit: int = 200) -> list[dict[str, Any]]:
             return [
                 {"id": FOREIGN_JID, "name": "Nadia"},
@@ -1582,6 +1691,7 @@ def test_resolve_last_message_fetch_fails_soft() -> None:
     """An unreadable chat still resolves — without a pinned message."""
 
     class Unreadable(_PinWaha):
+        @override
         def fetch_chat_messages(
             self, session: str, chat_id: str, limit: int = 50
         ) -> list[dict[str, Any]]:
@@ -1627,6 +1737,7 @@ def test_resolve_last_message_dict_shaped_jid() -> None:
                 ]
             )
 
+        @override
         def list_chats(self, session: str, limit: int = 200) -> list[dict[str, Any]]:
             return [
                 {
@@ -1655,9 +1766,11 @@ def test_resolve_last_message_chats_down_contacts_fallback() -> None:
     """A dead chat list falls back to the contact book."""
 
     class ChatsDown(_PinWaha):
+        @override
         def list_chats(self, session: str, limit: int = 200) -> list[dict[str, Any]]:
             raise RuntimeError("chats endpoint down")
 
+        @override
         def list_contacts(self, session: str, limit: int = 500) -> list[dict[str, Any]]:
             return [{"id": FOREIGN_JID, "name": "Nadia"}]
 
