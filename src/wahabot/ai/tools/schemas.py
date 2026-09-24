@@ -59,11 +59,15 @@ class ReactToMessageSchema(BaseModel):
 
 
 class SendImageSchema(BaseModel):
-    """Send an image to a WhatsApp chat from a public URL."""
+    """Send an image to a WhatsApp chat."""
 
     url: str | None = Field(
         default=None,
-        description="Public URL of the image. Never invent one.",
+        description="Public URL of the image. Never invent one. Pass url XOR path.",
+    )
+    path: str | None = Field(
+        default=None,
+        description="Local image path on the host. Pass path XOR url.",
     )
     caption: str = Field(default="", description="Optional caption.")
     chat: str | None = Field(default=None, description=CHAT_DESCRIPTION)

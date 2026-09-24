@@ -65,7 +65,7 @@ def build_default_tools(
         stay_silent(),
         escalate(waha, channel, settings),
         react_to_message(waha),
-        send_image(waha),
+        send_image(waha, settings.max_image_bytes),
         send_file(waha, settings.max_file_bytes),
         send_video(waha, settings.max_video_upload_bytes),
         send_voice(waha, settings, settings.max_voice_upload_bytes),

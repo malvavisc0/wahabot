@@ -792,11 +792,18 @@ def react_to_message(waha: WahaClient) -> BaseTool:
     )
 
 
-def send_image(waha: WahaClient) -> BaseTool:
-    """Build a tool that sends an image to a chat."""
+def send_image(waha: WahaClient, max_file_bytes: int) -> BaseTool:
+    """Build a tool that sends an image to a chat.
+
+    Two sources, matching WAHA's ``sendImage`` file shapes: a public
+    ``url`` (``RemoteFile`` — WAHA downloads it) or a local ``path``
+    (``BinaryFile`` — read, capped at *max_file_bytes* and base64-
+    encoded), like the other media tools.
+    """
 
     def send_image_fn(
         url: str | None = None,
+        path: str | None = None,
         caption: str = "",
         chat: str | None = None,
         reason: str = "",
@@ -812,37 +819,66 @@ def send_image(waha: WahaClient) -> BaseTool:
         session = target.session
         if not session or not chat_id:
             return error("no active conversation context")
-        if not url:
-            return error("url is required")
-        probe_error = probe_media_url(url)
-        if probe_error:
-            return error(probe_error)
+        if bool(url) == bool(path):
+            return error("pass exactly one of url or path")
+        if url:
+            probe_error = probe_media_url(str(url))
+            if probe_error:
+                return error(probe_error)
         log_action_reason("send_image", reason, chat=chat_id)
-        mimetype = infer_image_mimetype(url)
+        file = image_file(str(url) if url else str(path), max_file_bytes)
+        if isinstance(file, str):
+            return error(file)
         try:
             sent_id = waha.send_image(
-                session,
-                chat_id,
-                file={"mimetype": mimetype, "url": url},
-                caption=caption,
+                session, chat_id, file=file, caption=caption or None
             )
         except Exception as exc:
             return send_failed_envelope("send_image", chat_id, exc)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
-        return ok(chat=chat_id, url=url, mimetype=mimetype, caption=caption)
+        return ok(
+            chat=chat_id,
+            mimetype=file["mimetype"],
+            filename=file.get("filename") or "",
+            caption=caption,
+        )
 
     return FunctionTool.from_defaults(
         fn=send_image_fn,
         fn_schema=SendImageSchema,
         name="send_image",
         description=(
-            "Send an image from a public URL to the current chat. URL "
-            "must come from the message, a tool result, or the "
-            "operator's instruction — never invented; unfetchable links "
-            "are refused. One send per run."
+            "Send an image from a public url or local path to the "
+            "current chat. URL must come from the message, a tool "
+            "result, or the operator's instruction — never invented; "
+            "unfetchable links are refused. One send per run."
         ),
     )
+
+
+def image_file(name_or_url: str, max_file_bytes: int) -> dict[str, Any] | str:
+    """A WAHA image payload for a URL or local path, or an error string.
+
+    Same shape as :func:`video_file` but typed with the image MIME
+    map; a shell-tool render (``.png``, ``.webp``) must not ride the
+    wire stamped ``application/octet-stream``.
+    """
+    if "://" in name_or_url:
+        file: dict[str, Any] = {
+            "mimetype": infer_mimetype(name_or_url, _IMAGE_MIME_BY_EXT, "image/jpeg"),
+            "url": name_or_url,
+        }
+        name = PurePosixPath(urlsplit(name_or_url).path).name
+        if name:
+            file["filename"] = name
+        return file
+    loaded = local_file(name_or_url, max_file_bytes)
+    if isinstance(loaded, str):
+        return loaded
+    return loaded | {
+        "mimetype": infer_mimetype(name_or_url, _IMAGE_MIME_BY_EXT, "image/jpeg"),
+    }
 
 
 def infer_image_mimetype(url: str) -> str:
