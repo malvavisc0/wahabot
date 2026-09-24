@@ -888,6 +888,95 @@ def test_run_tool_call_wraps_runtime_exceptions_in_envelope() -> None:
     assert tool_outcome(content) == "failed"
 
 
+def test_tool_tracing_marks_errors_and_dedupes() -> None:
+    """Tool tracing: failures export an ERROR span, successes one span.
+
+    Two trace bugs from the meme incident
+    (docs/bug-report-2c665d8.md):
+
+    - Bug 4: the LlamaIndex dispatcher's drop path never ends the span
+      on exception, so failed calls leaked unexported — the Langfuse
+      trace showed a 0.0s gap where the send_image TypeError happened.
+      ``run_tool_guarded`` must set ERROR plus the tool attributes and
+      end the span while it is still active, inside the worker thread.
+    - Bug 5: LlamaIndex auto-decorates both ``FunctionTool.__call__``
+      and ``FunctionTool.call`` with the dispatcher span, doubling
+      every tool span. ``_dedupe_tool_spans`` must leave exactly one.
+
+    One provider + one instrument() for both scenarios: OTel allows a
+    single global tracer provider per process, so a second test-local
+    provider would be silently ignored anyway.
+    """
+    from opentelemetry import trace as trace_api
+    from opentelemetry.instrumentation.llamaindex import (
+        LlamaIndexInstrumentor,
+    )
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from pydantic import BaseModel
+
+    from wahabot.ai.observability import (
+        _dedupe_tool_spans,  # pyright: ignore[reportPrivateUsage]
+    )
+    from wahabot.ai.workflow import run_tool_call
+
+    exported: list[Any] = []
+
+    class _Exporter:
+        def export(self, batch: Any) -> None:
+            exported.extend(batch)
+
+        def shutdown(self) -> None:
+            return None
+
+    class _Processor(SimpleSpanProcessor):
+        def __init__(self) -> None:
+            super().__init__(_Exporter())  # pyright: ignore[reportArgumentType]
+
+    class UrlSchema(BaseModel):
+        url: str | None = None
+        reason: str = ""
+
+    def exploding_fn(url: str | None = None, reason: str = "") -> str:
+        raise RuntimeError("WAHA connection refused")
+
+    def quiet_fn(url: str | None = None, reason: str = "") -> str:
+        return '{"ok": true}'
+
+    provider = TracerProvider()
+    provider.add_span_processor(_Processor())
+    trace_api.set_tracer_provider(provider)
+    LlamaIndexInstrumentor().instrument()
+    _dedupe_tool_spans()
+
+    fail_tool = FunctionTool.from_defaults(
+        fn=exploding_fn, fn_schema=UrlSchema, name="fetch_thing", description="Fetch."
+    )
+    ok_tool = FunctionTool.from_defaults(
+        fn=quiet_fn, fn_schema=UrlSchema, name="quiet", description="Quiet."
+    )
+
+    fail_sel = ToolSelection(
+        tool_id="tc", tool_name="fetch_thing", tool_kwargs={"url": "http://x"}
+    )
+    message = asyncio.run(run_tool_call({"fetch_thing": fail_tool}, fail_sel))
+    ok_tool(url="http://x")
+    provider.force_flush()
+
+    tool_spans = [s for s in exported if s.name.startswith("FunctionTool")]
+    # Bug 5: one span per tool execution, not two.
+    assert len(tool_spans) == 2, [s.name for s in tool_spans]
+    by_status: dict[str, list[Any]] = {}
+    for span in tool_spans:
+        by_status.setdefault(span.status.status_code.name, []).append(span)
+    # Bug 4: the failed call's span carries ERROR and the tool attributes.
+    assert "ERROR" in by_status, by_status.keys()
+    attrs: dict[str, Any] = dict(by_status["ERROR"][0].attributes or {})
+    assert attrs["tool.name"] == "fetch_thing"
+    assert "WAHA connection refused" in str(attrs["tool.error"])
+    assert json.loads(str(message.content))["ok"] is False
+
+
 def test_token_count_is_honest_not_char_equivalent() -> None:
     """The trim counts real tokens, so the budget buys real history.
 

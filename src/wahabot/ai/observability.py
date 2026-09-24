@@ -94,6 +94,7 @@ def enable_langfuse(settings: Settings) -> bool:
             mask_otel_spans=mask_otel_spans,
         )
         LlamaIndexInstrumentor().instrument()
+        _dedupe_tool_spans()
     except Exception:
         _client = None
         logger.exception("Failed to initialise Langfuse tracing; continuing without it")
@@ -116,6 +117,31 @@ def _warn_if_auth_fails(client: Langfuse) -> None:
         logger.warning(
             "Langfuse auth failed; check the LANGFUSE_* credentials — exports may fail"
         )
+
+
+def _dedupe_tool_spans() -> None:
+    """Strip the dispatcher span off ``FunctionTool.__call__``.
+
+    LlamaIndex's ``__init_subclass__`` auto-decorates every public
+    method with ``dispatcher.span``, so a tool call nests two identical
+    spans — one around ``__call__``, one around the ``call`` it
+    delegates to — doubling the trace payload for every tool execution
+    (docs/bug-report-2c665d8.md, bug 5). Removing the outer
+    decoration leaves the single ``call`` span, which carries the same
+    input/output and is the one the failure marking (bug 4) targets.
+    Fail-soft: an unexpected layout logs and leaves the duplicate in
+    place rather than breaking tracing.
+    """
+    try:
+        from llama_index.core.tools.function_tool import FunctionTool
+
+        wrapper = FunctionTool.__dict__.get("__call__")
+        if wrapper is None or not hasattr(wrapper, "__wrapped__"):
+            logger.debug("FunctionTool.__call__ not dispatcher-wrapped; no dedup")
+            return
+        FunctionTool.__call__ = wrapper.__wrapped__
+    except Exception:
+        logger.debug("Could not dedupe FunctionTool tracing spans")
 
 
 #: Span attributes whose value is the session id we set ourselves —

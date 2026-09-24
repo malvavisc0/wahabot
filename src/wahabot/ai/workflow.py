@@ -24,7 +24,7 @@ from llama_index.core.base.llms.types import (
 )
 from llama_index.core.llms.function_calling import FunctionCallingLLM
 from llama_index.core.memory import ChatMemoryBuffer
-from llama_index.core.tools import BaseTool, ToolSelection
+from llama_index.core.tools import BaseTool, ToolOutput, ToolSelection
 from llama_index.core.workflow import (
     Context,
     StartEvent,
@@ -214,6 +214,52 @@ def tool_call_failure_envelope(tool_call: ToolSelection, exc: Exception) -> str:
     )
 
 
+def mark_active_span_error(tool_call: ToolSelection, exc: Exception) -> None:
+    """Flag the active tracing span ERROR and end it for a failed tool call.
+
+    The exception never propagates out of the instrumented tool layer
+    (``run_tool_call`` catches it), so the OTel span ends ``UNSET`` —
+    and worse, the LlamaIndex dispatcher's drop path never *ends* the
+    span at all, so it leaks unexported and the Langfuse trace showed a
+    0.0s gap where the send_image TypeError happened
+    (docs/bug-report-2c665d8.md, bug 4). This must run in the worker
+    thread while the tool span's context is still attached: there it
+    sets ERROR plus ``tool.name``/``tool.error`` attributes and ends
+    the span, which both records and exports the failure. Fail-soft:
+    tracing may be disabled, or no span may be active.
+    """
+    try:
+        from opentelemetry.trace import Status, StatusCode, get_current_span
+
+        span = get_current_span()
+        if not span.is_recording():
+            return
+        span.set_status(Status(StatusCode.ERROR, str(exc)))
+        span.set_attribute("tool.name", tool_call.tool_name)
+        span.set_attribute("tool.error", str(exc))
+        span.end()
+    except Exception:
+        logger.debug("Could not mark tracing span for failed tool call")
+
+
+def run_tool_guarded(
+    tool: BaseTool, tool_call: ToolSelection
+) -> ToolOutput:
+    """Call the tool, marking its tracing span ERROR on exception.
+
+    Runs inside the ``asyncio.to_thread`` worker so the span the
+    dispatcher opened around ``FunctionTool.call`` is still the active
+    one when the exception is caught — closing it there is the only
+    chance, because the dispatcher's drop path leaks the span open and
+    the event-loop thread's context carries no tool span.
+    """
+    try:
+        return tool(**tool_call.tool_kwargs)
+    except Exception as exc:
+        mark_active_span_error(tool_call, exc)
+        raise
+
+
 async def run_tool_call(
     tools_by_name: dict[str, BaseTool], tool_call: ToolSelection
 ) -> ChatMessage:
@@ -256,8 +302,8 @@ async def run_tool_call(
             outcome = "failed"
         else:
             try:
-                fn = partial(tool, **tool_call.tool_kwargs)
-                called = await asyncio.to_thread(fn)
+                guard = partial(run_tool_guarded, tool, tool_call)
+                called = await asyncio.to_thread(guard)
                 content = called.content
                 outcome = "completed"
             except TypeError as exc:
