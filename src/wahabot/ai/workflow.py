@@ -877,31 +877,31 @@ class FunctionCallingAgentWorkflow(Workflow):
         tool_calls = self.llm.get_tool_calls_from_response(
             response, error_on_no_tool_call=False
         )
+        return await self.route_tool_calls(ctx, response, tool_calls, rounds)
+
+    async def route_tool_calls(
+        self,
+        ctx: Context,
+        response: ChatResponse,
+        tool_calls: list[ToolSelection],
+        rounds: int,
+    ) -> ToolCallEvent | StopEvent:
+        """The post-LLM dispatch: silence, repeat, plain text, or tools.
+
+        Shared stop bookkeeping first — every terminal path stamps the
+        user turn handled and collapses a delivered tool group — then
+        the branch-specific work: storing the reply (or the wrap-up
+        note a delivered run leaves instead), and the wrap-up call for
+        a round the loop cannot continue from.
+        """
         if any(call.tool_name == SILENCE_TOOL for call in tool_calls):
             self.log_silence_reason(tool_calls)
             logger.debug("Stopping run: model chose stay_silent")
-            await self.mark_turn_handled(ctx)
-            await self.collapse_delivery(ctx)
-            return self.stopped_response()
+            return await self.stop_with(ctx, self.stopped_response(), note=False)
         if tool_calls and await self.repeats_tool_call(ctx, tool_calls):
-            await self.mark_turn_handled(ctx)
-            await self.collapse_delivery(ctx)
-            return self.stopped_response()
+            return await self.stop_with(ctx, self.stopped_response(), note=False)
         if not tool_calls:
-            self.warn_accidental_silence(response, rounds)
-            delivered = self.any_delivery()
-            note = str(response.message.content or "").strip() if delivered else ""
-            await self.remember(ctx, response, tool_calls, skip_text=delivered)
-            await self.mark_turn_handled(ctx)
-            # Collapse before storing the note: the note appended after
-            # the tool results would break ``batch_closes_history`` and
-            # the group would never fold.
-            await self.collapse_delivery(ctx)
-            if delivered:
-                if note:
-                    await self.store_wrap_up_note(ctx, note)
-                self.audit_wrap_up_note(note)
-            return StopEvent(result=self.drop_post_delivery_text(response))
+            return await self.finish_text_round(ctx, response, rounds)
         if self.delivery_complete(tool_calls) or rounds >= self.tool_round_limit:
             # Do not store calls which will not be executed: the chat API
             # requires every advertised call to have a tool response.
@@ -911,12 +911,43 @@ class FunctionCallingAgentWorkflow(Workflow):
                 else f"round limit {self.tool_round_limit}"
             )
             result = await self.wrap_up_response(ctx, reason)
-            await self.mark_turn_handled(ctx)
-            await self.collapse_delivery(ctx)
-            await self.flush_pending_wrap_up_note(ctx)
-            return StopEvent(result=result)
+            return await self.stop_with(ctx, StopEvent(result=result), note=True)
         await self.remember(ctx, response, tool_calls)
         return ToolCallEvent(tool_calls=tool_calls)
+
+    async def stop_with(self, ctx: Context, event: StopEvent, *, note: bool) -> StopEvent:
+        """End the run with *event*: stamp the turn, collapse, flush the note.
+
+        *note* is True only for the wrap-up path, which stages its
+        note during ``wrap_up_response`` and needs it flushed after the
+        collapse — the note must never land before the delivery group
+        folds (``batch_closes_history`` would leave the scaffolding
+        raw).
+        """
+        await self.mark_turn_handled(ctx)
+        await self.collapse_delivery(ctx)
+        if note:
+            await self.flush_pending_wrap_up_note(ctx)
+        return event
+
+    async def finish_text_round(
+        self, ctx: Context, response: ChatResponse, rounds: int
+    ) -> ToolCallEvent | StopEvent:
+        """A plain-text round: the reply, or the wrap-up note if delivered."""
+        self.warn_accidental_silence(response, rounds)
+        delivered = self.any_delivery()
+        note = str(response.message.content or "").strip() if delivered else ""
+        await self.remember(ctx, response, [], skip_text=delivered)
+        # Collapse before storing the note: the note appended after
+        # the tool results would break ``batch_closes_history`` and
+        # the group would never fold.
+        await self.mark_turn_handled(ctx)
+        await self.collapse_delivery(ctx)
+        if delivered:
+            if note:
+                await self.store_wrap_up_note(ctx, note)
+            self.audit_wrap_up_note(note)
+        return StopEvent(result=self.drop_post_delivery_text(response))
 
     async def mark_turn_handled(self, ctx: Context) -> None:
         """Stamp the run's inbound user turn as handled conversation.

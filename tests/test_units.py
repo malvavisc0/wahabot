@@ -75,7 +75,6 @@ from wahabot.ai.tools.whatsapp import (
     fenced_chat,
     fenced_message_id,
     fit_messages,
-    infer_image_mimetype,
     infer_mimetype,
     local_file,
     mention_tokens,
@@ -1049,9 +1048,7 @@ def test_degrade_old_history_squeezes_old_keeps_fresh() -> None:
                 ToolCallBlock(tool_name="run_shell_command", tool_call_id="c1"),
             ],
         ),
-        tool_result(
-            {"ok": True, "exit_code": 0, "stdout": "wlan0 ok\n" + "x" * 3000}
-        ),
+        tool_result({"ok": True, "exit_code": 0, "stdout": "wlan0 ok\n" + "x" * 3000}),
         assistant("todo bien con tu wifi"),
         user("crea un meme"),
         ChatMessage(
@@ -1071,10 +1068,8 @@ def test_degrade_old_history_squeezes_old_keeps_fresh() -> None:
     after = sum(token_count(m) for m in degraded)
 
     # The old wifi slice: thinking gone, stdout gone, verdict kept.
-    old_slice = degraded[: 4]
-    assert not any(
-        isinstance(b, ThinkingBlock) for m in old_slice for b in m.blocks
-    )
+    old_slice = degraded[:4]
+    assert not any(isinstance(b, ThinkingBlock) for m in old_slice for b in m.blocks)
     wifi_tool = next(m for m in old_slice if m.role == MessageRole.TOOL)
     assert '"ok": true' in str(wifi_tool.content)
     assert "wlan0" not in str(wifi_tool.content)
@@ -1084,9 +1079,7 @@ def test_degrade_old_history_squeezes_old_keeps_fresh() -> None:
         for m in old_slice
     )
     # The fresh window (last FRESH_TURNS user turns and after) untouched.
-    fresh_from = next(
-        i for i, m in enumerate(messages) if m.content == "crea un meme"
-    )
+    fresh_from = next(i for i, m in enumerate(messages) if m.content == "crea un meme")
     assert degraded[fresh_from:] == messages[fresh_from:]
     # Old payload bulk actually shrank.
     assert after < before // 2
@@ -1121,9 +1114,7 @@ def test_squeeze_tool_result_keeps_verdict_only() -> None:
 
     big = ChatMessage(
         role=MessageRole.TOOL,
-        content=_json.dumps(
-            {"ok": False, "error": "cooldown", "stdout": "x" * 2000}
-        ),
+        content=_json.dumps({"ok": False, "error": "cooldown", "stdout": "x" * 2000}),
     )
     squeezed = squeeze_tool_result(big)
     assert '"error": "cooldown"' in str(squeezed.content)
@@ -2031,7 +2022,6 @@ def test_send_file_payloads() -> None:
         )
         == "application/octet-stream"
     )
-    assert infer_image_mimetype("http://x.invalid/pic.jpg") == "image/jpeg"
     with tempfile.TemporaryDirectory() as tmpdir:
         pdf = Path(tmpdir) / "out.pdf"
         pdf.write_bytes(b"%PDF-1.4 smoke bytes")

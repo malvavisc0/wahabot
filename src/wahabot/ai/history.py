@@ -567,7 +567,7 @@ def squeeze_tool_result(msg: ChatMessage) -> ChatMessage:
     text = str(msg.content or "").strip()
     try:
         payload = json.loads(text)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return msg
     if not isinstance(payload, dict):
         return msg

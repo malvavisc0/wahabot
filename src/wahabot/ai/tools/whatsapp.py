@@ -883,11 +883,6 @@ def image_file(name_or_url: str, max_file_bytes: int) -> dict[str, Any] | str:
     }
 
 
-def infer_image_mimetype(url: str) -> str:
-    """Best-effort image mimetype from a URL's path extension."""
-    return infer_mimetype(url, _IMAGE_MIME_BY_EXT, "image/jpeg")
-
-
 def send_video(waha: WahaClient, max_file_bytes: int) -> BaseTool:
     """Build a tool that sends a video to a chat.
 
