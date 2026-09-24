@@ -16,6 +16,7 @@ stranger get a refusal envelope, not a delivery.
 
 import base64
 import contextvars
+import io
 import json
 import mimetypes
 import re
@@ -28,6 +29,7 @@ from urllib.parse import urlsplit
 import httpx
 from llama_index.core.tools import BaseTool, FunctionTool
 from loguru import logger
+from PIL import Image
 
 from wahabot.ai.messages import jid_string
 from wahabot.ai.tools.envelope import error, ok
@@ -1198,7 +1200,10 @@ def send_sticker(waha: WahaClient, max_sticker_bytes: int) -> BaseTool:
     the group-chat equivalent of a punchline, and unlike a lone emoji
     in text it is a legitimate *message*, not a misfired reaction.
     Same two sources as the other media tools: public ``url`` or
-    local ``path`` (capped at *max_sticker_bytes*).
+    local ``path`` (capped at *max_sticker_bytes*). A non-square
+    local image is padded to square first: WhatsApp renders stickers
+    square, so an unpadded one arrives squashed (the meme incident,
+    docs/bug-report-2c665d8.md, bug 3).
     """
 
     def send_sticker_fn(
@@ -1228,13 +1233,18 @@ def send_sticker(waha: WahaClient, max_sticker_bytes: int) -> BaseTool:
         file = sticker_file(str(url) if url else str(path), max_sticker_bytes)
         if isinstance(file, str):
             return error(file)
+        if path:
+            padded = squared_sticker_payload(str(path), max_sticker_bytes)
+            if isinstance(padded, str):
+                return error(padded)
+            file = padded
         try:
             sent_id = waha.send_sticker(session, chat_id, file=file)
         except Exception as exc:
             return send_failed_envelope("send_sticker", chat_id, exc)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
-        return ok(chat=chat_id, mimetype=file["mimetype"])
+        return ok(chat=chat_id, mimetype=file["mimetype"], square=True)
 
     return FunctionTool.from_defaults(
         fn=send_sticker_fn,
@@ -1243,10 +1253,56 @@ def send_sticker(waha: WahaClient, max_sticker_bytes: int) -> BaseTool:
         description=(
             "Send a sticker (WebP) — the chat's pure-reaction medium, "
             "fitting for another sticker or a joke needing no words. "
-            "From a public url or local path. URL rule as send_image. "
-            "One send per run."
+            "From a public url or local path; non-square local images "
+            "are padded to square (WhatsApp renders stickers square). "
+            "URL rule as send_image. One send per run."
         ),
     )
+
+
+def squared_sticker_payload(
+    path: str, max_sticker_bytes: int
+) -> dict[str, Any] | str:
+    """A square WAHA sticker payload for a local path, or an error string.
+
+    WhatsApp renders stickers on a square canvas: a 1080x1360 meme
+    sent as-is arrives squashed, and the model had no way to know
+    (docs/bug-report-2c665d8.md, bug 3). A non-square image is
+    letterboxed onto a square canvas (white bars where the image does
+    not reach) and re-encoded as WebP; a square one rides the wire
+    unchanged. Unreadable/corrupt images surface PIL's error as the
+    error string — the model gets a diagnosis, not a crash.
+    """
+    loaded = local_file(path, max_sticker_bytes)
+    if isinstance(loaded, str):
+        return loaded
+    try:
+        with Image.open(io.BytesIO(base64.b64decode(loaded["data"]))) as im:
+            width, height = im.size
+            if width == height:
+                return loaded | {
+                    "mimetype": infer_mimetype(
+                        path, _IMAGE_MIME_BY_EXT, "image/webp"
+                    )
+                }
+            side = max(width, height)
+            canvas = Image.new(im.mode, (side, side), "white")
+            canvas.paste(im, ((side - width) // 2, (side - height) // 2))
+            buf = io.BytesIO()
+            canvas.save(buf, "WEBP", lossless=True)
+    except Exception as exc:
+        return f"cannot decode {path} as an image: {exc}"
+    data = buf.getvalue()
+    if len(data) > max_sticker_bytes:
+        return (
+            f"padded sticker is {len(data)} B, over the "
+            f"{max_sticker_bytes} B cap; downscale before sending"
+        )
+    return {
+        "mimetype": "image/webp",
+        "filename": PurePosixPath(path).name,
+        "data": base64.b64encode(data).decode(),
+    }
 
 
 def sticker_file(name_or_url: str, max_file_bytes: int) -> dict[str, Any] | str:

@@ -1917,6 +1917,84 @@ def test_send_sticker_payloads() -> None:
         assert isinstance(sticker_file(str(Path(tmpdir) / "missing.webp"), 1024), str)
 
 
+def test_squared_sticker_payload_pads_nonsquare() -> None:
+    """Non-square local stickers are letterboxed to square, not squashed.
+
+    The meme incident (docs/bug-report-2c665d8.md, bug 3): a 1080x1360
+    meme sent via the sticker workaround arrived distorted because
+    WhatsApp renders stickers on a square canvas and nothing padded or
+    refused the image. The payload helper must center the image on a
+    square canvas; a square input rides the wire unchanged; a corrupt
+    file surfaces a diagnosis instead of raising.
+    """
+    import io
+
+    from PIL import Image
+
+    from wahabot.ai.tools.whatsapp import squared_sticker_payload
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        meme = Path(tmpdir) / "meme.webp"
+        Image.new("RGB", (1080, 1360), "white").save(meme, "WEBP")
+        padded = squared_sticker_payload(str(meme), max_sticker_bytes=1024 * 1024)
+        assert not isinstance(padded, str)
+        assert padded["mimetype"] == "image/webp"
+        with Image.open(io.BytesIO(base64.b64decode(padded["data"]))) as im:
+            assert im.size == (1360, 1360)
+
+        square = Path(tmpdir) / "square.webp"
+        Image.new("RGB", (512, 512), "red").save(square, "WEBP")
+        kept = squared_sticker_payload(str(square), max_sticker_bytes=1024 * 1024)
+        assert not isinstance(kept, str)
+        with Image.open(io.BytesIO(base64.b64decode(kept["data"]))) as im:
+            assert im.size == (512, 512)
+
+        wide = Path(tmpdir) / "wide.webp"
+        Image.new("RGB", (800, 400), "blue").save(wide, "WEBP")
+        wide_padded = squared_sticker_payload(str(wide), max_sticker_bytes=1024 * 1024)
+        assert not isinstance(wide_padded, str)
+        with Image.open(io.BytesIO(base64.b64decode(wide_padded["data"]))) as im:
+            assert im.size == (800, 800)
+
+        corrupt = Path(tmpdir) / "bad.webp"
+        corrupt.write_bytes(b"not an image")
+        failed = squared_sticker_payload(str(corrupt), max_sticker_bytes=1024 * 1024)
+        assert isinstance(failed, str)
+        assert "cannot decode" in failed
+
+
+def test_send_sticker_pads_local_path_before_sending() -> None:
+    """The tool letterboxes a non-square local path before the wire send."""
+    import io
+
+    from PIL import Image
+
+    from wahabot.ai.tools.whatsapp import (
+        RunTarget,
+        bind_target,
+        reset_target,
+        send_sticker,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        meme = Path(tmpdir) / "meme.webp"
+        Image.new("RGB", (1080, 1360), "white").save(meme, "WEBP")
+        waha = unittest.mock.Mock()
+        waha.send_sticker.return_value = "id"
+        target = RunTarget(session=SESSION, chat_id=CHAT_ID)
+        token = bind_target(target)
+        try:
+            tool = send_sticker(waha, 1024 * 1024)
+            out = tool(path=str(meme), reason="meme as sticker")
+        finally:
+            reset_target(token)
+        envelope: dict[str, Any] = json.loads(cast("str", out.content))
+        assert envelope["ok"] is True
+        file = waha.send_sticker.call_args.kwargs["file"]
+        with Image.open(io.BytesIO(base64.b64decode(file["data"]))) as im:
+            assert im.size == (1360, 1360)
+
+
 def test_mark_seen_swallows_failures() -> None:
     """mark_seen never raises: a presence hiccup must not kill a run."""
     waha = unittest.mock.Mock()
