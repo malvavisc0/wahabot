@@ -170,18 +170,30 @@ def video_meta(url: str, settings: Settings) -> dict[str, Any] | None:
         opts["extractor_args"] = {"youtube": {"player_client": [_YOUTUBE_CLIENT]}}
     if settings.web_search_proxy:
         opts["proxy"] = settings.web_search_proxy
-    try:
-        with yt_dlp.YoutubeDL(cast(Any, opts)) as ydl:
-            info = _extract(ydl, url)
-    except Exception as exc:
-        logger.info("Video metadata unavailable for {url}: {exc}", url=url, exc=exc)
-        return None
+    info = _extract_safely(url, opts)
     if not info:
         return None
     if "entries" in info:
         info = _post_info(info)
+    meta = _meta_fields(info)
+    _attach_caption_tracks(meta, info, url)
+    return meta
+
+
+def _extract_safely(url: str, opts: dict[str, Any]) -> dict[str, Any] | None:
+    """The extracted info dict, or None when yt-dlp cannot resolve it."""
+    try:
+        with yt_dlp.YoutubeDL(cast(Any, opts)) as ydl:
+            return _extract(ydl, url)
+    except Exception as exc:
+        logger.info("Video metadata unavailable for {url}: {exc}", url=url, exc=exc)
+        return None
+
+
+def _meta_fields(info: dict[str, Any]) -> dict[str, Any]:
+    """The envelope's scalar metadata fields from a resolved info dict."""
     description = str(info.get("description") or "")[:_DESCRIPTION_CHARS]
-    meta = {
+    return {
         "title": info.get("title"),
         "description": description or None,
         "uploader": info.get("uploader") or info.get("channel"),
@@ -189,17 +201,20 @@ def video_meta(url: str, settings: Settings) -> dict[str, Any] | None:
         "view_count": info.get("view_count"),
         "id": info.get("id"),
     }
-    # Caption tracks come from the processed dict (the raw one lacks
-    # per-format caption URLs); both live on ``info`` after _extract's
-    # retry, and videos without captions carry empty dicts — drop those.
-    if _YOUTUBE_HOST_RE.match(url):
-        tracks = cast(
-            "dict[str, list[dict[str, Any]]]",
-            info.get("subtitles") or {},
-        )
-        if tracks:
-            meta["_caption_tracks"] = tracks
-    return meta
+
+
+def _attach_caption_tracks(meta: dict[str, Any], info: dict[str, Any], url: str) -> None:
+    """Stash YouTube's caption tracks on *meta* for the transcript path.
+
+    Tracks come from the processed dict (the raw one lacks per-format
+    caption URLs); videos without captions carry empty dicts — drop
+    those.
+    """
+    if not _YOUTUBE_HOST_RE.match(url):
+        return
+    tracks = cast("dict[str, list[dict[str, Any]]]", info.get("subtitles") or {})
+    if tracks:
+        meta["_caption_tracks"] = tracks
 
 
 def _extract(ydl: Any, url: str) -> dict[str, Any] | None:
@@ -259,25 +274,41 @@ def youtube_transcript(
     cost an HLS playlist hop; the model can still read the description,
     so "" (not an error) is the honest answer for a caption-less video.
     """
-    lang = next(
+    ordered = _ordered_caption_tracks(tracks, language)
+    if not ordered:
+        logger.info("No usable caption track for {url}", url=url)
+        return ""
+    for text in (t for f in ordered for t in [_fetch_track_text(f)]):
+        if text:
+            return text
+    logger.info("Caption tracks for {url} had no fetchable format", url=url)
+    return ""
+
+
+def _ordered_caption_tracks(
+    tracks: dict[str, list[dict[str, Any]]], language: str
+) -> list[list[dict[str, Any]]]:
+    """Caption format lists, the *language* track first, others after."""
+    preferred = next(
         (t for name, t in sorted(tracks.items()) if name.startswith(language)),
         None,
     )
-    if lang is None and len(tracks) == 1:
-        lang = next(iter(tracks.values()))
-    if lang is None:
-        logger.info("No usable caption track for {url}", url=url)
-        return ""
-    ordered = [lang] + [t for t in tracks.values() if t is not lang]
-    for formats in ordered:
-        for wanted in ("json3", "srt", "vtt"):
-            track = next((f for f in formats if f.get("ext") == wanted), None)
-            if track is None:
-                continue
-            text = _fetch_captions(str(track.get("url") or ""))
-            if text:
-                return _paragraph(text if wanted == "json3" else _strip_vtt(text))
-    logger.info("Caption tracks for {url} had no fetchable format", url=url)
+    if preferred is None and len(tracks) == 1:
+        preferred = next(iter(tracks.values()))
+    if preferred is None:
+        return []
+    return [preferred] + [t for t in tracks.values() if t is not preferred]
+
+
+def _fetch_track_text(formats: list[dict[str, Any]]) -> str:
+    """One track list's captions as prose, trying json3, srt, then vtt."""
+    for wanted in ("json3", "srt", "vtt"):
+        track = next((f for f in formats if f.get("ext") == wanted), None)
+        if track is None:
+            continue
+        text = _fetch_captions(str(track.get("url") or ""))
+        if text:
+            return _paragraph(text if wanted == "json3" else _strip_vtt(text))
     return ""
 
 
@@ -324,22 +355,11 @@ def _paragraph(caption_text: str) -> str:
     whitespace, and break into paragraphs at sentence boundaries —
     the same formatting the dropped transcript tool used.
     """
-    if caption_text.lstrip().startswith("{"):
-        # json3: event objects with utf8 segments.
-        try:
-            data: dict[str, Any] = json.loads(caption_text)
-            events = data.get("events") or []
-            parts = [
-                "".join(
-                    seg.get("utf8", "") for seg in cast("list[Any]", ev.get("segs")) or []
-                )
-                for ev in cast("list[Any]", events)
-            ]
-            joined = " ".join(part.strip() for part in parts if part.strip())
-        except json.JSONDecodeError:
-            return ""
-    else:
-        joined = caption_text
+    joined = (
+        _join_json3(caption_text)
+        if caption_text.lstrip().startswith("{")
+        else (caption_text)
+    )
     joined = re.sub(r"\s+", " ", joined).strip()
     sentences = _SENTENCE_END_RE.split(joined)
     paragraphs = [
@@ -348,6 +368,19 @@ def _paragraph(caption_text: str) -> str:
     ]
     text = "\n\n".join(p for p in paragraphs if p)
     return text[:_MAX_TRANSCRIPT_CHARS]
+
+
+def _join_json3(caption_text: str) -> str:
+    """The utf8 segments of a json3 caption body, "" on a parse failure."""
+    try:
+        data: dict[str, Any] = json.loads(caption_text)
+    except json.JSONDecodeError:
+        return ""
+    parts = [
+        "".join(seg.get("utf8", "") for seg in cast("list[Any]", ev.get("segs")) or [])
+        for ev in cast("list[Any]", data.get("events") or [])
+    ]
+    return " ".join(part.strip() for part in parts if part.strip())
 
 
 def _fetch(url: str, settings: Settings) -> Any:
