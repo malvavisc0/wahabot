@@ -46,6 +46,7 @@ from typing import Any, NamedTuple, cast
 from llama_index.core.base.llms.types import (
     ChatMessage,
     MessageRole,
+    ThinkingBlock,
     ToolCallBlock,
 )
 
@@ -54,6 +55,7 @@ from wahabot.ai.messages import REACTION_TARGET_KWARG, TURN_HANDLED_KWARG
 __all__ = [
     "ToolCall",
     "chat_visible_text",
+    "degrade_old_history",
     "inbound_message_id",
     "is_error_narration",
     "is_silence_narration",
@@ -492,3 +494,88 @@ def _last_user_turn(groups: list[list[ChatMessage]]) -> list[ChatMessage]:
         if group[0].role == MessageRole.USER:
             return list(group)
     return groups[-1] if groups else []
+
+
+#: How many of the newest *user turns* stay verbatim. A user turn and
+# everything after it up to the next user turn is one run's slice;
+#: ``degrade_old_history`` squeezes only the slices that fall outside
+#: this window. Two turns: the newest is the current/last run (its tool
+#: output may still be the subject of the next message), the one before
+#: gives one run of full-fidelity hindsight — past that, the delivered
+#: words matter but the *how* (thinking blocks, raw shell output) does
+#: not (docs/bug-report-2c665d8.md, bug 7).
+FRESH_TURNS = 2
+
+#: Tool-result keys that survive degradation. ``ok``/``error``/``outcome``
+#: are the verdict ("it worked", "it failed why"); ``chat`` identifies the
+#: delivered conversation; ``tool``/``error`` text keeps failure diagnosis.
+#: Everything else — ``stdout`` dumps, message lists, page text — is the
+#: payload the model already consumed when the run was live.
+_VERDICT_KEYS = ("ok", "error", "outcome", "chat", "tool")
+
+
+def degrade_old_history(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Squeeze old history: keep every word, lose the operational scaffolding.
+
+    Recent conversation is social memory and stays verbatim; old turns
+    keep their *conclusions* but drop their *work*:
+
+    - assistant ``ThinkingBlock``s are removed from old slices — the
+      deliberation is spent once the run is over, but it dominates
+      replayed history (a single reasoning block can be ~1k tokens);
+    - old tool results keep only their verdict (``ok``, ``error``, …)
+      — the model needs to remember *that* a command worked, not the
+      2k characters of ``stdout`` it printed.
+
+    Destructive on purpose: the caller (``chat_history``) persists the
+    result back into memory, so degradation compounds across runs. A
+    run's turns degrade on the *next-next* run, never while fresh — the
+    newest ``FRESH_TURNS`` user turns and everything after them are
+    untouched. Idempotent: an already-degraded message passes through
+    unchanged.
+    """
+    turn_starts = [i for i, m in enumerate(messages) if m.role == MessageRole.USER]
+    if len(turn_starts) <= FRESH_TURNS:
+        return messages
+    cutoff = turn_starts[-FRESH_TURNS]
+    head = [degrade_message(m) for m in messages[:cutoff]]
+    return head + messages[cutoff:]
+
+
+def degrade_message(msg: ChatMessage) -> ChatMessage:
+    """One message degraded: thinking stripped, tool results squeezed."""
+    if msg.role == MessageRole.TOOL:
+        return squeeze_tool_result(msg)
+    if not any(isinstance(b, ThinkingBlock) for b in msg.blocks):
+        return msg
+    return ChatMessage(
+        role=msg.role,
+        blocks=[b for b in msg.blocks if not isinstance(b, ThinkingBlock)],
+        content=msg.content,
+        additional_kwargs=msg.additional_kwargs,
+    )
+
+
+def squeeze_tool_result(msg: ChatMessage) -> ChatMessage:
+    """A tool-result message reduced to its verdict envelope.
+
+    The tool results are JSON envelopes (``wahabot.ai.tools.envelope``);
+    keeping the verdict keys preserves the outcome and the failure
+    diagnosis while dropping the payload. Non-JSON results pass through
+    unchanged — a plain-text tool answer is its own verdict.
+    """
+    text = str(msg.content or "").strip()
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        return msg
+    if not isinstance(payload, dict):
+        return msg
+    verdict = {k: payload[k] for k in _VERDICT_KEYS if k in payload}
+    if not verdict or len(json.dumps(verdict, ensure_ascii=False)) >= len(text):
+        return msg
+    return ChatMessage(
+        role=msg.role,
+        content=json.dumps(verdict, ensure_ascii=False),
+        additional_kwargs=msg.additional_kwargs,
+    )

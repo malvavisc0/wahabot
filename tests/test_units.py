@@ -1010,6 +1010,134 @@ def test_token_count_is_honest_not_char_equivalent() -> None:
     assert token_count(call) > 0
 
 
+def test_degrade_old_history_squeezes_old_keeps_fresh() -> None:
+    """Old turns lose thinking and tool payloads; fresh turns stay verbatim.
+
+    The meme incident (docs/bug-report-2c665d8.md, bug 7): replayed
+    history was dominated by old reasoning blocks and raw ``stdout``
+    — ~12.4k tokens per run. Degradation keeps the social content
+    (who said what, what was delivered) and the tool verdicts, drops
+    the operational scaffolding from slices older than the last
+    ``FRESH_TURNS`` user turns, and never touches the fresh window.
+    """
+    import json as _json
+
+    from llama_index.core.base.llms.types import (
+        TextBlock,
+        ThinkingBlock,
+        ToolCallBlock,
+    )
+
+    from wahabot.ai.history import degrade_old_history
+    from wahabot.ai.workflow import token_count
+
+    def user(text: str) -> ChatMessage:
+        return ChatMessage(role=MessageRole.USER, content=text)
+
+    def assistant(text: str) -> ChatMessage:
+        return ChatMessage(role=MessageRole.ASSISTANT, blocks=[TextBlock(text=text)])
+
+    def tool_result(payload: dict[str, Any]) -> ChatMessage:
+        return ChatMessage(role=MessageRole.TOOL, content=_json.dumps(payload))
+
+    messages = [
+        user("revisa mi wifi"),
+        ChatMessage(
+            role=MessageRole.ASSISTANT,
+            blocks=[
+                ThinkingBlock(content="deliberation " * 200),
+                ToolCallBlock(tool_name="run_shell_command", tool_call_id="c1"),
+            ],
+        ),
+        tool_result(
+            {"ok": True, "exit_code": 0, "stdout": "wlan0 ok\n" + "x" * 3000}
+        ),
+        assistant("todo bien con tu wifi"),
+        user("crea un meme"),
+        ChatMessage(
+            role=MessageRole.ASSISTANT,
+            blocks=[
+                ThinkingBlock(content="meme plan " * 200),
+                ToolCallBlock(tool_name="run_shell_command", tool_call_id="c2"),
+            ],
+        ),
+        tool_result({"ok": True, "exit_code": 0, "stdout": "fonts ok"}),
+        assistant("meme enviado"),
+        user("jajaja"),
+        assistant("jaj"),
+    ]
+    before = sum(token_count(m) for m in messages)
+    degraded = degrade_old_history(messages)
+    after = sum(token_count(m) for m in degraded)
+
+    # The old wifi slice: thinking gone, stdout gone, verdict kept.
+    old_slice = degraded[: 4]
+    assert not any(
+        isinstance(b, ThinkingBlock) for m in old_slice for b in m.blocks
+    )
+    wifi_tool = next(m for m in old_slice if m.role == MessageRole.TOOL)
+    assert '"ok": true' in str(wifi_tool.content)
+    assert "wlan0" not in str(wifi_tool.content)
+    # Delivered words survive.
+    assert any(
+        m.role == MessageRole.ASSISTANT and "todo bien" in str(m.content)
+        for m in old_slice
+    )
+    # The fresh window (last FRESH_TURNS user turns and after) untouched.
+    fresh_from = next(
+        i for i, m in enumerate(messages) if m.content == "crea un meme"
+    )
+    assert degraded[fresh_from:] == messages[fresh_from:]
+    # Old payload bulk actually shrank.
+    assert after < before // 2
+    # Idempotent: degrading again changes nothing.
+    assert degrade_old_history(degraded) == degraded
+
+
+def test_degrade_old_history_small_conversation_untouched() -> None:
+    """Fewer user turns than the fresh window: nothing is degraded."""
+
+    from wahabot.ai.history import FRESH_TURNS, degrade_old_history
+
+    messages = [
+        ChatMessage(role=MessageRole.USER, content="hola"),
+        ChatMessage(role=MessageRole.ASSISTANT, content="hola!"),
+    ]
+    assert len(messages) <= FRESH_TURNS
+    assert degrade_old_history(messages) == messages
+
+
+def test_squeeze_tool_result_keeps_verdict_only() -> None:
+    """The tool-result squeeze: verdict keys stay, payload goes.
+
+    A failure keeps its diagnosis (``error``), a success keeps its
+    ``ok``; non-JSON tool text passes through — a plain answer is its
+    own verdict — and a verdict no smaller than the original is left
+    alone (no point swapping identical bulk).
+    """
+    import json as _json
+
+    from wahabot.ai.history import squeeze_tool_result
+
+    big = ChatMessage(
+        role=MessageRole.TOOL,
+        content=_json.dumps(
+            {"ok": False, "error": "cooldown", "stdout": "x" * 2000}
+        ),
+    )
+    squeezed = squeeze_tool_result(big)
+    assert '"error": "cooldown"' in str(squeezed.content)
+    assert "xxxx" not in str(squeezed.content)
+
+    plain = ChatMessage(role=MessageRole.TOOL, content="the answer is 42")
+    assert squeeze_tool_result(plain).content == plain.content
+
+    already_small = ChatMessage(
+        role=MessageRole.TOOL, content='{"ok": true, "chat": "c@g.us"}'
+    )
+    assert squeeze_tool_result(already_small).content == already_small.content
+
+
 def test_burst_refuses_unresolvable_sender() -> None:
     """A group message with no participant/author never buffers.
 

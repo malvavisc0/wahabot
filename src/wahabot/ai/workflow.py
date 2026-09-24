@@ -38,6 +38,7 @@ from loguru import logger
 from wahabot.ai.events import InputEvent, ToolCallEvent
 from wahabot.ai.history import (
     chat_visible_text,
+    degrade_old_history,
     inbound_message_id,
     is_single_emoji,
     sanitize_chat_history,
@@ -696,15 +697,18 @@ class FunctionCallingAgentWorkflow(Workflow):
         """The trimmed, structurally valid conversation plus system prompt.
 
         The conversation is sanitised (balanced tool groups, alternating
-        turns) and trimmed to the memory token budget. The system message
-        is kept out of the rolling buffer so the token trim can never
-        evict it; its cost is accounted via ``initial_token_count`` so the
-        whole prompt still fits the budget.
+        turns), degraded (old groups lose thinking blocks and tool-
+        result payloads — their conclusions stay), and trimmed to the
+        memory token budget. The system message is kept out of the
+        rolling buffer so the token trim can never evict it; its cost
+        is accounted via ``initial_token_count`` so the whole prompt
+        still fits the budget.
         """
         memory = await ctx.store.get("memory")
         system = self.system_message()
         messages = await memory.aget_all()
         messages = sanitize_chat_history(messages, drop_trailing_user=False)
+        messages = degrade_old_history(messages)
         messages = trim_to_budget(messages, self.memory_token_limit, token_count)
         await memory.aset(messages)
         initial = self.system_token_count(memory)
