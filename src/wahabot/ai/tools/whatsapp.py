@@ -1260,9 +1260,7 @@ def send_sticker(waha: WahaClient, max_sticker_bytes: int) -> BaseTool:
     )
 
 
-def squared_sticker_payload(
-    path: str, max_sticker_bytes: int
-) -> dict[str, Any] | str:
+def squared_sticker_payload(path: str, max_sticker_bytes: int) -> dict[str, Any] | str:
     """A square WAHA sticker payload for a local path, or an error string.
 
     WhatsApp renders stickers on a square canvas: a 1080x1360 meme
@@ -1281,9 +1279,7 @@ def squared_sticker_payload(
             width, height = im.size
             if width == height:
                 return loaded | {
-                    "mimetype": infer_mimetype(
-                        path, _IMAGE_MIME_BY_EXT, "image/webp"
-                    )
+                    "mimetype": infer_mimetype(path, _IMAGE_MIME_BY_EXT, "image/webp")
                 }
             side = max(width, height)
             canvas = Image.new(im.mode, (side, side), "white")

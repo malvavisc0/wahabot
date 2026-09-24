@@ -2684,6 +2684,136 @@ def test_remember_strips_thinking_separator(unit_settings: Settings) -> None:
     assert asyncio.run(stored_texts()) == ["jaj real reply"]
 
 
+def test_post_delivery_wrap_up_note_stored_not_sent(
+    unit_settings: Settings,
+) -> None:
+    """Post-delivery final text becomes a tagged wrap-up note in memory.
+
+    The meme incident (docs/bug-report-2c665d8.md, bug 6): after the
+    sticker delivery the model's final 📦 was dropped by the latch and
+    the 3.8s round produced nothing. The wrap-up design keeps the
+    latch (the note never goes to the chat) but stores the text as a
+    ``wrap_up_note``-tagged assistant message and journals it — the
+    next run reads what happened instead of a bare delivery record.
+    """
+    from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
+    from llama_index.core.memory import ChatMemoryBuffer
+    from llama_index.core.workflow import Context
+
+    from wahabot.ai.messages import WRAP_UP_NOTE_KWARG
+    from wahabot.ai.workflow import FunctionCallingAgentWorkflow, load_llm
+
+    async def scenario() -> tuple[list[ChatMessage], str, str]:
+        wf = FunctionCallingAgentWorkflow(llm=load_llm(unit_settings))
+        ctx = Context(wf)
+        await ctx.store.set(
+            "memory",
+            ChatMemoryBuffer.from_defaults(),  # pyright: ignore[reportUnknownMemberType]
+        )
+        # The delivery already fired this run (sticker sent).
+        from wahabot.ai.tools.whatsapp import RunTarget, bind_target, reset_target
+
+        target = RunTarget(session=SESSION, chat_id=CHAT_ID)
+        token = bind_target(target)
+        try:
+            target.sent = CHAT_ID
+            message = ChatMessage(
+                role=MessageRole.ASSISTANT,
+                content=(
+                    "Made the millennial starter pack meme with PIL and sent "
+                    "it as a sticker; send_image rejected the local path."
+                ),
+            )
+            response = ChatResponse(message=message)
+            delivered = wf.any_delivery()
+            await wf.remember(ctx, response, [], skip_text=delivered)
+            if delivered:
+                await wf.store_wrap_up_note(ctx, str(message.content))
+            memory = await ctx.store.get("memory")
+            stored = await memory.aget_all()
+            final = wf.drop_post_delivery_text(response)
+        finally:
+            reset_target(token)
+        return stored, str(final.message.content or ""), str(message.content or "")
+
+    stored, final_content, note = asyncio.run(scenario())
+    # The note is in memory, tagged as a wrap-up note.
+    notes = [m for m in stored if WRAP_UP_NOTE_KWARG in m.additional_kwargs]
+    assert len(notes) == 1
+    assert notes[0].content == note
+    assert "sticker" in str(notes[0].content)
+    # The reply to the chat stays empty: the latch holds.
+    assert final_content == ""
+
+
+def test_wrap_up_prompt_used_after_delivery(unit_settings: Settings) -> None:
+    """After a delivery, wrap-up calls ask for the self-record note.
+
+    ``wrap_up_response`` must pick ``_POST_DELIVERY_WRAP_UP_PROMPT``
+    over the round-limit prompt when the delivery latch fired, and
+    store the produced sentence as the tagged note.
+    """
+    from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
+    from llama_index.core.memory import ChatMemoryBuffer
+    from llama_index.core.workflow import Context
+
+    from wahabot.ai.messages import WRAP_UP_NOTE_KWARG
+    from wahabot.ai.workflow import (
+        _POST_DELIVERY_WRAP_UP_PROMPT,  # pyright: ignore[reportPrivateUsage]
+        FunctionCallingAgentWorkflow,
+        load_llm,
+    )
+
+    async def scenario() -> tuple[str, str, list[ChatMessage]]:
+        seen: dict[str, str] = {}
+
+        async def fake_achat(self_llm: Any, messages: Any, **kwargs: Any) -> Any:
+            seen["prompt"] = str(messages[-1].content or "")
+            return ChatResponse(
+                message=ChatMessage(
+                    role=MessageRole.ASSISTANT,
+                    content="Sent the meme as a sticker after the image path failed",
+                )
+            )
+
+        from wahabot.ai.workflow import ObservableOpenAILike
+
+        original = ObservableOpenAILike.achat
+        ObservableOpenAILike.achat = fake_achat  # pyright: ignore[reportAttributeAccessIssue]
+        try:
+            wf = FunctionCallingAgentWorkflow(llm=load_llm(unit_settings))
+            ctx = Context(wf)
+            await ctx.store.set(
+                "memory",
+                ChatMemoryBuffer.from_defaults(),  # pyright: ignore[reportUnknownMemberType]
+            )
+            from wahabot.ai.tools.whatsapp import RunTarget, bind_target, reset_target
+
+            target = RunTarget(session=SESSION, chat_id=CHAT_ID)
+            token = bind_target(target)
+            try:
+                target.sent = CHAT_ID  # delivery fired
+                await wf.wrap_up_response(
+                    ctx, "non-delivery round after completed delivery"
+                )
+                # The note is staged until collapse_delivery folds the group.
+                staged = await ctx.store.get("pending_wrap_up_note", default="")
+                await wf.flush_pending_wrap_up_note(ctx)
+                memory = await ctx.store.get("memory")
+                return seen["prompt"], staged, await memory.aget_all()
+            finally:
+                reset_target(token)
+        finally:
+            ObservableOpenAILike.achat = original
+
+    prompt, staged, stored = asyncio.run(scenario())
+    assert _POST_DELIVERY_WRAP_UP_PROMPT[:30] in prompt
+    assert "sticker" in staged
+    notes = [m for m in stored if WRAP_UP_NOTE_KWARG in m.additional_kwargs]
+    assert len(notes) == 1
+    assert "sticker" in str(notes[0].content)
+
+
 def test_remember_drops_lone_emoji_reply(unit_settings: Settings) -> None:
     """``remember`` never stores a lone-emoji reply as the bot's text.
 

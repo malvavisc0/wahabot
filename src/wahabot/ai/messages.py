@@ -23,6 +23,13 @@ REACTION_TARGET_KWARG = "reaction_target_id"
 #: silent run's message must stay in context for the next run).
 TURN_HANDLED_KWARG = "turn_handled"
 
+#: Kwarg key tagging the model's post-delivery wrap-up note — the
+#: one-sentence self-record stored after a delivery fired. The note
+#: was never sent to the chat (the one-delivery latch holds), so
+#: anything reading history must be able to tell it apart from a
+#: message the chat saw.
+WRAP_UP_NOTE_KWARG = "wrap_up_note"
+
 
 def jid_string(value: Any) -> str:
     """A JID field as a plain ``user@server`` string.

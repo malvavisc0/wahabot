@@ -45,7 +45,7 @@ from wahabot.ai.history import (
     trim_to_budget,
     wire_call,
 )
-from wahabot.ai.messages import TURN_HANDLED_KWARG
+from wahabot.ai.messages import TURN_HANDLED_KWARG, WRAP_UP_NOTE_KWARG
 from wahabot.ai.tools.whatsapp import current_target, log_action_reason
 from wahabot.core.audit import save_action
 from wahabot.settings import Settings
@@ -65,6 +65,23 @@ _EARLY_STOPPING_PROMPT = (
     "response to the user's original message. Do not attempt to use any "
     "more tools. If you already sent your reply, say nothing more — "
     "answer with an empty message."
+)
+
+#: After a delivery tool fired, the run's remaining purpose is the
+#: self-record: a one-sentence note of what was done and why, stored in
+#: the model's own history (never sent to the chat — the one-delivery
+#: latch holds). Without it the post-delivery round had exactly one
+#: legal output, an empty message, the model guessed at that and its
+#: chatter was discarded (docs/bug-report-2c665d8.md, bug 6); with it
+#: the round produces the context the *next* run needs — why the meme
+#: went out as a sticker, what the failed send attempt taught.
+_POST_DELIVERY_WRAP_UP_PROMPT = (
+    "You already delivered your reply to the chat this run — nothing "
+    "more will be sent, no matter what you write. In one short "
+    "sentence, note for your own record what you did and why (the "
+    "delivery that worked, and anything that failed or was skipped "
+    "along the way). This note is stored for your next conversation "
+    "turn, not sent to the chat. Do not use any tools."
 )
 
 #: The tools that deliver content to a chat; each latches the shared
@@ -242,9 +259,7 @@ def mark_active_span_error(tool_call: ToolSelection, exc: Exception) -> None:
         logger.debug("Could not mark tracing span for failed tool call")
 
 
-def run_tool_guarded(
-    tool: BaseTool, tool_call: ToolSelection
-) -> ToolOutput:
+def run_tool_guarded(tool: BaseTool, tool_call: ToolSelection) -> ToolOutput:
     """Call the tool, marking its tracing span ERROR on exception.
 
     Runs inside the ``asyncio.to_thread`` worker so the span the
@@ -841,6 +856,14 @@ class FunctionCallingAgentWorkflow(Workflow):
         """
         rounds = await self.next_round(ctx)
         chat_history = await self.populated_history(ctx, ev)
+        if self.any_delivery():
+            # The delivery already fired: everything from here on can
+            # only produce the wrap-up note. Say so instead of letting
+            # the model guess and discarding its answer (bug 6).
+            chat_history = [
+                *chat_history,
+                ChatMessage(role="user", content=_POST_DELIVERY_WRAP_UP_PROMPT),
+            ]
         async with self.llm_semaphore:
             response = await self.llm.achat_with_tools(
                 self.tools,
@@ -863,9 +886,17 @@ class FunctionCallingAgentWorkflow(Workflow):
         if not tool_calls:
             self.warn_accidental_silence(response, rounds)
             delivered = self.any_delivery()
+            note = str(response.message.content or "").strip() if delivered else ""
             await self.remember(ctx, response, tool_calls, skip_text=delivered)
             await self.mark_turn_handled(ctx)
+            # Collapse before storing the note: the note appended after
+            # the tool results would break ``batch_closes_history`` and
+            # the group would never fold.
             await self.collapse_delivery(ctx)
+            if delivered:
+                if note:
+                    await self.store_wrap_up_note(ctx, note)
+                self.audit_wrap_up_note(note)
             return StopEvent(result=self.drop_post_delivery_text(response))
         if self.delivery_complete(tool_calls) or rounds >= self.tool_round_limit:
             # Do not store calls which will not be executed: the chat API
@@ -878,6 +909,7 @@ class FunctionCallingAgentWorkflow(Workflow):
             result = await self.wrap_up_response(ctx, reason)
             await self.mark_turn_handled(ctx)
             await self.collapse_delivery(ctx)
+            await self.flush_pending_wrap_up_note(ctx)
             return StopEvent(result=result)
         await self.remember(ctx, response, tool_calls)
         return ToolCallEvent(tool_calls=tool_calls)
@@ -1091,21 +1123,75 @@ class FunctionCallingAgentWorkflow(Workflow):
         model is told the budget is spent and asked for a final answer
         without tools. The round counter is already over the limit, so
         even a defiant model requesting tools again cannot continue.
-        A delivered reply makes the wrap-up text post-delivery chatter —
-        it is dropped like any other post-delivery final text.
+
+        A delivered reply changes the ask: the final text can never be
+        sent (the one-delivery latch holds), so the round produces the
+        post-delivery wrap-up note instead — one sentence of what was
+        done and why, stored in the model's history for the next run
+        and journaled, never sent to the chat (bug 6 of
+        docs/bug-report-2c665d8.md: the un-nudged model burned the
+        round on chatter that could only be discarded).
         """
         limit = self.tool_round_limit
         logger.warning("Generating wrap-up response ({reason})", reason=reason)
-        messages = await self.chat_history(ctx)
-        messages.append(
-            ChatMessage(
-                role="user",
-                content=_EARLY_STOPPING_PROMPT.format(limit=limit),
-            )
+        delivered = self.any_delivery()
+        prompt = (
+            _POST_DELIVERY_WRAP_UP_PROMPT
+            if delivered
+            else _EARLY_STOPPING_PROMPT.format(limit=limit)
         )
+        messages = await self.chat_history(ctx)
+        messages.append(ChatMessage(role="user", content=prompt))
         async with self.llm_semaphore:
             response = await self.llm.achat(messages)
+        if delivered:
+            note = str(response.message.content or "").strip()
+            if note:
+                # Stored by the caller after collapse_delivery: the note
+                # appended before the collapse would break the group's
+                # closes-history precondition and leave scaffolding raw.
+                await ctx.store.set("pending_wrap_up_note", note)
+            self.audit_wrap_up_note(note)
         return self.drop_post_delivery_text(response)
+
+    async def flush_pending_wrap_up_note(self, ctx: Context) -> None:
+        """Store the wrap-up note ``wrap_up_response`` staged, if any.
+
+        The note lands only after ``collapse_delivery`` folded the
+        tool group: appended before the fold it would break the
+        group's closes-history precondition and leave the scaffolding
+        raw in memory.
+        """
+        note = await ctx.store.get("pending_wrap_up_note", default="")
+        if not note:
+            return
+        await self.store_wrap_up_note(ctx, note)
+        await ctx.store.set("pending_wrap_up_note", "")
+
+    async def store_wrap_up_note(self, ctx: Context, note: str) -> None:
+        """Append the post-delivery wrap-up note to the run's memory.
+
+        The note rides memory as an assistant message tagged with
+        ``WRAP_UP_NOTE_KWARG`` so history readers can tell it from a
+        message the chat saw — the note was never sent to the chat,
+        the one-delivery latch held. Always stored *after* the
+        delivery group collapsed (see ``flush_pending_wrap_up_note``).
+        """
+        try:
+            memory = await ctx.store.get("memory")
+            await memory.aput(
+                ChatMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=note,
+                    additional_kwargs={WRAP_UP_NOTE_KWARG: True},
+                )
+            )
+        except Exception:
+            logger.debug("Could not store post-delivery wrap-up note")
+
+    def audit_wrap_up_note(self, note: str) -> None:
+        """Journal the run's self-report (empty note included, visibly so)."""
+        self.audit("wrap_up", note=note[:300])
 
     def drop_post_delivery_text(self, response: ChatResponse) -> ChatResponse:
         """Empty *response* when a delivery tool already fired this run.
