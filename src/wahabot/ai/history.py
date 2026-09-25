@@ -57,6 +57,7 @@ __all__ = [
     "chat_visible_text",
     "degrade_old_history",
     "inbound_message_id",
+    "is_emoji_narration",
     "is_error_narration",
     "is_silence_narration",
     "sanitize_chat_history",
@@ -101,6 +102,57 @@ _SINGLE_EMOJI_RE = re.compile(
 def is_single_emoji(reply: str) -> bool:
     """True when *reply* is exactly one emoji and nothing else."""
     return bool(_SINGLE_EMOJI_RE.match(reply))
+
+
+#: An emoji followed by narration: ``👍 Reaccioné con 👍 a…``,
+#: ``🙄 I reacted with 🙄 to…``. The pattern-completion small models
+#: produce after (or instead of) a reaction tool call: the emoji is
+#: the reaction, the rest is a report to nobody. Language-agnostic by
+#: shape, not vocabulary: one lone emoji, then a line that is *about*
+#: the emoji or the reaction/send — verbs the model narrates in
+#: whatever language the chat uses (reacted/reaccioné/reaccionó,
+#: sent/envié, without writing/sin escribir, …). A real message may
+#: open with an emoji, but its second line talks to the chat, not
+#: about the bot's own action.
+_EMOJI_NARRATION_RE = re.compile(
+    "".join(
+        (
+            r"^\s*",
+            r"[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF",
+            r"[\U0001F1E0-\U0001F1FF\U00002702-\U000027B0\U0001F900-\U0001F9FF",
+            r"\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U00002600-\U000026FF]",
+            r"\U0000FE0F?[\U0001F3FB-\U0001F3FF]?",
+            r"\s*(?:[\n·|—-]+\s*)?",
+            r"(?:i\s+)?",
+            r"(?:already\s+)?",
+            r"(?:",
+            r"reacted|reaccion(?:é|o|amos)|reacted with|",
+            r"he\s+reacted|he\s+reaccionado|",
+            r"envié|envió|enviado|mandé|mandó|mandado|",
+            r"sent|answered|respondí|respondió|",
+            r"replied|replió",
+            r")\b",
+            r".*",
+        )
+    ),
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def is_emoji_narration(reply: str) -> bool:
+    """True when *reply* is one emoji plus a report about that action.
+
+    ``👍\\nReaccioné con 👍 al matiz de Francisco, sin escribir por el
+    modo silencio.`` — the model narrated the reaction it meant to
+    deliver instead of calling the tool (or after a tool round). The
+    emoji half makes it *look* like a lone-emoji reaction; the words
+    half is a self-report no chat member asked for, in any language.
+    Delivery turns this into silence (the handler's lone-emoji path
+    cannot run — the emoji rides narration, not a message), and
+    storage filters it so the model's self-history cannot re-teach
+    the pattern.
+    """
+    return bool(_EMOJI_NARRATION_RE.match(reply.strip()))
 
 
 #: Replies that narrate a chosen silence instead of being one. Small
@@ -195,6 +247,8 @@ def chat_visible_text(content: Any) -> str:
     if is_silence_narration(reply):
         return ""
     if is_error_narration(reply):
+        return ""
+    if is_emoji_narration(reply):
         return ""
     return reply
 

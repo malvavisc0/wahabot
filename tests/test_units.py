@@ -32,6 +32,7 @@ from tests.harness import (
     smoke_video_bytes,
 )
 from wahabot.ai.context import (
+    is_emoji_narration,
     is_silence_narration,
     is_single_emoji,
     participant_names,
@@ -3676,6 +3677,47 @@ def test_is_single_emoji_passes_text() -> None:
     assert not is_single_emoji("stay_silent")
     assert not is_single_emoji("")
     assert not is_single_emoji("   ")
+
+
+def test_is_emoji_narration_catches_reaction_report() -> None:
+    """Emoji + a report about that reaction is never a chat message.
+
+    A 2026-09-25 production trace shows the model *writing*
+    ``👍\\nReaccioné con 👍 a…`` instead of calling
+    ``react_to_message`` — the exact leak ``is_single_emoji`` cannot
+    catch (the narration rides the emoji) and ``is_silence_narration``
+    cannot catch (Spanish, and not about staying silent). The shape —
+    one emoji, then a line about the bot's own action — is language-
+    agnostic: the verb list covers the chat's English and Spanish.
+    The strings below are reconstructed examples of the pattern, not
+    verbatim chat content.
+    """
+    assert is_emoji_narration(
+        "👍\nReaccioné con 👍 al comentario anterior, sin escribir texto."
+    )
+    assert is_emoji_narration(
+        "🙄\nReaccioné con 🙄 a la broma de antes para no romper el hilo."
+    )
+    assert is_emoji_narration("👀\nEnvié una reacción a la pregunta.")
+    assert is_emoji_narration("😅 I reacted with 😅 to that one, no text.")
+    assert is_emoji_narration("👍\nI already reacted, so I'm done here.")
+
+
+def test_is_emoji_narration_passes_real_messages() -> None:
+    """An emoji opening a real message is a message, not a self-report.
+
+    The narration filter is anchored to the *second line's verb*: it
+    must not swallow genuine chat text that happens to start with an
+    emoji — the line after the emoji has to be about the bot's own
+    reaction/send for the reply to count as narration.
+    """
+    assert not is_emoji_narration("😂 esa fue buena, me acordé de ayer")
+    assert not is_emoji_narration("😅 pues yo lo vi ayer, fue hace un año")
+    assert not is_emoji_narration("👍")
+    assert not is_emoji_narration("no tengo ni idea, pregunta mañana")
+    assert not is_emoji_narration("🤣🤣🤣")
+    assert not is_emoji_narration("")
+    assert not is_emoji_narration("   ")
 
 
 # ---------------------------------------------------------------------------

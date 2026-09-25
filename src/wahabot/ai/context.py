@@ -11,6 +11,7 @@ from loguru import logger
 
 from wahabot.ai.history import (
     chat_visible_text,
+    is_emoji_narration,
     is_error_narration,
     is_silence_narration,
     is_single_emoji,
@@ -40,6 +41,7 @@ from wahabot.settings import Settings
 __all__ = [
     "final_reply",
     "handle_message",
+    "is_emoji_narration",
     "is_error_narration",
     "is_silence_narration",
     "is_single_emoji",
