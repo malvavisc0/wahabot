@@ -708,10 +708,13 @@ def test_burst_lone_emoji_becomes_reaction(bot: Bot) -> None:
         "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
     }
     chat = "491555000001@c.us"
-    # Force the ~50 % reaction coin flip to the reaction side.
+    # Force the ~50 % reaction coin flip to the reaction side. The
+    # burst flushes in the background up to burst_inactivity_s after
+    # the post, so the patch must stay active through the wait — a
+    # patch scoped to the post alone would exit before the coin flip.
     with unittest.mock.patch("wahabot.handlers.random.random", return_value=0.0):
         emoji_bot.post(burst_chat_event(body="mira ese reel", mid="EMOJI1", chat=chat))
-    assert _wait(lambda: len(emoji_bot.waha.reactions) >= 1)
+        assert _wait(lambda: len(emoji_bot.waha.reactions) >= 1)
     # The anchor is the burst's only/last message.
     assert (f"false_{chat}_EMOJI1", "👍") in emoji_bot.waha.reactions
     # No text was sent: the emoji became a reaction, never a message.
