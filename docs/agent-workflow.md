@@ -18,7 +18,7 @@ The AI code is split into focused modules under `src/wahabot/ai/`:
 
 | Module | What it does |
 |---|---|
-| `workflow.py` | `FunctionCallingAgentWorkflow` (the `@step` methods), `load_llm`, `build_agent` |
+| `workflow/` | The agent workflow split into a package: `agent.py` (`FunctionCallingAgentWorkflow` steps, `ObservableOpenAILike`, `load_llm`, `build_agent`), `toolkit.py` (tool execution/validation/failure envelopes), `delivery.py` (delivery-group folding, chat-visible text), `text.py` (token-count sizing). Re-exports the old `workflow.py` surface |
 | `events.py` | The workflow events (`InputEvent`, `ToolCallEvent`) |
 | `context.py` | Sender tagging, reply-context rendering + the `handle_message` entrypoint |
 | `messages.py` | Message classification and extraction (`extract_text`, `image_media`, `is_replyable`, …) |
@@ -523,7 +523,7 @@ message" (good: "url quoted by the user needs reading"). It is
 log-only — `log_action_reason` (`whatsapp.py`) writes the
 delivery/silence reasons to the operator's log (INFO; a missing
 reason logs a WARNING), and the workflow's per-call line
-(`run_tool_call` in `workflow.py`) prints every call's reason and
+(`run_tool_call` in `workflow/toolkit.py`) prints every call's reason and
 arguments — a missing reason shows as `reason: (model gave none)`.
 Nothing else — never delivered to a chat, never fed back to the model.
 It is an observability and self-restraint knob: naming *why* forces
@@ -650,7 +650,7 @@ workflow runs any requested tool automatically.
 
 These behaviors of the underlying engine were verified against the
 installed source, and the workflow's safeguards depend on them. Read
-this before touching `workflow.py` or `handlers.py`.
+this before touching `workflow/` or `handlers.py`.
 
 ### The engine is the `workflows` package, not `llama_index.core.workflow`
 
@@ -765,7 +765,7 @@ and fall back to kwargs, or it will silently see zero.
   tool-free wrap-up call (logged with its trigger: the round limit, or
   a non-delivery round after a completed delivery). The counter resets
   at every run start.
-- The workflow's delivery set (`DELIVERY_TOOLS` in `workflow.py`) is
+- The workflow's delivery set (`DELIVERY_TOOLS` in `workflow/delivery.py`) is
   `send_message`, `send_media`, `forward_message`, and
   `react_to_message` (`send_media` covers all five media kinds via its
   `kind` argument). They share a single delivery latch and
