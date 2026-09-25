@@ -28,8 +28,8 @@ roles for plain turns. Together these invariants are enforced by
    is also removed so the next turn maintains alternation.
 
 This module also owns the reply-text classification that decides what
-is *chat-visible* (:func:`is_silence_narration`,
-:func:`is_error_narration`, :func:`chat_visible_text`) — one definition
+is *chat-visible* (:func:`narration_kind` and the three ``is_*``
+predicates it backs, :func:`chat_visible_text`) — one definition
 shared by delivery (``final_reply``) and storage (``remember``) so the
 two filters can never drift apart. It lives here, next to the history
 invariants it protects, because ``context`` imports ``workflow`` which
@@ -60,6 +60,7 @@ __all__ = [
     "is_emoji_narration",
     "is_error_narration",
     "is_silence_narration",
+    "narration_kind",
     "sanitize_chat_history",
     "tool_calls",
     "trim_to_budget",
@@ -110,10 +111,10 @@ def is_single_emoji(reply: str) -> bool:
 #: the reaction, the rest is a report to nobody. Language-agnostic by
 #: shape, not vocabulary: one lone emoji, then a line that is *about*
 #: the emoji or the reaction/send — verbs the model narrates in
-#: whatever language the chat uses (reacted/reaccioné/reaccionó,
-#: sent/envié, without writing/sin escribir, …). A real message may
-#: open with an emoji, but its second line talks to the chat, not
-#: about the bot's own action.
+#: whatever language the chat uses (reacted/reaccioné/habe reagiert,
+#: sent/envié/geschickt, without writing/sin escribir/ohne zu
+#: schreiben, …). A real message may open with an emoji, but its
+#: second line talks to the chat, not about the bot's own action.
 _EMOJI_NARRATION_RE = re.compile(
     "".join(
         (
@@ -123,14 +124,20 @@ _EMOJI_NARRATION_RE = re.compile(
             r"\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U00002600-\U000026FF]",
             r"\U0000FE0F?[\U0001F3FB-\U0001F3FF]?",
             r"\s*(?:[\n·|—-]+\s*)?",
-            r"(?:i\s+)?",
-            r"(?:already\s+)?",
+            r"(?:i\s+|ich\s+)?",
+            r"(?:already\s+|bereits\s+|schon\s+)?",
+            r"(?:habe\s+|hab\s+)?",
+            r"(?:mit\s+\S+\s+)?",
             r"(?:",
             r"reacted|reaccion(?:é|o|amos)|reacted with|",
             r"he\s+reacted|he\s+reaccionado|",
             r"envié|envió|enviado|mandé|mandó|mandado|",
             r"sent|answered|respondí|respondió|",
-            r"replied|replió",
+            r"replied|replió|",
+            r"reagiert|habe\s+reagiert|",
+            r"geschickt|gesendet|",
+            r"geantwortet|habe\s+geantwortet|",
+            r"reagierte",
             r")\b",
             r".*",
         )
@@ -164,7 +171,10 @@ def is_emoji_narration(reply: str) -> bool:
 #: The same happens after a delivered reaction or reply: the model
 #: pattern-completes "I already reacted to that message, so I'm done
 #: here." instead of going quiet — the reaction/reply already went out
-#: via the tool, so the narration is chatter, not an answer.
+#: via the tool, so the narration is chatter, not an answer. The
+#: chat's languages (English, Spanish, German) carry the same anchored
+#: shapes: a Spanish "Sin respuesta." or German "Keine Antwort."
+#: reaching the chat is the same bug as the English "No response.".
 _SILENCE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -187,6 +197,36 @@ _SILENCE_PATTERNS = tuple(
             )
         ),
         r"^i'?m done (here|with this)\b",
+        r"^sin respuesta[.!…]?$",
+        r"^(no tengo )?nada( más)? que (añadir|decir)[.!…]?$",
+        r"^(me |prefiero )?(quedo|quedarme) (callado|callada|en silencio)[.!…]?$",
+        r"^silencio[.!…]?$",
+        r"^\(silencio\)$",
+        r"^no diré nada\b",
+        r"^no voy a (responder|contestar)\b",
+        r"^keine antwort[.!…]?$",
+        r"^keine (antwort|rückmeldung) hierzu[.!…]?$",
+        "".join(
+            (
+                r"^(ich )?(habe )?nichts( (mehr|weiter))?",
+                r"( zu (sagen|ergänzen|hinzuzufügen))?[.!…]?$",
+            )
+        ),
+        r"^nichts hinzuzufügen[.!…]?$",
+        r"^ich bleibe (still|stumm|leise)[.!…]?$",
+        r"^bleib(?:e|t)? (still|stumm)[.!…]?$",
+        r"^stille[.!…]?$",
+        r"^\(stille\)$",
+        r"^ich sage nichts[.!…]?$",
+        r"^ich (werde |will )?nicht (antworten|antworten werde|reagieren)\b",
+        r"^nicht an mich (gerichtet|addressiert)\b",
+        r"^ich bin fertig (hier|damit)\b",
+        "".join(
+            (
+                r"^ich habe (bereits )?(reagiert|geantwortet|geschickt)",
+                r"[,.]?\s*(damit )?bin ich fertig\b",
+            )
+        ),
     )
 )
 
@@ -195,8 +235,9 @@ def is_silence_narration(reply: str) -> bool:
     """True when *reply* narrates a silence instead of being one.
 
     Stripped of surrounding whitespace/quotes/parentheses and matched
-    case-insensitively against the silence-meta patterns; anything the
-    model actually wanted to say still goes through.
+    case-insensitively against the silence-meta patterns (English,
+    Spanish and German — the chat's languages); anything the model
+    actually wanted to say still goes through.
     """
     cleaned = reply.strip().strip("\"'`()").strip()
     return any(pattern.search(cleaned) for pattern in _SILENCE_PATTERNS)
@@ -228,6 +269,28 @@ def is_error_narration(reply: str) -> bool:
     )
 
 
+def narration_kind(reply: str) -> str:
+    """The narration class of *reply*: "error", "emoji", "silence", or "".
+
+    The one classifier behind :func:`is_error_narration`,
+    :func:`is_emoji_narration` and :func:`is_silence_narration` — a
+    single dispatch whose *kind* survives to the caller, so delivery
+    and storage not only agree that a reply is narration (the drop),
+    they can log — and later act on — *which* failure mode the model
+    produced. An empty string means the reply is chat-visible text.
+    """
+    text = str(reply or "").strip()
+    if not text:
+        return ""
+    if is_error_narration(text):
+        return "error"
+    if is_emoji_narration(text):
+        return "emoji"
+    if is_silence_narration(text):
+        return "silence"
+    return ""
+
+
 def chat_visible_text(content: Any) -> str:
     """The chat-visible text of *content*.
 
@@ -244,11 +307,7 @@ def chat_visible_text(content: Any) -> str:
     reply = str(content or "").strip() if content is not None else ""
     if not reply:
         return ""
-    if is_silence_narration(reply):
-        return ""
-    if is_error_narration(reply):
-        return ""
-    if is_emoji_narration(reply):
+    if narration_kind(reply):
         return ""
     return reply
 

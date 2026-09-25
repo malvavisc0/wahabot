@@ -3643,6 +3643,47 @@ def test_is_silence_narration_catches_leaked_tool_token() -> None:
     )
 
 
+def test_is_silence_narration_catches_spanish() -> None:
+    """Spanish silence narration is the same bug as the English one.
+
+    The chat is bilingual (English and Spanish), and a model that
+    narrates "I'll stay silent" in one language will do it in the
+    other: ``Sin respuesta.`` reaching the chat is the identical
+    failure to ``No response.``. The Spanish patterns mirror the
+    English ones shape for shape — a real Spanish sentence must never
+    match, same as English.
+    """
+    assert is_silence_narration("Sin respuesta.")
+    assert is_silence_narration("Me quedo callado.")
+    assert is_silence_narration("Prefiero quedarme en silencio.")
+    assert is_silence_narration("Nada que añadir.")
+    assert is_silence_narration("No tengo nada más que decir.")
+    assert is_silence_narration("No voy a responder.")
+    assert not is_silence_narration("Me quedo callado entonces, pero mañana te cuento")
+    assert not is_silence_narration("el silencio de la noche me gusta")
+    assert not is_silence_narration("sin respuesta tuya no puedo decidir, dime tú")
+    assert not is_silence_narration("nada que decirte aún, espera la noticia")
+
+
+def test_is_silence_narration_catches_german() -> None:
+    """German silence narration is the same bug as the English one.
+
+    The chat's languages are covered pattern for pattern: ``Keine
+    Antwort.`` reaching the chat is the identical failure to ``No
+    response.``. The German patterns mirror the English/Spanish
+    shapes — a real German sentence must never match.
+    """
+    assert is_silence_narration("Keine Antwort.")
+    assert is_silence_narration("Nichts zu sagen.")
+    assert is_silence_narration("Ich bleibe still.")
+    assert is_silence_narration("Nicht an mich gerichtet.")
+    assert is_silence_narration("Ich werde nicht antworten.")
+    assert is_silence_narration("Ich habe reagiert, damit bin ich fertig.")
+    assert not is_silence_narration("Keine Antwort von dir gestern, alles gut?")
+    assert not is_silence_narration("ich bleibe still wenn du das willst, aber sag mir")
+    assert not is_silence_narration("die Stille hier drüben ist seltsam")
+
+
 def test_is_single_emoji_catches_lone_emoji() -> None:
     """A lone emoji reply is intercepted — it's a reaction, not a message.
 
@@ -3701,6 +3742,8 @@ def test_is_emoji_narration_catches_reaction_report() -> None:
     assert is_emoji_narration("👀\nEnvié una reacción a la pregunta.")
     assert is_emoji_narration("😅 I reacted with 😅 to that one, no text.")
     assert is_emoji_narration("👍\nI already reacted, so I'm done here.")
+    assert is_emoji_narration("👍\nHabe mit 👍 reagiert, ohne zu schreiben.")
+    assert is_emoji_narration("🙄 Ich habe mit 🙄 reagiert und bleibe still.")
 
 
 def test_is_emoji_narration_passes_real_messages() -> None:

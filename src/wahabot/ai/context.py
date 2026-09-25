@@ -15,6 +15,7 @@ from wahabot.ai.history import (
     is_error_narration,
     is_silence_narration,
     is_single_emoji,
+    narration_kind,
 )
 from wahabot.ai.messages import (
     addressed_note,
@@ -45,6 +46,7 @@ __all__ = [
     "is_error_narration",
     "is_silence_narration",
     "is_single_emoji",
+    "narration_kind",
     "operator_tools_pass",
     "own_identity_pass",
     "participant_names",
@@ -507,17 +509,22 @@ def final_reply(result: Any) -> str:
 
     Delivery filters by :func:`chat_visible_text` — the one definition
     storage (``remember``) also applies, so the two ends cannot drift
-    apart. This wrapper only adds the delivery-side log lines.
+    apart. This wrapper only adds the delivery-side log lines, which
+    carry the narration *kind*: a recurring failure mode is only
+    visible in the audit trail if the log says which one fired.
     """
     message = cast(ChatMessage, result.message)
     content = message.content
     reply = content.strip() if isinstance(content, str) else ""
     if not reply or chat_visible_text(reply):
-        return chat_visible_text(reply)
-    if is_silence_narration(reply):
+        return reply
+    kind = narration_kind(reply)
+    if kind == "silence":
         logger.debug("Filtering silence narration: {reply!r}", reply=reply)
         return ""
     logger.warning(
-        "Dropping invented error payload as final reply: {reply!r}", reply=reply[:200]
+        "Dropping {kind} narration as final reply: {reply!r}",
+        kind=kind,
+        reply=reply[:200],
     )
     return ""
