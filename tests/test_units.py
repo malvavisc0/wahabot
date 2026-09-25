@@ -1046,7 +1046,14 @@ def test_degrade_old_history_squeezes_old_keeps_fresh() -> None:
             role=MessageRole.ASSISTANT,
             blocks=[
                 ThinkingBlock(content="deliberation " * 200),
-                ToolCallBlock(tool_name="run_shell_command", tool_call_id="c1"),
+                ToolCallBlock(
+                    tool_name="run_shell_command",
+                    tool_call_id="c1",
+                    tool_kwargs={
+                        "command": "iw dev wlan0 link && " + "x" * 3000,
+                        "reason": "Revisar el estado del wifi",
+                    },
+                ),
             ],
         ),
         tool_result({"ok": True, "exit_code": 0, "stdout": "wlan0 ok\n" + "x" * 3000}),
@@ -1056,7 +1063,11 @@ def test_degrade_old_history_squeezes_old_keeps_fresh() -> None:
             role=MessageRole.ASSISTANT,
             blocks=[
                 ThinkingBlock(content="meme plan " * 200),
-                ToolCallBlock(tool_name="run_shell_command", tool_call_id="c2"),
+                ToolCallBlock(
+                    tool_name="run_shell_command",
+                    tool_call_id="c2",
+                    tool_kwargs={"command": "fc-list | head", "reason": "Fuentes"},
+                ),
             ],
         ),
         tool_result({"ok": True, "exit_code": 0, "stdout": "fonts ok"}),
@@ -1068,9 +1079,17 @@ def test_degrade_old_history_squeezes_old_keeps_fresh() -> None:
     degraded = degrade_old_history(messages)
     after = sum(token_count(m) for m in degraded)
 
-    # The old wifi slice: thinking gone, stdout gone, verdict kept.
+    # The old wifi slice: thinking gone, call body gone, stdout gone,
+    # verdicts kept.
     old_slice = degraded[:4]
     assert not any(isinstance(b, ThinkingBlock) for m in old_slice for b in m.blocks)
+    (old_call,) = [
+        b
+        for m in old_slice
+        for b in m.blocks
+        if isinstance(b, ToolCallBlock) and b.tool_call_id == "c1"
+    ]
+    assert old_call.tool_kwargs == {"reason": "Revisar el estado del wifi"}
     wifi_tool = next(m for m in old_slice if m.role == MessageRole.TOOL)
     assert '"ok": true' in str(wifi_tool.content)
     assert "wlan0" not in str(wifi_tool.content)
@@ -1079,7 +1098,8 @@ def test_degrade_old_history_squeezes_old_keeps_fresh() -> None:
         m.role == MessageRole.ASSISTANT and "todo bien" in str(m.content)
         for m in old_slice
     )
-    # The fresh window (last FRESH_TURNS user turns and after) untouched.
+    # The fresh window (last FRESH_TURNS user turns and after) untouched:
+    # the fresh meme call keeps its full kwargs.
     fresh_from = next(i for i, m in enumerate(messages) if m.content == "crea un meme")
     assert degraded[fresh_from:] == messages[fresh_from:]
     # Old payload bulk actually shrank.
@@ -1128,6 +1148,89 @@ def test_squeeze_tool_result_keeps_verdict_only() -> None:
         role=MessageRole.TOOL, content='{"ok": true, "chat": "c@g.us"}'
     )
     assert squeeze_tool_result(already_small).content == already_small.content
+
+
+def test_degrade_message_squeezes_old_tool_call_kwargs() -> None:
+    """Old assistant tool calls keep name and reason, lose their bodies.
+
+    The meme-script incident (docs/bug-report-2c665d8.md, bug 7): a
+    3k-char ``run_shell_command`` body rode every later prompt because
+    ``degrade_message`` squeezed tool *results* but never the calls
+    themselves. After degradation the block keeps its id and name and
+    the one-line ``reason``; the ``command`` body is gone. A call
+    without a ``reason`` keeps name and empty kwargs — knowing *that*
+    the tool fired is the surviving value. Already-squeezed and
+    small calls pass through unchanged (idempotence + no pointless
+    swaps).
+    """
+    from llama_index.core.base.llms.types import TextBlock, ToolCallBlock
+
+    from wahabot.ai.history import degrade_message
+
+    big = ChatMessage(
+        role=MessageRole.ASSISTANT,
+        blocks=[
+            TextBlock(text=""),
+            ToolCallBlock(
+                tool_call_id="c-meme",
+                tool_name="run_shell_command",
+                tool_kwargs={
+                    "command": "mkdir -p /tmp/meme && cat > gen.py <<'EOF'\n"
+                    + "from PIL import Image\n" * 120,
+                    "reason": "Dibujar el meme pedido",
+                },
+            ),
+        ],
+    )
+    degraded = degrade_message(big)
+    (block,) = [b for b in degraded.blocks if isinstance(b, ToolCallBlock)]
+    assert block.tool_name == "run_shell_command"
+    assert block.tool_call_id == "c-meme"
+    assert block.tool_kwargs == {"reason": "Dibujar el meme pedido"}
+    assert "gen.py" not in str(block.tool_kwargs)
+
+    no_reason = ChatMessage(
+        role=MessageRole.ASSISTANT,
+        blocks=[
+            ToolCallBlock(
+                tool_call_id="c-2",
+                tool_name="web_search",
+                tool_kwargs={"query": "q" * 2000},
+            )
+        ],
+    )
+    degraded_call = degrade_message(no_reason)
+    (call,) = [b for b in degraded_call.blocks if isinstance(b, ToolCallBlock)]
+    assert call.tool_name == "web_search"
+    assert call.tool_kwargs == {}
+
+    small = ChatMessage(
+        role=MessageRole.ASSISTANT,
+        blocks=[
+            ToolCallBlock(
+                tool_call_id="c-3",
+                tool_name="read_chat",
+                tool_kwargs={"mode": "list", "reason": "leer hilo"},
+            )
+        ],
+    )
+    assert degrade_message(small).blocks == small.blocks
+
+    # Idempotence: a second pass changes nothing.
+    assert degrade_message(degraded).blocks == degraded.blocks
+
+
+def test_degrade_message_keeps_delivered_text() -> None:
+    """Degradation never eats the words the chat actually saw."""
+    from llama_index.core.base.llms.types import TextBlock
+
+    from wahabot.ai.history import degrade_message
+
+    spoken = ChatMessage(
+        role=MessageRole.ASSISTANT,
+        blocks=[TextBlock(text="el puente está cerrado, avisé dos veces")],
+    )
+    assert degrade_message(spoken).content == spoken.content
 
 
 def test_burst_refuses_unresolvable_sender() -> None:

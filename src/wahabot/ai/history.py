@@ -69,7 +69,7 @@ __all__ = [
 
 #: The serialized id note an inbound turn carries (``context.py``
 #: appends it as the turn's last line): the id inside brackets.
-_INBOUND_ID_RE = re.compile(r"\[message id: ([^\]]+)\]")
+INBOUND_ID_RE = re.compile(r"\[message id: ([^\]]+)\]")
 
 
 #: Emoji-only replies.  Small models often output a lone emoji (👋, 🤣,
@@ -78,7 +78,7 @@ _INBOUND_ID_RE = re.compile(r"\[message id: ([^\]]+)\]")
 #: so we treat a single-emoji final reply as an implicit reaction or
 #: silence.  Multi-emoji strings like ``🤣🤣🤣`` are kept as real
 #: messages — those are intentional chat text.
-_SINGLE_EMOJI_RE = re.compile(
+SINGLE_EMOJI_RE = re.compile(
     "".join(
         (
             r"^\s*(?:",
@@ -102,7 +102,7 @@ _SINGLE_EMOJI_RE = re.compile(
 
 def is_single_emoji(reply: str) -> bool:
     """True when *reply* is exactly one emoji and nothing else."""
-    return bool(_SINGLE_EMOJI_RE.match(reply))
+    return bool(SINGLE_EMOJI_RE.match(reply))
 
 
 #: An emoji followed by narration: ``👍 Reaccioné con 👍 a…``,
@@ -115,7 +115,7 @@ def is_single_emoji(reply: str) -> bool:
 #: sent/envié/geschickt, without writing/sin escribir/ohne zu
 #: schreiben, …). A real message may open with an emoji, but its
 #: second line talks to the chat, not about the bot's own action.
-_EMOJI_NARRATION_RE = re.compile(
+EMOJI_NARRATION_RE = re.compile(
     "".join(
         (
             r"^\s*",
@@ -159,7 +159,7 @@ def is_emoji_narration(reply: str) -> bool:
     storage filters it so the model's self-history cannot re-teach
     the pattern.
     """
-    return bool(_EMOJI_NARRATION_RE.match(reply.strip()))
+    return bool(EMOJI_NARRATION_RE.match(reply.strip()))
 
 
 #: Replies that narrate a chosen silence instead of being one. Small
@@ -175,7 +175,7 @@ def is_emoji_narration(reply: str) -> bool:
 #: chat's languages (English, Spanish, German) carry the same anchored
 #: shapes: a Spanish "Sin respuesta." or German "Keine Antwort."
 #: reaching the chat is the same bug as the English "No response.".
-_SILENCE_PATTERNS = tuple(
+SILENCE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
         r"^no response\b",
@@ -240,7 +240,7 @@ def is_silence_narration(reply: str) -> bool:
     actually wanted to say still goes through.
     """
     cleaned = reply.strip().strip("\"'`()").strip()
-    return any(pattern.search(cleaned) for pattern in _SILENCE_PATTERNS)
+    return any(pattern.search(cleaned) for pattern in SILENCE_PATTERNS)
 
 
 def is_error_narration(reply: str) -> bool:
@@ -318,7 +318,7 @@ def inbound_message_id(incoming: str) -> str:
     Empty when the turn carries no note — operator commands have none,
     so they are never treated as redeliveries.
     """
-    match = _INBOUND_ID_RE.search(incoming)
+    match = INBOUND_ID_RE.search(incoming)
     return match.group(1).strip() if match else ""
 
 
@@ -358,17 +358,17 @@ def wire_call(call: Any) -> ToolCall | None:
     return ToolCall(name, call_id) if name else None
 
 
-def _message_tool_call_count(msg: ChatMessage) -> int:
+def message_tool_call_count(msg: ChatMessage) -> int:
     """The number of tool calls advertised by an assistant message."""
     return len(tool_calls(msg))
 
 
-def _is_tool_message(msg: ChatMessage) -> bool:
+def is_tool_message(msg: ChatMessage) -> bool:
     """True if *msg* is a tool-result message (``role == TOOL``)."""
     return msg.role == MessageRole.TOOL
 
 
-def _deduplicate_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
+def deduplicate_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
     """Step 1: Merge consecutive duplicate-role messages (keep every word).
 
     Out-of-band folds create consecutive same-role turns the chat API
@@ -384,18 +384,18 @@ def _deduplicate_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
         can_merge = (
             prev is not None
             and prev.role == msg.role
-            and not _is_tool_message(msg)
-            and _message_tool_call_count(prev) == 0
-            and _message_tool_call_count(msg) == 0
+            and not is_tool_message(msg)
+            and message_tool_call_count(prev) == 0
+            and message_tool_call_count(msg) == 0
         )
         if prev is not None and can_merge:
-            merged[-1] = _merge_pair(prev, msg)
+            merged[-1] = merge_pair(prev, msg)
         else:
             merged.append(msg)
     return merged
 
 
-def _merge_pair(first: ChatMessage, second: ChatMessage) -> ChatMessage:
+def merge_pair(first: ChatMessage, second: ChatMessage) -> ChatMessage:
     """Two same-role messages as one, every word and kwarg of both kept.
 
     Kwargs merge left-to-right (``second`` wins collisions) so a tag
@@ -410,7 +410,7 @@ def _merge_pair(first: ChatMessage, second: ChatMessage) -> ChatMessage:
     )
 
 
-def _validate_tool_groups(messages: list[ChatMessage]) -> list[ChatMessage]:
+def validate_tool_groups(messages: list[ChatMessage]) -> list[ChatMessage]:
     """Step 2: Validate tool groups.
 
     Keep an assistant tool-call message only if exactly N matching tool
@@ -422,15 +422,15 @@ def _validate_tool_groups(messages: list[ChatMessage]) -> list[ChatMessage]:
     while i < n:
         msg = messages[i]
 
-        if _is_tool_message(msg):
+        if is_tool_message(msg):
             i += 1
             continue
 
-        call_count = _message_tool_call_count(msg)
+        call_count = message_tool_call_count(msg)
         if call_count > 0:
             j = i + 1
             tool_msgs: list[ChatMessage] = []
-            while j < n and _is_tool_message(messages[j]):
+            while j < n and is_tool_message(messages[j]):
                 tool_msgs.append(messages[j])
                 j += 1
 
@@ -446,7 +446,7 @@ def _validate_tool_groups(messages: list[ChatMessage]) -> list[ChatMessage]:
     return validated
 
 
-def _trim_history(
+def trim_history(
     messages: list[ChatMessage], drop_trailing_user: bool
 ) -> list[ChatMessage]:
     """Steps 3 & 4: Trim leading non-user and trailing incomplete.
@@ -469,8 +469,8 @@ def _trim_history(
 
     while trimmed:
         last = trimmed[-1]
-        if _message_tool_call_count(last) > 0 or (
-            drop_trailing_user and last.role == MessageRole.USER and not _is_handled(last)
+        if message_tool_call_count(last) > 0 or (
+            drop_trailing_user and last.role == MessageRole.USER and not is_handled(last)
         ):
             trimmed.pop()
         else:
@@ -479,7 +479,7 @@ def _trim_history(
     return trimmed
 
 
-def _is_handled(msg: ChatMessage) -> bool:
+def is_handled(msg: ChatMessage) -> bool:
     """True when *msg*'s run completed — the turn is real conversation.
 
     Unstamped means the run that appended it never finished, so it is
@@ -506,12 +506,12 @@ def sanitize_chat_history(
     if not chat_history:
         return chat_history
 
-    deduplicated = _deduplicate_messages(chat_history)
-    validated = _validate_tool_groups(deduplicated)
-    return _trim_history(validated, drop_trailing_user)
+    deduplicated = deduplicate_messages(chat_history)
+    validated = validate_tool_groups(deduplicated)
+    return trim_history(validated, drop_trailing_user)
 
 
-def _group_boundaries(messages: list[ChatMessage]) -> list[int]:
+def group_boundaries(messages: list[ChatMessage]) -> list[int]:
     """Start index of each atomic group (a message plus its tool replies).
 
     An assistant message advertising ``N`` tool calls owns the next ``N``
@@ -523,21 +523,21 @@ def _group_boundaries(messages: list[ChatMessage]) -> list[int]:
     n = len(messages)
     while i < n:
         starts.append(i)
-        call_count = _message_tool_call_count(messages[i])
+        call_count = message_tool_call_count(messages[i])
         i += 1 + call_count
     return starts
 
 
-def _split_groups(messages: list[ChatMessage]) -> list[list[ChatMessage]]:
+def split_groups(messages: list[ChatMessage]) -> list[list[ChatMessage]]:
     """Split *messages* into atomic groups (a message plus its tool replies)."""
     if not messages:
         return []
-    starts = _group_boundaries(messages)
+    starts = group_boundaries(messages)
     ends = [*starts[1:], len(messages)]
     return [messages[a:b] for a, b in zip(starts, ends, strict=True)]
 
 
-def _newest_within_budget(
+def newest_within_budget(
     groups: list[list[ChatMessage]],
     budget: int,
     token_counter: Callable[[ChatMessage], int],
@@ -580,20 +580,20 @@ def trim_to_budget(
 
     *token_counter* returns the token count for one message.
     """
-    groups = _split_groups(messages)
-    kept = _newest_within_budget(groups, budget, token_counter)
+    groups = split_groups(messages)
+    kept = newest_within_budget(groups, budget, token_counter)
     if not kept:
         return []
 
     while kept and kept[-1][0].role != MessageRole.USER:
         kept.pop()
     if not kept:
-        return _last_user_turn(groups)
+        return last_user_turn(groups)
 
     return [m for group in reversed(kept) for m in group]
 
 
-def _last_user_turn(groups: list[list[ChatMessage]]) -> list[ChatMessage]:
+def last_user_turn(groups: list[list[ChatMessage]]) -> list[ChatMessage]:
     """Return the last user-led group alone.
 
     Fallback for :func:`trim_to_budget` when the budget is so small that
@@ -624,7 +624,48 @@ FRESH_TURNS = 2
 #: delivered conversation; ``tool``/``error`` text keeps failure diagnosis.
 #: Everything else — ``stdout`` dumps, message lists, page text — is the
 #: payload the model already consumed when the run was live.
-_VERDICT_KEYS = ("ok", "error", "outcome", "chat", "tool")
+VERDICT_KEYS = ("ok", "error", "outcome", "chat", "tool")
+
+#: Tool-call keys that survive degradation. ``reason`` is the audit
+#: trail's one-line "what and why" (every tool takes it); everything
+#: else — ``command`` bodies, search queries, URLs, page text — is the
+#: work the model already did.
+CALL_VERDICT_KEYS = ("reason",)
+
+#: Shortest a squeezed tool-call kwargs dict may be, relative to the
+#: original — below this the squeeze saves nothing worth the swap.
+MIN_SQUEEZE_GAIN = 32
+
+
+def squeeze_tool_call_kwargs(kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    """Tool-call kwargs reduced to their ``reason``, or None when unchanged."""
+    if not kwargs:
+        return None
+    verdict = {k: kwargs[k] for k in CALL_VERDICT_KEYS if k in kwargs}
+    squeezed = json.dumps(verdict, ensure_ascii=False)
+    if len(squeezed) + MIN_SQUEEZE_GAIN > len(json.dumps(kwargs, ensure_ascii=False)):
+        return None
+    return verdict
+
+
+def degraded_tool_call_block(block: ToolCallBlock) -> ToolCallBlock:
+    """A ``ToolCallBlock`` with its kwargs squeezed to the verdict."""
+    kwargs = block.tool_kwargs
+    if isinstance(kwargs, str):
+        try:
+            kwargs = json.loads(kwargs)
+        except ValueError:
+            return block
+    if not isinstance(kwargs, dict):
+        return block
+    verdict = squeeze_tool_call_kwargs(cast(dict[str, Any], kwargs))
+    if verdict is None:
+        return block
+    return ToolCallBlock(
+        tool_call_id=block.tool_call_id,
+        tool_name=block.tool_name,
+        tool_kwargs=verdict,
+    )
 
 
 def degrade_old_history(messages: list[ChatMessage]) -> list[ChatMessage]:
@@ -638,7 +679,12 @@ def degrade_old_history(messages: list[ChatMessage]) -> list[ChatMessage]:
       replayed history (a single reasoning block can be ~1k tokens);
     - old tool results keep only their verdict (``ok``, ``error``, …)
       — the model needs to remember *that* a command worked, not the
-      2k characters of ``stdout`` it printed.
+      2k characters of ``stdout`` it printed;
+    - old ``ToolCallBlock`` kwargs keep only their ``reason`` — the
+      meme-script incident (docs/bug-report-2c665d8.md, bug 7: a 3k-char
+      ``run_shell_command`` body rode every later prompt as dead
+      weight): the model needs to remember *that* it drew a meme, not
+      the Python it drew it with.
 
     Destructive on purpose: the caller (``chat_history``) persists the
     result back into memory, so degradation compounds across runs. A
@@ -656,15 +702,33 @@ def degrade_old_history(messages: list[ChatMessage]) -> list[ChatMessage]:
 
 
 def degrade_message(msg: ChatMessage) -> ChatMessage:
-    """One message degraded: thinking stripped, tool results squeezed."""
+    """One message degraded: thinking stripped, tool work squeezed.
+
+    ``role=TOOL`` results are reduced to their verdict envelope
+    (:func:`squeeze_tool_result`); assistant messages lose their
+    ``ThinkingBlock``s and have every ``ToolCallBlock``'s kwargs
+    squeezed to the call's ``reason`` (:func:`degraded_tool_call_block`).
+    A message with nothing to squeeze passes through as the same
+    object. The rebuild passes ``content=None``: ``ChatMessage.__init__``
+    treats any non-None content — the empty string included — as an
+    instruction to replace ``blocks`` with it, which would drop the
+    very tool calls being preserved.
+    """
     if msg.role == MessageRole.TOOL:
         return squeeze_tool_result(msg)
-    if not any(isinstance(b, ThinkingBlock) for b in msg.blocks):
+    blocks = list(msg.blocks)
+    if not blocks:
+        return msg
+    squeezed = [
+        degraded_tool_call_block(b) if isinstance(b, ToolCallBlock) else b for b in blocks
+    ]
+    stripped = [b for b in squeezed if not isinstance(b, ThinkingBlock)]
+    if stripped == blocks:
         return msg
     return ChatMessage(
         role=msg.role,
-        blocks=[b for b in msg.blocks if not isinstance(b, ThinkingBlock)],
-        content=msg.content,
+        blocks=stripped,
+        content=None,
         additional_kwargs=msg.additional_kwargs,
     )
 
@@ -684,7 +748,7 @@ def squeeze_tool_result(msg: ChatMessage) -> ChatMessage:
         return msg
     if not isinstance(payload, dict):
         return msg
-    verdict = {k: payload[k] for k in _VERDICT_KEYS if k in payload}
+    verdict = {k: payload[k] for k in VERDICT_KEYS if k in payload}
     if not verdict or len(json.dumps(verdict, ensure_ascii=False)) >= len(text):
         return msg
     return ChatMessage(
