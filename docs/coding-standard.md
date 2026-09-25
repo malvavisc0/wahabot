@@ -60,13 +60,16 @@ uv run radon cc src -s | grep -E '\-\s(C|D|E|F)\s'   # must be empty
 Rules say "no dead code"; vulture enforces it. It must run on a 3.14
 parser (`uvx --python 3.14`) — the code uses PEP 758 parenthesis-free
 `except A, B`, which older parsers silently skip (unparsed files look
-clean). Hits are **suspects, not verdicts**: workflow `@step` methods,
-typer commands, FastAPI routes, `register_*` closure callbacks,
-pydantic members and dotted-string references
-(`uvicorn http="wahabot.core.protocol:LoggingH11Protocol"`) are
-framework registrations it cannot see. Check for a registration site
-before deleting; real dead code (never-read fields, zero-call-site
-functions) goes out in the same pass.
+clean). Config lives in `[tool.vulture]` in pyproject.toml
+(`ignore_decorators` for framework-dispatched registrations — `@step`,
+`@app.*`, `@on_*`; `ignore_names` for typer commands, pydantic members
+and dotted-string references like
+`uvicorn http="wahabot.core.protocol:LoggingH11Protocol"`), so the
+default run is **expected to be empty**. A hit is a *suspect*: check
+for a registration site before deleting; if it is a new framework
+registration pattern, add it to the pyproject lists in the same pass.
+Real dead code (never-read fields, zero-call-site functions) goes out
+in the same pass.
 
 ## PII
 Never use or commit PII — not in code, tests, docs, plans, fixtures,

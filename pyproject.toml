@@ -83,3 +83,18 @@ select = [
     "RUF", # ruff-specific
 ]
 
+[tool.vulture]
+# Framework registrations vulture cannot see being called: @step
+# methods (LlamaIndex engine dispatch), webhook @on_* closures, FastAPI
+# route handlers, and — via ignore-names — typer commands (they
+# register by type annotation, not decorator), pydantic members, the
+# uvicorn dotted-string protocol reference, the FunctionTool.__call__
+# monkey-patch, and test-only accessors (tests/ is outside vulture's
+# src/ scan, so their call sites never count).
+ignore_decorators = ["@step", "@app.post", "@app.get", "@on_message", "@on_command", "@on_forget", "@on_reaction", "@on_session_status"]
+ignore_names = [
+    "session_init", "session_list", "session_view", "serve", "tell",
+    "forget", "escalations", "model_config", "timestamp", "engine",
+    "handlers", "LoggingH11Protocol", "__call__", "recovery_poller_armed",
+]
+
