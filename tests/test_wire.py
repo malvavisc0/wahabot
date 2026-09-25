@@ -673,6 +673,59 @@ def test_burst_assembles_one_turn(bot: Bot) -> None:
     )
 
 
+def test_burst_lone_emoji_becomes_reaction(bot: Bot) -> None:
+    """A burst's lone-emoji reply reacts on the anchor, not silence.
+
+    The production trace showed a burst answering a shared reel with
+    ``👍`` and the handler logging "Dropping lone emoji as silence";
+    the single-message path converts a lone emoji to a ~50 % reaction,
+    but the burst path called ``finish_agent_reply`` without
+    ``emoji_reaction`` so it always dropped. The burst path now opts in
+    — the reaction lands on the burst's last (anchor) message.
+    """
+    from tests.harness import chat_event as burst_chat_event
+
+    emoji_bot = bot.rebuild(
+        burst_enabled=True,
+        burst_inactivity_s=0.4,
+        burst_hold_cap_s=5.0,
+        send_seen=False,
+    )
+    llm = emoji_bot.stack.llm
+    llm.clear()  # the shared stack's agent_round must see this run as round 1
+    llm.override = {
+        "id": "chatcmpl-smoke-emoji",
+        "object": "chat.completion",
+        "created": 1788525841,
+        "model": "smoke-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "👍"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+    }
+    chat = "491555000001@c.us"
+    # Force the ~50 % reaction coin flip to the reaction side.
+    with unittest.mock.patch("wahabot.handlers.random.random", return_value=0.0):
+        emoji_bot.post(burst_chat_event(body="mira ese reel", mid="EMOJI1", chat=chat))
+    assert _wait(lambda: len(emoji_bot.waha.reactions) >= 1)
+    # The anchor is the burst's only/last message.
+    assert (f"false_{chat}_EMOJI1", "👍") in emoji_bot.waha.reactions
+    # No text was sent: the emoji became a reaction, never a message.
+    assert emoji_bot.waha.sent == []
+    # The audit journals the reaction, not a dropped-emoji silence.
+    reactions = _audit_entries(emoji_bot, "reaction", chat)
+    assert any(
+        e.get("reaction") == "👍" and e.get("message_id") == f"false_{chat}_EMOJI1"
+        for e in reactions
+    )
+    dropped = _audit_entries(emoji_bot, "silence", chat)
+    assert not any("dropped_emoji" in e for e in dropped)
+
+
 def test_burst_disabled_runs_per_message(bot: Bot) -> None:
     """burst_enabled=False keeps the pre-burst behavior: one run each."""
     plain_bot = bot.rebuild(burst_enabled=False)

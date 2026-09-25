@@ -823,7 +823,9 @@ and fall back to kwargs, or it will silently see zero.
   `is_single_emoji` in the handler: with ~50% probability it is
   converted into a reaction on the triggering message, otherwise it is
   dropped as silence — either way it is never sent as chat text. The
-  same guard covers album runs (reacting on the album's container id).
+  same guard covers burst and album runs (reacting on the burst's
+  anchor or the album's container id; the burst path opts into
+  `emoji_reaction` the same way the single-message path does).
   Multi-emoji strings (`🤣🤣🤣`) are intentional chat text and pass
   through as a normal reply.
 - List modes of `read_chat` (`list`, `search`) return

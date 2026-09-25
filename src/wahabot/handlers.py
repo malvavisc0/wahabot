@@ -205,9 +205,10 @@ async def finish_agent_reply(
     Shared post-run decision of the single-message, burst and album
     paths: tool-delivered runs log their dropped final text; silence
     stays silent; anything else is quote-replied to *message_id* with
-    the typing presence. A lone emoji is not an answer — the burst
-    path drops it as silence, while the single-message path
-    (``emoji_reaction``) randomly converts it into a reaction (~50 %).
+    the typing presence. A lone emoji is not an answer — *emoji_reaction*
+    converts it into a reaction on *message_id* with ~50 % probability,
+    otherwise it is dropped as silence. The burst path opts in, so a
+    burst's lone-emoji answer reacts like a single message's.
 
     Every branch journals its decision (roadmap: "journal everything")
     — the audit timeline shows *why* a chat saw nothing: delivered via
@@ -881,7 +882,14 @@ def register_agent_handler(
         # burst path shares the single-message path's contract.
         await mark_llm_recovered(waha, merged.session)
         await finish_agent_reply(
-            waha, merged.session, chat_id, message_id, reply, delivered, settings
+            waha,
+            merged.session,
+            chat_id,
+            message_id,
+            reply,
+            delivered,
+            settings,
+            emoji_reaction=True,
         )
 
     if settings.burst_enabled:
