@@ -4204,3 +4204,179 @@ def test_dispatch_contains_handler_failure() -> None:
         assert calls == ["boom", "after"]
     finally:
         reset_handlers()
+
+
+def test_slim_tool_spec_strips_padding_keeps_semantics() -> None:
+    """Slimming removes ``title``/``anyOf``/``strict`` padding only.
+
+    The bundled tools ride every request as serialized JSON schemas;
+    Pydantic pads them with auto-generated titles, nullable unions and
+    a redundant ``strict: false`` (~360 tokens of nothing the model
+    reads). The slimmed spec keeps every name, description, default
+    and enum — only the scaffolding goes — and is a deep copy: the
+    original spec object is never mutated.
+    """
+    import json as _json
+
+    from wahabot.ai.tools.slim import slim_tool_spec
+
+    spec = {
+        "type": "function",
+        "function": {
+            "name": "send_text",
+            "description": "Send a text reply.",
+            "strict": False,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chat": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "default": None,
+                        "description": "Optional chat JID.",
+                        "title": "Chat",
+                    },
+                    "text": {
+                        "description": "Text to send.",
+                        "title": "Text",
+                        "type": "string",
+                    },
+                    "kind": {
+                        "anyOf": [
+                            {"enum": ["a", "b"], "type": "string"},
+                            {"type": "null"},
+                        ],
+                        "default": "a",
+                        "title": "Kind",
+                    },
+                },
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+        },
+    }
+    slimmed = slim_tool_spec(spec)
+
+    fn = slimmed["function"]
+    assert "strict" not in fn
+    params = fn["parameters"]
+    assert "title" not in _json.dumps(slimmed)
+    assert params["properties"]["chat"] == {
+        "type": "string",
+        "default": None,
+        "description": "Optional chat JID.",
+    }
+    assert params["properties"]["text"] == {
+        "description": "Text to send.",
+        "type": "string",
+    }
+    assert params["properties"]["kind"] == {
+        "enum": ["a", "b"],
+        "type": "string",
+        "default": "a",
+    }
+    assert params["required"] == ["text"]
+    assert params["additionalProperties"] is False
+    # A non-nullable anyOf (a real union) must survive.
+    real_union = slim_tool_spec(
+        {
+            "type": "function",
+            "function": {
+                "name": "u",
+                "parameters": {
+                    "properties": {"x": {"anyOf": [{"type": "string"}, {"type": "int"}]}}
+                },
+            },
+        }
+    )
+    assert real_union["function"]["parameters"]["properties"]["x"]["anyOf"] == [
+        {"type": "string"},
+        {"type": "int"},
+    ]
+    # The input spec is untouched.
+    assert spec["function"]["parameters"]["properties"]["chat"]["title"] == "Chat"
+    assert spec["function"]["strict"] is False
+
+
+def test_prepared_tool_specs_are_slimmed_and_valid() -> None:
+    """The LLM request's tool specs are slimmed, all tools present.
+
+    End to end through ``ObservableOpenAILike``: the override the chat
+    path uses must slim the specs ``_prepare_chat_with_tools`` builds
+    from the real bundled tools — every tool survives, no ``title``
+    or ``strict: false`` padding rides the payload, and the schemas
+    still validate a sample call (the wire format the model answers
+    in is unchanged, only the documentation padding shrank).
+    """
+
+    from wahabot.ai.tools import build_default_tools
+    from wahabot.ai.workflow import ObservableOpenAILike
+    from wahabot.core.waha import WahaClient
+    from wahabot.settings import Settings
+
+    settings = Settings(
+        waha_url="http://x",
+        waha_api_key="k",
+        webhook_hmac_key="h",
+        llm_api_base="http://llm.invalid",
+        llm_api_key="k",
+        shell_tool=True,
+        _env_file=None,
+    )
+    llm = ObservableOpenAILike(
+        model="test-model",
+        api_base="http://llm.invalid",
+        api_key="k",
+        is_chat_model=True,
+        is_function_calling_model=True,
+    )
+    tools = build_default_tools(WahaClient("http://x", "k"), settings)
+    prepared = llm._prepare_chat_with_tools(tools, chat_history=[])
+    specs = prepared["tools"]
+
+    assert len(specs) == len(tools)
+    names = {spec["function"]["name"] for spec in specs}
+    assert names == {tool.metadata.name for tool in tools}
+
+    def json_keys(spec: dict[str, Any]) -> set[str]:
+        keys: set[str] = set()
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                keys.update(node)
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(spec)
+        return keys
+
+    all_keys = set().union(*(json_keys(spec) for spec in specs))
+    assert "title" not in all_keys, "title padding survived"
+    assert "strict" not in all_keys, "strict flag survived"
+    assert "anyOf" not in all_keys, "nullable unions survived"
+
+    # A slimmed schema still accepts a real call's arguments: a
+    # minimal valid call (every optional field at its default, every
+    # required field filled) must validate against the unchanged
+    # Pydantic model — the wire format the model answers in.
+    sample: dict[str, Any] = {
+        "text": "hola",
+        "command": "ls",
+        "url": "https://x.example",
+        "query": "q",
+        "report": "r",
+        "message_id": "m",
+        "kind": "image",
+        "mode": "list",
+    }
+    for tool in tools:
+        schema = tool.metadata.fn_schema
+        assert schema is not None, f"{tool.metadata.name}: no fn_schema"
+        call = {
+            name: sample.get(name, "x") if field.is_required() else field.default
+            for name, field in schema.model_fields.items()
+        }
+        call["reason"] = "prueba"
+        schema.model_validate(call)

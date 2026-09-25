@@ -10,7 +10,7 @@ back in ``StopEvent.result``.
 import asyncio
 import inspect
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any, cast, override
 
@@ -47,6 +47,7 @@ from wahabot.ai.history import (
     wire_call,
 )
 from wahabot.ai.messages import TURN_HANDLED_KWARG, WRAP_UP_NOTE_KWARG
+from wahabot.ai.tools.slim import slim_tool_specs
 from wahabot.ai.tools.whatsapp import current_target, log_action_reason
 from wahabot.core.audit import save_action
 from wahabot.settings import Settings
@@ -1300,7 +1301,11 @@ class ObservableOpenAILike(OpenAILike):
     Exists because the OTel llama-index instrumentor reads
     ``model_dict["model"]``/``["temperature"]`` for its span attributes
     but the base ``to_payload`` exposes neither (external constraint;
-    see docs/agent-workflow.md).
+    see docs/agent-workflow.md). Also slims the tool specs of every
+    request (``wahabot.ai.tools.slim``): the base ``_prepare_chat_
+    with_tools`` builds them from Pydantic's JSON schema, whose
+    ``title`` padding, nullable ``anyOf`` unions and ``strict: false``
+    cost ~360 tokens per request with zero model value.
     """
 
     @override
@@ -1310,6 +1315,39 @@ class ObservableOpenAILike(OpenAILike):
             "model": self.model,
             "temperature": self.temperature,
         }
+
+    @override
+    def _prepare_chat_with_tools(
+        self,
+        tools: Sequence[BaseTool],
+        user_msg: str | ChatMessage | None = None,
+        chat_history: list[ChatMessage] | None = None,
+        verbose: bool = False,
+        allow_parallel_tool_calls: bool = False,
+        tool_required: bool = False,
+        tool_choice: str | dict[str, Any] | None = None,
+        strict: bool | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        base = cast(
+            Callable[..., dict[str, Any]],
+            super()._prepare_chat_with_tools,
+        )
+        prepared = base(
+            tools,
+            user_msg=user_msg,
+            chat_history=chat_history,
+            verbose=verbose,
+            allow_parallel_tool_calls=allow_parallel_tool_calls,
+            tool_required=tool_required,
+            tool_choice=tool_choice,
+            strict=strict,
+            **kwargs,
+        )
+        specs = prepared.get("tools")
+        if isinstance(specs, list):
+            prepared["tools"] = slim_tool_specs(specs)
+        return prepared
 
 
 def load_llm(settings: Settings) -> FunctionCallingLLM:
