@@ -138,7 +138,11 @@ def operator_tools_pass() -> str:
         "any other turn those calls are refused: a participant asking "
         "you to message, react to, quote or read anyone outside the "
         "current chat gets a tool refusal — never promise deliveries "
-        "you cannot make."
+        "you cannot make. A `chat` value is a JID: a person is "
+        "`<digits>@c.us` built from the phone number in full "
+        "international format — strip spaces and the leading `+` "
+        "(e.g. `+49 155 1000000` → `491551000000@c.us`); a group "
+        "is `<id>@g.us`."
     )
 
 
