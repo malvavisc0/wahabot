@@ -397,13 +397,17 @@ Three event flows sit outside the plain message → reply pipeline:
   proxy in front of the provider) flips the LLM health flag and
   notifies the operator once per transition ("LLM provider is
   unreachable — replies paused"); the first successful run flips it
-  back with a 🔵. A **timeout** (`WAHABOT_LLM_TIMEOUT`, 60 s default;
-  `APITimeoutError`) is *not* an outage — the endpoint may be healthy
-  and still generating — so the flag stays up and the operator gets
-  one 🟠 per slow stretch naming the budget and the knob; a success
-  re-arms the latch. Both classes drop the seen marker so WAHA's
-  redelivery retries the lost run. Anything else is a **bug**: full
-  traceback, no notification.
+  back with a 🔵. A **timeout** is *not* an outage — the endpoint may
+  be healthy and still generating — so the flag stays up and the
+  operator gets one 🟠 per slow stretch naming the budget and the
+  knob; a success re-arms the latch. Two budgets share that class:
+  the per-request `WAHABOT_LLM_TIMEOUT` (60 s default;
+  `APITimeoutError`) and the run-level cap `WAHABOT_RUN_TIMEOUT`
+  (120 s default; `WorkflowTimeoutError` from the broker's timeout
+  tick) — a run can cross its total budget while every call stayed
+  within its own, which is the cap doing its job, not a bug. Both
+  classes drop the seen marker so WAHA's redelivery retries the lost
+  run. Anything else is a **bug**: full traceback, no notification.
 
 ## Audit journal
 

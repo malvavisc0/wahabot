@@ -726,7 +726,7 @@ def register_agent_handler(
             # a bug with the full traceback. The dropped seen markers
             # let WAHA's redelivery retry the whole burst either way.
             failure_class = await classify_llm_failure(
-                waha, buffer.key[0], exc, settings.llm_timeout
+                waha, buffer.key[0], exc, settings.llm_timeout, settings.run_timeout
             )
             if failure_class == "bug":
                 logger.exception(
@@ -1192,7 +1192,7 @@ def register_agent_handler(
             # retries; the run is just as lost either way. Anything
             # else is a bug: full traceback, also redeliverable.
             failure_class = await classify_llm_failure(
-                waha, event.session, exc, settings.llm_timeout
+                waha, event.session, exc, settings.llm_timeout, settings.run_timeout
             )
             forget_seen(message_id)
             if failure_class != "bug":

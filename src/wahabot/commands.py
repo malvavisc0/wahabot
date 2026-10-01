@@ -147,7 +147,9 @@ async def run_command(
                 # re-raises: the self-chat caller drops its own seen
                 # marker so the command retries on redelivery, exactly
                 # like every other command failure.
-                await classify_llm_failure(waha, event.session, exc, settings.llm_timeout)
+                await classify_llm_failure(
+                    waha, event.session, exc, settings.llm_timeout, settings.run_timeout
+                )
                 raise
             await mark_llm_recovered(waha, event.session)
         await persist_memory(settings, event.session, OPERATOR_CHAT_ID, ctx)

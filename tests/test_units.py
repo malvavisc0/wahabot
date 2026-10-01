@@ -24,6 +24,7 @@ import pytest
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.tools import FunctionTool, ToolSelection
+from llama_index.core.workflow import WorkflowTimeoutError
 
 from tests.harness import (
     CHAT_ID,
@@ -116,6 +117,7 @@ from wahabot.settings import Settings
 from wahabot.status import (
     llm_call_timed_out,
     llm_endpoint_down,
+    run_timed_out,
     session_healthy,
     set_session_health,
 )
@@ -188,6 +190,27 @@ def test_llm_call_timed_out_classification() -> None:
     assert not llm_call_timed_out(status_error(502))
     assert not llm_call_timed_out(status_error(400))
     assert not llm_call_timed_out(ValueError("unrelated bug"))
+    # The run-level timeout is a different budget and never matches
+    # here: its runs reach the run classifier instead.
+    assert not llm_call_timed_out(
+        WorkflowTimeoutError("Operation timed out after 600.0 seconds")
+    )
+
+
+def test_run_timed_out_classification() -> None:
+    """The run-cap classifier matches WorkflowTimeoutError and nothing else.
+
+    The workflow timeout tick fires when a run's *total* duration
+    crosses ``WAHABOT_RUN_TIMEOUT`` — a slow-generation class like the
+    per-request timeout, never an outage (the endpoint may be healthy
+    and still mid-generation) and never a bug (the cap did its job).
+    """
+    request = httpx.Request("POST", "http://llm.invalid/v1/chat/completions")
+
+    assert run_timed_out(WorkflowTimeoutError("Operation timed out after 600.0 seconds"))
+    assert not run_timed_out(openai.APITimeoutError(request=request))
+    assert not run_timed_out(openai.APIConnectionError(request=request))
+    assert not run_timed_out(ValueError("unrelated bug"))
 
 
 def test_load_llm_auto_cache_flag(unit_settings: Settings) -> None:
