@@ -58,7 +58,7 @@ def build_default_tools(
         escalate(waha, channel, settings),
         react_to_message(waha),
         send_media(waha, settings),
-        read_chat(waha),
+        read_chat(waha, settings),
         forward_message(waha),
         web_search_builder(settings),
         visit_url_builder(settings),

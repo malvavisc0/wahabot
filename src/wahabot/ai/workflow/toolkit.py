@@ -196,9 +196,10 @@ async def run_tool_call(
     Tool functions are sync and do network I/O (WAHA, web), so they run
     in a worker thread via ``asyncio.to_thread`` to keep the event loop
     responsive. Tool outputs are not truncated here: every tool bounds
-    its own payload at the source (``visit_url`` capping its text,
-    ``web_search`` its per-result snippets, the list tools slimming
-    ``_data`` and fitting to a whole-message budget), so a blunt
+    its own payload at the source (``visit_url`` previewing its text,
+    ``web_search`` capping snippets, the list tools inlining a slim
+    preview, ``run_shell_command`` capping its streams) and spills the
+    full result to a temp file when anything was cut, so a blunt
     workflow-level char cutoff would only mangle already-curated JSON
     envelopes.
 

@@ -592,7 +592,7 @@ Underneath it calls WAHA `PUT /api/reaction` (see
 
 | Tool | Purpose |
 |---|---|
-| `read_chat(mode="list", chat=None, limit=20)` | `mode=list`: recent messages as a JSON `messages` list, each entry carrying its serialized `id` (for react/forward), body, sender and media info |
+| `read_chat(mode="list", chat=None, limit=20)` | `mode=list`: recent messages as a JSON `messages` list (newest first, bounded inline preview; the full history rides `file.path`), each entry carrying its serialized `id` (for react/forward), body, sender and media info |
 | `read_chat(mode="metadata", chat=None)` | Chat metadata summary (name, participant count + JIDs, …) via `/chats/overview` |
 | `read_chat(mode="search", query=…, chat=None, limit=20)` | Find recent messages containing a text substring |
 | `read_chat(mode="resolve", name=…)` | Resolve a person/group name to chat JIDs — operator runs: chats first, contacts as fallback (the answer to "send it to *Family*"); chat runs: the current chat's own participants only (mention help — never the contact book) |

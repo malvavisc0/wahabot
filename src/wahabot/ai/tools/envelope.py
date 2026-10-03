@@ -23,6 +23,11 @@ def ok(**payload: Any) -> str:
     return json.dumps({"ok": True, **payload}, ensure_ascii=False)
 
 
-def error(message: str) -> str:
-    """The failure envelope: ``{"ok": false, "error": message}``."""
-    return json.dumps({"ok": False, "error": message}, ensure_ascii=False)
+def error(message: str, **payload: Any) -> str:
+    """The failure envelope: ``{"ok": false, "error": message, ...payload}``.
+
+    *payload* is for context worth preserving even on failure — e.g. a
+    shell command that timed out still reports its exit code, captured
+    partial output and spill file so nothing already captured is lost.
+    """
+    return json.dumps({"ok": False, "error": message, **payload}, ensure_ascii=False)

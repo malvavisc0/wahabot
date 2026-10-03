@@ -43,8 +43,9 @@ def web_search_builder(settings: Settings) -> BaseTool:
         name="web_search",
         description=(
             "Search the web for up-to-date or external information. "
-            "Returns `results`: title, url, snippet per hit. Read a "
-            "promising hit with visit_url."
+            "Returns `results`: title, url, snippet per hit — a snippet "
+            "flagged `content_truncated` has its full text in the "
+            "`file` JSON spill. Read a promising hit with visit_url."
         ),
     )
 
@@ -64,16 +65,24 @@ def shell_builder(settings: Settings) -> BaseTool:
             "cannot do: filesystem, processes, system state, running "
             "utilities. The system prompt's Host block lists the "
             "available binaries; use those, do not guess others. "
-            "Returns exit_code, stdout, stderr (truncated "
-            f"past {settings.shell_max_output} chars; killed after "
-            f"{int(settings.shell_timeout)}s — keep commands quick and "
-            "quiet)."
+            "Returns exit_code, stdout, stderr (bounded inline preview, "
+            f"killed after {int(settings.shell_timeout)}s — keep commands "
+            "quick). When a stream was cut, its full capture rides a "
+            "spill file — `file.path` for stdout, `stderr_file.path` for "
+            "stderr — read the rest in parts with head/sed/tail."
         ),
     )
 
 
 def visit_url_builder(settings: Settings) -> BaseTool:
     """Build the website-fetching tool bound to settings."""
+    deref = (
+        "read the rest via `transcript_file.path` (a local file) with "
+        + "the shell tool, in parts"
+        if settings.shell_tool
+        else "the rest waits in `transcript_file.path` (a local file "
+        + "only the operator can open)"
+    )
 
     def visit_url_fn(url: str, reason: str = "") -> str:
         return visit_url(settings, url)
@@ -89,7 +98,8 @@ def visit_url_builder(settings: Settings) -> BaseTool:
             "views). A YouTube link with captions also carries its "
             "`transcript` — the spoken content, so you can summarize or "
             "answer about the video itself; `transcript_truncated` true "
-            "means only the first part fit. Say you have the video's "
+            f"means only the first part fit inline — {deref}. A long "
+            "page body likewise drops `file`. Say you have the video's "
             "info or captions, never that you watched the video."
         ),
     )

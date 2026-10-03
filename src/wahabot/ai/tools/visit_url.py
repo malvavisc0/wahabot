@@ -17,10 +17,13 @@ spoken content arrives without the dropped ``get_youtube_transcript``
 tool (docs/bug-report-2c665d8.md, bug 7b) or its
 ``youtube-transcript-api`` dependency.
 
-The response body is returned inline (HTML stripped, truncated), since
-wahabot has no file tools. Tools follow wahabot conventions: they return
-the shared JSON envelope and never raise (failures become an ``error``
-envelope fed back to the model).
+The response body is previewed inline (HTML stripped, bounded) and long
+bodies spill the full text to a temp file (``file.path``) so nothing is
+lost — the model reads the rest in parts via ``run_shell_command`` when
+the shell tool is enabled (otherwise the operator can open the path).
+Tools follow wahabot conventions: they return the shared JSON envelope
+and never raise (failures become an ``error`` envelope fed back to the
+model).
 """
 
 import json
@@ -33,6 +36,7 @@ from curl_cffi import requests as cffi_requests
 from loguru import logger
 
 from wahabot.ai.tools.envelope import error, ok
+from wahabot.ai.tools.outfile import write_text_output
 from wahabot.settings import Settings
 
 __all__ = ["visit_url"]
@@ -95,15 +99,15 @@ def visit_url(settings: Settings, url: str) -> str:
     path. If the metadata extraction fails, the HTML path still runs —
     the tool never dead-ends.
 
-    Args:
-        url: The web page URL to visit.
-
     Returns:
-        A JSON envelope with the page ``text`` (up to ~4000 chars), its
-        final ``url``, HTTP ``status`` and a ``truncated`` flag — or, for
-        a resolved video link, its ``title``/``description``/``uploader``
-        metadata (plus ``transcript``/``transcript_truncated`` for
-        captioned YouTube videos). An ``error`` envelope is returned if
+        A JSON envelope with the page ``text`` (a bounded preview of up
+        to ~4000 chars), its final ``url``, HTTP ``status`` and a
+        ``truncated`` flag — and, when the body was cut, a ``file``
+        (absolute path to the full body) the agent can read in parts.
+        A resolved video link instead carries ``title``/``description``/
+        ``uploader`` metadata, plus ``transcript``/``transcript_``
+        ``truncated`` and (on long captions) a ``transcript_file`` with
+        the full spoken content. An ``error`` envelope is returned if
         the page could not be fetched at all.
     """
     if not url.strip():
@@ -118,9 +122,7 @@ def visit_url(settings: Settings, url: str) -> str:
             if tracks and _YOUTUBE_HOST_RE.match(url):
                 transcript = youtube_transcript(url, tracks)
                 if transcript:
-                    meta["transcript"] = transcript
-                    if len(transcript) >= _MAX_TRANSCRIPT_CHARS:
-                        meta["transcript_truncated"] = True
+                    meta.update(transcript_fields(transcript))
             return ok(source="yt-dlp", kind="video", url=url, **meta)
         # Extractor failed → the page might still be readable (e.g. a
         # private/removed post), so fall through to the HTML path.
@@ -132,15 +134,50 @@ def visit_url(settings: Settings, url: str) -> str:
         return error(f"visit_url failed: {exc}")
 
     text = _to_text(response)
-    truncated = len(text) > _MAX_CHARS
-    if truncated:
-        text = text[:_MAX_CHARS]
     return ok(
         url=str(response.url),
         status=response.status_code,
-        truncated=truncated,
-        text=text,
+        **page_fields(text),
     )
+
+
+def page_fields(text: str) -> dict[str, Any]:
+    """Envelope fields for a fetched page body: preview + optional spill.
+
+    Short bodies ride the envelope whole; long ones keep a bounded
+    ``text`` preview, flag ``truncated``, and spill the full body to
+    ``file`` so no content is lost. The spill is fail-soft: on a write
+    error the envelope just keeps the preview and the flag.
+    """
+    if len(text) <= _MAX_CHARS:
+        return {"text": text, "truncated": False}
+    fields: dict[str, Any] = {"text": text[:_MAX_CHARS], "truncated": True}
+    try:
+        fields["file"] = write_text_output("page", text)
+    except Exception as exc:
+        logger.warning("could not spill page text to file: {exc}", exc=exc)
+    return fields
+
+
+def transcript_fields(transcript: str) -> dict[str, Any]:
+    """Envelope fields for a transcript: preview + optional spill file.
+
+    Short transcripts ride the envelope as ``transcript``; long ones
+    keep a ``transcript`` preview, flag ``transcript_truncated``, and
+    spill the full text to ``transcript_file`` so the model can read the
+    rest in parts. Fail-soft like :func:`page_fields`.
+    """
+    if len(transcript) <= _MAX_TRANSCRIPT_CHARS:
+        return {"transcript": transcript}
+    fields: dict[str, Any] = {
+        "transcript": transcript[:_MAX_TRANSCRIPT_CHARS],
+        "transcript_truncated": True,
+    }
+    try:
+        fields["transcript_file"] = write_text_output("transcript", transcript)
+    except Exception as exc:
+        logger.warning("could not spill transcript to file: {exc}", exc=exc)
+    return fields
 
 
 def video_meta(url: str, settings: Settings) -> dict[str, Any] | None:
@@ -348,12 +385,14 @@ def _strip_vtt(vtt: str) -> str:
 
 
 def _paragraph(caption_text: str) -> str:
-    """Caption text as readable paragraphed prose, truncated.
+    """Caption text as readable paragraphed prose.
 
     Caption fragments arrive as ~3-second snippets; joining them
     verbatim yields mid-sentence breaks every few words. Join, collapse
     whitespace, and break into paragraphs at sentence boundaries —
-    the same formatting the dropped transcript tool used.
+    the same formatting the dropped transcript tool used. The result
+    stays whole: truncation/spill is the envelope's job
+    (:func:`transcript_fields`).
     """
     joined = (
         _join_json3(caption_text)
@@ -366,8 +405,7 @@ def _paragraph(caption_text: str) -> str:
         " ".join(sentences[i : i + _PARAGRAPH_SENTENCES]).strip()
         for i in range(0, len(sentences), _PARAGRAPH_SENTENCES)
     ]
-    text = "\n\n".join(p for p in paragraphs if p)
-    return text[:_MAX_TRANSCRIPT_CHARS]
+    return "\n\n".join(p for p in paragraphs if p)
 
 
 def _join_json3(caption_text: str) -> str:

@@ -19,17 +19,18 @@ from typing import Any
 from loguru import logger
 
 from wahabot.ai.tools.envelope import error, ok
+from wahabot.ai.tools.outfile import write_json_output
 from wahabot.settings import Settings
 
 __all__ = ["web_search"]
 
 _MIN_TIMEOUT_SECONDS = 2.0
 
-#: Cap on one search result's ``content`` snippet. webserp's snippets
-#: are the only unbounded field across all tools — every other payload
-#: self-limits at its source. Capping here keeps the envelope valid JSON
-#: (the whole result survives; only the snippet is trimmed) instead of a
-#: workflow-level blunt char cutoff mangling the envelope mid-string.
+#: Cap on one search result's inline ``content`` snippet. webserp's
+#: snippets are the only unbounded field across all tools — every other
+#: payload self-limits at its source. The inline cap keeps the envelope
+#: small, but the full findings ride a spill file when any snippet was
+#: cut, so nothing is silently lost (see :func:`_spill_findings`).
 _MAX_CONTENT_CHARS = 600
 
 
@@ -46,8 +47,11 @@ def web_search(
             ``WAHABOT_WEB_SEARCH_MAX_RESULTS``.
 
     Returns:
-        A JSON envelope with a ``results`` list of findings, or an
-        ``error`` envelope (a failure never raises).
+        A JSON envelope with a ``results`` list of findings (inline
+        snippets capped at ``_MAX_CONTENT_CHARS``), or an ``error``
+        envelope (a failure never raises). When any snippet was cut,
+        the full findings also ride ``file`` (a temp JSON file) so the
+        model can read the rest via the shell tool.
     """
     if not query.strip():
         return error("query cannot be empty")
@@ -62,10 +66,17 @@ def web_search(
             proxy=settings.web_search_proxy,
         )
         findings = _parse_output(output)
+        raw_results = _raw_results(output)
     except Exception as exc:
         logger.warning("web_search failed: {exc}", exc=exc)
         return error(f"web_search failed: {exc}")
-    return ok(query=query, count=len(findings), results=findings)
+    payload: dict[str, Any] = {
+        "query": query,
+        "count": len(findings),
+        "results": findings,
+    }
+    payload.update(_spill_findings(query, raw_results, findings))
+    return ok(**payload)
 
 
 def _run_webserp(
@@ -102,6 +113,18 @@ def _run_webserp(
     return result.stdout
 
 
+def _raw_results(output: str) -> list[dict[str, Any]]:
+    """The raw webserp result dicts, unparsed (for the spill rebuild)."""
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return []
+    raw = data.get("results")
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
 def _parse_output(output: str) -> list[dict[str, Any]]:
     """Parse webserp's stdout JSON into a list of normalised findings."""
     try:
@@ -117,21 +140,60 @@ def _parse_output(output: str) -> list[dict[str, Any]]:
     for raw in raw_results:
         if not isinstance(raw, dict):
             continue
-        finding = _build_finding(raw)
+        finding = _build_finding(raw, cap_content=True)
         if finding is not None:
             findings.append(finding)
     return findings
 
 
-def _build_finding(raw: dict[str, Any]) -> dict[str, Any] | None:
-    """Build a normalised finding from a raw webserp result."""
+def _spill_findings(
+    query: str, raw_results: list[dict[str, Any]], findings: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Envelope fields preserving any snippet cut past the inline cap.
+
+    :func:`_build_finding` caps each inline snippet at
+    ``_MAX_CONTENT_CHARS`` and flags it ``content_truncated``, but the
+    trimmed tails must not vanish: when any snippet was cut, the full
+    findings (uncut content, rebuilt from the raw results) ride a temp
+    JSON file (``file``) the model can dereference in parts. Fail-soft:
+    a write error just leaves the envelope inline-only.
+    """
+    if not any(finding.get("content_truncated") for finding in findings):
+        return {}
+    full = [
+        finding
+        for raw in raw_results
+        if (finding := _build_finding(raw, cap_content=False)) is not None
+    ]
+    try:
+        return {"file": write_json_output("search", {"query": query, "results": full})}
+    except Exception as exc:
+        logger.warning("could not spill web_search results to file: {exc}", exc=exc)
+        return {}
+
+
+def _build_finding(
+    raw: dict[str, Any], cap_content: bool = True
+) -> dict[str, Any] | None:
+    """Build a normalised finding from a raw webserp result.
+
+    With *cap_content* the inline snippet is capped at
+    ``_MAX_CONTENT_CHARS`` and flagged ``content_truncated`` when cut;
+    the uncapped variant is what reaches the spill file
+    (:func:`_spill_findings`), so the envelope itself never carries the
+    bulk.
+    """
     url = raw.get("url")
     title = raw.get("title")
     if not url or not title:
         return None
     finding: dict[str, Any] = {"url": url, "title": title}
     if content := raw.get("content"):
-        finding["content"] = content[:_MAX_CONTENT_CHARS]
+        if cap_content and len(content) > _MAX_CONTENT_CHARS:
+            finding["content"] = content[:_MAX_CONTENT_CHARS]
+            finding["content_truncated"] = True
+        else:
+            finding["content"] = content
     if raw.get("engine"):
         finding["engine"] = raw["engine"]
     return finding

@@ -33,6 +33,7 @@ from PIL import Image
 
 from wahabot.ai.messages import jid_string
 from wahabot.ai.tools.envelope import error, ok
+from wahabot.ai.tools.outfile import write_json_output
 from wahabot.ai.tools.schemas import (
     EscalateSchema,
     ForwardMessageSchema,
@@ -1298,9 +1299,10 @@ def slim_message(message: dict[str, Any], max_body: int = 200) -> dict[str, Any]
     WAHA messages carry a raw ``_data`` blob (messageSecret,
     reportingToken, engine flags — ~90% of the payload) that is useless
     to the model and inflates every tool result. Slimmed messages keep
-    valid JSON and stay small enough for the memory budget. Message
-    bodies are capped at *max_body* chars — a huge paste cannot push
-    one message past the whole result budget.
+    valid JSON and stay small enough for the inline preview budget.
+    Message bodies are capped at *max_body* chars for the inline slice
+    only — the full, unslimmed history is what goes to the spill file
+    (:func:`fit_messages`), so a huge paste is not lost.
     """
     keys = ("id", "timestamp", "from", "fromMe", "participant", "body", "hasMedia", "ack")
     slimmed = {key: message[key] for key in keys if message.get(key) is not None}
@@ -1311,48 +1313,76 @@ def slim_message(message: dict[str, Any], max_body: int = 200) -> dict[str, Any]
     return slimmed
 
 
-#: Whole-message budget for list-tool envelopes, in serialized chars.
-#: List results are trimmed to whole messages *before* serialization so
-#: the envelope stays parseable JSON and each tool result is small
-#: enough to coexist with the conversation around it in the token
-#: budget.
-_LIST_ENVELOPE_BUDGET = 1800
+#: Inline result cap for the list/search readers, in serialized chars.
+#: A working slice of the newest messages rides the envelope so the model
+#: sees real content immediately; the *whole* result goes to a temp file
+#: (see :func:`fit_messages`) so asking for 600 never silently caps at
+#: whatever fits inline.
+_LIST_INLINE_BUDGET = 4000
 
 
 def fit_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """The most recent whole messages that fit the envelope budget.
+    """Envelope a chat summary without truncating the *full* result.
 
-    WAHA returns messages newest-first, so the list keeps the head
-    (the newest messages are the useful ones). ``count`` stays the
-    total fetched (the model should know how much exists);
-    ``returned`` is what actually fits, and ``truncated`` flags the
-    cut. The envelope is always valid JSON.
+    WAHA returns messages newest-first, so the inline preview keeps the
+    head (newest are the useful ones) up to ``_LIST_INLINE_BUDGET``; the
+    envelope reports how many messages were ``returned`` inline and
+    flags ``truncated`` so the model can see the cut without counting.
+    The entire fetched list — with full, unslimmed message bodies — is
+    written to a temp JSON file, and the envelope returns the file's
+    metadata with an ``messages`` inline preview and ``message_count``
+    (the total fetched — how much exists) so the model knows it can
+    dereference the file for all of them.
+    ``file.path`` is absolute (reachable via the shell tool or the
+    operator); the file write is fail-soft, the envelope then degrades
+    to inline-only.
     """
-    kept: list[dict[str, Any]] = []
-    used = 0
-    for message in messages:
-        item = json.dumps(message, ensure_ascii=False)
-        if kept and used + len(item) > _LIST_ENVELOPE_BUDGET:
-            break
-        kept.append(message)
-        used += len(item)
-    return {
+
+    def inline_slice() -> list[dict[str, Any]]:
+        slimmed = [slim_message(message) for message in messages]
+        kept: list[dict[str, Any]] = []
+        used = 0
+        for item in slimmed:
+            serialized = json.dumps(item, ensure_ascii=False)
+            if kept and used + len(serialized) > _LIST_INLINE_BUDGET:
+                break
+            kept.append(item)
+            used += len(serialized)
+        return kept
+
+    kept = inline_slice()
+    out: dict[str, Any] = {
         "messages": kept,
-        "count": len(messages),
         "returned": len(kept),
         "truncated": len(kept) < len(messages),
     }
+    if messages:
+        out["message_count"] = len(messages)
+        try:
+            out["file"] = write_json_output(f"chat_{int(time.time())}", messages)
+        except Exception as exc:
+            logger.warning("could not spill chat messages to file: {exc}", exc=exc)
+    return out
 
 
-def read_chat(waha: WahaClient) -> BaseTool:
+def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
     """Build the chat-reading tool: list/search/metadata/recent/resolve.
 
     One tool replaces the five old readers (docs/bug-report-2c665d8.md,
     bug 7b) behind a ``mode`` argument. ``recent`` is operator-only
     (the conversation list is cross-chat reach); the rest fence the
     current chat like before. The reach rule lives in the system prompt
-    (``{{operator_tools}}``); ``fenced_chat`` enforces it.
+    (``{{operator_tools}}``); ``fenced_chat`` enforces it. *settings*
+    decides how the description hints at dereferencing spill files:
+    with the shell tool enabled the model can read them itself,
+    otherwise only the operator can.
     """
+    deref = (
+        "dereference `file.path` via run_shell_command (head/sed/tail) "
+        + "to read past a long preview"
+        if settings.shell_tool
+        else "the operator can open `file.path` for the full history"
+    )
 
     def read_chat_fn(
         mode: str = "list",
@@ -1387,8 +1417,10 @@ def read_chat(waha: WahaClient) -> BaseTool:
         name="read_chat",
         description=(
             "Read the current chat. `mode=list` returns its recent "
-            "messages newest-first (each id lets you quote, forward or "
-            "react; raise `limit` to look further back). `mode=search` "
+            "messages newest-first; short results ride the envelope, long "
+            f"ones include `file` (a path to the full JSON) with an inline "
+            f"preview — {deref}. Each message id lets you quote or "
+            "react; raise `limit` to look further back. `mode=search` "
             "searches its history for `query`. `mode=metadata` returns "
             "name, participant count and (for small chats) the "
             "participant JIDs — the source for send_message mentions. "
@@ -1451,22 +1483,28 @@ def read_resolve_chat(
 def read_chat_messages(
     waha: WahaClient, session: str, chat_id: str, query: str, name: str, limit: int
 ) -> str:
-    """The `list` mode: recent messages from a chat, newest first."""
+    """The `list` mode: recent messages from a chat, newest first.
+
+    Short chats ride the envelope inline; long ones spill the full
+    result to a temp JSON file (see :func:`fit_messages`).
+    """
     messages = waha.fetch_chat_messages(session, chat_id, limit=limit)
-    return ok(chat=chat_id, **fit_messages([slim_message(m) for m in messages]))
+    return ok(chat=chat_id, **fit_messages(messages))
 
 
 def read_search_messages(
     waha: WahaClient, session: str, chat_id: str, query: str, name: str, limit: int
 ) -> str:
-    """The `search` mode: recent messages matching *query*."""
+    """The `search` mode: recent messages matching *query*. Long result
+    sets spill to a temp file like ``list`` (see :func:`fit_messages`).
+    """
     if not query.strip():
         return error("query is required")
     messages = waha.search_messages(session, query, chat_id, limit=limit)
     return ok(
         chat=chat_id,
         query=query,
-        **fit_messages([slim_message(m) for m in messages]),
+        **fit_messages(messages),
     )
 
 

@@ -58,6 +58,7 @@ from wahabot.ai.messages import (
 from wahabot.ai.observability import _mask_value  # pyright: ignore[reportPrivateUsage]
 from wahabot.ai.resolve import chat_context_note, resolve_last_message
 from wahabot.ai.scrub import strip_spoofed_markers
+from wahabot.ai.tools.shell import shell_command
 from wahabot.ai.tools.url_videos import video_urls
 from wahabot.ai.tools.whatsapp import (
     _DOC_MIME_BY_EXT as DOC_MIME_BY_EXT,  # pyright: ignore[reportPrivateUsage]
@@ -1496,9 +1497,13 @@ def test_visit_url_youtube_inlines_transcript(unit_settings: Settings) -> None:
     The dropped get_youtube_transcript affordance lives in visit_url
     now (7b merge): a manual caption track rides the envelope as
     `transcript`, and a track that exceeds the char cap is flagged
-    `transcript_truncated` instead of silently losing its tail.
+    `transcript_truncated` — but no content is lost, the full text
+    spills to `transcript_file` for the agent to read in parts.
     """
-    from wahabot.ai.tools.visit_url import _MAX_TRANSCRIPT_CHARS, visit_url
+    from wahabot.ai.tools.visit_url import (
+        _MAX_TRANSCRIPT_CHARS,  # pyright: ignore[reportPrivateUsage]
+        visit_url,
+    )
 
     long_cue = " ".join(f"Sentence {i} keeps going." for i in range(800))
     info = {
@@ -1537,6 +1542,10 @@ def test_visit_url_youtube_inlines_transcript(unit_settings: Settings) -> None:
     assert result["transcript"].startswith("Sentence 0 keeps going.")
     assert result["transcript_truncated"] is True
     assert len(result["transcript"]) == _MAX_TRANSCRIPT_CHARS
+    assert "transcript_file" in result
+    spill = Path(result["transcript_file"]["path"]).read_text(encoding="utf-8")
+    assert len(spill) > _MAX_TRANSCRIPT_CHARS
+    assert "Sentence 500 keeps going." in spill
 
 
 def test_visit_url_media_falls_back_to_html(unit_settings: Settings) -> None:
@@ -1625,6 +1634,234 @@ def test_visit_url_plain_page_skips_yt_dlp(unit_settings: Settings) -> None:
         result = json.loads(visit_url(unit_settings, "https://example.com/a"))
     assert result["ok"] is True
     assert result["text"] == "just words"
+
+
+def test_visit_url_long_page_spills_to_file(unit_settings: Settings) -> None:
+    """A page body over the cap keeps a bounded preview + full-body file.
+
+    Reading a whole long article inline would cost the token budget;
+    the envelope shows a ``text`` preview, flags ``truncated``, and
+    spills the full body to ``file`` so the model can read the rest
+    in parts via the shell tool.
+    """
+    from wahabot.ai.tools.visit_url import (
+        _MAX_CHARS as PAGE_CAP,  # pyright: ignore[reportPrivateUsage]
+    )
+    from wahabot.ai.tools.visit_url import (
+        visit_url,
+    )
+
+    long_body = "all the words " * 900  # ~13.5k chars, over the 4k inline cap
+
+    class FakeResponse:
+        url = "https://example.com/very-long"
+        status_code = 200
+        text = long_body
+        headers: ClassVar[dict[str, str]] = {"content-type": "text/html"}
+
+    with unittest.mock.patch(
+        "wahabot.ai.tools.visit_url._fetch",
+        lambda url, settings: FakeResponse(),  # pyright: ignore[reportUnknownLambdaType]
+    ):
+        result = json.loads(visit_url(unit_settings, "https://example.com/very-long"))
+    assert result["ok"] is True
+    assert result["truncated"] is True
+    assert result["text"] == long_body.strip()[:PAGE_CAP]
+    assert "file" in result
+    spill = Path(result["file"]["path"]).read_text(encoding="utf-8")
+    assert spill == long_body.strip()
+    assert result["file"]["bytes"] > PAGE_CAP
+
+
+def test_visit_url_short_page_stays_inline(unit_settings: Settings) -> None:
+    """A short page rides the envelope whole: no file, no flag."""
+    from wahabot.ai.tools.visit_url import visit_url
+
+    class FakeResponse:
+        url = "https://example.com/short"
+        status_code = 200
+        text = "just a couple of words"
+        headers: ClassVar[dict[str, str]] = {"content-type": "text/html"}
+
+    with unittest.mock.patch(
+        "wahabot.ai.tools.visit_url._fetch",
+        lambda url, settings: FakeResponse(),  # pyright: ignore[reportUnknownLambdaType]
+    ):
+        result = json.loads(visit_url(unit_settings, "https://example.com/short"))
+    assert result["ok"] is True
+    assert result["truncated"] is False
+    assert result["text"] == "just a couple of words"
+    assert "file" not in result
+
+
+def test_shell_result_spills_over_cap() -> None:
+    """A flooding command spills its full output to files (end to end).
+
+    ``run_shell_command`` caps the inline stdout/stderr but must not
+    lose output: each overflowing stream carries a spill file —
+    `file` for stdout, `stderr_file` for stderr — holding the
+    complete capture (seeded with the inline preview) so the agent
+    can read the rest in parts. The whole path is exercised here
+    (reader threads, spill, envelope) — a `_render_result`-only test
+    once passed while the readers dropped the tail in production.
+    """
+    settings = Settings(
+        webhook_hmac_key="k",
+        waha_url="http://waha.invalid",
+        waha_api_key="k",
+        llm_api_base="http://llm.invalid",
+        llm_api_key="k",
+        shell_tool=True,
+        shell_max_output=200,
+        shell_timeout=30,
+        _env_file=None,
+    )
+    loud = "loud" * 2500  # 10k chars, far past the 200-char inline cap
+    command = f"printf %s '{loud}'; echo boom >&2; echo boom >&2"
+    rendered = json.loads(shell_command(settings, command))
+    assert rendered["ok"] is True
+    assert rendered["exit_code"] == 0
+    assert rendered["truncated"] is True
+    assert rendered["stdout"] == loud[:200]
+    assert rendered["stderr"] == "boom\nboom"  # small stderr rides inline
+    assert "file" in rendered
+    spill = Path(rendered["file"]["path"]).read_text(encoding="utf-8")
+    assert loud in spill  # the complete stream, head to tail
+    assert rendered["file"]["bytes"] == len(loud.encode())
+    assert "stderr_file" not in rendered  # stderr fit inline: no disk touch
+
+
+def test_shell_small_command_never_touches_disk() -> None:
+    """Output within the inline cap rides the envelope alone: no files."""
+    settings = Settings(
+        webhook_hmac_key="k",
+        waha_url="http://waha.invalid",
+        waha_api_key="k",
+        llm_api_base="http://llm.invalid",
+        llm_api_key="k",
+        shell_tool=True,
+        shell_max_output=200,
+        shell_timeout=30,
+        _env_file=None,
+    )
+    rendered = json.loads(shell_command(settings, "echo small; echo oops >&2"))
+    assert rendered["ok"] is True
+    assert rendered["truncated"] is False
+    assert rendered["stdout"] == "small"
+    assert rendered["stderr"] == "oops"
+    assert "file" not in rendered
+    assert "stderr_file" not in rendered
+
+
+def test_shell_sink_finalize_drops_late_reader_chunks() -> None:
+    """A late reader write after finalize must not crash or corrupt.
+
+    The timeout path renders the envelope while a reader daemon thread
+    can still be draining pipe remnants; before the finalize flag that
+    write hit a closed handle — crashing the reader and losing the
+    partial tail the envelope promised. Finalized sinks drop late
+    chunks instead.
+    """
+    from wahabot.ai.tools.shell import (
+        _StreamSink,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    sink = _StreamSink("race", 10)
+    sink.append(b"x" * 10)  # fill the preview
+    sink.append(b"spilled")  # open the spill file
+    meta = sink.file_meta()  # finalize (the timeout path's render)
+    assert meta is not None
+    sink.append(b"late-tail")  # a reader racing past the kill
+    assert sink.file_meta() is meta  # idempotent
+    content = Path(meta["path"]).read_bytes()
+    assert b"late-tail" not in content  # dropped, not crashed
+    assert content == b"x" * 10 + b"spilled"
+
+
+def test_shell_timeout_keeps_partial_output() -> None:
+    """A timed-out command reports the partial output it managed to print.
+
+    The old behavior threw everything away on timeout; the kill costs
+    the model the missing tail, never what was already captured: the
+    error envelope carries the inline previews (and spill files for
+    anything that overflowed them).
+    """
+    settings = Settings(
+        webhook_hmac_key="k",
+        waha_url="http://waha.invalid",
+        waha_api_key="k",
+        llm_api_base="http://llm.invalid",
+        llm_api_key="k",
+        shell_tool=True,
+        shell_max_output=200,
+        shell_timeout=1,
+        _env_file=None,
+    )
+    rendered = json.loads(shell_command(settings, 'bash -c "echo started; sleep 30"'))
+    assert rendered["ok"] is False
+    assert "timed out" in rendered["error"]
+    assert rendered["stdout"] == "started"
+    assert rendered["truncated"] is False
+
+
+def test_web_search_spills_cut_snippets(unit_settings: Settings) -> None:
+    """A snippet cut past the inline cap is not lost: full text on file.
+
+    webserp's snippets are the one unbounded payload field; the inline
+    cap keeps the envelope small, and a cut snippet is flagged
+    `content_truncated` with the *full* findings riding `file` so the
+    model can read the rest via the shell tool.
+    """
+    from wahabot.ai.tools import web_search as web_search_mod
+
+    long_snippet = "detail " * 300  # 2.1k chars, past the 600-char cap
+    webserp_output = json.dumps(
+        {
+            "results": [
+                {"url": "https://a.example", "title": "Hit A", "content": long_snippet},
+                {"url": "https://b.example", "title": "Hit B", "content": "short"},
+            ]
+        }
+    )
+    with unittest.mock.patch.object(
+        web_search_mod, "_run_webserp", return_value=webserp_output
+    ):
+        result = json.loads(web_search_mod.web_search(unit_settings, "query"))
+    assert result["ok"] is True
+    assert result["count"] == 2
+    finding = result["results"][0]
+    assert finding["content_truncated"] is True
+    assert (
+        finding["content"]
+        == long_snippet[
+            : web_search_mod._MAX_CONTENT_CHARS  # pyright: ignore[reportPrivateUsage]
+        ]
+    )
+    assert result["results"][1].get("content_truncated") is None
+    assert "file" in result
+    spill = json.loads(Path(result["file"]["path"]).read_text(encoding="utf-8"))
+    assert spill["query"] == "query"
+    assert spill["results"][0]["content"] == long_snippet  # uncut
+
+
+def test_web_search_short_snippets_stay_inline(unit_settings: Settings) -> None:
+    """Nothing cut means no spill: the envelope rides alone."""
+    from wahabot.ai.tools import web_search as web_search_mod
+
+    webserp_output = json.dumps(
+        {
+            "results": [
+                {"url": "https://a.example", "title": "Hit A", "content": "tiny"},
+            ]
+        }
+    )
+    with unittest.mock.patch.object(
+        web_search_mod, "_run_webserp", return_value=webserp_output
+    ):
+        result = json.loads(web_search_mod.web_search(unit_settings, "query"))
+    assert result["ok"] is True
+    assert "file" not in result
+    assert "content_truncated" not in result["results"][0]
 
 
 def test_visit_url_media_bare_info_retries_processed(unit_settings: Settings) -> None:
@@ -1986,25 +2223,49 @@ _PIN_MESSAGES = [
 ]
 
 
-def test_fit_messages_keeps_newest_when_truncating() -> None:
-    """Truncation keeps the newest messages: WAHA lists newest-first.
+def test_fit_messages_spills_full_history_to_file() -> None:
+    """Inline preview is capped, but the full history rides a temp file.
 
-    The incident's wrong answer: the envelope kept the *tail* of the
-    list, silently dropping the chat's actual last message — the one
-    an operator command asked about — and the model reasoned from a
-    message that was hours old.
+    The old behavior silently cut the envelope at 1800 chars, so asking
+    for 600 messages never gave the model more than a sliver. New
+    behavior: the newest messages appear in ``messages`` inline (bounded),
+    and the *entire* list — full bodies, not the slimmed preview — is
+    persisted to ``file.path`` with its ``message_count``, so a long
+    read is never truncated at the source.
     """
     messages = [
         {"id": f"false_{CHAT_ID}_M{i}", "body": f"message {i}" * 20} for i in range(20)
     ]
     fitted = fit_messages(messages)
-    assert fitted["count"] == 20
+    assert fitted["message_count"] == 20
     assert fitted["truncated"] is True
+    assert fitted["returned"] == len(fitted["messages"])
+    assert fitted["returned"] < 20  # inline preview is bounded
+    assert "file" in fitted
+    assert fitted["file"]["bytes"] > 0
     newest = messages[0]["id"]
     assert fitted["messages"][0]["id"] == newest
-    assert [m["id"] for m in fitted["messages"]] == [
-        m["id"] for m in messages[: fitted["returned"]]
-    ]
+    spill = json.loads(Path(fitted["file"]["path"]).read_text(encoding="utf-8"))
+    assert len(spill) == 20
+    assert spill[0]["id"] == newest
+    assert spill[-1]["id"] == messages[-1]["id"]
+    # the spill holds the full bodies, not the slimmed inline previews
+    assert spill[0]["body"] == messages[0]["body"]
+
+
+def test_fit_messages_short_list_rides_inline() -> None:
+    """A short history fits inline: no truncation, but still spilled.
+
+    Even when everything fits the inline budget the full bodies ride
+    the file (the inline slice is slimmed — bodies cut at 200 chars),
+    and `returned`/`truncated` tell the model exactly what it has.
+    """
+    messages = [{"id": f"false_{CHAT_ID}_M{i}", "body": f"note {i}"} for i in range(3)]
+    fitted = fit_messages(messages)
+    assert fitted["message_count"] == 3
+    assert fitted["returned"] == 3
+    assert fitted["truncated"] is False
+    assert "file" in fitted
 
 
 def test_resolve_last_message_pins_named_chat() -> None:
@@ -2495,7 +2756,7 @@ def test_send_media_blank_source_yields_to_real_source() -> None:
         target = RunTarget(session=SESSION, chat_id=CHAT_ID)
         token = bind_target(target)
         try:
-            tool = send_media(waha, settings)
+            tool: Any = send_media(waha, settings)
             out = tool(kind="file", url="   ", path=str(doc))
             envelope: dict[str, Any] = json.loads(str(out.content))
             assert envelope["ok"] is True, envelope
@@ -2506,7 +2767,7 @@ def test_send_media_blank_source_yields_to_real_source() -> None:
         assert waha.send_file.call_args.kwargs["file"]["mimetype"] == "application/pdf"
 
 
-def test_read_chat_rejects_chat_in_operator_modes() -> None:
+def test_read_chat_rejects_chat_in_operator_modes(unit_settings: Settings) -> None:
     """mode=resolve/recent ignore chats by design; a passed `chat` is refused.
 
     Both modes work on the whole roster/contact book, so a `chat`
@@ -2526,7 +2787,7 @@ def test_read_chat_rejects_chat_in_operator_modes() -> None:
     target = RunTarget(session=SESSION, chat_id=CHAT_ID, armed=True)
     token = bind_target(target)
     try:
-        tool = cast("Any", read_chat(cast("Any", waha))).fn
+        tool = cast("Any", read_chat(cast("Any", waha), unit_settings)).fn
         for mode in ("resolve", "recent"):
             out = _json.loads(tool(mode=mode, chat=CHAT_ID, name="Family"))
             assert out["ok"] is False, mode
@@ -3263,7 +3524,7 @@ def test_wrap_up_prompt_used_after_delivery(unit_settings: Settings) -> None:
 
     from wahabot.ai.messages import WRAP_UP_NOTE_KWARG
     from wahabot.ai.workflow import (
-        _POST_DELIVERY_WRAP_UP_PROMPT,  # pyright: ignore[reportPrivateUsage]
+        _POST_DELIVERY_WRAP_UP_PROMPT,
         FunctionCallingAgentWorkflow,
         load_llm,
     )
@@ -3438,7 +3699,7 @@ def test_operator_tools_placeholder_renders() -> None:
     assert "operator command" not in plain
 
 
-def test_resolve_chat_chat_run_matches_roster() -> None:
+def test_resolve_chat_chat_run_matches_roster(unit_settings: Settings) -> None:
     """A chat run resolves names against the chat's own roster only.
 
     The contact book and chat list never enter a chat-run search: the
@@ -3476,7 +3737,7 @@ def test_resolve_chat_chat_run_matches_roster() -> None:
                 }
             ]
 
-    tool = cast(Any, read_chat(cast(Any, RosterWaha()))).fn
+    tool = cast(Any, read_chat(cast(Any, RosterWaha()), unit_settings)).fn
     token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID))
     try:
         hit = _json.loads(tool(mode="resolve", name="alex rivers"))
@@ -3491,7 +3752,7 @@ def test_resolve_chat_chat_run_matches_roster() -> None:
     assert not outsider["ok"]
 
 
-def test_resolve_chat_operator_run_searches_contacts() -> None:
+def test_resolve_chat_operator_run_searches_contacts(unit_settings: Settings) -> None:
     """An operator run keeps the full contact-book search.
 
     ``wahabot tell`` commands resolve against the operator's chat list
@@ -3523,7 +3784,7 @@ def test_resolve_chat_operator_run_searches_contacts() -> None:
             return [{"id": "491999999999@c.us", "name": "Family"}]
 
     waha = ContactBookWaha()
-    tool = cast(Any, read_chat(cast(Any, waha))).fn
+    tool = cast(Any, read_chat(cast(Any, waha), unit_settings)).fn
     token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID, armed=True))
     try:
         hit = _json.loads(tool(mode="resolve", name="Family"))
@@ -4243,7 +4504,7 @@ def test_slim_tool_spec_strips_padding_keeps_semantics() -> None:
 
     from wahabot.ai.tools.slim import slim_tool_spec
 
-    spec = {
+    spec: dict[str, Any] = {
         "type": "function",
         "function": {
             "name": "send_text",
@@ -4353,7 +4614,9 @@ def test_prepared_tool_specs_are_slimmed_and_valid() -> None:
         is_function_calling_model=True,
     )
     tools = build_default_tools(WahaClient("http://x", "k"), settings)
-    prepared = llm._prepare_chat_with_tools(tools, chat_history=[])
+    prepared = llm._prepare_chat_with_tools(  # pyright: ignore[reportPrivateUsage]
+        tools, chat_history=[]
+    )
     specs = prepared["tools"]
 
     assert len(specs) == len(tools)

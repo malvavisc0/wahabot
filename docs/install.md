@@ -62,7 +62,7 @@ Key env vars:
 | `WAHABOT_WEB_SEARCH_PROXY` | Optional proxy for webserp | — |
 | `WAHABOT_SHELL_TOOL` | Enable shell tool (off by default; run unprivileged/sandboxed) | `false` |
 | `WAHABOT_SHELL_TIMEOUT` | Shell command timeout (s) | `30` |
-| `WAHABOT_SHELL_MAX_OUTPUT` | Max chars returned from a shell command | `2000` |
+| `WAHABOT_SHELL_MAX_OUTPUT` | Max inline chars per shell output stream (full output spills to a temp file) | `2000` |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Opt-in tracing (see README) | — |
 
 ## Quick start
