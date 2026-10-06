@@ -55,6 +55,7 @@ __all__ = [
     "reply_context_section",
     "sender_tag",
     "turn_body",
+    "turn_user_message",
 ]
 
 
@@ -425,6 +426,69 @@ async def handle_message(
     """
     chat_id = str(event.payload.get("from", ""))
     logger.info("Agent handling message from {chat_id}", chat_id=chat_id)
+    user_msg, image_blocks = await turn_user_message(
+        event,
+        image=image,
+        images=images,
+        settings=settings,
+        waha=waha,
+        pinned_note=pinned_note,
+        bot_name=bot_name,
+        bot_mention_regex=bot_mention_regex,
+        body_scrubbed=body_scrubbed,
+    )
+    # Bind this run's delivery target around the whole run: the workflow
+    # engine schedules steps/tasks under this context, so the binding
+    # propagates to every step and tool call of THIS run — concurrent
+    # runs bind their own targets and never see each other's. The
+    # binding resets before returning, so the *target itself* is
+    # returned alongside the reply for the caller's latch checks.
+    typing = (
+        (settings.typing_presence_min_s, settings.typing_presence_max_s)
+        if settings is not None
+        else None
+    )
+    target = RunTarget(session=event.session, chat_id=chat_id, armed=armed, typing=typing)
+    token = bind_target(target)
+    try:
+        # WAHABOT_RUN_TIMEOUT as a true per-run wall-clock cap. The
+        # library's own timeout= must stay None: on the reused per-chat
+        # Context it would act as a cumulative alive-time budget that
+        # sums every run's latency and permanently kills busy chats at
+        # the cap (docs/incident-2026-10-06-run-timeout.md). wait_for
+        # raises TimeoutError, classified by run_timed_out.
+        result = await asyncio.wait_for(
+            agent.run(input=user_msg, image_blocks=image_blocks, ctx=ctx),
+            timeout=(settings.run_timeout or None) if settings is not None else None,
+        )
+    finally:
+        reset_target(token)
+    return final_reply(result), target
+
+
+async def turn_user_message(
+    event: WahaEvent,
+    image: dict[str, Any] | None = None,
+    images: list[dict[str, Any]] | None = None,
+    settings: Settings | None = None,
+    waha: WahaClient | None = None,
+    pinned_note: str = "",
+    bot_name: str | None = None,
+    bot_mention_regex: str | None = None,
+    body_scrubbed: bool = False,
+) -> tuple[str, list[ImageBlock]]:
+    """The run's user message text and its first-call image blocks.
+
+    Everything the model reads of *this* turn before the run: the
+    sender tag (roster fetch first — group tags render
+    ``[Name <jid>]``), the spoof-scrubbed body, image-caption markers,
+    the message-id note, quote context, the caller's ``pinned_note``
+    and the addressed-mention marker. Image bytes ride as blocks on the
+    first LLM call only (``handle_message`` passes them to the run);
+    the text anchors stay in the message so later rounds and turns
+    keep a description once the pixels are gone.
+    """
+    chat_id = str(event.payload.get("from", ""))
     # Roster before tag: group sender tags render ``[Name <jid>]`` via
     # the resolver, so the fetch must precede the tag build. One
     # fetch, same cache the quoting lines and reaction notes share.
@@ -455,24 +519,7 @@ async def handle_message(
     # property), so this log is the authoritative count of what rides
     # the first LLM call.
     logger.info("Attaching {n} image block(s) to agent run", n=len(image_blocks))
-    # Bind this run's delivery target around the whole run: the workflow
-    # engine schedules steps/tasks under this context, so the binding
-    # propagates to every step and tool call of THIS run — concurrent
-    # runs bind their own targets and never see each other's. The
-    # binding resets before returning, so the *target itself* is
-    # returned alongside the reply for the caller's latch checks.
-    typing = (
-        (settings.typing_presence_min_s, settings.typing_presence_max_s)
-        if settings is not None
-        else None
-    )
-    target = RunTarget(session=event.session, chat_id=chat_id, armed=armed, typing=typing)
-    token = bind_target(target)
-    try:
-        result = await agent.run(input=user_msg, image_blocks=image_blocks, ctx=ctx)
-    finally:
-        reset_target(token)
-    return final_reply(result), target
+    return user_msg, image_blocks
 
 
 def turn_body(event: WahaEvent, prescrubbed: bool = False) -> str:

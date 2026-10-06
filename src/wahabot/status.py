@@ -463,18 +463,26 @@ def llm_call_timed_out(exc: Exception) -> bool:
 
 
 def run_timed_out(exc: Exception) -> bool:
-    """Whether *exc* is the run-level workflow timeout firing.
+    """Whether *exc* is the run-level timeout firing.
 
-    Distinct budget from :func:`llm_call_timed_out`: the broker's
-    timeout tick kills a run whose *total* duration crossed
-    ``WAHABOT_RUN_TIMEOUT`` — several rounds each within the per-call
-    budget can add up past the cap, or one slow call can leave no room
-    for the wrap-up round. Still a slow generation, never an outage
-    (the endpoint may be healthy) and never a bug (the cap did its
-    job): the health flag stays up and the operator message names the
-    run knob, not the per-request one.
+    Distinct budget from :func:`llm_call_timed_out`: the run cap kills a
+    run whose *total* duration crossed ``WAHABOT_RUN_TIMEOUT`` — several
+    rounds each within the per-call budget can add up past the cap, or
+    one slow call can leave no room for the wrap-up round. Still a slow
+    generation, never an outage (the endpoint may be healthy) and never
+    a bug (the cap did its job): the health flag stays up and the
+    operator message names the run knob, not the per-request one.
+
+    Two exception shapes reach here: builtin ``TimeoutError`` — the
+    ``asyncio.wait_for`` cap around ``agent.run`` in
+    :func:`wahabot.ai.context.handle_message`, the enforcement point
+    since the library's own ``timeout=`` proved cumulative across a
+    reused Context (docs/incident-2026-10-06-run-timeout.md) — and
+    ``WorkflowTimeoutError``, should a library timeout ever fire again.
+    ``openai.APITimeoutError`` does not subclass ``TimeoutError``, so
+    the per-call budget class keeps its own, earlier branch.
     """
-    return isinstance(exc, WorkflowTimeoutError)
+    return isinstance(exc, (WorkflowTimeoutError, TimeoutError))
 
 
 async def mark_llm_unreachable(waha: WahaClient, session: str, exc: Exception) -> None:

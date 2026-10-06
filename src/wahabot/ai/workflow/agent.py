@@ -885,7 +885,15 @@ def build_agent(
         tools=tools or [],
         system_prompt=system_prompt,
         prompt_renderer=prompt_renderer,
-        timeout=settings.run_timeout or None,
+        # No workflow timeout: llama-index-workflows 2.25.0 enforces
+        # timeout= as a cumulative alive-time budget over the whole
+        # Context, and this bot reuses one Context per chat — the
+        # budget would silently sum every run's latency and
+        # permanently kill busy chats at the cap
+        # (docs/incident-2026-10-06-run-timeout.md). WAHABOT_RUN_TIMEOUT
+        # is a true per-run wall-clock cap enforced around agent.run()
+        # in wahabot.ai.context.handle_message.
+        timeout=None,
         memory_token_limit=settings.memory_token_limit,
         tool_round_limit=settings.tool_round_limit,
         settings=settings,

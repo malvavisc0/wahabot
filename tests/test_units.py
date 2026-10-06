@@ -199,16 +199,21 @@ def test_llm_call_timed_out_classification() -> None:
 
 
 def test_run_timed_out_classification() -> None:
-    """The run-cap classifier matches WorkflowTimeoutError and nothing else.
+    """The run-cap classifier matches both run-timeout shapes, nothing else.
 
-    The workflow timeout tick fires when a run's *total* duration
-    crosses ``WAHABOT_RUN_TIMEOUT`` — a slow-generation class like the
-    per-request timeout, never an outage (the endpoint may be healthy
-    and still mid-generation) and never a bug (the cap did its job).
+    The cap fires as builtin ``TimeoutError`` (the ``asyncio.wait_for``
+    wall-clock around ``agent.run`` in ``handle_message`` — the
+    enforcement point since the library's ``timeout=`` proved
+    cumulative across a reused Context) and as
+    ``WorkflowTimeoutError`` should a library timeout ever fire. A
+    slow-generation class like the per-request timeout, never an
+    outage (the endpoint may be healthy and still mid-generation) and
+    never a bug (the cap did its job).
     """
     request = httpx.Request("POST", "http://llm.invalid/v1/chat/completions")
 
     assert run_timed_out(WorkflowTimeoutError("Operation timed out after 600.0 seconds"))
+    assert run_timed_out(TimeoutError())
     assert not run_timed_out(openai.APITimeoutError(request=request))
     assert not run_timed_out(openai.APIConnectionError(request=request))
     assert not run_timed_out(ValueError("unrelated bug"))
@@ -4666,3 +4671,94 @@ def test_prepared_tool_specs_are_slimmed_and_valid() -> None:
         }
         call["reason"] = "prueba"
         schema.model_validate(call)
+
+
+def test_run_timeout_cap_and_context_reuse(unit_settings: Settings) -> None:
+    """The run cap is a per-run wall clock, and a cancelled run leaves
+    the shared per-chat Context usable.
+
+    The incident (docs/incident-2026-10-06-run-timeout.md): the library
+    enforces ``timeout=`` as a cumulative alive-time budget over the
+    whole Context, so on the reused per-chat Context a busy chat's
+    budget hit zero and every later message died within seconds. The
+    cap now lives around ``agent.run`` in ``handle_message`` — one
+    wall clock per run — and the library timeout stays ``None``. Two
+    properties must hold:
+
+    1. A run whose LLM call outlives ``WAHABOT_RUN_TIMEOUT`` is
+       cancelled and surfaces as ``TimeoutError`` (the class
+       ``run_timed_out`` classifies, so the operator notify and
+       seen-marker drop behave like the old ``WorkflowTimeoutError``).
+    2. Cancellation mid-run does not poison the Context: the next
+       message in the same chat runs normally against the same ctx.
+    """
+
+    from llama_index.core.workflow import Context
+
+    from wahabot.ai.context import handle_message
+    from wahabot.ai.workflow import ObservableOpenAILike, build_agent
+
+    async def scenario() -> tuple[Any, Any]:
+        capped = unit_settings.model_copy(update={"run_timeout": 1})
+        agent = build_agent(capped, system_prompt="You are a bot.")
+
+        slow: dict[str, Any] = {}
+
+        async def hanging_achat(self_llm: Any, messages: Any, **kwargs: Any) -> Any:
+            slow["started"] = True
+            await asyncio.sleep(30)  # outlives the 1s run cap
+            raise AssertionError("unreachable: the cap cancels first")
+
+        async def quick_achat(self_llm: Any, messages: Any, **kwargs: Any) -> Any:
+            from llama_index.core.base.llms.types import ChatResponse
+
+            return ChatResponse(
+                message=ChatMessage(role=MessageRole.ASSISTANT, content="fine")
+            )
+
+        ctx = Context(agent)
+        original = ObservableOpenAILike.achat
+        ObservableOpenAILike.achat = hanging_achat  # pyright: ignore[reportAttributeAccessIssue]
+        timed_out: Any = None
+        try:
+            slow_event = WahaEvent(
+                id="slow",
+                timestamp=1,
+                event="message",
+                session=SESSION,
+                me={},
+                payload={"from": "491555000001@c.us", "body": "hang please"},
+            )
+            # waha=None: the DM path skips the roster lookup entirely.
+            timed_out = await handle_message(slow_event, agent, ctx=ctx, settings=capped)
+        except Exception as exc:
+            timed_out = exc
+        finally:
+            ObservableOpenAILike.achat = quick_achat  # pyright: ignore[reportAttributeAccessIssue]
+            try:
+                next_event = WahaEvent(
+                    id="next",
+                    timestamp=2,
+                    event="message",
+                    session=SESSION,
+                    me={},
+                    payload={"from": "491555000001@c.us", "body": "still there?"},
+                )
+                reply, target = await handle_message(
+                    next_event, agent, ctx=ctx, settings=capped
+                )
+                recovered = (reply, target)
+            except Exception as exc:
+                recovered = exc
+            ObservableOpenAILike.achat = original
+        assert slow.get("started"), "the slow run never reached the LLM call"
+        return timed_out, recovered
+
+    timed_out, recovered = asyncio.run(scenario())
+    # Property 1: the cap fires as TimeoutError, not WorkflowTimeoutError.
+    assert isinstance(timed_out, TimeoutError), timed_out
+    assert run_timed_out(timed_out)
+    # Property 2: the same Context serves the next run cleanly.
+    assert not isinstance(recovered, Exception), recovered
+    reply, _target = recovered
+    assert reply == "fine"
