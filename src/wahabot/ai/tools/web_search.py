@@ -127,34 +127,52 @@ def _parse_output(
     max_results: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
     """Select at most max_results valid findings, preserving upstream order."""
+    parsed = _webserp_payload(output)
+    raw_results = [
+        raw for raw in cast("list[Any]", parsed["results"]) if isinstance(raw, dict)
+    ]
+    findings, selected = _select_findings(raw_results, max_results)
+    return findings, selected, _engine_failures(parsed)
+
+
+def _webserp_payload(output: str) -> dict[str, Any]:
+    """Parsed webserp stdout: a JSON object carrying a results list."""
     try:
         data = json.loads(output)
     except json.JSONDecodeError as exc:
         raise ValueError(f"webserp returned invalid JSON: {exc}") from exc
-
     if not isinstance(data, dict):
         raise ValueError("webserp output must be a JSON object")
     parsed = cast(dict[str, Any], data)
-    raw_results = parsed.get("results")
-    if not isinstance(raw_results, list):
+    if not isinstance(parsed.get("results"), list):
         raise ValueError("webserp output missing 'results' list")
+    return parsed
 
-    raw_results = [raw for raw in raw_results if isinstance(raw, dict)]
+
+def _select_findings(
+    raw_results: list[dict[str, Any]], max_results: int | None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Capped findings plus the raw results they were built from."""
     findings: list[dict[str, Any]] = []
     selected: list[dict[str, Any]] = []
     for raw in raw_results:
         finding = _build_finding(raw, cap_content=True)
-        if finding is not None:
-            findings.append(finding)
-            selected.append(raw)
-            if max_results is not None and len(findings) >= max_results:
-                break
-    failures = [
+        if finding is None:
+            continue
+        findings.append(finding)
+        selected.append(raw)
+        if max_results is not None and len(findings) >= max_results:
+            break
+    return findings, selected
+
+
+def _engine_failures(parsed: dict[str, Any]) -> list[dict[str, str]]:
+    """Bounded engine/error pairs from webserp's unresponsive engines."""
+    return [
         {"engine": str(item[0])[:80], "error": str(item[1])[:200]}
         for item in (parsed.get("unresponsive_engines") or [])
         if isinstance(item, list) and len(item) >= 2
     ][:20]
-    return findings, selected, failures
 
 
 def _spill_findings(

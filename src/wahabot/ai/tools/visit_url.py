@@ -28,9 +28,10 @@ the preview. Process-level interrupts are not caught.
 
 import json
 import re
+from collections.abc import Iterable
 from html import unescape
 from itertools import islice
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -41,9 +42,6 @@ from loguru import logger
 from wahabot.ai.tools.envelope import error, ok
 from wahabot.ai.tools.outfile import write_text_output
 from wahabot.settings import Settings
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable
 
 __all__ = ["visit_url"]
 
@@ -134,24 +132,48 @@ def visit_url(settings: Settings, url: str) -> str:
         return error("url must be a valid HTTP(S) URL")
     if parts.scheme not in ("http", "https") or not parts.netloc:
         return error("url must be a valid HTTP(S) URL")
-    if _MEDIA_HOST_RE.match(url):
-        try:
-            meta = video_meta(url, settings)
-            if meta is not None:
-                tracks = cast(
-                    "dict[str, list[dict[str, Any]]] | None",
-                    meta.pop("_caption_tracks", None),
-                )
-                if tracks and _YOUTUBE_HOST_RE.match(url):
-                    transcript = youtube_transcript(url, tracks, settings=settings)
-                    if transcript:
-                        meta.update(transcript_fields(transcript))
-                return ok(source="yt-dlp", url=url, **meta)
-        except Exception as exc:
-            logger.info("Media processing failed for {url}: {exc}", url=url, exc=exc)
-        # Extractor failed → the page might still be readable (e.g. a
-        # private/removed post), so fall through to the HTML path.
-        logger.info("yt-dlp could not resolve {url}; falling back to HTML", url=url)
+    media = _media_envelope(url, settings)
+    if media is not None:
+        return media
+    return _page_envelope(url, settings)
+
+
+def _media_envelope(url: str, settings: Settings) -> str | None:
+    """A media host's yt-dlp metadata envelope, or None to take the HTML path.
+
+    Extraction failures and unresolved placeholders mean the page may
+    still be readable (e.g. a private or removed post), so every miss
+    falls back to HTML instead of returning an error envelope.
+    """
+    if not _MEDIA_HOST_RE.match(url):
+        return None
+    try:
+        meta = video_meta(url, settings)
+        if meta is not None:
+            fields = _with_transcript(url, meta, settings)
+            return ok(source="yt-dlp", url=url, **fields)
+    except Exception as exc:
+        logger.info("Media processing failed for {url}: {exc}", url=url, exc=exc)
+    logger.info("yt-dlp could not resolve {url}; falling back to HTML", url=url)
+    return None
+
+
+def _with_transcript(
+    url: str, meta: dict[str, Any], settings: Settings
+) -> dict[str, Any]:
+    """Metadata fields with a YouTube transcript inlined when tracks resolve."""
+    tracks = cast(
+        "dict[str, list[dict[str, Any]]] | None", meta.pop("_caption_tracks", None)
+    )
+    if tracks and _YOUTUBE_HOST_RE.match(url):
+        transcript = youtube_transcript(url, tracks, settings=settings)
+        if transcript:
+            meta.update(transcript_fields(transcript))
+    return meta
+
+
+def _page_envelope(url: str, settings: Settings) -> str:
+    """The fetched page's envelope, or an error envelope on failure."""
     try:
         response = _fetch(url, settings)
         text = _to_text(response)
@@ -335,26 +357,33 @@ def _post_info(info: dict[str, Any]) -> dict[str, Any]:
     A truncated count/sum covers only inspected dict entries; preserve
     a supplied parent duration and the raw parent metadata.
     """
-    source = cast("Iterable[Any] | None", info.get("entries"))
+    source = cast(Iterable[Any] | None, info.get("entries"))
     inspected = list(islice(source if source is not None else (), _MAX_POST_ITEMS + 1))
     truncated = len(inspected) > _MAX_POST_ITEMS
-    entries = [
-        cast("dict[str, Any]", e)
-        for e in inspected[:_MAX_POST_ITEMS]
-        if isinstance(e, dict) and e
-    ]
-    durations = [e["duration"] for e in entries if e.get("duration") is not None]
-    total = sum(durations) if durations else None
+    entries = _post_entries(inspected[:_MAX_POST_ITEMS])
     post = info | {
         "entries": entries,
         "title": info.get("title")
         or f"post with {len(entries)}{'+' if truncated else ''} items",
-        "duration": info.get("duration") if info.get("duration") is not None else total,
+        "duration": info.get("duration")
+        if info.get("duration") is not None
+        else _entries_duration(entries),
         "item_count": len(entries),
     }
     if truncated:
         post["item_count_truncated"] = True
     return post
+
+
+def _post_entries(inspected: list[Any]) -> list[dict[str, Any]]:
+    """The non-empty dict entries among a post's inspected items."""
+    return [cast("dict[str, Any]", e) for e in inspected if isinstance(e, dict) and e]
+
+
+def _entries_duration(entries: list[dict[str, Any]]) -> Any:
+    """Summed duration of the entries that carry one; None when none do."""
+    durations = [e["duration"] for e in entries if e.get("duration") is not None]
+    return sum(durations) if durations else None
 
 
 def youtube_transcript(
@@ -437,27 +466,37 @@ def _fetch_captions(track_url: str, settings: Settings | None = None) -> str:
 
 def _strip_vtt(vtt: str) -> str:
     """Best-effort WebVTT/SRT cue text, without metadata blocks or tags."""
-    lines: list[str] = []
     normalized = vtt.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    lines: list[str] = []
     for block in re.split(r"\n[ \t]*\n", normalized):
-        if re.match(r"(?:NOTE|STYLE|REGION)(?:\s|$)", block.lstrip()):
-            continue
-        cue_lines = block.splitlines()
-        cue_start = next((i + 1 for i, line in enumerate(cue_lines) if "-->" in line), 0)
-        if not cue_start and block.lstrip().startswith("WEBVTT"):
-            continue
-        for line in cue_lines[cue_start:]:
-            stripped = line.strip()
-            if (
-                not stripped
-                or stripped.startswith(("WEBVTT", "#"))
-                or "-->" in stripped
-                or re.fullmatch(r"\d{1,2}:\d{2}:\d{2}[.,]\d{3}", stripped)
-                or stripped.isdigit()
-            ):
-                continue
-            lines.append(unescape(_TAG_RE.sub("", stripped)))
+        lines.extend(_vtt_block_lines(block))
     return " ".join(lines)
+
+
+def _vtt_block_lines(block: str) -> list[str]:
+    """One cue block's spoken lines; metadata and header blocks yield none."""
+    if re.match(r"(?:NOTE|STYLE|REGION)(?:\s|$)", block.lstrip()):
+        return []
+    cue_lines = block.splitlines()
+    cue_start = next((i + 1 for i, line in enumerate(cue_lines) if "-->" in line), 0)
+    if not cue_start and block.lstrip().startswith("WEBVTT"):
+        return []
+    return [
+        unescape(_TAG_RE.sub("", stripped))
+        for stripped in (line.strip() for line in cue_lines[cue_start:])
+        if not _is_cue_noise(stripped)
+    ]
+
+
+def _is_cue_noise(stripped: str) -> bool:
+    """Whether a stripped cue line is timing, numbering, or file markup."""
+    return (
+        not stripped
+        or stripped.startswith(("WEBVTT", "#"))
+        or "-->" in stripped
+        or stripped.isdigit()
+        or re.fullmatch(r"\d{1,2}:\d{2}:\d{2}[.,]\d{3}", stripped) is not None
+    )
 
 
 def _paragraph(caption_text: str) -> str:
@@ -492,23 +531,42 @@ def _join_json3(caption_text: str) -> str:
         return ""
     parts: list[str] = []
     for event in events:
-        if not isinstance(event, dict):
+        part = _json3_event_text(event)
+        if part is None:
             return ""
-        segments = cast("dict[str, Any]", event).get("segs", [])
-        if not isinstance(segments, list):
-            return ""
-        chunks: list[str] = []
-        for segment in segments:
-            if not isinstance(segment, dict):
-                return ""
-            text = cast("dict[str, Any]", segment).get("utf8", "")
-            if not isinstance(text, str):
-                return ""
-            chunks.append(text)
-        part = "".join(chunks).strip()
         if part:
             parts.append(part)
     return " ".join(parts)
+
+
+def _json3_event_text(event: Any) -> str | None:
+    """One caption event's joined utf8 text; None marks a malformed shape.
+
+    An event without segments yields "" (nothing to say); a malformed
+    event or segment yields None so the whole body fails soft.
+    """
+    if not isinstance(event, dict):
+        return None
+    segments = cast("dict[str, Any]", event).get("segs", [])
+    if not isinstance(segments, list):
+        return None
+    chunks: list[str] = []
+    for segment in segments:
+        text = _json3_segment_text(segment)
+        if text is None:
+            return None
+        chunks.append(text)
+    return "".join(chunks).strip()
+
+
+def _json3_segment_text(segment: Any) -> str | None:
+    """One segment's utf8 text, or None when the shape is malformed."""
+    if not isinstance(segment, dict):
+        return None
+    text = cast("dict[str, Any]", segment).get("utf8", "")
+    if not isinstance(text, str):
+        return None
+    return text
 
 
 def _fetch(url: str, settings: Settings) -> Any:
