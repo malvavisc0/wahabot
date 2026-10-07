@@ -20,6 +20,8 @@ from llama_index.core.base.llms.types import ChatMessage
 from llama_index.core.tools import BaseTool, ToolOutput, ToolSelection
 from loguru import logger
 
+from wahabot.ai.tools.envelope import error
+
 #: A TypeError raised by the tool call carries this marker when the
 #: arguments never matched the tool's signature — the wrapper below
 #: re-raises signature failures with it so the envelope can name the
@@ -53,8 +55,7 @@ def tool_call_log_extra(tool_call: ToolSelection) -> str:
     remaining arguments (the *what* — a shell command, a search
     query). A missing reason is flagged in place: the operator's audit
     goal is "read the log and know why", so a call the model never
-    justified must be visible as such, not just shorter. Empty for a
-    bare call with no arguments at all.
+    justified must be visible as such, not just shorter.
     """
     kwargs = dict(tool_call.tool_kwargs)
     parts: list[str] = []
@@ -65,7 +66,7 @@ def tool_call_log_extra(tool_call: ToolSelection) -> str:
     if kwargs:
         args = ", ".join(f"{k}={v!r}" for k, v in sorted(kwargs.items()))
         parts.append(f"args: {args[:_ARGS_LOG_CAP]}")
-    return f" ({'; '.join(parts)})" if parts else ""
+    return f" ({'; '.join(parts)})"
 
 
 def tool_fn(tool: BaseTool) -> Callable[..., Any]:
@@ -138,10 +139,7 @@ def tool_call_failure_envelope(tool_call: ToolSelection, exc: Exception) -> str:
     message = str(exc)
     if message.startswith(_SIGNATURE_MARKER):
         message = message[len(_SIGNATURE_MARKER) :].strip()
-    return json.dumps(
-        {"ok": False, "error": message, "tool": tool_call.tool_name},
-        ensure_ascii=False,
-    )
+    return error(message, tool=tool_call.tool_name)
 
 
 def mark_active_span_error(tool_call: ToolSelection, exc: Exception) -> None:

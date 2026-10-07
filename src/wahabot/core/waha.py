@@ -1,6 +1,5 @@
 """HTTP client for the WAHA WhatsApp HTTP API."""
 
-import json
 from typing import Any, cast
 from urllib.parse import quote
 
@@ -50,7 +49,7 @@ def response_json(response: httpx.Response) -> Any:
     """
     try:
         return response.json()
-    except (json.JSONDecodeError, ValueError) as exc:
+    except ValueError as exc:
         err = httpx.HTTPStatusError(
             message=f"Empty or non-JSON response from {response.url}",
             request=response.request,

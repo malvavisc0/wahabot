@@ -48,7 +48,6 @@ from wahabot.ai.workflow.toolkit import (
     run_tool_call,
     tool_call_key,
     tool_outcome,
-    tool_outcome_ok,
 )
 from wahabot.core.audit import save_action
 from wahabot.settings import Settings
@@ -758,12 +757,13 @@ class FunctionCallingAgentWorkflow(Workflow):
         """
         message = await run_tool_call(tools_by_name, tool_call)
         kwargs = dict(tool_call.tool_kwargs)
+        outcome = tool_outcome(str(message.content or ""))
         self.audit(
             "tool_call",
             tool=tool_call.tool_name,
             args={key: str(value)[:300] for key, value in kwargs.items()},
-            ok=tool_outcome_ok(str(message.content or "")),
-            outcome=tool_outcome(str(message.content or "")),
+            ok=outcome == "completed",
+            outcome=outcome,
         )
         return message
 

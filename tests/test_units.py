@@ -78,6 +78,7 @@ from wahabot.ai.tools.whatsapp import (
     fenced_chat,
     fenced_message_id,
     fit_messages,
+    image_file,
     infer_mimetype,
     local_file,
     mention_tokens,
@@ -112,7 +113,7 @@ from wahabot.core.persistence import (
 from wahabot.core.presence import clear_typing, mark_seen, typing_pause
 from wahabot.core.transcribe import fetch_transcript, is_transcribable_mimetype
 from wahabot.core.tts import synthesize
-from wahabot.core.waha import WahaClient
+from wahabot.core.waha import WahaClient, response_json
 from wahabot.reactions import is_own_message_id
 from wahabot.settings import Settings
 from wahabot.status import (
@@ -806,6 +807,43 @@ def test_tool_outcome_detects_enveloped_failures() -> None:
     # A non-JSON success payload (defensive: some tools return prose)
     # reads as completed, never crashes the audit.
     assert tool_outcome("done") == "completed"
+
+
+@pytest.mark.parametrize(
+    ("content", "outcome", "expected_ok"),
+    [
+        ('{"ok": true}', "completed", True),
+        ('{"ok": false, "error": "refused"}', "failed", False),
+        ("Tool missing does not exist", "unknown", False),
+    ],
+)
+def test_tool_audit_preserves_outcome_fields(
+    content: str, outcome: str, expected_ok: bool
+) -> None:
+    from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+
+    llm = unittest.mock.Mock()
+    llm.metadata.is_function_calling_model = True
+    agent = FunctionCallingAgentWorkflow(llm=llm)
+    selection = ToolSelection(
+        tool_id="tc", tool_name="sample", tool_kwargs={"query": "hello"}
+    )
+    message = ChatMessage(role="tool", content=content)
+    with (
+        unittest.mock.patch(
+            "wahabot.ai.workflow.agent.run_tool_call",
+            new=unittest.mock.AsyncMock(return_value=message),
+        ),
+        unittest.mock.patch.object(agent, "audit") as audit,
+    ):
+        assert asyncio.run(agent.run_and_audit_tool_call({}, selection)) is message
+    audit.assert_called_once_with(
+        "tool_call",
+        tool="sample",
+        args={"query": "hello"},
+        ok=expected_ok,
+        outcome=outcome,
+    )
 
 
 def test_run_tool_call_returns_envelope_for_bad_arguments() -> None:
@@ -1869,6 +1907,54 @@ def test_web_search_short_snippets_stay_inline(unit_settings: Settings) -> None:
     assert "content_truncated" not in result["results"][0]
 
 
+@pytest.mark.parametrize(
+    ("output", "expected_error"),
+    [
+        ("{", "webserp returned invalid JSON:"),
+        ("{}", "webserp output missing 'results' list"),
+        ('{"results": null}', "webserp output missing 'results' list"),
+        ("[]", "'list' object has no attribute 'get'"),
+        (
+            json.dumps(
+                {
+                    "results": [
+                        None,
+                        "invalid",
+                        {"url": "https://page.invalid/", "title": "Result"},
+                        {"title": "missing URL"},
+                    ]
+                }
+            ),
+            None,
+        ),
+    ],
+)
+def test_web_search_parses_output_once(
+    unit_settings: Settings, output: str, expected_error: str | None
+) -> None:
+    from wahabot.ai.tools import web_search as web_search_mod
+
+    with (
+        unittest.mock.patch.object(web_search_mod, "_run_webserp", return_value=output),
+        unittest.mock.patch.object(
+            web_search_mod.json, "loads", wraps=json.loads
+        ) as load,
+    ):
+        rendered = web_search_mod.web_search(unit_settings, "sample")
+        load.assert_called_once_with(output)
+    result = json.loads(rendered)
+    if expected_error is not None:
+        assert result["ok"] is False
+        assert result["error"].startswith(f"web_search failed: {expected_error}")
+        return
+    assert result == {
+        "ok": True,
+        "query": "sample",
+        "count": 1,
+        "results": [{"url": "https://page.invalid/", "title": "Result"}],
+    }
+
+
 def test_visit_url_media_bare_info_retries_processed(unit_settings: Settings) -> None:
     """A bare raw dict (Facebook share redirect) retries format processing.
 
@@ -2452,6 +2538,26 @@ def test_own_message_id_detection() -> None:
     assert not is_own_message_id(f"false_{CHAT_ID}_X")
 
 
+@pytest.mark.parametrize(
+    ("url", "mimetype", "filename"),
+    [
+        ("https://files.invalid/image.PNG?download=1", "image/png", "image.PNG"),
+        (
+            "https://files.invalid/image.unknown_image",
+            "image/jpeg",
+            "image.unknown_image",
+        ),
+        ("https://files.invalid/", "image/jpeg", None),
+        ("https://files.invalid/report.pdf", "image/jpeg", "report.pdf"),
+    ],
+)
+def test_image_url_payloads(url: str, mimetype: str, filename: str | None) -> None:
+    expected = {"mimetype": mimetype, "url": url}
+    if filename:
+        expected["filename"] = filename
+    assert image_file(url, max_file_bytes=1024) == expected
+
+
 def test_send_file_payloads() -> None:
     remote = remote_file("http://files.invalid/q3/report.pdf")
     assert (
@@ -2636,7 +2742,11 @@ def test_send_sticker_pads_local_path_before_sending() -> None:
         token = bind_target(target)
         try:
             tool = send_media(waha, settings)
-            out = tool(kind="sticker", path=str(meme), reason="meme as sticker")
+            with unittest.mock.patch(
+                "wahabot.ai.tools.whatsapp.local_file", wraps=local_file
+            ) as load:
+                out = tool(kind="sticker", path=str(meme), reason="meme as sticker")
+            load.assert_called_once_with(str(meme), settings.max_sticker_bytes)
         finally:
             reset_target(token)
         envelope: dict[str, Any] = json.loads(cast("str", out.content))
@@ -2644,6 +2754,36 @@ def test_send_sticker_pads_local_path_before_sending() -> None:
         file = waha.send_sticker.call_args.kwargs["file"]
         with Image.open(io.BytesIO(base64.b64decode(file["data"]))) as im:
             assert im.size == (1360, 1360)
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_error"),
+    [(None, "cannot read"), (b"large", "over the 4 B cap")],
+)
+def test_send_sticker_refuses_bad_paths(
+    tmp_path: Path, unit_settings: Settings, body: bytes | None, expected_error: str
+) -> None:
+    from wahabot.ai.tools.whatsapp import (
+        RunTarget,
+        bind_target,
+        reset_target,
+        send_media,
+    )
+
+    path = tmp_path / "sticker.webp"
+    if body is not None:
+        path.write_bytes(body)
+    settings = unit_settings.model_copy(update={"max_sticker_bytes": 4})
+    waha = unittest.mock.Mock()
+    token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID))
+    try:
+        out = send_media(waha, settings)(kind="sticker", path=str(path))
+    finally:
+        reset_target(token)
+    envelope = json.loads(str(out.content))
+    assert envelope["ok"] is False
+    assert expected_error in envelope["error"]
+    waha.send_sticker.assert_not_called()
 
 
 def test_send_media_rejects_invalid_sources() -> None:
@@ -3061,6 +3201,18 @@ def test_waha_wire_shapes() -> None:
         and json.loads(seen_request.content) == {"session": SESSION, "chatId": CHAT_ID}
     )
     wire_waha._client.close()  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("body", [b"", b"not json", b"\xff"])
+def test_waha_invalid_json_is_http_error(body: bytes) -> None:
+    request = httpx.Request("GET", "http://waha.invalid/api/sessions/default/me")
+    response = httpx.Response(200, content=body, request=request)
+    with pytest.raises(httpx.HTTPStatusError) as failure:
+        response_json(response)
+    assert str(failure.value) == f"Empty or non-JSON response from {request.url}"
+    assert failure.value.request is request
+    assert failure.value.response is response
+    assert isinstance(failure.value.__cause__, ValueError)
 
 
 def test_forget_event_shape() -> None:

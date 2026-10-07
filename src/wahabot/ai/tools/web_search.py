@@ -65,8 +65,7 @@ def web_search(
             timeout=settings.web_search_timeout,
             proxy=settings.web_search_proxy,
         )
-        findings = _parse_output(output)
-        raw_results = _raw_results(output)
+        findings, raw_results = _parse_output(output)
     except Exception as exc:
         logger.warning("web_search failed: {exc}", exc=exc)
         return error(f"web_search failed: {exc}")
@@ -113,20 +112,10 @@ def _run_webserp(
     return result.stdout
 
 
-def _raw_results(output: str) -> list[dict[str, Any]]:
-    """The raw webserp result dicts, unparsed (for the spill rebuild)."""
-    try:
-        data = json.loads(output)
-    except json.JSONDecodeError:
-        return []
-    raw = data.get("results")
-    if not isinstance(raw, list):
-        return []
-    return [item for item in raw if isinstance(item, dict)]
-
-
-def _parse_output(output: str) -> list[dict[str, Any]]:
-    """Parse webserp's stdout JSON into a list of normalised findings."""
+def _parse_output(
+    output: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Parse stdout once into inline findings and raw results for spilling."""
     try:
         data = json.loads(output)
     except json.JSONDecodeError as exc:
@@ -136,14 +125,13 @@ def _parse_output(output: str) -> list[dict[str, Any]]:
     if not isinstance(raw_results, list):
         raise ValueError("webserp output missing 'results' list")
 
+    raw_results = [raw for raw in raw_results if isinstance(raw, dict)]
     findings: list[dict[str, Any]] = []
     for raw in raw_results:
-        if not isinstance(raw, dict):
-            continue
         finding = _build_finding(raw, cap_content=True)
         if finding is not None:
             findings.append(finding)
-    return findings
+    return findings, raw_results
 
 
 def _spill_findings(

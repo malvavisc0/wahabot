@@ -110,7 +110,7 @@ def parse_event(session: str, body: bytes) -> WahaEvent:
     """Validate the event body; reject malformed or foreign-session events."""
     try:
         event = WahaEvent.model_validate_json(body)
-    except (UnicodeDecodeError, ValueError) as exc:
+    except ValueError as exc:
         logger.error("Rejecting malformed event body: {exc}", exc=exc)
         raise HTTPException(status_code=400, detail="Malformed event body") from exc
     if event.session != session:

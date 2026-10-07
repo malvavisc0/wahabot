@@ -97,9 +97,7 @@ def _version_line() -> str:
     return f"wahabot {version} (Python {platform.python_version()})"
 
 
-def _log_startup_banner(
-    settings: Settings, host: str | None = None, port: int | None = None
-) -> None:
+def _log_startup_banner(settings: Settings, host: str, port: int) -> None:
     """Log the running configuration in one readable banner at startup."""
     logger.info("──────────────── wahabot startup ────────────────")
     logger.info("{line}", line=_version_line())
@@ -119,8 +117,8 @@ def _log_startup_banner(
         logger.info("Transcription: {url}", url=settings.transcribe_url)
     logger.info(
         "Webhook: http://{host}:{port}/api/webhook/{session}",
-        host=host or settings.host,
-        port=port or settings.port,
+        host=host,
+        port=port,
         session=settings.session,
     )
     logger.info("──────────────────────────────────────────────")

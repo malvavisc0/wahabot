@@ -196,8 +196,8 @@ def test_foreign_session_event_rejected(bot: Bot) -> None:
     assert len(list(journals)) == 0
 
 
-def test_malformed_event_rejected(bot: Bot) -> None:
-    body = b"{ not json"
+@pytest.mark.parametrize("body", [b"{ not json", b"\xff", b"{}"])
+def test_malformed_event_rejected(bot: Bot, body: bytes) -> None:
     bot.post_raw(
         body,
         headers={"X-Webhook-Hmac": sign(body, bot.settings.webhook_hmac_key)},

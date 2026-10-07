@@ -160,39 +160,31 @@ class _StreamSink:
         return self._meta
 
 
-class _StreamReader:
-    """Drain one pipe on a daemon thread into its stream sink."""
+def _start_reader(stream: IO[bytes] | None, sink: _StreamSink) -> threading.Thread:
+    """Start a daemon reader thread for one pipe and return its handle."""
 
-    def __init__(self, stream: IO[bytes] | None, sink: _StreamSink) -> None:
-        self.thread = threading.Thread(
-            target=self._drain, args=(stream, sink), daemon=True
-        )
-
-    def _drain(self, stream: IO[bytes] | None, sink: _StreamSink) -> None:
+    def drain() -> None:
         if stream is None:
             return
         while chunk := stream.read(_READ_CHUNK):
             sink.append(chunk)
 
-
-def _start_reader(stream: IO[bytes] | None, sink: _StreamSink) -> _StreamReader:
-    """Start a daemon reader thread for one pipe and return its handle."""
-    reader = _StreamReader(stream, sink)
-    reader.thread.start()
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
     return reader
 
 
-def _join_readers(readers: list[_StreamReader], timeout: float) -> bool:
+def _join_readers(readers: list[threading.Thread], timeout: float) -> bool:
     """Join reader threads within *timeout*; False when the deadline passed."""
     deadline = threading.Event()
     timer = threading.Timer(timeout, deadline.set)
     timer.start()
     try:
         for reader in readers:
-            while reader.thread.is_alive():
+            while reader.is_alive():
                 if deadline.is_set():
                     return False
-                reader.thread.join(timeout=0.05)
+                reader.join(timeout=0.05)
     finally:
         timer.cancel()
     return True

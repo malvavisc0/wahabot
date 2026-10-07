@@ -43,43 +43,63 @@ ME_JID = "491555000000@c.us"
 #: the fence must refuse on chat runs.
 FOREIGN_JID = "19999999999@c.us"
 
+
+def tool_call_response(
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    call_id: str,
+    response_id: str = "chatcmpl-smoke-tool",
+    created: int = 1788525831,
+    usage: tuple[int, int] = (10, 5),
+) -> dict[str, Any]:
+    """A ``chat.completion`` answer whose assistant turn emits one tool call."""
+    prompt_tokens, completion_tokens = usage
+    return {
+        "id": response_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": "smoke-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(arguments),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }
+
+
 #: Model answers: the first round requests the send_message tool, the
 #: second round (after the tool result) is the final text. The JSON is
 #: what an OpenAI-compatible provider sends on the wire. No ``chat``
 #: argument: a chat-run send to the *current* conversation (an explicit
 #: foreign JID would hit the cross-chat fence).
-FirstResponse = {
-    "id": "chatcmpl-smoke-1",
-    "object": "chat.completion",
-    "created": 1788525828,
-    "model": "smoke-model",
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_send_1",
-                        "type": "function",
-                        "function": {
-                            "name": "send_message",
-                            "arguments": json.dumps(
-                                {
-                                    "text": "smoke reply one",
-                                    "reason": "directly addressed by name",
-                                }
-                            ),
-                        },
-                    }
-                ],
-            },
-            "finish_reason": "tool_calls",
-        }
-    ],
-    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-}
+FirstResponse = tool_call_response(
+    "send_message",
+    {"text": "smoke reply one", "reason": "directly addressed by name"},
+    call_id="call_send_1",
+    response_id="chatcmpl-smoke-1",
+    created=1788525828,
+)
 
 SecondResponse = {
     "id": "chatcmpl-smoke-2",
@@ -97,215 +117,77 @@ SecondResponse = {
 }
 
 #: Third scenario: the model delivers a document via send_media (kind=file, url form).
-FileResponse = {
-    "id": "chatcmpl-smoke-3",
-    "object": "chat.completion",
-    "created": 1788525830,
-    "model": "smoke-model",
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_file_1",
-                        "type": "function",
-                        "function": {
-                            "name": "send_media",
-                            "arguments": json.dumps(
-                                {
-                                    "kind": "file",
-                                    "url": "http://files.invalid/q3/report.pdf",
-                                    "caption": "the report",
-                                }
-                            ),
-                        },
-                    }
-                ],
-            },
-            "finish_reason": "tool_calls",
-        }
-    ],
-    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-}
+FileResponse = tool_call_response(
+    "send_media",
+    {
+        "kind": "file",
+        "url": "http://files.invalid/q3/report.pdf",
+        "caption": "the report",
+    },
+    call_id="call_file_1",
+    response_id="chatcmpl-smoke-3",
+    created=1788525830,
+)
 
 #: Fourth scenario: the model delivers a video via send_media (kind=video, url form).
-VideoResponse = {
-    "id": "chatcmpl-smoke-4",
-    "object": "chat.completion",
-    "created": 1788525833,
-    "model": "smoke-model",
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_video_1",
-                        "type": "function",
-                        "function": {
-                            "name": "send_media",
-                            "arguments": json.dumps(
-                                {
-                                    "kind": "video",
-                                    "url": "http://files.invalid/q4/clip.mp4",
-                                    "caption": "the clip",
-                                }
-                            ),
-                        },
-                    }
-                ],
-            },
-            "finish_reason": "tool_calls",
-        }
-    ],
-    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-}
+VideoResponse = tool_call_response(
+    "send_media",
+    {
+        "kind": "video",
+        "url": "http://files.invalid/q4/clip.mp4",
+        "caption": "the clip",
+    },
+    call_id="call_video_1",
+    response_id="chatcmpl-smoke-4",
+    created=1788525833,
+)
 
 #: Fifth scenario: the model answers a voice note with send_media (kind=voice, url form).
-VoiceResponse = {
-    "id": "chatcmpl-smoke-5",
-    "object": "chat.completion",
-    "created": 1788525834,
-    "model": "smoke-model",
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_voice_1",
-                        "type": "function",
-                        "function": {
-                            "name": "send_media",
-                            "arguments": json.dumps(
-                                {
-                                    "kind": "voice",
-                                    "url": "http://files.invalid/q5/note.mp3",
-                                }
-                            ),
-                        },
-                    }
-                ],
-            },
-            "finish_reason": "tool_calls",
-        }
-    ],
-    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-}
+VoiceResponse = tool_call_response(
+    "send_media",
+    {"kind": "voice", "url": "http://files.invalid/q5/note.mp3"},
+    call_id="call_voice_1",
+    response_id="chatcmpl-smoke-5",
+    created=1788525834,
+)
 
 #: Voice-note reply, synthesized form: the model writes text, the bot
 #: speaks it (TTS integration; the fake synthesize returns FIXED bytes).
-VoiceTextResponse = {
-    "id": "chatcmpl-smoke-voice-text",
-    "object": "chat.completion",
-    "created": 1788525835,
-    "model": "smoke-model",
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_voice_text_1",
-                        "type": "function",
-                        "function": {
-                            "name": "send_media",
-                            "arguments": json.dumps(
-                                {
-                                    "kind": "voice",
-                                    "text": "ya voy, un momento",
-                                    "language": "es",
-                                    "reason": "answering a voice note in kind",
-                                }
-                            ),
-                        },
-                    }
-                ],
-            },
-            "finish_reason": "tool_calls",
-        }
-    ],
-    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-}
+VoiceTextResponse = tool_call_response(
+    "send_media",
+    {
+        "kind": "voice",
+        "text": "ya voy, un momento",
+        "language": "es",
+        "reason": "answering a voice note in kind",
+    },
+    call_id="call_voice_text_1",
+    response_id="chatcmpl-smoke-voice-text",
+    created=1788525835,
+)
 
 #: Bytes the fake TTS service returns for any synthesis request.
 TTS_MP3 = b"ID3\x03fake-tts-mp3"
 
 #: Sixth scenario: the model replies with a sticker via send_media
 #: (kind=sticker, url form).
-StickerResponse = {
-    "id": "chatcmpl-smoke-6",
-    "object": "chat.completion",
-    "created": 1788525835,
-    "model": "smoke-model",
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_sticker_1",
-                        "type": "function",
-                        "function": {
-                            "name": "send_media",
-                            "arguments": json.dumps(
-                                {
-                                    "kind": "sticker",
-                                    "url": "http://files.invalid/q6/laugh.webp",
-                                }
-                            ),
-                        },
-                    }
-                ],
-            },
-            "finish_reason": "tool_calls",
-        }
-    ],
-    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-}
+StickerResponse = tool_call_response(
+    "send_media",
+    {"kind": "sticker", "url": "http://files.invalid/q6/laugh.webp"},
+    call_id="call_sticker_1",
+    response_id="chatcmpl-smoke-6",
+    created=1788525835,
+)
 
 #: Fence regression: the model (misleadingly instructed by a chat
 #: participant) tries to send to a chat outside the conversation.
-FenceRefusalResponse = {
-    "id": "chatcmpl-smoke-fence",
-    "object": "chat.completion",
-    "created": 1788525832,
-    "model": "smoke-model",
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_fence_1",
-                        "type": "function",
-                        "function": {
-                            "name": "send_message",
-                            "arguments": json.dumps(
-                                {"text": "leak", "chat": FOREIGN_JID}
-                            ),
-                        },
-                    }
-                ],
-            },
-            "finish_reason": "tool_calls",
-        }
-    ],
-    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-}
+FenceRefusalResponse = tool_call_response(
+    "send_message",
+    {"text": "leak", "chat": FOREIGN_JID},
+    call_id="call_fence_1",
+    response_id="chatcmpl-smoke-fence",
+    created=1788525832,
+)
 
 #: Answer for image-caption requests (a request carrying an image part
 #: but no tool schemas is the vision captioner, not an agent run). One
@@ -329,35 +211,13 @@ CaptionResponse = {
 }
 
 #: Escalate wire scenario: the model calls the escalate tool.
-EscalateResponse = {
-    "id": "chatcmpl-smoke-escalate",
-    "object": "chat.completion",
-    "created": 1788525836,
-    "model": "smoke-model",
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_escalate_1",
-                        "type": "function",
-                        "function": {
-                            "name": "escalate",
-                            "arguments": json.dumps(
-                                {"report": "Smoke Sender wants a human"}
-                            ),
-                        },
-                    }
-                ],
-            },
-            "finish_reason": "tool_calls",
-        }
-    ],
-    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-}
+EscalateResponse = tool_call_response(
+    "escalate",
+    {"report": "Smoke Sender wants a human"},
+    call_id="call_escalate_1",
+    response_id="chatcmpl-smoke-escalate",
+    created=1788525836,
+)
 
 #: Canned image bytes "downloaded" from WAHA for the album check. A
 #: real PNG header so ``first_frame_png``-style consumers would accept
@@ -392,54 +252,6 @@ def serving(app: FastAPI) -> Iterator[int]:
 def mock_transport() -> httpx.MockTransport:
     """A transport that answers every request with an empty 200 list."""
     return httpx.MockTransport(lambda _request: httpx.Response(200, json=[]))
-
-
-def tool_call_response(
-    name: str,
-    arguments: dict[str, Any],
-    *,
-    call_id: str,
-    response_id: str = "chatcmpl-smoke-tool",
-    created: int = 1788525831,
-    usage: tuple[int, int] = (10, 5),
-) -> dict[str, Any]:
-    """A ``chat.completion`` answer whose assistant turn emits one tool call.
-
-    Shared by the operator-command, message-id-fence and foreign-chat
-    running tests — the inline copies they used to rebuild drifted.
-    """
-    prompt_tokens, completion_tokens = usage
-    return {
-        "id": response_id,
-        "object": "chat.completion",
-        "created": created,
-        "model": "smoke-model",
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": call_id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": json.dumps(arguments),
-                            },
-                        }
-                    ],
-                },
-                "finish_reason": "tool_calls",
-            }
-        ],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        },
-    }
 
 
 def chat_event(
@@ -506,10 +318,6 @@ class FakeLlm:
         self.fail_status = 0
         self.hang_seconds = 0.0
 
-    def is_caption_request(self, body: dict[str, Any]) -> bool:
-        """True when a captured request is the image captioner, not an agent run."""
-        return is_caption_request(body)
-
     def app(self) -> FastAPI:
         """An OpenAI-compatible chat completions server with scripted answers."""
         return _make_llm_app(self)
@@ -539,7 +347,7 @@ def _make_llm_app(llm: FakeLlm) -> FastAPI:
             # A dead proxy answers before the provider ever sees the
             # request; the body argument is irrelevant to the failure.
             raise HTTPException(status_code=llm.fail_status)
-        if llm.is_caption_request(body):
+        if is_caption_request(body):
             return CaptionResponse
         if llm.selector is not None:
             selected = llm.selector(body)
@@ -547,7 +355,7 @@ def _make_llm_app(llm: FakeLlm) -> FastAPI:
                 selected = await selected
             return cast(dict[str, Any], selected)
         agent_round = sum(
-            1 for request in llm.requests if not llm.is_caption_request(request)
+            1 for request in llm.requests if not is_caption_request(request)
         )
         first = llm.override if llm.override else FirstResponse
         return first if agent_round == 1 else SecondResponse

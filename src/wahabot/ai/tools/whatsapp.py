@@ -1072,14 +1072,13 @@ def send_media_sticker(
     from_url: bool,
 ) -> str:
     """Send the single `sticker` source, padding non-square locals to square."""
-    file = sticker_file(source, settings.max_sticker_bytes)
+    file = (
+        sticker_file(source, settings.max_sticker_bytes)
+        if from_url
+        else squared_sticker_payload(source, settings.max_sticker_bytes)
+    )
     if isinstance(file, str):
         return error(file)
-    if not from_url:
-        padded = squared_sticker_payload(source, settings.max_sticker_bytes)
-        if isinstance(padded, str):
-            return error(padded)
-        file = padded
     try:
         sent_id = waha.send_sticker(session, chat_id, file=file)
     except Exception as exc:
@@ -1111,14 +1110,7 @@ def image_file(name_or_url: str, max_file_bytes: int) -> dict[str, Any] | str:
     wire stamped ``application/octet-stream``.
     """
     if "://" in name_or_url:
-        file: dict[str, Any] = {
-            "mimetype": infer_mimetype(name_or_url, _IMAGE_MIME_BY_EXT, "image/jpeg"),
-            "url": name_or_url,
-        }
-        name = PurePosixPath(urlsplit(name_or_url).path).name
-        if name:
-            file["filename"] = name
-        return file
+        return remote_file(name_or_url, _IMAGE_MIME_BY_EXT, "image/jpeg")
     loaded = local_file(name_or_url, max_file_bytes)
     if isinstance(loaded, str):
         return loaded
