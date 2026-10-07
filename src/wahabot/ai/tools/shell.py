@@ -1,20 +1,19 @@
-"""Rich shell execution tool.
+"""Host shell execution with bounded previews and best-effort capture.
 
-Runs an arbitrary shell command on the host via ``subprocess`` and returns
-a result in the shared JSON envelope — the same "never raises" contract
-as the other tools. Inline stdout/stderr are bounded
-(``settings.shell_max_output`` chars per stream), but nothing captured
-is ever lost: past the inline cap a reader thread streams the rest
-straight to a spill file (opened only on overflow, so small commands
-touch no disk; memory stays bounded no matter how much a command
-floods), and the envelope points at it via ``file.path`` /
-``stderr_file.path``. Even a timeout reports the partial output
-captured before the kill — inline previews plus spill files on the
-``error`` envelope. Because this can do anything on the host, it is
-**off by default**: the tool is only registered when ``shell_tool`` is
-enabled in settings (``WAHABOT_SHELL_TOOL=true``). Operators must also
-cap runtime (``WAHABOT_SHELL_TIMEOUT``) so a runaway command can never
-hang the webhook.
+Commands run through Bash without a sandbox. Each stdout/stderr preview
+retains up to ``settings.shell_max_output`` bytes (at least 200), decoded
+as UTF-8 with replacement and stripped of surrounding whitespace.
+Overflow attempts a lazy spill file; successful files contain the raw
+captured bytes. Capture failures keep the preview, mark truncation and
+report ``capture_errors`` without changing the command's exit status.
+
+A single wall-time deadline covers output reads and process completion.
+Timeouts return available partial output after bounded process-group
+termination and reader draining; cleanup can exceed the runtime deadline.
+Descendants that leave the process group can escape termination. The tool
+is off by default and only registered when ``shell_tool`` is enabled
+(``WAHABOT_SHELL_TOOL=true``); the runtime budget is configured with
+``WAHABOT_SHELL_TIMEOUT`` (at least one second).
 """
 
 import contextlib
@@ -22,6 +21,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from typing import IO, Any
 
 from loguru import logger
@@ -44,26 +44,28 @@ SHELL = "/bin/bash"
 
 
 def shell_command(settings: Settings, command: str) -> str:
-    """Run a shell command and return its result as a JSON envelope.
+    """Run an unsandboxed host command and return its JSON envelope.
 
-    The command runs through ``/bin/bash`` so pipes, redirection and the
-    usual shell features work; stdin is closed so a command that reads
-    it cannot hang. Nothing captured is lost: each stream keeps an
-    inline preview bounded by ``settings.shell_max_output`` chars, and
-    whatever overflows it streams to a spill file — so a flooding
-    command can exhaust neither memory nor the model's token budget.
-    A non-zero exit code is reported in the envelope (``ok`` stays true
-    — the command ran), while a start failure or timeout yields an
-    ``error`` envelope; on timeout the partial output captured before
-    the kill still rides that envelope. On timeout the shell and its
-    whole process group are reaped (SIGTERM, then SIGKILL), so
-    background children cannot survive orphaned on the host.
+    ``/bin/bash`` supports pipes and redirection; stdin is closed. Each
+    stream keeps a preview of at most ``max(settings.shell_max_output, 200)``
+    bytes, decoded with replacement and stripped. On overflow a lazy spill
+    attempts to retain the raw capture with bounded memory. Capture faults
+    mark truncation and add per-stream ``capture_errors``; failed spills
+    are omitted. ``ok`` stays true for executed commands, including nonzero
+    exits or capture faults; start failures/timeouts return an error envelope.
+
+    One monotonic deadline (at least one second) covers stream reads and
+    process completion. Timeout sends SIGTERM then SIGKILL to the original
+    process group, with bounded wait/drain cleanup outside that budget.
+    Available partial capture is returned; descendants that leave the
+    process group are not guaranteed to be killed or reaped.
     """
     if not command.strip():
         return error("command cannot be empty")
     run_timeout = max(settings.shell_timeout, _MIN_TIMEOUT_SECONDS)
     max_output = max(settings.shell_max_output, _MIN_MAX_OUTPUT)
     logger.debug("Running shell command: {cmd}", cmd=command)
+    deadline = time.monotonic() + run_timeout
     try:
         proc = subprocess.Popen(
             command,
@@ -85,23 +87,25 @@ def shell_command(settings: Settings, command: str) -> str:
         _start_reader(proc.stdout, sinks["stdout"]),
         _start_reader(proc.stderr, sinks["stderr"]),
     ]
-    if not _join_readers(readers, run_timeout):
+    try:
+        if not _join_readers(readers, deadline):
+            raise subprocess.TimeoutExpired(command, run_timeout)
+        proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
         _kill_tree(proc)
+        _join_readers(readers, time.monotonic() + _KILL_WAIT_SECONDS)
         logger.warning("shell_command timed out after {t}s", t=run_timeout)
         return _render(None, sinks, f"command timed out after {run_timeout}s")
-    proc.wait()
     return _render(proc.returncode, sinks, None)
 
 
 class _StreamSink:
-    """One command stream's bounded inline preview plus lazy spill file.
+    """One stream's byte-bounded preview and optional best-effort spill.
 
-    The first *cap* bytes stay in memory as the envelope's inline
-    preview. Only when a stream overflows that cap is a spill file
-    opened — seeded with the buffered preview so the file always holds
-    the complete stream — and every further chunk streams straight to
-    disk. A command whose output fits inline therefore never touches
-    disk, and a flooding command never grows memory past the cap.
+    The first *cap* bytes stay in memory. Overflow attempts a lazy spill,
+    seeded with the preview to retain the raw capture when writes succeed.
+    A capture failure disables spilling and hides incomplete file metadata.
+    In-budget output creates no file; the preview never grows past *cap*.
     """
 
     def __init__(self, label: str, cap: int) -> None:
@@ -111,92 +115,107 @@ class _StreamSink:
         self._meta: dict[str, Any] | None = None
         self._label = label
         self._finalized = False
+        self.capture_error: str | None = None
 
     def append(self, chunk: bytes) -> None:
-        """Add one chunk to the preview, spilling the remainder to disk.
+        """Keep a bounded prefix and attempt to spill overflow.
 
-        A no-op once the sink is finalized: on the timeout path the
-        reader thread can still be draining pipe remnants when the
-        envelope is rendered — writing to the closed handle would both
-        crash the reader and lose the very tail the envelope promised.
+        After a capture failure chunks are discarded without retrying disk
+        operations, allowing the reader to keep draining. A finalized sink
+        ignores late chunks from a reader that outlived bounded cleanup.
         """
-        if self._finalized:
+        if self._finalized or self.capture_error is not None:
             return
         if len(self._preview) < self._cap:
             take = chunk[: self._cap - len(self._preview)]
             self._preview.extend(take)
             chunk = chunk[len(take) :]
         if chunk:
-            if self._file is None:
-                self._file, self._meta = open_byte_output(self._label)
-                self._file.write(bytes(self._preview))
-            self._file.write(chunk)
+            try:
+                if self._file is None:
+                    self._file, self._meta = open_byte_output(self._label)
+                    self._file.write(bytes(self._preview))
+                self._file.write(chunk)
+            except Exception as exc:
+                self.capture_failed("spill", exc)
+
+    def capture_failed(self, operation: str, exc: Exception) -> None:
+        """Record the first capture fault and discard any incomplete spill."""
+        if self.capture_error is not None:
+            return
+        self.capture_error = f"{operation} failed: {type(exc).__name__}: {exc}"[:200]
+        handle, meta = self._file, self._meta
+        self._file = None
+        self._meta = None
+        if handle is not None:
+            with contextlib.suppress(Exception):
+                handle.close()
+        if meta is not None:
+            with contextlib.suppress(OSError):
+                os.remove(meta["path"])
 
     @property
     def text(self) -> str:
-        """The bounded inline preview."""
+        """The byte-bounded preview decoded as UTF-8 with replacement."""
         return bytes(self._preview).decode(errors="replace")
 
     @property
     def truncated(self) -> bool:
-        """True when output past the inline cap exists (on the spill file)."""
-        return self._file is not None
+        """True when output overflowed the preview or capture may be incomplete."""
+        return self._file is not None or self.capture_error is not None
 
     def file_meta(self) -> dict[str, Any] | None:
-        """The spill file's metadata, or None if the stream fit inline.
+        """Finalize and return a successful spill's metadata, otherwise None.
 
-        Finalizes the file (closing the handle and computing its size);
-        idempotent, so the timeout path can call it after the kill.
+        Closing flushes buffered writes; failure invalidates the spill and
+        reports a capture fault. Idempotent; freezes even an inline-only sink.
         """
-        if self._file is None or self._finalized:
+        if self._finalized:
             return self._meta
         self._finalized = True
-        with contextlib.suppress(OSError):
-            self._file.close()
-        meta = self._meta
-        if meta is not None:
-            with contextlib.suppress(OSError):
-                meta["bytes"] = os.path.getsize(meta["path"])
+        if self._file is not None:
+            try:
+                self._file.close()
+                if self._meta is not None:
+                    self._meta["bytes"] = os.path.getsize(self._meta["path"])
+            except Exception as exc:
+                self.capture_failed("spill finalization", exc)
         return self._meta
 
 
 def _start_reader(stream: IO[bytes] | None, sink: _StreamSink) -> threading.Thread:
-    """Start a daemon reader thread for one pipe and return its handle."""
+    """Start a daemon pipe-drain thread; report read failures on its sink."""
 
     def drain() -> None:
         if stream is None:
             return
-        while chunk := stream.read(_READ_CHUNK):
-            sink.append(chunk)
+        try:
+            while chunk := stream.read(_READ_CHUNK):
+                sink.append(chunk)
+        except Exception as exc:
+            sink.capture_failed("read", exc)
 
     reader = threading.Thread(target=drain, daemon=True)
     reader.start()
     return reader
 
 
-def _join_readers(readers: list[threading.Thread], timeout: float) -> bool:
-    """Join reader threads within *timeout*; False when the deadline passed."""
-    deadline = threading.Event()
-    timer = threading.Timer(timeout, deadline.set)
-    timer.start()
-    try:
-        for reader in readers:
-            while reader.is_alive():
-                if deadline.is_set():
-                    return False
-                reader.join(timeout=0.05)
-    finally:
-        timer.cancel()
+def _join_readers(readers: list[threading.Thread], deadline: float) -> bool:
+    """Join reader threads by a monotonic deadline; False if any remain alive."""
+    for reader in readers:
+        reader.join(timeout=max(0.0, deadline - time.monotonic()))
+        if reader.is_alive():
+            return False
     return True
 
 
 def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
-    """Terminate *proc* and its process group: SIGTERM, grace, then SIGKILL.
+    """Signal the original process group with bounded waits for *proc*.
 
-    SIGKILL goes to the whole group unconditionally after the grace
-    period — a child that ignores SIGTERM must not survive orphaned just
-    because the shell itself died promptly. The final wait is bounded so
-    a child stuck in uninterruptible sleep cannot hang the tool thread.
+    After SIGTERM, wait up to the grace period for *proc*, then send SIGKILL
+    to the group even if *proc* exited promptly. Only *proc* is waited on;
+    descendants that leave its process group are not covered. Both waits
+    are bounded so a stuck process cannot hang this cleanup indefinitely.
     """
     with contextlib.suppress(ProcessLookupError):
         os.killpg(proc.pid, signal.SIGTERM)
@@ -213,16 +232,16 @@ def _render(
     sinks: dict[str, _StreamSink],
     failure: str | None,
 ) -> str:
-    """Render the command's outcome into the JSON envelope.
+    """Render exit/timeout status separately from best-effort capture.
 
-    Inline stdout/stderr are the sinks' bounded previews; each stream
-    that overflowed its cap carries the full capture as a spill file
-    (``file`` for stdout, ``stderr_file`` for stderr) so the model can
-    read the rest in parts (``head``/``tail``/``sed``/``rg`` on the
-    path). A timed-out command renders an ``error`` envelope — but
-    with the same previews and spill files, so only the missing tail is
-    lost, never what was already captured.
+    stdout/stderr are decoded, whitespace-stripped byte-bounded previews.
+    Successful spills use ``file``/``stderr_file``; capture faults mark
+    ``truncated`` and attach ``capture_errors`` without publishing failed
+    spills or changing command exit status. Timeouts return available
+    partial capture on an error envelope, without ``exit_code``.
     """
+    out_file = sinks["stdout"].file_meta()
+    err_file = sinks["stderr"].file_meta()
     out = sinks["stdout"].text.strip()
     err = sinks["stderr"].text.strip()
     out_truncated = sinks["stdout"].truncated
@@ -232,10 +251,17 @@ def _render(
         "stderr": err,
         "truncated": out_truncated or err_truncated,
     }
-    if out_truncated:
-        payload["file"] = sinks["stdout"].file_meta()
-    if err_truncated:
-        payload["stderr_file"] = sinks["stderr"].file_meta()
+    if out_file is not None:
+        payload["file"] = out_file
+    if err_file is not None:
+        payload["stderr_file"] = err_file
+    capture_errors = {
+        name: sink.capture_error
+        for name, sink in sinks.items()
+        if sink.capture_error is not None
+    }
+    if capture_errors:
+        payload["capture_errors"] = capture_errors
     if failure is not None:
         return error(failure, **payload)
     payload["exit_code"] = returncode if returncode is not None else "unknown"

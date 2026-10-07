@@ -76,11 +76,10 @@ async def run_command(
 
     No dedup (the command id is unique by construction), no staleness
     gate (no WAHA redelivery for a command the operator just fired), no
-    chat gates. The run's delivery target is the event's ``from``
-    ("operator") so the run behaves like a DM: the model may pass
-    ``chat=…`` explicitly (a group or a person resolved via
-    ``read_chat`` resolve mode) or omit it, exactly as in a normal chat — and a
-    delivery latch from another run can never block this command's
+    chat gates. The run uses the synthetic "operator" context, not a
+    deliverable WhatsApp chat. Delivery tools must receive an explicit
+    ``chat`` JID; plain final text is returned to the command caller.
+    A delivery latch from another run can never block this command's
     send (each run binds its own target). ``armed=True`` opens the
     cross-chat fence in the WhatsApp tools for this run alone; the
     arming flag rides the run-scoped binding, so a concurrent chat run

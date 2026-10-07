@@ -57,12 +57,12 @@ Key env vars:
 | `WAHABOT_TTS_VOICES` | JSON map of language code → voice id | `{"en":"vd_british_male_casual","de":"vd_german_male_casual","es":"vd_spanish_male"}` |
 | `WAHABOT_TTS_INSTRUCT` | JSON map of language code → frozen delivery instruct (empty = omit) | `{"en":"","de":"","es":"spoken casually, like teasing a friend in a group chat"}` |
 | `WAHABOT_TTS_DEFAULT_LANGUAGE` | Language fallback when the reply's has no voice-map entry | `en` |
-| `WAHABOT_WEB_SEARCH_MAX_RESULTS` | Default web search results | `5` |
+| `WAHABOT_WEB_SEARCH_MAX_RESULTS` | Default total valid search results across engines | `5` |
 | `WAHABOT_WEB_SEARCH_TIMEOUT` | webserp subprocess and `visit_url` fetch timeout (s) | `30` |
-| `WAHABOT_WEB_SEARCH_PROXY` | Optional proxy for webserp | — |
+| `WAHABOT_WEB_SEARCH_PROXY` | Optional proxy for search, pages, metadata, and caption requests | — |
 | `WAHABOT_SHELL_TOOL` | Enable shell tool (off by default; run unprivileged/sandboxed) | `false` |
-| `WAHABOT_SHELL_TIMEOUT` | Shell command timeout (s) | `30` |
-| `WAHABOT_SHELL_MAX_OUTPUT` | Max inline chars per shell output stream (full output spills to a temp file) | `2000` |
+| `WAHABOT_SHELL_TIMEOUT` | Shell execution deadline (s, minimum 1), plus bounded cleanup | `30` |
+| `WAHABOT_SHELL_MAX_OUTPUT` | Inline bytes per shell output stream (minimum 200; overflow attempts a file spill) | `2000` |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Opt-in tracing (see README) | — |
 
 ## Quick start
@@ -85,8 +85,8 @@ to at least set a `system_prompt`:
 
 ```json
 {
-  "goal": "Be a witty friend in this WhatsApp group.",
-  "system_prompt": "You are Kai, a witty friend in this WhatsApp group. Today is {{date}}. Keep it short — no markdown, match the group's energy.",
+  "goal": "Contribute when useful and make each reply clear and easy to understand.",
+  "system_prompt": "You are Kai, an AI member of this WhatsApp group. Today is {{date}}. Match the group's tone, but use natural, complete sentences and enough context to be understood. Never sacrifice meaning for brevity or humor. Use WhatsApp formatting rather than Markdown headings. {{operator_tools}}",
   "bot_name": "Kai",
   "bot_mention_regex": "(?i)(?<![a-z@])@?kai(?![a-z])",
   "group_participation": "judicious",
@@ -95,8 +95,11 @@ to at least set a `system_prompt`:
 }
 ```
 
-The `system_prompt` is the bot's entire personality. Write it like you're
-describing a friend, not a service. The model will mirror whatever tone you set.
+The `system_prompt` guides personality and participation; tool descriptions and
+schemas explain the tool contracts. Write for a person to understand, not a fixed
+line count. Include `{{operator_tools}}` to explain cross-chat permissions; the
+runtime fence still enforces them. Inspect substitutions with
+`uv run wahabot sessions view --name default`.
 
 ## Startup banner
 

@@ -1,7 +1,7 @@
 [project]
 name = "wahabot"
-version = "0.9.8"
-description = "A WhatsApp bot that answers chats with an LLM agent"
+version = "0.9.9"
+description = "Self-hosted WhatsApp AI agent with chat memory, media understanding, web research, and operator controls via WAHA"
 readme = "README.md"
 authors = [
     { name = "Malvavisc0", email = "207609879+malvavisc0@users.noreply.github.com" }
@@ -97,4 +97,3 @@ ignore_names = [
     "forget", "escalations", "model_config", "timestamp", "engine",
     "handlers", "LoggingH11Protocol", "__call__", "recovery_poller_armed",
 ]
-

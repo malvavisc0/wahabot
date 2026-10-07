@@ -776,9 +776,9 @@ class ObservableOpenAILike(OpenAILike):
     but the base ``to_payload`` exposes neither (external constraint;
     see docs/agent-workflow.md). Also slims the tool specs of every
     request (``wahabot.ai.tools.slim``): the base ``_prepare_chat_
-    with_tools`` builds them from Pydantic's JSON schema, whose
-    ``title`` padding, nullable ``anyOf`` unions and ``strict: false``
-    cost ~360 tokens per request with zero model value.
+    with_tools`` builds them from Pydantic's JSON schema. Titles and
+    redundant ``strict: false`` are removed, and nullable unions are
+    compacted without dropping explicit null support.
     """
 
     @override

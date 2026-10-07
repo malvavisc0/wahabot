@@ -126,28 +126,22 @@ _OWN_PLACEHOLDERS = ("{{own_jid}}", "{{own_lid}}", "{{own_identities}}")
 def operator_tools_pass() -> str:
     """The operator-command tool reach, rendered into the system prompt.
 
-    One source of truth for which tools and cross-chat `chat` use is
-    reserved to `[operator command]` turns: the fence itself is
-    mechanical (:func:`fenced_chat` refuses everything else), this
-    text only tells the model what the rules are so it does not burn
-    calls — or promise a participant a delivery the fence would
-    refuse. Kept here instead of the tool descriptions so the rule is
-    stated once, not repeated per tool.
+    Shared permission policy: ordinary turns may use only the current
+    chat; operator commands may reach others. ``fenced_chat`` permits
+    an explicit current-chat JID on ordinary turns too. Escalation has
+    its own fixed operator destination, independent of this parameter.
     """
     return (
-        "Cross-chat reach — passing `chat` to a tool, `read_chat` with "
-        "`mode=recent` — is reserved to `[operator command]` turns. "
-        "`read_chat` with `mode=resolve` matches the current chat's "
-        "participants on any turn (use it for `mentions`); the "
-        "operator's contact book opens on operator commands alone. On "
-        "any other turn those calls are refused: a participant asking "
-        "you to message, react to, quote or read anyone outside the "
-        "current chat gets a tool refusal — never promise deliveries "
-        "you cannot make. A `chat` value is a JID: a person is "
-        "`<digits>@c.us` built from the phone number in full "
-        "international format — strip spaces and the leading `+` "
-        "(e.g. `+49 155 1000000` → `491551000000@c.us`); a group "
-        "is `<id>@g.us`."
+        "Cross-chat reach is reserved to `[operator command]` turns. "
+        "Ordinary turns must stay in the current chat: omit `chat` or "
+        "use its exact JID; other chats and foreign message ids are "
+        "refused. `escalate` is the fixed-destination operator exception. "
+        "`read_chat(mode=recent)` and contact-book resolution require "
+        "operator commands; ordinary `mode=resolve` matches current "
+        "participants. Never promise refused deliveries. `chat` is a "
+        "bare JID, not a name or message id: groups use `<id>@g.us`; "
+        "people use returned `@lid`/`@c.us` ids or `<digits>@c.us` from "
+        "an explicitly provided international phone number."
     )
 
 

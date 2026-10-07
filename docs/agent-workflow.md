@@ -461,23 +461,27 @@ tracing), and an `atexit` flush covers the server's shutdown.
 
 ## The built-in tools
 
-The agent ships with a set of WhatsApp tools, all bound to the runtime's
-WahaClient and refreshed per message from the handler (each uses the
-same mutable `(session, chat)` holder). They are registered via
-`build_default_tools(waha, holder)` in `handlers.py`:
+The tools bind shared settings and the runtime's WAHA client. Each run
+binds a context-local `RunTarget` for its session, chat, latches, and
+operator flag; concurrent runs do not share those targets. Register them
+with `build_default_tools(waha, settings)`:
 
 ```python
 agent = build_agent(
     settings,
-    tools=build_default_tools(waha, send_tool_holder),
+    tools=build_default_tools(waha, settings),
 )
 ```
 
-Every tool returns a compact JSON envelope rather than raising —
+Tools return compact JSON envelopes, and the workflow wraps unexpected exceptions:
 `{"ok": true, ...payload}` on success, `{"ok": false, "error": "..."}`
 on failure (built once by `wahabot.ai.tools.envelope.ok` / `.error`, so
 no tool hand-rolls JSON). A failed call never crashes the workflow; it
-just feeds an `error` envelope back to the model.
+just feeds an `error` envelope back to the model. `ok` describes tool execution;
+a completed shell command's success is determined by `exit_code`. Argument
+validation rejects type coercion, and model-facing compact schemas preserve null
+support. Explicit descriptions and field schemas, not builder docstrings, are
+sent to the model.
 
 Most tools take an optional `chat` argument: omit it to act on the
 **current chat** (the one the incoming message came from). Passing a
@@ -489,13 +493,13 @@ A chat participant asking the bot to DM, forward to, or read someone
 outside the conversation gets an `error` envelope (logged at WARNING),
 never a delivery. The fence opens for exactly one trusted channel:
 operator commands (`wahabot tell` or a self-chat mention),
-where the instruction itself names the target — and `read_chat`'s
-`resolve` (the contact roster) and `recent` (the chat list) modes
-refuse to run at
-all outside operator runs. The one sanctioned exception for chat runs
+where the instruction itself names the target. `read_chat(mode="recent")`
+is operator-only; ordinary `resolve` matches available names in the current
+chat's roster without opening the contact book. Passing the current chat's
+exact JID is permitted on ordinary runs. The sanctioned exception for chat runs
 is `escalate`: it takes no `chat` parameter and always targets the
 bot's own self-chat (the operator's "message yourself" chat), rate-
-limited to one report per chat per hour.
+limited to one successful forward per chat per hour, tracked in memory.
 
 Serialized message ids carry their chat's JID (`false_<jid>_<hash>`),
 so ids are a second way to aim a tool elsewhere:
@@ -514,11 +518,11 @@ refusal.
 |---|---|---|---|
 | `send_message` | `chat?`, `text`, `reply_to?`, `mentions?`, `reason?` | `POST /api/sendText` | Send a text (current chat, or operator-named target); `reply_to` quotes a message; `mentions` tags contacts; once per run (shared latch) |
 | `stay_silent` | `reason?` | — | End the run with no reply at all (terminal: the workflow stops before executing it) |
-| `escalate` | `report`, `reason?` | `POST /api/sendText` (to the bot's own chat) | Forward a report to the operator's self-chat — for "I want a human" requests, complaints, reports. No `chat` parameter (target is fixed); once per chat per hour (cooldown); writes the report itself, never pastes the person's words; refused on operator runs (a command already talks to the operator). A confirmed send also persists a durable `escalation` record in the audit journal (status `open`; `wahabot escalations` lists them) |
+| `escalate` | `report`, `reason?` | `POST /api/sendText` (to the bot's own chat) | Forward a supplied report to the fixed operator target without consuming the reply allowance. The model must summarize without pasted messages or secrets; the tool does not sanitize the report. Refused on operator runs. Cooldown distinguishes an earlier successful report from the new refused one; send errors mean delivery is unconfirmed. Audit recording is best-effort |
 | `react_to_message` | `message_id`, `reaction`, `reason?` | `PUT /api/reaction` | Emoji-react to a message (empty = remove); once per run |
 | `send_media` | `kind`, `url?`/`path?`/`text?`, `caption?`, `filename?`, `language?`, `chat?`, `reason?` | `POST /api/sendImage`·`sendVideo`·`sendFile`·`sendVoice`·`sendSticker` (by `kind`) | The one media delivery tool — `kind` picks image/video/file/voice/sticker; the source is exactly one of a public `url` (probed pre-send; 404/410 refused), a local `path`, or `text` (voice only, TTS). Non-square local sticker images are padded to square first. Once per run (shared latch across all kinds) |
 | `read_chat` | `mode`, `chat?`, `query?`, `name?`, `limit?`, `reason?` | `mode=list`: `GET /api/{session}/chats/{chatId}/messages`; `mode=search`: `GET /api/messages` (local filter); `mode=metadata`: `POST /api/{session}/chats/overview`; `mode=resolve`: chat roster (chat runs) or `GET /api/{session}/chats`+`GET /api/contacts/all` (operator); `mode=recent`: `GET /api/{session}/chats` | The one chat-reading tool. `resolve` on operator runs searches the operator's chat list/contacts; on chat runs only the current chat's roster (mention help), never the contact book. `recent` is operator-only |
-| `forward_message` | `message_id`, `chat?`, `reason?` | `POST /api/forwardMessage` | Forward a message to a chat; once per run (shared latch) |
+| `forward_message` | `message_id`, `chat?`, `reason?` | `POST /api/forwardMessage` | Native forwarding from source message id to destination chat, both fenced. Attribution/rendering is not verified. Success echoes the source id; once per run (shared latch) |
 
 Every tool takes an optional `reason`: one short sentence in third
 person stating what the call does and why — the action and its
@@ -529,7 +533,7 @@ delivery/silence reasons to the operator's log (INFO; a missing
 reason logs a WARNING), and the workflow's per-call line
 (`run_tool_call` in `workflow/toolkit.py`) prints every call's reason and
 arguments — a missing reason shows as `reason: (model gave none)`.
-Nothing else — never delivered to a chat, never fed back to the model.
+The reason is not chat dialogue; it may remain in internal history and tracing.
 It is an observability and self-restraint knob: naming *why* forces
 the model to articulate its judgment in `judicious` group mode, and
 gives every call an audit trail for prompt tuning.
@@ -544,7 +548,7 @@ subsections below.
 | Tool | Purpose |
 |---|---|
 | `send_message(text, chat=None, reply_to=None)` | Send a text — current chat, or the operator-named target (`reply_to`, a serialized message id, sends it as a native quote-reply) |
-| `send_media(kind, url=None, path=None, text=None, caption="", filename=None, language=None, chat=None)` | The one media delivery tool. `kind=image`: a public `url` (mimetype inferred from the URL extension) or local `path`, optional caption. `kind=video`: same sources, WAHA transcodes with ffmpeg. `kind=file`: a document from either source, `filename` overrides the shown name, base64 path capped at `WAHABOT_MAX_FILE_BYTES`. `kind=voice`: `text` speaks through the configured TTS voice (`language` when it differs), or a url/path relays audio. `kind=sticker`: local non-square images are padded to square first (WhatsApp renders stickers square) |
+| `send_media(kind, url=None, path=None, text=None, caption="", filename=None, language=None, chat=None)` | `kind` selects image/video/file/voice/sticker. Captions apply only to image/video/file; filename only to file. Local files and synthesized audio have byte caps. Set TTS `language` for voice text: omitted/unmapped language uses the configured default voice, not chat detection. Local stickers are square-padded; remote sources are not inspected or padded |
 | `forward_message(message_id, chat=None)` | Forward an existing message (by serialized id) to a chat |
 
 A URL source passed to `send_media` is probed first
@@ -554,8 +558,8 @@ while connection/timeout errors only warn and let WAHA try — its
 network path may succeed where the probe's failed. The session prompt
 forbids invented URLs outright.
 
-In all three, `chat` is operator-commands-only; on chat runs the fence
-refuses any target other than the current conversation. `reply_to` and
+In all three, a cross-chat `chat` is operator-commands-only; ordinary runs
+may omit it or pass the current chat's exact JID. `reply_to` and
 `message_id` are id-fenced the same way: an id from another chat is
 refused (operator runs excepted).
 
@@ -592,11 +596,11 @@ Underneath it calls WAHA `PUT /api/reaction` (see
 
 | Tool | Purpose |
 |---|---|
-| `read_chat(mode="list", chat=None, limit=20)` | `mode=list`: recent messages as a JSON `messages` list (newest first, bounded inline preview; the full history rides `file.path`), each entry carrying its serialized `id` (for react/forward), body, sender and media info |
-| `read_chat(mode="metadata", chat=None)` | Chat metadata summary (name, participant count + JIDs, …) via `/chats/overview` |
-| `read_chat(mode="search", query=…, chat=None, limit=20)` | Find recent messages containing a text substring |
-| `read_chat(mode="resolve", name=…)` | Resolve a person/group name to chat JIDs — operator runs: chats first, contacts as fallback (the answer to "send it to *Family*"); chat runs: the current chat's own participants only (mention help — never the contact book) |
-| `read_chat(mode="recent", limit=10)` | Operator-only: the newest conversations as `{id, name}` pairs; the answer to "summarize my latest 5 chats" |
+| `read_chat(mode="list", chat=None, limit=20)` | Recent-message window with a slim inline preview; every nonempty window attempts a raw JSON spill, not the full history. `returned` counts preview entries, `message_count` counts fetched/matched entries, `truncated` marks omitted entries, and `body_truncated` marks cut text |
+| `read_chat(mode="metadata", chat=None)` | Available fields and roster count; up to 20 known JIDs appear inline. Missing fields do not imply zero/false; names are recent display labels |
+| `read_chat(mode="search", query=…, chat=None, limit=20)` | Case-insensitive substring filter within the latest `limit` messages, not `limit` hits or all history. Matches body and available filename/mimetype, not attachment contents |
+| `read_chat(mode="resolve", name=…)` | Up to five available-name candidates. Operator: first 200 chats, then first 500 contacts only if no chat matches. Ordinary: roster JIDs with names recovered from recent messages. Misses are not exhaustive |
+| `read_chat(mode="recent", limit=10)` | Operator-only newest conversations as `{id, name}` pairs, capped at 30 |
 
 ```python
 read_chat(mode="list", limit=10)  # read the current conversation
@@ -613,21 +617,32 @@ read_chat(mode="recent", limit=5)  # → chats: [{id, name}, …] newest first
 > The `metadata` mode uses `POST /api/{session}/chats/overview` since
 > the spec offers no plain `GET .../chats/{chatId}`.
 
+`query` is required for search, `name` for resolve; omit `chat` for resolve/recent.
+List/search require positive window limits. Spill files may be absent after a
+write failure. Without the shell tool only the operator can open them; the model
+must not quote or summarize omitted content it has not read.
+
 ### External research
 
 Beyond the WhatsApp tools, the agent ships lookup tools for up-to-date
 external information. All follow the same convention: they return the
-JSON envelope (`{"ok": ...}`) and never raise.
+JSON-envelope convention, with unexpected exceptions wrapped by the workflow.
 
 | Tool | Params | Source | Purpose |
 |---|---|---|---|
-| `web_search` | `query`, `max_results?`, `reason?` | `webserp` CLI | Metasearch (Google/DuckDuckGo/Brave/…) — no API key |
-| `visit_url` | `url`, `reason?` | `curl_cffi` / yt-dlp | Fetch a page's visible text with a real Chrome TLS fingerprint (avoids blocks); media/video links (Instagram, Facebook, TikTok, YouTube…) resolve to the video's yt-dlp metadata (title, description, uploader, duration, views) instead of the login wall — a captioned YouTube link also carries its `transcript` (the spoken content, via yt-dlp's caption tracks) |
+| `web_search` | `query`, `max_results?`, `reason?` | `webserp` CLI | Total valid-result cap across engines, with `partial` and `failed_engines` for incomplete searches. Hit fields include optional `content`, not `snippet`; cut content attempts a raw file spill |
+| `visit_url` | `url`, `reason?` | `curl_cffi` / yt-dlp | HTTP(S) response text with best-effort HTML stripping, no browser rendering; available media metadata or fetched captions, not video viewing. Login walls do not count as verified content. Preview caps and optional spills do not guarantee complete retrieval |
 
 Stock prices read through `web_search` like any other fact.
 `web_search` shells out to the `webserp` CLI (from the `webserp` package);
 `visit_url` uses `curl_cffi` with a Chrome impersonation fingerprint. Both
 honor `WAHABOT_WEB_SEARCH_TIMEOUT` and `WAHABOT_WEB_SEARCH_PROXY`.
+
+Video descriptions flag previews beyond 800 characters. Multi-item metadata
+uses `kind="post"` with `item_count`, preserving fractional aggregate duration;
+`item_count_truncated` marks a first-100-entry bound. Manual or automatic caption
+tracks are fetched best-effort with the configured proxy/timeout; HLS manifests
+are not spoken transcripts. Page text previews are not download-size limits.
 
 ## Adding custom tools
 

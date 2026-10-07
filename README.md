@@ -1,39 +1,43 @@
 # wahabot
 
-You know the morning. Forty-seven unread messages. A voice note you'll never find time to play. A photo with no context. A question from yesterday that nobody answered, and a customer quietly deciding you're slow. The conversations are the business, but they live in nobody's system.
+wahabot is a self-hosted AI agent for WhatsApp, connected through the [WAHA](https://waha.devlike.pro) HTTP API. It brings conversation memory, media understanding, web research, and operator-controlled actions to direct messages and groups. Use an OpenAI-compatible model endpoint and keep the bot's configuration and conversation records on your own machine.
 
-wahabot is an AI assistant that lives in your WhatsApp and takes that work. It reads the conversation like a person would: it listens to the voice notes, looks at the photos and videos, asks for what's missing, searches the web when it needs facts, sends the file the customer asked for, and stays quiet when it has nothing to add. You run it on your own machine, on any OpenAI-compatible model, connected through the [WAHA](https://waha.devlike.pro) HTTP API.
+The agent reads the context, decides whether a response is useful, gathers the information it needs, and replies. It can transcribe voice notes, analyze images and sampled video frames, send real files, and ask for missing information. Its language and personality come from your session prompt. For natural replies, prioritize complete sentences and enough context to be understood, rather than imposing a fixed message-length limit.
 
-You have seen the chatbot demos that answer FAQs and nothing else. This is the other kind.
+The goal is useful participation, not a bot that answers every group message or pretends to be a person.
 
 ## It thinks before it speaks
 
-Keyword bots fire canned answers. wahabot runs a loop: read the conversation, decide what is needed, call a tool, read the result, then reply. If the answer needs a search, it searches. If it needs the chat history, it reads it. It stops when the work is done, not when a script says so.
+wahabot runs a tool-calling loop: read the conversation, decide what is needed, call a tool, inspect the result, then reply. A model that supports function calling is required; image and video understanding also need a vision-capable endpoint. Research and actions finish before delivery, so the final answer can describe what actually happened.
 
-```
-StartEvent ──► prepare_chat_history ──► InputEvent
-  user turn into memory,                   │
-  frames stashed for call #1               ▼
-                                    handle_llm_input
-                                            │
-                  ┌─────────────────────────┴──────────┐
-                  │  no tool calls                     │  tool calls
-                  ▼                                    ▼
-               StopEvent ──► reply for the chat   handle_tool_calls ──► InputEvent (next round)
+```text
+Incoming message -> context and memory -> model
+                                            |
+                             tool call -> inspect result -> model
+                                            |
+                              final reply, reaction, or silence
 ```
 
-The toolset it can reach for: send messages, images, files and voice replies, quote and @-mention people, react with emoji, forward posts, read back through chat history, search old messages, search the web, fetch pages with a real Chrome TLS fingerprint (most sites answer as if a browser asked), look up stock prices, pull YouTube transcripts, and, if you opt in, run shell commands on the host.
+The bundled tools cover text and media delivery, quoting and numeric mentions, reactions, native forwarding, chat context, web search, page and video-metadata retrieval, human escalation, and an optional host shell. Python builder docstrings are for developers; explicit tool descriptions and parameter schemas are the instructions sent to the model.
 
-The loop has brakes: `stay_silent` ends a run quietly, a repeated tool call is never executed twice, a round limit force-wraps a confused run, and a hard timeout keeps the webhook free. A lone-emoji reply lands as a reaction on the triggering message, never as chat text. The bot also knows when it shouldn't speak at all: in a group it answers when addressed, and in judicious mode it reads everything and decides for itself whether it has something worth saying.
+The loop has brakes: `stay_silent` ends a run and cancels other tools in that batch, repeated calls are blocked, and round and run-time limits stop runaway work. Text, media, and forwarding share one successful-send allowance per run; reactions have a separate allowance. After successful delivery, further research or actions are blocked. In groups, mentioned mode responds when addressed, while judicious mode lets the model decide whether it has something worth adding.
+
+## Know What Was Retrieved
+
+- `read_chat` searches a bounded recent-message window, not every message ever sent. Display names and metadata are best-effort; missing fields or search hits do not prove absence. Inline previews identify cut bodies separately from omitted messages.
+- `web_search` caps the total valid results across engines and reports partial engine failures. Snippets are leads; open relevant sources before treating their contents as verified.
+- `visit_url` fetches response text or available media metadata without browser rendering. A login wall is not the requested article. YouTube captions are best-effort, may be automatic, and do not establish what a video visually shows.
+- Large results attempt to spill to local files. The model can read them only when the shell tool is enabled; otherwise the operator can open them. A truncation flag does not guarantee that a file was successfully written.
+- The optional shell enforces an execution deadline and attempts bounded process-group cleanup. Output previews are byte-capped, and capture errors are reported. `ok: true` means the command ran; check `exit_code` to determine whether it succeeded. The shell is not a sandbox.
 
 ## Built for how people actually text
 
 Nobody sends one clean, complete request. The leak arrives as "there's water coming through the ceiling", then "flat 3B", then a video. wahabot holds the burst, waits for the sender to finish, and answers once instead of asking "which flat?" three times.
 
 - Voice notes are transcribed (a WhisperX service) and heard without anyone asking. It can talk back in its own voice too, if you point it at a TTS service: the model writes the line, the configured voice speaks it.
-- Photos are looked at, videos are watched (evenly spaced frames captioned by the vision model, plus the spoken track transcribed). Albums arrive as one turn with all images attached.
-- Links to reels, TikToks and X posts are resolved and watched via yt-dlp, not just read. YouTube links get the full transcript instead, because captions beat six sampled frames on long-form.
-- Every chat has its own rolling memory, persisted to disk, so the bot picks up each conversation where it left off and survives restarts.
+- Photos are analyzed by the vision model. Videos use sampled frames and, when transcription is configured, the audio track; this is not exhaustive frame-by-frame viewing. Albums arrive as one turn with their images attached.
+- Supported reel, TikTok, and X links can be resolved through yt-dlp and passed through the video pipeline within configured limits. YouTube links use available metadata and captions rather than the video-download path; retrieval can fail or be incomplete.
+- Every chat has its own rolling memory. With persistence configured, the bot can pick up the conversation after a restart.
 
 ## You stay the boss
 
@@ -49,31 +53,31 @@ A voice note works too: speak "kAI do this..." and it transcribes and runs like 
 uv run wahabot tell "search the latest news about elon musk and send a summary to the group Family"
 ```
 
-Commands share one rolling history, so a follow-up like "now send that to the second group" just works. Names resolve to the right person or group automatically, and the result lands in WhatsApp, not in your terminal.
+Commands share one rolling history for follow-ups. Names are matched against available chats and contacts; genuinely ambiguous recipients need clarification before sending. Commands must supply an explicit destination for delivery. Their final text returns to the terminal or self-chat caller, and requested messages or media go to the selected WhatsApp chat.
 
 The fences you want in a business bot:
 
-- Chat participants can never make it message, read, forward or react outside their own conversation. Cross-chat reach belongs to your commands alone, so a group member cannot make it DM or spy on anyone.
-- When someone asks for a human, reports a problem, or complains about the bot, the `escalate` tool forwards a bot-written report to your self-chat, once per chat per hour, and never pastes the person's words, so hidden instructions can't ride the channel.
-- Every bot action is journaled with its arguments and outcome. When a customer asks "what did the bot do?", you can show them, message by message (`data/audit/`, listed by `wahabot escalations` for the human handoffs).
+- WhatsApp tools fence ordinary participants to the current chat; cross-chat delivery and contact-book access belong to trusted operator commands. `escalate` is the fixed-destination human-handoff exception. These checks do not sandbox an enabled shell, so run it unprivileged with an appropriate external sandbox.
+- When someone needs a human, reports a bot problem, or complains, `escalate` can forward a report to your self-chat. The model is instructed to summarize without pasted messages or secrets; the tool does not sanitize arbitrary report text. Successful forwards have an in-memory per-chat hourly cooldown. Feedback distinguishes success, cooldown, and unconfirmed delivery.
+- Actions and outcomes are recorded in the audit journal on a best-effort basis (`data/audit/`). `wahabot escalations` lists recorded handoffs; a logging failure does not undo an already completed action.
 - `wahabot forget <chat-id>` wipes one chat's memory, live context and disk file.
 
 ## Straight talk about the channel
 
 Two things you should know before you put this on a business number:
 
-- The connection is unofficial. WAHA drives a WhatsApp Web session, which violates WhatsApp's terms. Any unofficial number can be banned, with no appeal. Run the bot on a prepaid SIM, never on the number printed on your business cards.
-- The bot only ever replies. It answers people who wrote first, and it never campaigns. That is a deliberate design rule: a bot that texts first, at scale, on schedule is the spam fingerprint, and reply-only behavior keeps the bot looking like an eager employee instead.
+- The connection is unofficial. WAHA drives a WhatsApp Web session, and unofficial automation can violate WhatsApp's terms and lead to a ban. Use a separate number, not one your business depends on.
+- Ordinary runs respond to incoming messages. Trusted operator commands can initiate a message to another chat, so permissions and responsible use still matter. The project is not an outreach scheduler, and no reply policy eliminates the risk of a number being banned.
 
-Your data stays yours. Memory, the verbatim event journal and the audit log are files on your machine; JIDs are masked before anything leaves for tracing.
+Memory, event journals, and audit records live on your machine. Conversation content is still sent to the model endpoint and any configured transcription, TTS, or tracing service. JID masking in tracing does not anonymize all message content. Configure access, retention, and service providers accordingly; tool spill files also depend on host temporary-file cleanup.
 
 ## Where this is heading
 
-Everything above exists and runs today. The commercial roadmap turns this engine into a business product: durable cases with owners, so "a customer texted" becomes "Sarah's on it"; connectors that write into your CRM or job system; an operator console where staff claim and close the work. The plan, the pricing logic and the risk register live in [docs/plans/commercial-roadmap.md](docs/plans/commercial-roadmap.md).
+The current project is the conversation engine. Durable case ownership, CRM/job-system connectors, and an operator console are future directions, not bundled features.
 
 ## Install
 
-See the [installation guide](docs/install.md): local setup or Docker, the full env var reference, quick start, session config, and every CLI command.
+Python 3.14+, [uv](https://docs.astral.sh/uv/), a reachable WAHA instance, and a function-calling model endpoint are required. See the [installation guide](docs/install.md) for configuration, optional media services, and CLI commands.
 
 ```bash
 uv sync
@@ -82,21 +86,23 @@ uv run wahabot sessions init
 uv run wahabot serve
 ```
 
+Configure your WAHA webhook and session prompt as described in the guide. Inspect the expanded prompt with `uv run wahabot sessions view --name default`. Session configuration under `data/` is local runtime data, not part of release artifacts.
+
 ## Observability
 
-Set `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` and every agent turn is exported to [Langfuse](https://langfuse.com): prompts, completions, token counts, latency, tool calls, as one session per WhatsApp chat. Without credentials, tracing is a no-op and nothing leaves.
+Set `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` to export agent traces to [Langfuse](https://langfuse.com): prompts, completions, token counts, latency, and tool calls, as one session per WhatsApp chat. Without these credentials, no traces are exported; calls to configured model and media services still occur.
 
 ## Under the hood
 
-The agent is a three-step LlamaIndex workflow (prepare the history, ask the model, run its tool calls, loop until done), with per-chat memory that is repaired and trimmed before every LLM call and persisted to `data/memory/` at the end of every run. Every tool returns a small JSON envelope, `{"ok": true, ...}` or `{"ok": false, "error": "..."}`, and never raises: a failed lookup is data the model can shrug off or retry.
+The agent is a LlamaIndex workflow with per-chat memory repaired and trimmed before model calls and persisted to `data/memory/` when configured. Tools return JSON envelopes, and the workflow converts unexpected tool exceptions into error feedback. Argument types are validated strictly; compact schemas retain explicit `null` support. Old history keeps command exit codes and capture errors so execution failures do not become apparent successes.
 
 The module map, engine semantics and every safeguard explained: [Agent workflow](docs/agent-workflow.md).
 
 ```bash
-uv run ruff check --fix .      # lint
-uv run ruff format .           # format
-uv run basedpyright            # type check
-uv run pytest                  # end-to-end smoke suite
+uv run ruff check .            # lint
+uv run ruff format --check .   # formatting
+uv run basedpyright            # type checking
+uv run pytest                  # unit and end-to-end tests with fake services
 ```
 
 ## Docs
@@ -108,5 +114,4 @@ uv run pytest                  # end-to-end smoke suite
 - [WAHA identity fields](docs/waha-identity-fields.md) (`from` / `participant` / `to` semantics)
 - [WAHA albums](docs/waha-albums.md) (multi-image reassembly)
 - [WAHA broadcast sources](docs/waha-broadcast-sources.md) (status/newsletter handling)
-- [Commercial roadmap](docs/plans/commercial-roadmap.md) (where the product is going)
 - [Coding standard](docs/coding-standard.md) (the house rules)

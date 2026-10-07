@@ -1,12 +1,12 @@
 """Filesystem sink for large tool outputs.
 
-Tools that fan out a lot of data (a chat's whole history with
-``limit=600``, a long web page, a YouTube transcript, shell output)
+Tools that fan out a lot of data (a fetched chat window with
+``limit=600``, a long web page, fetched captions, shell output)
 must not inline megabytes into the model's token budget and must not
 silently truncate. Instead they write the full payload to a temporary
 file and return just its metadata (``file.path``/``file.bytes``) plus a
 bounded inline preview. The model keeps a working summary inline and can
-read the rest in parts through its own tools (``run_shell_command``), or
+read the rest only when ``run_shell_command`` is available, or
 the operator can open the path — without paying a base64/bloat tax on
 every message.
 """
@@ -27,8 +27,8 @@ __all__ = [
 
 #: Subdirectory under the system temp dir; all tool dumps land here so a
 #: workspace scan finds them in one place, nothing touches data_dir, and
-#: the OS's regular temp-dir cleaning sweeps them like any other
-#: transient file.
+#: retention depends on host temp-directory cleanup; no automatic
+#: expiry or per-chat access boundary is provided by this helper.
 _PREFIX = "wahabot-toolout"
 
 
@@ -44,7 +44,8 @@ def write_json_output(label: str, payload: Any) -> dict[str, Any]:
 
     ``mkstemp`` guarantees an unused, atomically-created path so concurrent
     tool calls never collide; *label* only names the prefix for humans (the
-    timestamp plus a random suffix) and is never trusted as a filename.
+    label plus a random suffix). Callers must supply a safe internal
+    prefix, not untrusted text or a path.
     Returns the file's metadata: absolute ``path``, bare ``filename`` and
     ``bytes`` written.
     """
@@ -79,7 +80,8 @@ def open_byte_output(label: str) -> tuple[BinaryIO, dict[str, Any]]:
 
     The shell tool's reader threads use this to stream a command's full
     output straight to disk as it arrives — memory stays bounded no
-    matter how much a command floods, and nothing captured is lost.
+    matter how much a command floods. File operations can raise; the
+    caller must handle failure and avoid promising a complete capture.
     Returns the open binary handle and its initial metadata dict (the
     same shape :func:`file_metadata` produces; the caller finalizes
     ``bytes`` after closing, since the file grows while streaming).

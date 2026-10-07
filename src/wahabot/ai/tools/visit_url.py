@@ -8,27 +8,30 @@ sites than a bare ``httpx`` client could.
 Media hosts are the exception: Instagram, Facebook, TikTok and friends
 serve unauthenticated fetchers a login/consent wall, so the HTML path
 returns chrome instead of content. For those, yt-dlp's per-site
-extractors provide the video's metadata (title, description, uploader,
-duration, views) without downloading anything — see the inbound-link
+extractors provide available metadata (title, description, uploader,
+duration, views) without downloading the video — see the inbound-link
 pipeline in ``url_videos`` for the heavyweight download path. YouTube
-links additionally carry their captions inline (``transcript`` in the
-envelope): yt-dlp's extractor exposes the caption track URLs, so the
-spoken content arrives without the dropped ``get_youtube_transcript``
-tool (docs/bug-report-2c665d8.md, bug 7b) or its
-``youtube-transcript-api`` dependency.
+links attempt caption retrieval from direct json3/SRT/VTT tracks;
+missing transcripts do not establish that no captions exist.
 
-The response body is previewed inline (HTML stripped, bounded) and long
-bodies spill the full text to a temp file (``file.path``) so nothing is
-lost — the model reads the rest in parts via ``run_shell_command`` when
-the shell tool is enabled (otherwise the operator can open the path).
-Tools follow wahabot conventions: they return the shared JSON envelope
-and never raise (failures become an ``error`` envelope fed back to the
-model).
+Only HTML content types undergo best-effort tag stripping; other decoded
+bodies retain their whitespace and tags. This is not browser-rendered or
+verified visible text. Bodies are fetched in full before preview limits
+are applied; these limits are not download byte caps. Long text attempts
+a full-text spill (``file.path``), readable by the model only when the
+shell tool is enabled (otherwise the operator can open the path).
+Ordinary metadata/caption processing exceptions fall back to HTTP;
+HTTP fetch/response-processing/envelope exceptions become an ``error``
+envelope; undecodable bodies yield a placeholder and failed spills keep
+the preview. Process-level interrupts are not caught.
 """
 
 import json
 import re
-from typing import Any, cast
+from html import unescape
+from itertools import islice
+from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import urlsplit
 
 import httpx
 import yt_dlp
@@ -39,12 +42,16 @@ from wahabot.ai.tools.envelope import error, ok
 from wahabot.ai.tools.outfile import write_text_output
 from wahabot.settings import Settings
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
 __all__ = ["visit_url"]
 
 _IMPERSONATE = "chrome"
 _MAX_CHARS = 4000
 _DESCRIPTION_CHARS = 800
 _MAX_TRANSCRIPT_CHARS = 6000
+_MAX_POST_ITEMS = 100
 
 # Strip common non-content tags in one pass, cheaply.
 _TAG_RE = re.compile(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>|<[^>]+>", re.I)
@@ -84,61 +91,78 @@ _YOUTUBE_HOST_RE = re.compile(
 #: the default ``web`` client dies on format resolution ("No video
 #: formats found") — the same external constraint ``video_meta``'s
 #: raw-extract path works around — and ``android`` still returns caption
-#: track URLs with it. Verified empirically: manual captions arrive as
-#: plain ``json3`` files, auto-captions as an HLS playlist of ``vtt``
-#: segments.
+#: track URLs with it. Either manual or automatic tracks can use direct
+#: json3/SRT/VTT URLs; HLS playlists require unsupported segment retrieval.
 _YOUTUBE_CLIENT = "android"
 
 
 def visit_url(settings: Settings, url: str) -> str:
-    """Fetch a web page and return its visible text or video metadata.
+    """Fetch HTTP(S) text or available video/post metadata, without rendering.
 
-    Media-host URLs resolve to the video's yt-dlp metadata (no
-    download); YouTube links additionally carry the video's captions
-    as ``transcript`` when they exist. Every other page takes the HTML
-    path. If the metadata extraction fails, the HTML path still runs —
-    the tool never dead-ends.
+    Media-host URLs attempt yt-dlp metadata without downloading video;
+    YouTube links attempt captions as ``transcript``. Extraction failures,
+    unresolved placeholders, and ordinary exceptions during metadata or
+    caption processing fall back to an HTTP page fetch. Unavailable or
+    malformed caption tracks normally just omit ``transcript``.
 
     Returns:
         A JSON envelope with the page ``text`` (a bounded preview of up
         to ~4000 chars), its final ``url``, HTTP ``status`` and a
         ``truncated`` flag — and, when the body was cut, a ``file``
-        (absolute path to the full body) the agent can read in parts.
-        A resolved video link instead carries ``title``/``description``/
-        ``uploader`` metadata, plus ``transcript``/``transcript_``
-        ``truncated`` and (on long captions) a ``transcript_file`` with
-        the full spoken content. An ``error`` envelope is returned if
-        the page could not be fetched at all.
+        (metadata containing the extracted text's file.path) if writing succeeds.
+        A metadata result has ``kind="video"`` or ``kind="post"`` and
+        ``title``/``description``/``uploader`` fields. Posts carry
+        ``item_count``; ``item_count_truncated`` marks counts and summed
+        durations limited to the first 100 inspected entries (unless
+        the parent supplies its own duration). Captions add ``transcript``/
+        ``transcript_truncated`` and (on long captions) a ``transcript_file`` with
+        the fetched caption text, which can be incomplete or generated.
+        Descriptions cap at 800 characters with description_truncated.
+        HTML text is best-effort tag stripping, not verified visible text;
+        other decoded bodies are preserved. Preview limits are not download
+        caps. For string inputs, ordinary HTTP fetch/response-processing/
+        envelope failures return an ``error`` envelope; unreadable bodies
+        yield a placeholder and spill failures keep the preview.
+        Process-level interrupts propagate.
     """
-    if not url.strip():
+    url = url.strip()
+    if not url:
         return error("url cannot be empty")
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return error("url must be a valid HTTP(S) URL")
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return error("url must be a valid HTTP(S) URL")
     if _MEDIA_HOST_RE.match(url):
-        meta = video_meta(url, settings)
-        if meta is not None:
-            tracks = cast(
-                "dict[str, list[dict[str, Any]]] | None",
-                meta.pop("_caption_tracks", None),
-            )
-            if tracks and _YOUTUBE_HOST_RE.match(url):
-                transcript = youtube_transcript(url, tracks)
-                if transcript:
-                    meta.update(transcript_fields(transcript))
-            return ok(source="yt-dlp", kind="video", url=url, **meta)
+        try:
+            meta = video_meta(url, settings)
+            if meta is not None:
+                tracks = cast(
+                    "dict[str, list[dict[str, Any]]] | None",
+                    meta.pop("_caption_tracks", None),
+                )
+                if tracks and _YOUTUBE_HOST_RE.match(url):
+                    transcript = youtube_transcript(url, tracks, settings=settings)
+                    if transcript:
+                        meta.update(transcript_fields(transcript))
+                return ok(source="yt-dlp", url=url, **meta)
+        except Exception as exc:
+            logger.info("Media processing failed for {url}: {exc}", url=url, exc=exc)
         # Extractor failed → the page might still be readable (e.g. a
         # private/removed post), so fall through to the HTML path.
         logger.info("yt-dlp could not resolve {url}; falling back to HTML", url=url)
     try:
         response = _fetch(url, settings)
+        text = _to_text(response)
+        return ok(
+            url=str(response.url),
+            status=response.status_code,
+            **page_fields(text),
+        )
     except Exception as exc:
         logger.warning("visit_url failed for {url}: {exc}", url=url, exc=exc)
         return error(f"visit_url failed: {exc}")
-
-    text = _to_text(response)
-    return ok(
-        url=str(response.url),
-        status=response.status_code,
-        **page_fields(text),
-    )
 
 
 def page_fields(text: str) -> dict[str, Any]:
@@ -146,8 +170,9 @@ def page_fields(text: str) -> dict[str, Any]:
 
     Short bodies ride the envelope whole; long ones keep a bounded
     ``text`` preview, flag ``truncated``, and spill the full body to
-    ``file`` so no content is lost. The spill is fail-soft: on a write
-    error the envelope just keeps the preview and the flag.
+    ``file`` when writing succeeds. The spill is fail-soft: on a write
+    error the envelope just keeps the preview and the flag. This character
+    preview limit does not cap the HTTP response download.
     """
     if len(text) <= _MAX_CHARS:
         return {"text": text, "truncated": False}
@@ -164,8 +189,8 @@ def transcript_fields(transcript: str) -> dict[str, Any]:
 
     Short transcripts ride the envelope as ``transcript``; long ones
     keep a ``transcript`` preview, flag ``transcript_truncated``, and
-    spill the full text to ``transcript_file`` so the model can read the
-    rest in parts. Fail-soft like :func:`page_fields`.
+    attempt to spill all fetched caption text to ``transcript_file``.
+    Shell-disabled models cannot read the file; failed writes omit it.
     """
     if len(transcript) <= _MAX_TRANSCRIPT_CHARS:
         return {"transcript": transcript}
@@ -181,7 +206,7 @@ def transcript_fields(transcript: str) -> dict[str, Any]:
 
 
 def video_meta(url: str, settings: Settings) -> dict[str, Any] | None:
-    """The video's yt-dlp metadata for *url*, or None when unresolvable.
+    """Video/post yt-dlp metadata for *url*, or None when unresolvable.
 
     Two tiers, cheapest reliable first: the raw extractor dict
     (``process=False``) skips format resolution — the step that needs a
@@ -201,6 +226,8 @@ def video_meta(url: str, settings: Settings) -> dict[str, Any] | None:
         "no_warnings": True,
         "noprogress": True,
         "noplaylist": True,
+        "lazy_playlist": True,
+        "playlistend": _MAX_POST_ITEMS + 1,
         "socket_timeout": max(settings.web_search_timeout, 2.0),
     }
     if _YOUTUBE_HOST_RE.match(url):
@@ -229,27 +256,40 @@ def _extract_safely(url: str, opts: dict[str, Any]) -> dict[str, Any] | None:
 
 def _meta_fields(info: dict[str, Any]) -> dict[str, Any]:
     """The envelope's scalar metadata fields from a resolved info dict."""
-    description = str(info.get("description") or "")[:_DESCRIPTION_CHARS]
-    return {
+    description = str(info.get("description") or "")
+    fields: dict[str, Any] = {
+        "kind": "post" if "entries" in info else "video",
         "title": info.get("title"),
-        "description": description or None,
+        "description": description[:_DESCRIPTION_CHARS] or None,
         "uploader": info.get("uploader") or info.get("channel"),
         "duration_s": info.get("duration"),
         "view_count": info.get("view_count"),
         "id": info.get("id"),
     }
+    if "entries" in info:
+        fields["item_count"] = info["item_count"]
+        if info.get("item_count_truncated"):
+            fields["item_count_truncated"] = True
+    if len(description) > _DESCRIPTION_CHARS:
+        fields["description_truncated"] = True
+    return fields
 
 
 def _attach_caption_tracks(meta: dict[str, Any], info: dict[str, Any], url: str) -> None:
     """Stash YouTube's caption tracks on *meta* for the transcript path.
 
-    Tracks come from the processed dict (the raw one lacks per-format
-    caption URLs); videos without captions carry empty dicts — drop
-    those.
+    Merge available manual and automatic tracks, preferring manual for
+    the same language. Availability and fetchability are not guaranteed.
     """
     if not _YOUTUBE_HOST_RE.match(url):
         return
-    tracks = cast("dict[str, list[dict[str, Any]]]", info.get("subtitles") or {})
+    manual = cast("dict[str, list[dict[str, Any]]]", info.get("subtitles") or {})
+    automatic = cast(
+        "dict[str, list[dict[str, Any]]]", info.get("automatic_captions") or {}
+    )
+    tracks = automatic | {
+        language: formats for language, formats in manual.items() if formats
+    }
     if tracks:
         meta["_caption_tracks"] = tracks
 
@@ -260,10 +300,8 @@ def _extract(ydl: Any, url: str) -> dict[str, Any] | None:
     A bare dict (url/id only, no descriptive keys) means the extractor
     returned an unresolved placeholder — Facebook ``/share/r/`` links
     do — so one processed pass is the only way to reach its metadata.
-    That retry is where format errors raise ("No video formats
-    found"), so it fails soft back to the bare dict: its url/id still
-    identify the link, and the caller decides between a sparse
-    envelope and the HTML fallback.
+    Retry failure or another undescribed placeholder returns None so
+    ``visit_url`` can attempt HTML rather than claim metadata success.
     """
     info = cast(
         dict[str, Any] | None,
@@ -278,8 +316,12 @@ def _extract(ydl: Any, url: str) -> dict[str, Any] | None:
         )
     except Exception as exc:
         logger.info("Processed retry failed for {url}: {exc}", url=url, exc=exc)
-        return info
-    return processed if processed and "entries" not in processed else info
+        return None
+    if processed and (
+        processed.get("title") or processed.get("description") or "entries" in processed
+    ):
+        return processed
+    return None
 
 
 def _post_info(info: dict[str, Any]) -> dict[str, Any]:
@@ -288,34 +330,54 @@ def _post_info(info: dict[str, Any]) -> dict[str, Any]:
     Format processing dies on multi-item Instagram posts ("No video
     formats found"), but the raw extractor dict still describes the
     *post* — caption, uploader, id — which is what the model needs,
-    plus the item count and summed duration.
+    plus the item count and summed available duration. Inspect at most
+    100 entries plus one lookahead, never exhaust an arbitrary playlist.
+    A truncated count/sum covers only inspected dict entries; preserve
+    a supplied parent duration and the raw parent metadata.
     """
-    entries: list[dict[str, Any]] = [e for e in (info.get("entries") or []) if e]
-    total = sum(int(e.get("duration") or 0) for e in entries)
-    return info | {
-        "title": info.get("title") or f"post with {len(entries)} items",
-        "duration": info.get("duration") or (total or None),
+    source = cast("Iterable[Any] | None", info.get("entries"))
+    inspected = list(islice(source if source is not None else (), _MAX_POST_ITEMS + 1))
+    truncated = len(inspected) > _MAX_POST_ITEMS
+    entries = [
+        cast("dict[str, Any]", e)
+        for e in inspected[:_MAX_POST_ITEMS]
+        if isinstance(e, dict) and e
+    ]
+    durations = [e["duration"] for e in entries if e.get("duration") is not None]
+    total = sum(durations) if durations else None
+    post = info | {
+        "entries": entries,
+        "title": info.get("title")
+        or f"post with {len(entries)}{'+' if truncated else ''} items",
+        "duration": info.get("duration") if info.get("duration") is not None else total,
+        "item_count": len(entries),
     }
+    if truncated:
+        post["item_count_truncated"] = True
+    return post
 
 
 def youtube_transcript(
-    url: str, tracks: dict[str, list[dict[str, Any]]], language: str = "en"
+    url: str,
+    tracks: dict[str, list[dict[str, Any]]],
+    language: str = "en",
+    settings: Settings | None = None,
 ) -> str:
     """The video's captions as paragraphed prose, or "" when unavailable.
 
-    *tracks* is yt-dlp's ``subtitles`` dict (manual caption tracks —
-    the ``android`` client exposes them as plain ``json3``/``vtt``/
-    ``srt`` files at fetchable URLs). A missing *language* track falls
-    back to any single available language, so non-English videos still
-    transcribe. Auto-generated captions are not in ``subtitles`` and
-    cost an HLS playlist hop; the model can still read the description,
-    so "" (not an error) is the honest answer for a caption-less video.
+    *tracks* combines available manual and automatic tracks. Try the
+    requested language first, then other languages, using direct
+    json3/SRT/VTT formats. HLS playlists are not transcribed. Empty
+    output means no fetched usable text, not proof of absent captions.
+    When supplied, settings control the proxy and effective HTTP timeout.
+    Caption HTTPX requests do not impersonate browser TLS and can be refused.
     """
     ordered = _ordered_caption_tracks(tracks, language)
     if not ordered:
         logger.info("No usable caption track for {url}", url=url)
         return ""
-    for text in (t for f in ordered for t in [_fetch_track_text(f)]):
+    for formats in ordered:
+        text = _fetch_track_text(formats, settings)
         if text:
             return text
     logger.info("Caption tracks for {url} had no fetchable format", url=url)
@@ -326,37 +388,43 @@ def _ordered_caption_tracks(
     tracks: dict[str, list[dict[str, Any]]], language: str
 ) -> list[list[dict[str, Any]]]:
     """Caption format lists, the *language* track first, others after."""
-    preferred = next(
-        (t for name, t in sorted(tracks.items()) if name.startswith(language)),
-        None,
+    ordered = sorted(
+        tracks.items(), key=lambda entry: (not entry[0].startswith(language), entry[0])
     )
-    if preferred is None and len(tracks) == 1:
-        preferred = next(iter(tracks.values()))
-    if preferred is None:
-        return []
-    return [preferred] + [t for t in tracks.values() if t is not preferred]
+    return [formats for _, formats in ordered]
 
 
-def _fetch_track_text(formats: list[dict[str, Any]]) -> str:
+def _fetch_track_text(
+    formats: list[dict[str, Any]], settings: Settings | None = None
+) -> str:
     """One track list's captions as prose, trying json3, srt, then vtt."""
     for wanted in ("json3", "srt", "vtt"):
-        track = next((f for f in formats if f.get("ext") == wanted), None)
-        if track is None:
-            continue
-        text = _fetch_captions(str(track.get("url") or ""))
-        if text:
-            return _paragraph(text if wanted == "json3" else _strip_vtt(text))
+        for track in (format for format in formats if format.get("ext") == wanted):
+            track_url = str(track.get("url") or "")
+            text = _fetch_captions(track_url, settings)
+            if text and not text.lstrip().startswith("#EXTM3U"):
+                parsed = _paragraph(
+                    _join_json3(text) if wanted == "json3" else _strip_vtt(text)
+                )
+                if parsed:
+                    return parsed
     return ""
 
 
-def _fetch_captions(track_url: str) -> str:
-    """Download one caption track, "" on any failure (fail-soft)."""
+def _fetch_captions(track_url: str, settings: Settings | None = None) -> str:
+    """Fetch a caption body, "" on ordinary failures; no browser impersonation.
+
+    Supplied settings use the page/extractor proxy and timeout floor (2s).
+    Without settings, uses a 10s HTTPX timeout and no proxy.
+    The body is downloaded in full; transcript preview limits are not byte caps.
+    """
     if not track_url:
         return ""
     try:
         response = httpx.get(
             track_url,
-            timeout=10.0,
+            timeout=max(settings.web_search_timeout, 2.0) if settings else 10.0,
+            proxy=settings.web_search_proxy if settings else None,
             headers={"User-Agent": "Mozilla/5.0"},
             follow_redirects=True,
         )
@@ -368,19 +436,27 @@ def _fetch_captions(track_url: str) -> str:
 
 
 def _strip_vtt(vtt: str) -> str:
-    """Cue text lines from a WebVTT/SRT body, one cue per line."""
+    """Best-effort WebVTT/SRT cue text, without metadata blocks or tags."""
     lines: list[str] = []
-    for line in vtt.splitlines():
-        stripped = line.strip()
-        if (
-            not stripped
-            or stripped.startswith(("WEBVTT", "#"))
-            or "-->" in stripped
-            or re.fullmatch(r"\d{1,2}:\d{2}:\d{2}[.,]\d{3}", stripped)
-            or stripped.isdigit()
-        ):
+    normalized = vtt.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    for block in re.split(r"\n[ \t]*\n", normalized):
+        if re.match(r"(?:NOTE|STYLE|REGION)(?:\s|$)", block.lstrip()):
             continue
-        lines.append(stripped)
+        cue_lines = block.splitlines()
+        cue_start = next((i + 1 for i, line in enumerate(cue_lines) if "-->" in line), 0)
+        if not cue_start and block.lstrip().startswith("WEBVTT"):
+            continue
+        for line in cue_lines[cue_start:]:
+            stripped = line.strip()
+            if (
+                not stripped
+                or stripped.startswith(("WEBVTT", "#"))
+                or "-->" in stripped
+                or re.fullmatch(r"\d{1,2}:\d{2}:\d{2}[.,]\d{3}", stripped)
+                or stripped.isdigit()
+            ):
+                continue
+            lines.append(unescape(_TAG_RE.sub("", stripped)))
     return " ".join(lines)
 
 
@@ -394,12 +470,7 @@ def _paragraph(caption_text: str) -> str:
     stays whole: truncation/spill is the envelope's job
     (:func:`transcript_fields`).
     """
-    joined = (
-        _join_json3(caption_text)
-        if caption_text.lstrip().startswith("{")
-        else (caption_text)
-    )
-    joined = re.sub(r"\s+", " ", joined).strip()
+    joined = re.sub(r"\s+", " ", caption_text).strip()
     sentences = _SENTENCE_END_RE.split(joined)
     paragraphs = [
         " ".join(sentences[i : i + _PARAGRAPH_SENTENCES]).strip()
@@ -409,16 +480,35 @@ def _paragraph(caption_text: str) -> str:
 
 
 def _join_json3(caption_text: str) -> str:
-    """The utf8 segments of a json3 caption body, "" on a parse failure."""
+    """Join json3 utf8 segments, or "" for malformed JSON/data shapes."""
     try:
-        data: dict[str, Any] = json.loads(caption_text)
+        data = json.loads(caption_text)
     except json.JSONDecodeError:
         return ""
-    parts = [
-        "".join(seg.get("utf8", "") for seg in cast("list[Any]", ev.get("segs")) or [])
-        for ev in cast("list[Any]", data.get("events") or [])
-    ]
-    return " ".join(part.strip() for part in parts if part.strip())
+    if not isinstance(data, dict):
+        return ""
+    events = cast("dict[str, Any]", data).get("events")
+    if not isinstance(events, list):
+        return ""
+    parts: list[str] = []
+    for event in events:
+        if not isinstance(event, dict):
+            return ""
+        segments = cast("dict[str, Any]", event).get("segs", [])
+        if not isinstance(segments, list):
+            return ""
+        chunks: list[str] = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                return ""
+            text = cast("dict[str, Any]", segment).get("utf8", "")
+            if not isinstance(text, str):
+                return ""
+            chunks.append(text)
+        part = "".join(chunks).strip()
+        if part:
+            parts.append(part)
+    return " ".join(parts)
 
 
 def _fetch(url: str, settings: Settings) -> Any:
@@ -437,14 +527,21 @@ def _fetch(url: str, settings: Settings) -> Any:
 
 
 def _to_text(response: Any) -> str:
-    """Return the response body as stripped readable text."""
+    """Preserve non-HTML decoded bodies; best-effort tag stripping for HTML.
+
+    HTML conversion does not render CSS/JavaScript or establish visibility.
+    """
     try:
         text = response.text or ""
     except Exception:
         return "(no readable body)"
 
-    content_type = response.headers.get("content-type", "")
-    stripped = text if "json" in content_type else _TAG_RE.sub(" ", text)
+    content_type = (
+        response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    )
+    if content_type not in ("text/html", "application/xhtml+xml"):
+        return text
+    stripped = _TAG_RE.sub(" ", text)
 
     collapsed = _WHITESPACE_RE.sub(" ", stripped)
     return collapsed.strip() or "(no readable text on page)"

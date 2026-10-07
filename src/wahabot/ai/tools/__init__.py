@@ -43,9 +43,9 @@ def build_default_tools(
     Tools resolve the current run's session/chat target and delivery
     latches through the run-scoped binding (``bind_target``), so one
     toolset safely serves concurrent runs across different chats.
-    ``escalation_channel`` carries the per-agent operator target and
-    cooldowns; a fresh one is created when the caller has none to share
-    (tests, one-off agents).
+    ``escalation_channel`` carries in-memory cooldowns and reads the
+    current operator target from live status state; a fresh channel is
+    created when the caller has none to share (tests, one-off agents).
     """
     if settings is None:
         from wahabot.settings import get_settings

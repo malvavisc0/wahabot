@@ -81,8 +81,9 @@ def validate_tool_kwargs(tool: BaseTool, tool_kwargs: dict[str, Any]) -> str | N
     """A model-facing error message for bad tool arguments, or None.
 
     Two checks, cheapest first: the function signature (catches unknown
-    and missing arguments) and the pydantic schema (catches wrong
-    argument *types* the signature can't see). Both produce the
+    and missing arguments) and strict pydantic validation (catches wrong
+    types without accepting coerced values the callable never receives).
+    Both produce the
     ``{"ok": false, "error": ...}`` envelope shape every tool already
     uses, with the valid argument names listed so the model can retry
     with corrected arguments — the raw ``TypeError`` it replaced named
@@ -101,7 +102,7 @@ def validate_tool_kwargs(tool: BaseTool, tool_kwargs: dict[str, Any]) -> str | N
     if schema is None:
         return None
     try:
-        schema.model_validate(tool_kwargs)
+        schema.model_validate(tool_kwargs, strict=True)
     except pydantic.ValidationError as exc:
         details = "; ".join(
             f"{'.'.join(str(loc) for loc in error['loc'])}: {error['msg']}"

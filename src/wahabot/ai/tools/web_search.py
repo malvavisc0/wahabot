@@ -14,7 +14,7 @@ result count and an optional proxy without touching code.
 import json
 import shutil
 import subprocess
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -27,10 +27,8 @@ __all__ = ["web_search"]
 _MIN_TIMEOUT_SECONDS = 2.0
 
 #: Cap on one search result's inline ``content`` snippet. webserp's
-#: snippets are the only unbounded field across all tools — every other
-#: payload self-limits at its source. The inline cap keeps the envelope
-#: small, but the full findings ride a spill file when any snippet was
-#: cut, so nothing is silently lost (see :func:`_spill_findings`).
+#: snippets are previewed inline. When one is cut, the selected findings
+#: attempt a full-text spill; failed writes leave only the preview.
 _MAX_CONTENT_CHARS = 600
 
 
@@ -39,19 +37,20 @@ def web_search(
     query: str,
     max_results: int | None = None,
 ) -> str:
-    """Search the web via webserp and return normalised results as text.
+    """Search via webserp and return a normalized JSON envelope.
 
     Args:
         query: Search query text.
-        max_results: Maximum results to return. Defaults to
+        max_results: Maximum total valid findings across all engines. Defaults to
             ``WAHABOT_WEB_SEARCH_MAX_RESULTS``.
 
     Returns:
         A JSON envelope with a ``results`` list of findings (inline
         snippets capped at ``_MAX_CONTENT_CHARS``), or an ``error``
         envelope (a failure never raises). When any snippet was cut,
-        the full findings also ride ``file`` (a temp JSON file) so the
-        model can read the rest via the shell tool.
+        selected findings attempt a full-content ``file`` spill. The
+        model can read it only if the shell tool is available; missing
+        file metadata means the spill failed.
     """
     if not query.strip():
         return error("query cannot be empty")
@@ -65,7 +64,7 @@ def web_search(
             timeout=settings.web_search_timeout,
             proxy=settings.web_search_proxy,
         )
-        findings, raw_results = _parse_output(output)
+        findings, raw_results, failures = _parse_output(output, max_results=limit)
     except Exception as exc:
         logger.warning("web_search failed: {exc}", exc=exc)
         return error(f"web_search failed: {exc}")
@@ -74,6 +73,13 @@ def web_search(
         "count": len(findings),
         "results": findings,
     }
+    if failures:
+        payload.update(partial=True, failed_engines=failures)
+        if not findings:
+            return error(
+                "no findings returned and search engines failed; search was incomplete",
+                **payload,
+            )
     payload.update(_spill_findings(query, raw_results, findings))
     return ok(**payload)
 
@@ -87,16 +93,20 @@ def _run_webserp(
 ) -> str:
     """Invoke the webserp CLI and return stdout as a string.
 
-    Raises on a missing binary, non-zero exit, or timeout — the caller
-    turns those into an error string.
+    webserp's count is per engine; the caller applies the total limit.
+    Its default 10-second per-request timeout is independent of the
+    configured subprocess deadline, allowing partial engines to finish.
+    Missing binary, nonzero exit, or timeout raises to the caller's
+    JSON error-envelope boundary.
     """
     if shutil.which("webserp") is None:
         raise RuntimeError("webserp CLI not found on PATH; install the 'webserp' package")
-    cmd = ["webserp", query, "--max-results", str(max_results)]
+    run_timeout = max(timeout, _MIN_TIMEOUT_SECONDS)
+    cmd = ["webserp", "--max-results", str(max_results)]
     if proxy:
         cmd += ["--proxy", proxy]
+    cmd += ["--", query]
     logger.debug("Running webserp: {cmd}", cmd=" ".join(cmd))
-    run_timeout = max(timeout, _MIN_TIMEOUT_SECONDS)
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -114,24 +124,37 @@ def _run_webserp(
 
 def _parse_output(
     output: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Parse stdout once into inline findings and raw results for spilling."""
+    max_results: int | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
+    """Select at most max_results valid findings, preserving upstream order."""
     try:
         data = json.loads(output)
     except json.JSONDecodeError as exc:
         raise ValueError(f"webserp returned invalid JSON: {exc}") from exc
 
-    raw_results = data.get("results")
+    if not isinstance(data, dict):
+        raise ValueError("webserp output must be a JSON object")
+    parsed = cast(dict[str, Any], data)
+    raw_results = parsed.get("results")
     if not isinstance(raw_results, list):
         raise ValueError("webserp output missing 'results' list")
 
     raw_results = [raw for raw in raw_results if isinstance(raw, dict)]
     findings: list[dict[str, Any]] = []
+    selected: list[dict[str, Any]] = []
     for raw in raw_results:
         finding = _build_finding(raw, cap_content=True)
         if finding is not None:
             findings.append(finding)
-    return findings, raw_results
+            selected.append(raw)
+            if max_results is not None and len(findings) >= max_results:
+                break
+    failures = [
+        {"engine": str(item[0])[:80], "error": str(item[1])[:200]}
+        for item in (parsed.get("unresponsive_engines") or [])
+        if isinstance(item, list) and len(item) >= 2
+    ][:20]
+    return findings, selected, failures
 
 
 def _spill_findings(
@@ -173,10 +196,11 @@ def _build_finding(
     """
     url = raw.get("url")
     title = raw.get("title")
-    if not url or not title:
+    if not isinstance(url, str) or not url or not isinstance(title, str) or not title:
         return None
     finding: dict[str, Any] = {"url": url, "title": title}
-    if content := raw.get("content"):
+    content = raw.get("content")
+    if isinstance(content, str) and content:
         if cap_content and len(content) > _MAX_CONTENT_CHARS:
             finding["content"] = content[:_MAX_CONTENT_CHARS]
             finding["content_truncated"] = True

@@ -1402,6 +1402,7 @@ def _run_failing_delivery_case(
         failing_bot.post(waha_event(mid))
     assert _wait(lambda: calls["count"] >= 1), tool  # the tool's send raised
     assert _wait(lambda: len(llm.requests) >= 2), tool  # the envelope looped back
+    assert "delivery was not confirmed" in str(llm.requests[1]["messages"]), tool
     if record is not None:  # the tool's own send never landed
         assert not getattr(failing_bot.waha, record), (tool, record)
     if tool == "send_message":  # the failed tool text must not ride along
@@ -2259,6 +2260,8 @@ def test_escalate_cooldown(bot: Bot) -> None:
     assert self_sent_after == self_sent_before
     cooldown_feedback = str(llm.requests[1]["messages"] if len(llm.requests) > 1 else [])
     assert "cooldown" in cooldown_feedback
+    assert "an earlier report from this chat was forwarded" in cooldown_feedback
+    assert "this new report was not forwarded" in cooldown_feedback
 
 
 def test_journal_covers_every_path(bot: Bot) -> None:
@@ -2346,7 +2349,7 @@ def test_escalate_fail_soft(tmp_path: Path) -> None:
         outcome = str(esc_fn(report="help"))
     finally:
         reset_target(token)
-    assert '"ok": false' in outcome and "did NOT go through" in outcome
+    assert '"ok": false' in outcome and "delivery was not confirmed" in outcome
     assert down_channel.cooldown_refusal(PC) is None
     down_channel.stamp(PC)
     assert (

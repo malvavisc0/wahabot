@@ -620,11 +620,12 @@ def last_user_turn(groups: list[list[ChatMessage]]) -> list[ChatMessage]:
 FRESH_TURNS = 2
 
 #: Tool-result keys that survive degradation. ``ok``/``error``/``outcome``
-#: are the verdict ("it worked", "it failed why"); ``chat`` identifies the
+#: are the verdict ("it ran", "it failed why"); ``exit_code`` preserves
+#: whether a completed shell command actually succeeded. ``chat`` identifies the
 #: delivered conversation; ``tool``/``error`` text keeps failure diagnosis.
 #: Everything else — ``stdout`` dumps, message lists, page text — is the
 #: payload the model already consumed when the run was live.
-VERDICT_KEYS = ("ok", "error", "outcome", "chat", "tool")
+VERDICT_KEYS = ("ok", "error", "outcome", "chat", "tool", "exit_code", "capture_errors")
 
 #: Tool-call keys that survive degradation. ``reason`` is the audit
 #: trail's one-line "what and why" (every tool takes it); everything

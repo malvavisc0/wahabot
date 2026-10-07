@@ -27,7 +27,8 @@ def error(message: str, **payload: Any) -> str:
     """The failure envelope: ``{"ok": false, "error": message, ...payload}``.
 
     *payload* is for context worth preserving even on failure — e.g. a
-    shell command that timed out still reports its exit code, captured
-    partial output and spill file so nothing already captured is lost.
+    timed-out shell command includes available partial output and spill
+    metadata, but has no confirmed exit_code. ``ok`` describes tool
+    execution; a completed shell command's own success uses exit_code.
     """
     return json.dumps({"ok": False, "error": message, **payload}, ensure_ascii=False)

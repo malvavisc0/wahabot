@@ -500,6 +500,21 @@ def test_roster_and_summarize_chat() -> None:
     assert summary["participants"] == 2
 
 
+def test_chat_metadata_preserves_known_false_and_zero_fields() -> None:
+    summary = summarize_chat(
+        CHAT_ID, {"id": CHAT_ID, "isReadOnly": False, "unreadCount": 0}
+    )
+    assert summary["isReadOnly"] is False
+    assert summary["unreadCount"] == 0
+    assert "participants" not in summary
+    assert "participant_list" not in summary
+    roster = [{"id": f"{100000 + i}@lid"} for i in range(21)]
+    assert "participant_list" in summarize_chat(CHAT_ID, {"participants": roster[:20]})
+    large = summarize_chat(CHAT_ID, {"participants": roster})
+    assert large["participants"] == 21
+    assert "participant_list" not in large
+
+
 def test_chat_jid_resolution() -> None:
     holder = {"chat_id": CHAT_ID}
     assert chat_jid(None, holder) == CHAT_ID
@@ -922,6 +937,35 @@ def test_run_tool_call_returns_envelope_for_bad_arguments() -> None:
     assert "message_id: Input should be a valid string" in str(message.content)
 
 
+def test_tool_validation_rejects_coercion_before_execution() -> None:
+    from pydantic import BaseModel
+
+    from wahabot.ai.workflow.toolkit import run_tool_call
+
+    class CountSchema(BaseModel):
+        count: int
+
+    called: list[int] = []
+
+    def count_fn(count: int) -> str:
+        called.append(count)
+        return '{"ok": true}'
+
+    tool = FunctionTool.from_defaults(
+        fn=count_fn, fn_schema=CountSchema, name="count", description="Count."
+    )
+    selection = ToolSelection(
+        tool_id="count", tool_name="count", tool_kwargs={"count": "5"}
+    )
+    outcome = asyncio.run(run_tool_call({"count": tool}, selection))
+    assert json.loads(str(outcome.content))["ok"] is False
+    assert called == []
+    selection.tool_kwargs = {"count": 5}
+    outcome = asyncio.run(run_tool_call({"count": tool}, selection))
+    assert json.loads(str(outcome.content))["ok"] is True
+    assert called == [5]
+
+
 def test_run_tool_call_wraps_runtime_exceptions_in_envelope() -> None:
     """A tool that raises gets the ``ok: false`` envelope, with the error text.
 
@@ -1215,6 +1259,12 @@ def test_squeeze_tool_result_keeps_verdict_only() -> None:
         role=MessageRole.TOOL, content='{"ok": true, "chat": "c@g.us"}'
     )
     assert squeeze_tool_result(already_small).content == already_small.content
+    failed_command = ChatMessage(
+        role=MessageRole.TOOL,
+        content=json.dumps({"ok": True, "exit_code": 7, "stdout": "x" * 2000}),
+    )
+    verdict = json.loads(str(squeeze_tool_result(failed_command).content))
+    assert verdict == {"ok": True, "exit_code": 7}
 
 
 def test_degrade_message_squeezes_old_tool_call_kwargs() -> None:
@@ -1567,7 +1617,7 @@ def test_visit_url_youtube_inlines_transcript(unit_settings: Settings) -> None:
     }
     fetched: list[str] = []
 
-    def fake_captions(track_url: str) -> str:
+    def fake_captions(track_url: str, settings: Settings | None = None) -> str:
         fetched.append(track_url)
         return f"WEBVTT\n\n00:00:00.000 --> 00:00:03.000\n{long_cue}"
 
@@ -1643,7 +1693,7 @@ def test_visit_url_media_skips_playlist_info(unit_settings: Settings) -> None:
     assert result == {
         "ok": True,
         "source": "yt-dlp",
-        "kind": "video",
+        "kind": "post",
         "url": "https://www.instagram.com/p/abc/",
         "title": "Post by camiloromero",
         "description": "a political caption",
@@ -1651,6 +1701,7 @@ def test_visit_url_media_skips_playlist_info(unit_settings: Settings) -> None:
         "duration_s": None,
         "view_count": None,
         "id": "DdXprrXGx5e",
+        "item_count": 3,
     }
 
 
@@ -1735,6 +1786,103 @@ def test_visit_url_short_page_stays_inline(unit_settings: Settings) -> None:
     assert result["truncated"] is False
     assert result["text"] == "just a couple of words"
     assert "file" not in result
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body"),
+    [
+        ("application/json", '{"text": "two  spaces and <tag>", "lines": "a\\nb"}'),
+        ("text/plain", "  Text with <tag> and\n\nspacing.  "),
+    ],
+)
+def test_visit_url_non_html_preserves_response_text(
+    unit_settings: Settings, content_type: str, body: str
+) -> None:
+    from wahabot.ai.tools.visit_url import visit_url
+
+    response = unittest.mock.Mock(
+        url="https://page.invalid/data",
+        status_code=200,
+        text=body,
+        headers={"content-type": content_type},
+    )
+    with unittest.mock.patch("wahabot.ai.tools.visit_url._fetch", return_value=response):
+        result = json.loads(visit_url(unit_settings, response.url))
+    assert result["text"] == body
+
+
+def test_caption_fetch_uses_configured_proxy_and_timeout(unit_settings: Settings) -> None:
+    from wahabot.ai.tools.visit_url import (
+        _fetch_captions,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    settings = unit_settings.model_copy(
+        update={
+            "web_search_proxy": "http://proxy.invalid:8080",
+            "web_search_timeout": 3.5,
+        }
+    )
+    response = unittest.mock.Mock(text="captions")
+    with unittest.mock.patch(
+        "wahabot.ai.tools.visit_url.httpx.get", return_value=response
+    ) as get:
+        assert _fetch_captions("https://captions.invalid/data", settings) == "captions"
+    assert get.call_args.kwargs["proxy"] == settings.web_search_proxy
+    assert get.call_args.kwargs["timeout"] == 3.5
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "[]",
+        '{"events": [null]}',
+        '{"events": "bad"}',
+        '{"events": [{"segs": {}}]}',
+        '{"events": [{"segs": [null]}]}',
+        '{"events": [{"segs": [{"utf8": 5}]}]}',
+    ],
+)
+def test_malformed_caption_json_fails_soft(body: str) -> None:
+    from wahabot.ai.tools.visit_url import (
+        _join_json3,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    assert _join_json3(body) == ""
+
+
+def test_caption_vtt_blocks_and_markup_are_not_speech() -> None:
+    from wahabot.ai.tools.visit_url import (
+        _strip_vtt,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    text = (
+        "WEBVTT\n\nNOTE ignored\nnot speech\n\nSTYLE\n::cue {color:red}\n\n"
+        "00:00:00.000 --> 00:00:01.000\n<v Speaker><b>Hello</b> &amp; goodbye.\n"
+    )
+    assert _strip_vtt(text) == "Hello & goodbye."
+
+
+def test_post_metadata_keeps_fractional_duration_and_bounds_entries(
+    unit_settings: Settings,
+) -> None:
+    from wahabot.ai.tools.visit_url import visit_url
+
+    fetched: list[int] = []
+
+    def entries() -> Any:
+        for i in range(200):
+            fetched.append(i)
+            yield {"id": str(i), "duration": 0.25}
+
+    info = {"title": "Many items", "id": "post", "entries": entries()}
+    with unittest.mock.patch(
+        "wahabot.ai.tools.visit_url.yt_dlp.YoutubeDL", _fake_ydl(info)
+    ):
+        result = json.loads(visit_url(unit_settings, "https://instagram.com/p/many/"))
+    assert result["kind"] == "post"
+    assert result["item_count"] == 100 and result["item_count_truncated"] is True
+    assert result["duration_s"] == 25
+    assert len(fetched) == 101
 
 
 def test_shell_result_spills_over_cap() -> None:
@@ -1847,11 +1995,99 @@ def test_shell_timeout_keeps_partial_output() -> None:
     assert rendered["truncated"] is False
 
 
+def test_shell_timeout_covers_process_after_output_eof(unit_settings: Settings) -> None:
+    settings = unit_settings.model_copy(update={"shell_timeout": 1})
+    started = time.monotonic()
+    rendered = json.loads(
+        shell_command(settings, "printf started; sleep 0.6; exec 1>&- 2>&-; exec sleep 3")
+    )
+    assert time.monotonic() - started < 1.5
+    assert rendered["ok"] is False
+    assert "timed out" in rendered["error"]
+    assert rendered["stdout"] == "started"
+
+
+def test_shell_spill_failure_keeps_exit_and_drains_output(
+    unit_settings: Settings,
+) -> None:
+    settings = unit_settings.model_copy(update={"shell_max_output": 200})
+    with unittest.mock.patch(
+        "wahabot.ai.tools.shell.open_byte_output", side_effect=OSError("disk unavailable")
+    ) as spill:
+        result = json.loads(shell_command(settings, "printf '%010000d' 1; exit 7"))
+    assert result["ok"] is True and result["exit_code"] == 7
+    assert result["stdout"] == "0" * 200
+    assert result["truncated"] is True
+    assert "disk unavailable" in result["capture_errors"]["stdout"]
+    assert "file" not in result
+    spill.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", ["seed", "overflow", "later", "close"])
+def test_shell_failed_spills_are_not_published(failure: str, tmp_path: Path) -> None:
+    from wahabot.ai.tools.shell import (
+        _StreamSink,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    handle = unittest.mock.Mock()
+    if failure == "close":
+        handle.close.side_effect = OSError("flush failed")
+    else:
+        before = {"seed": 0, "overflow": 1, "later": 2}[failure]
+        handle.write.side_effect = [None] * before + [OSError("write failed")]
+    meta = {"path": str(tmp_path / "incomplete.txt"), "bytes": 0}
+    sink = _StreamSink("test", 10)
+    with unittest.mock.patch(
+        "wahabot.ai.tools.shell.open_byte_output", return_value=(handle, meta)
+    ) as spill:
+        sink.append(b"x" * 20)
+        sink.append(b"later")
+        assert sink.file_meta() is None
+        writes = handle.write.call_count
+        sink.append(b"discarded")
+        assert handle.write.call_count == writes
+    spill.assert_called_once()
+    assert sink.text == "x" * 10
+    assert sink.truncated is True and sink.capture_error is not None
+
+
+def test_shell_preview_byte_limit_handles_multibyte_text() -> None:
+    from wahabot.ai.tools.shell import (
+        _StreamSink,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    raw = (" " + "\u00e9" * 101).encode()
+    sink = _StreamSink("unicode", 200)
+    sink.append(raw)
+    assert sink.text.strip() == raw[:200].decode(errors="replace").strip()
+    assert sink.text.endswith("\ufffd")
+    meta = sink.file_meta()
+    assert meta is not None and Path(meta["path"]).read_bytes() == raw
+    assert sink.capture_error is None
+
+
+def test_shell_pipe_read_failure_preserves_available_preview() -> None:
+    from wahabot.ai.tools.shell import (
+        _start_reader,  # pyright: ignore[reportPrivateUsage]
+        _StreamSink,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    stream = unittest.mock.Mock()
+    stream.read.side_effect = [b"started", OSError("pipe failed")]
+    sink = _StreamSink("read", 200)
+    reader = _start_reader(stream, sink)
+    reader.join(timeout=2)
+    assert not reader.is_alive()
+    assert sink.text == "started"
+    assert sink.truncated is True
+    assert sink.capture_error is not None and "pipe failed" in sink.capture_error
+    assert sink.file_meta() is None
+
+
 def test_web_search_spills_cut_snippets(unit_settings: Settings) -> None:
     """A snippet cut past the inline cap is not lost: full text on file.
 
-    webserp's snippets are the one unbounded payload field; the inline
-    cap keeps the envelope small, and a cut snippet is flagged
+    The inline content cap keeps the envelope small; a cut snippet is flagged
     `content_truncated` with the *full* findings riding `file` so the
     model can read the rest via the shell tool.
     """
@@ -1907,13 +2143,93 @@ def test_web_search_short_snippets_stay_inline(unit_settings: Settings) -> None:
     assert "content_truncated" not in result["results"][0]
 
 
+def test_web_search_caps_total_valid_results_and_spill(unit_settings: Settings) -> None:
+    from wahabot.ai.tools import web_search as search
+
+    raw = [{"title": "invalid", "url": None}] + [
+        {"title": f"Hit {i}", "url": f"https://page.invalid/{i}", "content": "x" * 700}
+        for i in range(5)
+    ]
+    with (
+        unittest.mock.patch.object(
+            search, "_run_webserp", return_value=json.dumps({"results": raw})
+        ),
+        unittest.mock.patch.object(search, "write_json_output") as spill,
+    ):
+        spill.return_value = {"path": "/tmp/mock-search.json"}
+        result = json.loads(search.web_search(unit_settings, "q", max_results=2))
+    assert result["count"] == 2
+    assert [hit["title"] for hit in result["results"]] == ["Hit 0", "Hit 1"]
+    stored = spill.call_args.args[1]["results"]
+    assert len(stored) == 2 and stored[0]["content"] == "x" * 700
+
+
+@pytest.mark.parametrize("has_results", [True, False])
+def test_web_search_exposes_incomplete_engine_results(
+    unit_settings: Settings, has_results: bool
+) -> None:
+    from wahabot.ai.tools import web_search as search
+
+    output = {
+        "results": [{"url": "https://page.invalid/", "title": "Hit"}]
+        if has_results
+        else [],
+        "unresponsive_engines": [["google", "timeout"], ["brave", "blocked"]],
+    }
+    with unittest.mock.patch.object(
+        search, "_run_webserp", return_value=json.dumps(output)
+    ):
+        result = json.loads(search.web_search(unit_settings, "query"))
+    assert result["ok"] is has_results
+    assert result["partial"] is True
+    assert result["failed_engines"] == [
+        {"engine": "google", "error": "timeout"},
+        {"engine": "brave", "error": "blocked"},
+    ]
+
+
+def test_web_search_cli_treats_option_shaped_query_as_data() -> None:
+    from wahabot.ai.tools.web_search import (
+        _run_webserp,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    with (
+        unittest.mock.patch(
+            "wahabot.ai.tools.web_search.shutil.which", return_value="/bin/webserp"
+        ),
+        unittest.mock.patch("wahabot.ai.tools.web_search.subprocess.run") as run,
+    ):
+        run.return_value = unittest.mock.Mock(returncode=0, stdout="{}")
+        assert (
+            _run_webserp(query="--version", max_results=2, timeout=2.5, proxy=None)
+            == "{}"
+        )
+    command = run.call_args.args[0]
+    assert command[-2:] == ["--", "--version"]
+    assert "--timeout" not in command
+    assert run.call_args.kwargs["timeout"] == 2.5
+
+
+@pytest.mark.parametrize("shell_enabled", [True, False])
+def test_research_tools_document_available_spill_access(
+    unit_settings: Settings, shell_enabled: bool
+) -> None:
+    from wahabot.ai.tools.external import visit_url_builder, web_search_builder
+
+    settings = unit_settings.model_copy(update={"shell_tool": shell_enabled})
+    for tool in (visit_url_builder(settings), web_search_builder(settings)):
+        description = tool.metadata.description
+        assert ("Only previews are accessible" in description) is not shell_enabled
+        assert ("run_shell_command" in description) is shell_enabled
+
+
 @pytest.mark.parametrize(
     ("output", "expected_error"),
     [
         ("{", "webserp returned invalid JSON:"),
         ("{}", "webserp output missing 'results' list"),
         ('{"results": null}', "webserp output missing 'results' list"),
-        ("[]", "'list' object has no attribute 'get'"),
+        ("[]", "webserp output must be a JSON object"),
         (
             json.dumps(
                 {
@@ -1936,8 +2252,8 @@ def test_web_search_parses_output_once(
 
     with (
         unittest.mock.patch.object(web_search_mod, "_run_webserp", return_value=output),
-        unittest.mock.patch.object(
-            web_search_mod.json, "loads", wraps=json.loads
+        unittest.mock.patch(
+            "wahabot.ai.tools.web_search.json.loads", wraps=json.loads
         ) as load,
     ):
         rendered = web_search_mod.web_search(unit_settings, "sample")
@@ -1999,6 +2315,147 @@ def test_visit_url_media_bare_info_retries_processed(unit_settings: Settings) ->
     assert result["title"] == "Bad robot fo' lifes"
     assert result["uploader"] == "RizzBot"
     assert result["duration_s"] == 27.333
+
+
+def test_unresolved_video_retry_falls_back_to_page(unit_settings: Settings) -> None:
+    from wahabot.ai.tools.visit_url import visit_url
+
+    class BareRetryYDL:
+        def __init__(self, opts: Any) -> None:
+            return None
+
+        def __enter__(self) -> BareRetryYDL:
+            return self
+
+        def __exit__(self, *exc: Any) -> None:
+            return None
+
+        def extract_info(self, url: str, download: bool, process: bool = True) -> Any:
+            if process:
+                raise ValueError("metadata retry failed")
+            return {"id": "placeholder", "url": url}
+
+    response = unittest.mock.Mock(
+        url="https://facebook.com/share/r/example/",
+        status_code=200,
+        text="<p>Readable fallback.</p>",
+        headers={"content-type": "text/html"},
+    )
+    with (
+        unittest.mock.patch("wahabot.ai.tools.visit_url.yt_dlp.YoutubeDL", BareRetryYDL),
+        unittest.mock.patch(
+            "wahabot.ai.tools.visit_url._fetch", return_value=response
+        ) as fetch,
+    ):
+        result = json.loads(visit_url(unit_settings, response.url))
+    fetch.assert_called_once()
+    assert result["ok"] is True and result["text"] == "Readable fallback."
+    assert "kind" not in result
+
+
+@pytest.mark.parametrize("url", ["file:///etc/hosts", "not a url", "https://[invalid"])
+def test_visit_url_refuses_non_web_sources(unit_settings: Settings, url: str) -> None:
+    from wahabot.ai.tools.visit_url import visit_url
+
+    with unittest.mock.patch("wahabot.ai.tools.visit_url._fetch") as fetch:
+        result = json.loads(visit_url(unit_settings, url))
+    assert result["ok"] is False and "HTTP(S)" in result["error"]
+    fetch.assert_not_called()
+
+
+def test_youtube_automatic_captions_and_language_fallback(
+    unit_settings: Settings,
+) -> None:
+    from wahabot.ai.tools.visit_url import visit_url
+
+    info = {
+        "title": "Multiple languages",
+        "id": "captions",
+        "description": "x" * 900,
+        "automatic_captions": {
+            "es": [{"ext": "json3", "url": "https://captions.invalid/es"}],
+            "fr": [{"ext": "json3", "url": "https://captions.invalid/fr"}],
+        },
+    }
+    caption = json.dumps({"events": [{"segs": [{"utf8": "Una explicación clara."}]}]})
+    with (
+        unittest.mock.patch(
+            "wahabot.ai.tools.visit_url.yt_dlp.YoutubeDL", _fake_ydl(info)
+        ),
+        unittest.mock.patch(
+            "wahabot.ai.tools.visit_url._fetch_captions", return_value=caption
+        ) as fetch,
+    ):
+        result = json.loads(
+            visit_url(unit_settings, "https://youtube.com/watch?v=captions")
+        )
+    fetch.assert_called_once_with("https://captions.invalid/es", unit_settings)
+    assert result["transcript"] == "Una explicación clara."
+    assert result["description_truncated"] is True
+    assert len(result["description"]) == 800
+
+
+def test_caption_hls_is_not_mistaken_for_transcript() -> None:
+    from wahabot.ai.tools.visit_url import youtube_transcript
+
+    tracks = {"en": [{"ext": "vtt", "url": "https://captions.invalid/playlist"}]}
+    with unittest.mock.patch(
+        "wahabot.ai.tools.visit_url._fetch_captions", return_value="#EXTM3U\nsegment.vtt"
+    ):
+        assert youtube_transcript("https://youtube.com/watch?v=x", tracks) == ""
+
+
+def test_caption_empty_parse_tries_another_available_format() -> None:
+    from wahabot.ai.tools.visit_url import youtube_transcript
+
+    tracks = {
+        "en": [
+            {"ext": "json3", "url": "https://captions.invalid/empty"},
+            {"ext": "vtt", "url": "https://captions.invalid/text"},
+        ]
+    }
+    with unittest.mock.patch(
+        "wahabot.ai.tools.visit_url._fetch_captions",
+        side_effect=["{}", "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nUseful words."],
+    ):
+        assert (
+            youtube_transcript("https://youtube.com/watch?v=x", tracks) == "Useful words."
+        )
+
+
+@pytest.mark.parametrize(
+    "stage", ["_post_info", "_meta_fields", "_attach_caption_tracks", "_paragraph"]
+)
+def test_video_postprocessing_failure_falls_back_to_http(
+    unit_settings: Settings, stage: str
+) -> None:
+    from wahabot.ai.tools.visit_url import visit_url
+
+    info = {
+        "title": "Clip",
+        "entries": [{"duration": 1}],
+        "subtitles": {"en": [{"ext": "vtt", "url": "https://captions.invalid/en"}]},
+    }
+    response = unittest.mock.Mock(
+        url="https://youtube.com/watch?v=fallback",
+        status_code=200,
+        text="<p>Fallback content.</p>",
+        headers={"content-type": "text/html"},
+    )
+    with (
+        unittest.mock.patch(
+            "wahabot.ai.tools.visit_url.yt_dlp.YoutubeDL", _fake_ydl(info)
+        ),
+        unittest.mock.patch(
+            "wahabot.ai.tools.visit_url._fetch_captions", return_value="Words."
+        ),
+        unittest.mock.patch(
+            f"wahabot.ai.tools.visit_url.{stage}", side_effect=ValueError("bad metadata")
+        ),
+        unittest.mock.patch("wahabot.ai.tools.visit_url._fetch", return_value=response),
+    ):
+        result = json.loads(visit_url(unit_settings, response.url))
+    assert result["ok"] is True and result["text"] == "Fallback content."
 
 
 def test_visit_url_media_downloader_error_falls_back(unit_settings: Settings) -> None:
@@ -2357,6 +2814,27 @@ def test_fit_messages_short_list_rides_inline() -> None:
     assert fitted["returned"] == 3
     assert fitted["truncated"] is False
     assert "file" in fitted
+
+
+def test_chat_preview_body_and_message_truncation_are_independent() -> None:
+    with unittest.mock.patch("wahabot.ai.tools.whatsapp.write_json_output") as spill:
+        spill.return_value = {"path": "/tmp/mock-chat.json"}
+        long_body = [{"id": "one", "body": "x" * 300}]
+        fitted = fit_messages(long_body)
+        assert fitted["returned"] == fitted["message_count"] == 1
+        assert fitted["truncated"] is False
+        assert fitted["messages"][0]["body_truncated"] is True
+        assert len(fitted["messages"][0]["body"]) == 201
+        spill.assert_called_once()
+        assert spill.call_args.args[1] == long_body
+        assert fit_messages([]) == {"messages": [], "returned": 0, "truncated": False}
+        spill.assert_called_once()
+    with unittest.mock.patch(
+        "wahabot.ai.tools.whatsapp.write_json_output", side_effect=OSError("unavailable")
+    ):
+        fitted = fit_messages(long_body)
+        assert "file" not in fitted
+        assert fitted["messages"][0]["body_truncated"] is True
 
 
 def test_resolve_last_message_pins_named_chat() -> None:
@@ -2751,9 +3229,37 @@ def test_send_sticker_pads_local_path_before_sending() -> None:
             reset_target(token)
         envelope: dict[str, Any] = json.loads(cast("str", out.content))
         assert envelope["ok"] is True
+        assert envelope["square"] is True
         file = waha.send_sticker.call_args.kwargs["file"]
         with Image.open(io.BytesIO(base64.b64decode(file["data"]))) as im:
             assert im.size == (1360, 1360)
+
+
+def test_remote_sticker_does_not_claim_verified_shape(unit_settings: Settings) -> None:
+    from wahabot.ai.tools.whatsapp import (
+        RunTarget,
+        bind_target,
+        reset_target,
+        send_media,
+    )
+
+    waha = unittest.mock.Mock()
+    waha.send_sticker.return_value = "id"
+    token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID))
+    try:
+        with unittest.mock.patch("wahabot.ai.tools.whatsapp.probe_media_url") as probe:
+            probe.return_value = None
+            out = cast(Any, send_media(waha, unit_settings))(
+                kind="sticker", url="https://media.invalid/wide.webp"
+            )
+    finally:
+        reset_target(token)
+    envelope = json.loads(str(out.content))
+    assert envelope["ok"] is True
+    assert "square" not in envelope
+    assert waha.send_sticker.call_args.kwargs["file"]["url"] == (
+        "https://media.invalid/wide.webp"
+    )
 
 
 @pytest.mark.parametrize(
@@ -2777,7 +3283,7 @@ def test_send_sticker_refuses_bad_paths(
     waha = unittest.mock.Mock()
     token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID))
     try:
-        out = send_media(waha, settings)(kind="sticker", path=str(path))
+        out = cast(Any, send_media(waha, settings))(kind="sticker", path=str(path))
     finally:
         reset_target(token)
     envelope = json.loads(str(out.content))
@@ -2827,6 +3333,18 @@ def test_send_media_rejects_invalid_sources() -> None:
                 "caption": "nope",
             },
             "caption is not supported for kind=sticker",
+        ),
+        (
+            {"kind": "image", "path": "/tmp/image.png", "filename": "renamed.png"},
+            "filename is only valid for kind=file",
+        ),
+        (
+            {"kind": "video", "path": "/tmp/clip.mp4", "language": "es"},
+            "language is only valid for kind=voice with text",
+        ),
+        (
+            {"kind": "voice", "path": "/tmp/note.mp3", "language": "es"},
+            "language is only valid for kind=voice with text",
         ),
     ]
     try:
@@ -3048,6 +3566,20 @@ def test_probe_media_url_refuses_missing() -> None:
     ):
         error = probe_media_url("https://x.invalid/pic.png")
     assert error is not None and "does not exist" in error
+
+
+def test_probe_media_url_retries_head_method_not_allowed() -> None:
+    with (
+        unittest.mock.patch.object(
+            httpx, "head", return_value=unittest.mock.Mock(status_code=405)
+        ),
+        unittest.mock.patch.object(
+            httpx, "get", return_value=unittest.mock.Mock(status_code=404)
+        ) as get,
+    ):
+        error = probe_media_url("https://media.invalid/missing.webp")
+    assert error is not None and "HTTP 404" in error
+    get.assert_called_once()
 
 
 def test_probe_media_url_soft_fails_offline() -> None:
@@ -3841,8 +4373,8 @@ def test_mention_tokens() -> None:
 def test_operator_tools_placeholder_renders() -> None:
     """``{{operator_tools}}`` in the system prompt renders the fence rules.
 
-    The operator-only reach (cross-chat `chat`, `resolve_chat`,
-    `recent_chats`) is stated once in the prompt instead of being
+    The operator-only reach (other chats, contact-book resolution,
+    recent conversations) is stated once in the prompt instead of being
     repeated in every tool description — the render must substitute it
     and never leave the placeholder verbatim, on any turn.
     """
@@ -3850,6 +4382,8 @@ def test_operator_tools_placeholder_renders() -> None:
 
     out = render_system_prompt("Rules:\n{{operator_tools}}")
     assert "reserved to `[operator command]` turns" in out
+    assert "omit `chat` or use its exact JID" in out
+    assert "`escalate` is the fixed-destination operator exception" in out
     assert "{{operator_tools}}" not in out
     # A prompt not carrying the placeholder is untouched.
     plain = render_system_prompt("You are {{bot_name}}.")
@@ -3863,7 +4397,7 @@ def test_resolve_chat_chat_run_matches_roster(unit_settings: Settings) -> None:
     search space is the current chat's participants (the people the
     asker already shares a conversation with), so a participant cannot
     enumerate the operator's contacts. A match returns JID+name for
-    mentions; a miss says the name is not in *this chat*.
+    mentions; a miss says no match was found in available participant names.
     """
     import json as _json
 
@@ -3897,7 +4431,7 @@ def test_resolve_chat_chat_run_matches_roster(unit_settings: Settings) -> None:
     tool = cast(Any, read_chat(cast(Any, RosterWaha()), unit_settings)).fn
     token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID))
     try:
-        hit = _json.loads(tool(mode="resolve", name="alex rivers"))
+        hit = _json.loads(tool(mode="resolve", name="  alex rivers  "))
         miss = _json.loads(tool(mode="resolve", name="Family"))
         outsider = _json.loads(tool(mode="resolve", name="kai's operator friend"))
     finally:
@@ -3905,12 +4439,12 @@ def test_resolve_chat_chat_run_matches_roster(unit_settings: Settings) -> None:
     assert hit["ok"] and hit["matches"] == [
         {"id": "111222333444555@lid", "name": "Alex Rivers"}
     ]
-    assert not miss["ok"] and "no participant in this chat" in miss["error"]
+    assert not miss["ok"] and "available participant names" in miss["error"]
     assert not outsider["ok"]
 
 
 def test_resolve_chat_operator_run_searches_contacts(unit_settings: Settings) -> None:
-    """An operator run keeps the full contact-book search.
+    """An operator run can use the bounded contact-book fallback.
 
     ``wahabot tell`` commands resolve against the operator's chat list
     first (contacts as fallback) — the fence opens for the trusted
@@ -3950,6 +4484,142 @@ def test_resolve_chat_operator_run_searches_contacts(unit_settings: Settings) ->
     assert hit["ok"] and hit["matches"] == [{"id": "491999999999@c.us", "name": "Family"}]
     assert waha.calls == ["chats", "contacts"]
     assert OPERATOR_KEY and OPERATOR_ARMED == "armed"
+
+
+@pytest.mark.parametrize("shell_enabled", [True, False])
+def test_chat_reader_documents_available_spill_access(
+    unit_settings: Settings, shell_enabled: bool
+) -> None:
+    from wahabot.ai.tools import build_default_tools
+
+    settings = unit_settings.model_copy(update={"shell_tool": shell_enabled})
+    tools = build_default_tools(unittest.mock.Mock(), settings)
+    names = {tool.metadata.name for tool in tools}
+    description = next(
+        tool.metadata.description for tool in tools if tool.metadata.name == "read_chat"
+    )
+    assert ("run_shell_command" in names) is shell_enabled
+    assert "not all history" in description
+    assert "body_truncated" in description
+    assert "Never quote unseen content" in description
+    assert ("Only the preview is accessible" in description) is not shell_enabled
+
+
+def test_chat_reader_mode_limits_and_name_caps(unit_settings: Settings) -> None:
+    from wahabot.ai.tools.whatsapp import RunTarget, bind_target, read_chat, reset_target
+
+    waha = unittest.mock.Mock()
+    waha.list_chats.return_value = [
+        {"id": f"{i}@g.us", "name": f"Family {i}"} for i in range(10)
+    ]
+    token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID, armed=True))
+    try:
+        tool = cast(Any, read_chat(waha, unit_settings))
+        recent = json.loads(str(tool(mode="recent", limit=100).content))
+        assert recent["ok"] is True
+        waha.list_chats.assert_called_with(SESSION, limit=30)
+        resolved = json.loads(str(tool(mode="resolve", name="  Family  ").content))
+        assert resolved["ok"] is True and len(resolved["matches"]) == 5
+        waha.list_contacts.assert_not_called()
+        for mode in ("list", "search"):
+            refused = json.loads(str(tool(mode=mode, query="q", limit=0).content))
+            assert refused["ok"] is False and "positive" in refused["error"]
+    finally:
+        reset_target(token)
+    waha.fetch_chat_messages.assert_not_called()
+    waha.search_messages.assert_not_called()
+
+
+def test_chat_search_scans_one_window_and_filters_available_fields() -> None:
+    messages = [
+        {"id": "body", "body": "Needle in body"},
+        {"id": "filename", "media": {"filename": "NEEDLE.pdf"}},
+        {"id": "mimetype", "media": {"mimetype": "text/needle"}},
+        {"id": "nested", "_data": {"media": {"filename": "needle.png"}}},
+        {"id": "attachment", "media": {"content": "needle"}},
+        {"id": "other", "body": "something else"},
+    ]
+    requests: list[httpx.Request] = []
+
+    def window(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=messages)
+
+    waha = WahaClient("http://waha.invalid", "k", transport=httpx.MockTransport(window))
+    matches = waha.search_messages(SESSION, "needle", CHAT_ID, limit=6)
+    assert [message["id"] for message in matches] == [
+        "body",
+        "filename",
+        "mimetype",
+        "nested",
+    ]
+    assert len(requests) == 1
+    assert requests[0].url.path == "/api/messages"
+    assert requests[0].url.params["limit"] == "6"
+    assert "query" not in requests[0].url.params
+
+
+@pytest.mark.parametrize(
+    ("source_chat", "destination", "operator", "allowed"),
+    [
+        (CHAT_ID, CHAT_ID, False, True),
+        (FOREIGN_JID, CHAT_ID, False, False),
+        (CHAT_ID, FOREIGN_JID, False, False),
+        (FOREIGN_JID, FOREIGN_JID, True, True),
+    ],
+)
+def test_forwarding_documents_and_fences_source_and_destination(
+    source_chat: str, destination: str, operator: bool, allowed: bool
+) -> None:
+    from wahabot.ai.tools.whatsapp import (
+        RunTarget,
+        bind_target,
+        forward_message,
+        reset_target,
+    )
+
+    source = f"false_{source_chat}_SOURCE"
+    waha = unittest.mock.Mock()
+    waha.forward_message.return_value = f"true_{destination}_FORWARDED"
+    target = RunTarget(session=SESSION, chat_id=CHAT_ID, armed=operator)
+    token = bind_target(target)
+    try:
+        outcome = cast(Any, forward_message(waha))(message_id=source, chat=destination)
+    finally:
+        reset_target(token)
+    envelope = json.loads(str(outcome.content))
+    assert envelope["ok"] is allowed
+    if allowed:
+        assert envelope["message_id"] == source
+        assert envelope["chat"] == destination
+        assert target.sent == destination
+        waha.forward_message.assert_called_once_with(SESSION, destination, source)
+    else:
+        assert target.sent == ""
+        waha.forward_message.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "message_id",
+    ["sent-as-string", {"_serialized": "sent-nested"}, None, {"_serialized": None}],
+)
+def test_waha_send_ids_accept_documented_shapes(message_id: Any) -> None:
+    expected = (
+        message_id
+        if isinstance(message_id, str)
+        else cast(dict[str, Any], message_id or {}).get("_serialized") or ""
+    )
+
+    def forwarded(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["chatId"] == CHAT_ID
+        assert payload["messageId"] == "source"
+        return httpx.Response(200, json={"id": message_id})
+
+    waha = WahaClient(
+        "http://waha.invalid", "k", transport=httpx.MockTransport(forwarded)
+    )
+    assert waha.forward_message(SESSION, CHAT_ID, "source") == expected
 
 
 def test_resolve_mentions() -> None:
@@ -4005,7 +4675,7 @@ def test_deliver_chat_text_resolves_mentions() -> None:
 
     The handler's final-reply send and the ``send_message`` tool share
     one delivery core: a ``@<number>`` token naming a roster member
-    rides the send as a mention JID (highlight + push), and text
+    rides the send as a mention JID, without verifying notification, and text
     naming nobody mentions nobody. A roster outage fails soft — the
     text still goes out, unmentioned.
     """
@@ -4067,6 +4737,56 @@ def test_deliver_chat_text_resolves_mentions() -> None:
     # A roster outage fails soft: the text still goes out.
     _, mentions, _ = deliver_chat_text(BrokenRosterWaha(), "default", "123@g.us", text)
     assert mentions == []
+
+
+@pytest.mark.parametrize(
+    ("text", "explicit", "expected", "warning"),
+    [
+        (
+            "Hello @491555000001 and @999999999999",
+            None,
+            ["491555000001@c.us"],
+            "auto-resolved",
+        ),
+        (
+            "Hello @Alice",
+            ["491555000001@c.us"],
+            ["491555000001@c.us"],
+            "not confirmed",
+        ),
+        (
+            "Hello @999999999999",
+            ["999999999999@c.us"],
+            ["999999999999@c.us"],
+            "auto-resolved",
+        ),
+    ],
+)
+def test_send_message_warning_does_not_claim_notification_failure(
+    text: str, explicit: list[str] | None, expected: list[str], warning: str
+) -> None:
+    from wahabot.ai.tools.whatsapp import (
+        RunTarget,
+        bind_target,
+        reset_target,
+        send_message,
+    )
+
+    waha = unittest.mock.Mock()
+    waha.get_chat_overview.return_value = {"participants": [{"id": "491555000001@c.us"}]}
+    waha.fetch_chat_messages.return_value = []
+    waha.send_text.return_value = f"true_{CHAT_ID}_SENT"
+    token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID))
+    try:
+        out = cast(Any, send_message(waha))(text=text, mentions=explicit)
+    finally:
+        reset_target(token)
+    envelope = json.loads(str(out.content))
+    assert envelope["ok"] is True
+    assert envelope["mentions"] == expected
+    assert warning in envelope["warning"]
+    assert "nobody was notified" not in envelope["warning"]
+    assert waha.send_text.call_args.kwargs["mentions"] == expected
 
 
 def test_log_action_reason() -> None:
@@ -4138,6 +4858,57 @@ def test_every_tool_takes_a_reason() -> None:
         assert "reason" in inspect.signature(fn).parameters, (
             f"{name}: function missing reason"
         )
+        assert set(schema.model_fields) == set(inspect.signature(fn).parameters), (
+            f"{name}: schema and callable parameters differ"
+        )
+        assert schema.model_fields["reason"].default == ""
+        assert "internal logs" in (schema.model_fields["reason"].description or "")
+        spec = tool.metadata.to_openai_tool()["function"]
+        assert spec["description"] == tool.metadata.description
+        for field, parameter in inspect.signature(fn).parameters.items():
+            if parameter.default is inspect.Parameter.empty:
+                assert schema.model_fields[field].is_required(), (name, field)
+            elif not schema.model_fields[field].is_required():
+                assert schema.model_fields[field].default == parameter.default, (
+                    name,
+                    field,
+                )
+
+
+def test_silence_cancels_other_tools_in_the_same_batch() -> None:
+    from llama_index.core.base.llms.types import ChatResponse
+    from llama_index.core.workflow import StopEvent
+
+    from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+
+    llm = unittest.mock.Mock()
+    llm.metadata.is_function_calling_model = True
+    agent = FunctionCallingAgentWorkflow(llm=llm)
+    response = ChatResponse(message=ChatMessage(role="assistant", content=""))
+    calls = [
+        ToolSelection(
+            tool_id="read", tool_name="read_chat", tool_kwargs={"mode": "list"}
+        ),
+        ToolSelection(
+            tool_id="silent",
+            tool_name="stay_silent",
+            tool_kwargs={"reason": "not invited"},
+        ),
+    ]
+    with (
+        unittest.mock.patch.object(
+            agent, "stop_with", new_callable=unittest.mock.AsyncMock
+        ) as stop,
+        unittest.mock.patch.object(
+            agent, "remember", new_callable=unittest.mock.AsyncMock
+        ) as remember,
+        unittest.mock.patch.object(agent, "log_silence_reason"),
+    ):
+        asyncio.run(agent.route_tool_calls(unittest.mock.Mock(), response, calls, 1))
+        remember.assert_not_called()
+        event = stop.call_args.args[1]
+        assert isinstance(event, StopEvent)
+        assert stop.call_args.kwargs == {"note": False}
 
 
 def test_tool_call_log_extra() -> None:
@@ -4648,13 +5419,13 @@ def test_dispatch_contains_handler_failure() -> None:
 
 
 def test_slim_tool_spec_strips_padding_keeps_semantics() -> None:
-    """Slimming removes ``title``/``anyOf``/``strict`` padding only.
+    """Slimming removes titles/redundant flags and preserves nullable semantics.
 
     The bundled tools ride every request as serialized JSON schemas;
-    Pydantic pads them with auto-generated titles, nullable unions and
-    a redundant ``strict: false`` (~360 tokens of nothing the model
-    reads). The slimmed spec keeps every name, description, default
-    and enum — only the scaffolding goes — and is a deep copy: the
+    Pydantic pads them with auto-generated titles and redundant
+    ``strict: false``. Nullable unions become equivalent type arrays
+    only when unconstrained. Names, descriptions, defaults, and enums
+    survive, and the result is a deep copy: the
     original spec object is never mutated.
     """
     import json as _json
@@ -4702,7 +5473,7 @@ def test_slim_tool_spec_strips_padding_keeps_semantics() -> None:
     params = fn["parameters"]
     assert "title" not in _json.dumps(slimmed)
     assert params["properties"]["chat"] == {
-        "type": "string",
+        "type": ["string", "null"],
         "default": None,
         "description": "Optional chat JID.",
     }
@@ -4711,8 +5482,7 @@ def test_slim_tool_spec_strips_padding_keeps_semantics() -> None:
         "type": "string",
     }
     assert params["properties"]["kind"] == {
-        "enum": ["a", "b"],
-        "type": "string",
+        "anyOf": [{"enum": ["a", "b"], "type": "string"}, {"type": "null"}],
         "default": "a",
     }
     assert params["required"] == ["text"]
@@ -4733,6 +5503,30 @@ def test_slim_tool_spec_strips_padding_keeps_semantics() -> None:
         {"type": "string"},
         {"type": "int"},
     ]
+    nullable_array = slim_tool_spec(
+        {
+            "type": "function",
+            "function": {
+                "name": "array",
+                "strict": True,
+                "parameters": {
+                    "properties": {
+                        "x": {
+                            "anyOf": [
+                                {"type": "array", "items": {"type": "string"}},
+                                {"type": "null"},
+                            ]
+                        }
+                    }
+                },
+            },
+        }
+    )
+    assert nullable_array["function"]["strict"] is True
+    assert nullable_array["function"]["parameters"]["properties"]["x"] == {
+        "type": ["array", "null"],
+        "items": {"type": "string"},
+    }
     # The input spec is untouched.
     assert spec["function"]["parameters"]["properties"]["chat"]["title"] == "Chat"
     assert spec["function"]["strict"] is False
@@ -4799,6 +5593,10 @@ def test_prepared_tool_specs_are_slimmed_and_valid() -> None:
     assert "title" not in all_keys, "title padding survived"
     assert "strict" not in all_keys, "strict flag survived"
     assert "anyOf" not in all_keys, "nullable unions survived"
+    for spec in specs:
+        for field in spec["function"]["parameters"]["properties"].values():
+            if field.get("default", object()) is None:
+                assert "null" in field["type"]
 
     # A slimmed schema still accepts a real call's arguments: a
     # minimal valid call (every optional field at its default, every

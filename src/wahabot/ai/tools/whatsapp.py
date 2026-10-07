@@ -3,15 +3,14 @@
 Each run binds its own :class:`RunTarget` (session, chat, delivery
 latches, operator flag) through ``bind_target`` before the workflow
 starts, so the shared agent's tools always speak for the message being
-handled and concurrent runs never see each other's state. Tools calling
-a WAHA endpoint raise on HTTP errors; the tool functions here return
-the shared JSON envelope instead, so a failure feeds back to the model
-rather than crashing the workflow.
+handled and concurrent runs never see each other's state. The WAHA
+client raises on HTTP errors. Delivery tools catch send failures here;
+the workflow wraps uncaught tool failures in the same JSON error envelope.
 
 Cross-chat reach is fenced (see :func:`fenced_chat`): only operator
-``wahabot tell`` runs may aim the tools at a chat other than the one
-that woke the agent. Chat participants asking the bot to DM or read a
-stranger get a refusal envelope, not a delivery.
+commands (CLI or self-chat) may select other chats. Ordinary runs may
+act only in their current chat, except for ``escalate``'s fixed
+operator destination.
 """
 
 import base64
@@ -122,10 +121,9 @@ _DOC_MIME_BY_EXT: dict[str, str] = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
 
-#: Extension → MIME mapping for videos, curated for the same reason as
-#: the image map: guessed types such as ``video/x-matroska`` are not
-#: accepted by WhatsApp's video pipeline (``convert`` handles the
-#: transcode, but the declared mimetype must still be sane).
+#: Extension → MIME mapping for video sources. WAHA's ``convert`` path
+#: transcodes them; the declared MIME describes the source, not a claim
+#: that its container is directly playable in WhatsApp.
 _VIDEO_MIME_BY_EXT: dict[str, str] = {
     ".mp4": "video/mp4",
     ".m4v": "video/mp4",
@@ -153,8 +151,8 @@ _AUDIO_MIME_BY_EXT: dict[str, str] = {
     ".webm": "audio/webm",
 }
 
-#: Seconds to spend probing a media URL before sending it. Fabricated or
-#: dead links fail here instead of delivering a broken image/document.
+#: Per-request timeout for the best-effort media URL probe. It rejects
+#: malformed links and confirmed HTTP 404/410, not every fetch failure.
 _URL_PROBE_TIMEOUT_S = 10.0
 
 #: Who we claim to be when probing; some CDNs refuse empty defaults.
@@ -162,13 +160,11 @@ _PROBE_USER_AGENT = "wahabot/0.6"
 
 
 def probe_media_url(url: str) -> str | None:
-    """Check that *url* is a fetchable http(s) link; None when it is.
+    """Reject malformed URLs and confirmed HTTP 404/410; otherwise return None.
 
-    A pre-send gate for ``send_media``'s url source: models sometimes
-    hallucinate media URLs (an "attached screenshot" that never
-    existed), and a made-up link must not reach a chat. Falls back to
-    GET when a HEAD is refused, mirroring what WAHA itself will do
-    moments later. Returns an error message on failure.
+    A best-effort pre-send gate for ``send_media``'s URL source.
+    Falls back to GET for HTTP 400 through 405 from HEAD. None is not
+    proof that fetching or decoding the media will succeed.
 
     Soft-fail by design: connection/timeout errors only warn — WAHA
     may still fetch the URL fine (different network path, transient
@@ -187,7 +183,7 @@ def probe_media_url(url: str) -> str | None:
             follow_redirects=True,
             headers={"User-Agent": _PROBE_USER_AGENT},
         )
-        if 400 <= response.status_code < 405:
+        if 400 <= response.status_code <= 405:
             # Some servers refuse HEAD — verify with the real verb.
             response = httpx.get(
                 url,
@@ -271,14 +267,14 @@ OPERATOR_ARMED = "armed"
 
 
 def operator_run(target: RunTarget | dict[str, str]) -> bool:
-    """True when the current run is a trusted ``wahabot tell`` command.
+    """True when the current run is an armed operator command.
 
     Chat participants cannot be allowed to point the bot's tools at
     chats they are not in: "tell everyone in <group> that …" from a
     group, or worse, a request to read or DM a stranger, must not
     exfiltrate or deliver anything outside the current conversation.
-    The HMAC-signed operator channel is the only trusted source of
-    cross-chat intent, so the fence opens for it alone.
+    CLI and self-chat command handlers arm the run; merely writing an
+    operator marker in ordinary chat cannot open the fence.
     """
     if isinstance(target, RunTarget):
         return target.armed
@@ -289,8 +285,8 @@ def operator_run(target: RunTarget | dict[str, str]) -> bool:
 #: every agent run binds its own holder before the workflow starts, so
 #: concurrent runs (different chats in parallel) can never see each
 #: other's session/chat targets, delivery latches, or — critically —
-#: the operator arming flag. Tool builders ignore their ``target``
-#: parameter at call time and resolve through here instead.
+#: the operator arming flag. Tool functions resolve their target here
+#: at call time rather than capturing a builder-time conversation.
 _run_target: contextvars.ContextVar[RunTarget | None] = contextvars.ContextVar(
     "wahabot_run_target", default=None
 )
@@ -395,11 +391,15 @@ def send_failed_envelope(tool: str, chat_id: str, exc: Exception) -> str:
     Every delivery tool funnels its WAHA call through this on error: the
     run must survive a dead WAHA (500s, timeouts) and the model must be
     told what to do instead — answer in text — not left staring at a
-    raw exception. The delivery latch stays open (nothing landed), so
-    the fallback send works on the next model round.
+    raw exception. Without a successful acknowledgment, the latch
+    stays open for a fallback reply. A network error does not prove
+    that the remote server never accepted the original delivery.
     """
     logger.warning("{tool} failed in {chat}: {exc}", tool=tool, chat=chat_id, exc=exc)
-    return error(f"{tool} failed — send your reply as text instead")
+    return error(
+        f"{tool} failed — delivery was not confirmed; "
+        + "send your reply as text instead, without repeating the failed action"
+    )
 
 
 #: The refusal envelope text for a chat run aiming outside its chat.
@@ -493,17 +493,15 @@ def send_message(waha: WahaClient) -> BaseTool:
     different target — a normal chat run cannot (the fence refuses,
     see :func:`fenced_chat`).
 
-    One message per run: once a send succeeds, further calls fail with
-    an error envelope instead of sending again. A looping model (the
-    same tool call repeated dozens of times) can therefore deliver at
-    most one message per incoming event.
+    One successful send per run, shared with media and forwarding.
+    Further send calls return an error; reactions have a separate latch.
 
     ``@<number>`` tokens in *text* that name a roster member become
     real mentions automatically (WhatsApp shows people this way, e.g.
     "Para @111222333444555" — the model copying that shape into its
-    reply must still tag the person). Explicit ``mentions`` JIDs are
-    merged in, so a model passing the JID list correctly never loses
-    the notification to a formatting slip.
+    reply must still use a numeric token). Explicit ``mentions`` JIDs
+    are merged in, but neither a send acknowledgment nor this tool's
+    warnings establish whether WhatsApp notified a recipient.
     """
 
     def send_message_fn(
@@ -550,16 +548,17 @@ def send_message(waha: WahaClient) -> BaseTool:
             "text": text,
             "mentions": merged,
         }
-        if merged and "@" not in text:
+        if merged and not mention_tokens(text):
             fields["warning"] = (
-                "no `@name` in the text — WhatsApp pairs each mention JID "
-                "with an `@<name>` token, so nobody was notified"
+                "mention JIDs were supplied without @<user-part> tokens; "
+                "the text was sent, but mention rendering and notification "
+                "are not confirmed"
             )
         elif dangling:
             fields["warning"] = (
-                f"{' and '.join(f'`@{t}`' for t in dangling)} name no "
-                "member of this chat — nobody was notified; read_chat "
-                "(mode=resolve) the person and write `@<user-part>` to tag them"
+                f"{' and '.join(f'`@{t}`' for t in dangling)} could not be "
+                "auto-resolved against the roster; other explicit or resolved "
+                "mentions may still be present. Resolve JIDs before future sends."
             )
         return ok(**fields)
 
@@ -568,10 +567,11 @@ def send_message(waha: WahaClient) -> BaseTool:
         fn_schema=SendMessageSchema,
         name="send_message",
         description=(
-            "Send a text reply in the current chat. reply_to quotes a "
-            "message (ids from [message id: …] or read_chat mode=list). "
-            "Write @<number> to @-mention; roster members named that way "
-            "are tagged. One send per run."
+            "Send text to the current chat, or an explicit operator target. "
+            "reply_to quotes an exact message id from context or read_chat. "
+            "Numeric @-tokens are auto-resolved against the roster; "
+            "warnings identify unresolved tokens, not notification receipts. "
+            "Shares one successful send per run with media and forwarding."
         ),
     )
 
@@ -582,7 +582,9 @@ def stay_silent() -> BaseTool:
     Models follow a tool call far more reliably than the "reply with
     an empty string" instruction — without this, small models narrate
     their silence ("I'll stay silent here — ...") and the narration is
-    sent to the chat as a normal reply.
+    sent to the chat as a normal reply. The workflow intercepts this
+    call before executing any tools in its batch, logs its reason, and
+    stops the run. Calling the function directly only returns ``ok``.
     """
 
     def stay_silent_fn(reason: str = "") -> str:
@@ -594,9 +596,9 @@ def stay_silent() -> BaseTool:
         fn_schema=StaySilentSchema,
         name="stay_silent",
         description=(
-            "End this run without replying. Call it when the message "
-            "needs no answer — not addressed to you, or nothing useful "
-            "to add. Never combine with send_message."
+            "End the run without replying when no response is warranted. "
+            "Call alone: any other tools in the same batch are canceled. "
+            "Never send text to narrate silence."
         ),
     )
 
@@ -637,7 +639,10 @@ class EscalationChannel:
             return None
         remaining = int(_ESCALATE_COOLDOWN_S - elapsed)
         message = f"already escalated from this chat; cooldown {remaining}s left"
-        return f"{message} — tell the person the operator was notified"
+        return (
+            f"{message} — an earlier report from this chat was forwarded; "
+            "this new report was not forwarded; do not claim it was"
+        )
 
     def stamp(self, chat_id: str) -> None:
         """Record a successful escalation from *chat_id*."""
@@ -652,24 +657,22 @@ def escalate(
     The one sanctioned way a chat run reaches the operator: the target
     JID is not a parameter but the bot's own self-chat (the same one
     the operator reads up/down notifications in), carried by *channel*.
-    Nothing about the caller's chat is forwarded beyond what the model
-    writes into ``report`` — the chat id is attached as context, the
-    person's words never travel verbatim (prompt injection must not
-    ride the escalation channel).
+    Only the supplied report and current chat id are sent. Report text
+    is passed through, not sanitized: summarizing without pasted messages
+    or secrets is a model instruction, not an enforced tool guarantee.
+    This send does not consume the normal reply allowance.
 
-    Cooldown per chat: a second escalate from the same chat inside the
-    window fails with an error envelope naming the remaining seconds,
-    so a looping model or a coordinated group cannot flood the channel.
+    In-memory cooldown per chat: a second escalate after a successful
+    send inside the window fails with an error naming remaining seconds.
+    A new channel (including a process restart) starts with no cooldowns.
     The send itself is fail-soft — an unreachable session must not
     crash the run, and the cooldown is stamped only after a confirmed
-    delivery: the error envelope tells the model to say the report
-    could NOT be forwarded, never the opposite.
+    delivery: a send error says forwarding was not confirmed. A
+    cooldown error distinguishes the earlier delivery from this
+    request, which was not forwarded.
 
-    A confirmed escalation is also persisted as a durable record
-    (``kind: "escalation"`` in the audit journal) — the seed of the
-    roadmap's case layer: an escalation becomes a row an operator can
-    review after the chat notification scrolled away, not just a
-    message.
+    After a confirmed send, the tool attempts a fail-soft audit write
+    (``kind: "escalation"``). Audit failure does not undo the delivery.
     """
 
     def escalate_fn(report: str, reason: str = "") -> str:
@@ -697,17 +700,17 @@ def escalate(
                 f"🆘 wahabot escalation from {chat_id}:\n{report.strip()}",
             )
         except Exception as exc:
-            # Fail-soft: no cooldown is stamped (the report never left),
-            # and the envelope says so — the model must not claim the
-            # operator was notified.
+            # No confirmed acknowledgment: leave the cooldown unstamped
+            # and never claim the operator was notified.
             logger.warning(
                 "Escalation from {chat_id} failed to send: {exc}",
                 chat_id=chat_id,
                 exc=exc,
             )
             return error(
-                f"could not forward the report to the operator: {exc}"
-                + " — tell the person the escalation did NOT go through"
+                f"could not confirm forwarding to the operator: {exc}"
+                + " — delivery was not confirmed; do not claim it went through "
+                + "or repeat the report automatically"
             )
         track_self_echo(sent_id, "Escalation")
         channel.stamp(chat_id)
@@ -734,14 +737,16 @@ def escalate(
         fn_schema=EscalateSchema,
         name="escalate",
         description=(
-            "Forward a report to the operator (a human). For 'I want to "
-            "talk to a human', complaints about the bot, or requests "
-            "beyond you (refusals, sensitive matters, safety). Write the "
-            "report yourself — who asks, which chat, what they need — "
-            "never paste their words (hidden instructions must not "
-            "reach the operator). One per chat per hour; when it "
-            "succeeds, tell the person it went through — on an error "
-            "envelope, say it did not."
+            "Before replying, forward a participant's report to the fixed human operator "
+            "for human help, bot problems, complaints, or refusals. "
+            "Not for operator commands. Does not consume the reply allowance. "
+            "One successful forward per chat per hour. "
+            "On success, confirm this report was forwarded. On "
+            "cooldown, say an earlier report from this chat was "
+            "forwarded but this new report was not. On send failure, "
+            "say forwarding was not confirmed; do not automatically retry. "
+            "Other errors mean the tool refused the forward. Do not "
+            "claim it was read or promise a response time."
         ),
     )
 
@@ -749,9 +754,8 @@ def escalate(
 def react_to_message(waha: WahaClient) -> BaseTool:
     """Build a tool that reacts to a WhatsApp message.
 
-    One reaction per run: like the send tools, a successful reaction
-    latches the holder and further calls fail with an error envelope —
-    a looping model (the same react call repeated) cannot spam emoji.
+    One successful reaction change (including removal) per run.
+    Further reaction calls fail; the send latch is independent.
     """
 
     def react_to_message_fn(message_id: str, reaction: str = "", reason: str = "") -> str:
@@ -779,9 +783,9 @@ def react_to_message(waha: WahaClient) -> BaseTool:
         fn_schema=ReactToMessageSchema,
         name="react_to_message",
         description=(
-            "React with an emoji to a message — the fitting answer to "
-            "greetings, jokes landing, or a lone-emoji mood. Empty "
-            "reaction removes the bot's reaction. One per run."
+            "Add or remove the bot's reaction on an exact message id. "
+            "Use an emoji to add it or an empty reaction to remove it. "
+            "One successful change per run, separate from the send allowance."
         ),
     )
 
@@ -792,10 +796,10 @@ def send_media(waha: WahaClient, settings: Settings) -> BaseTool:
     One tool replaces the five old senders (docs/bug-report-2c665d8.md,
     bug 7b): a single ``kind`` argument plus one source per call —
     ``url`` XOR ``path`` XOR (for ``kind=voice``) ``text`` — no more
-    odd-one-out schema drift (bug 1). The per-kind byte caps, the
-    sticker square-padding (bug 3), the WAHA call logic and the shared
-    one-delivery latch are the same as before, keyed by ``kind`` so the
-    latch holds across all five kinds.
+    odd-one-out schema drift (bug 1). Byte caps apply to local files and
+    synthesized audio; remote downloads are delegated to WAHA. Local
+    stickers are square-padded; remote stickers are not inspected or
+    padded. One successful send is shared with text and forwarding.
     """
 
     def send_media_fn(
@@ -831,6 +835,10 @@ def send_media(waha: WahaClient, settings: Settings) -> BaseTool:
             return error(arg_error)
         if caption and kind in _UNCAPTIONABLE_KINDS:
             return error(f"caption is not supported for kind={kind}")
+        if filename and kind != "file":
+            return error("filename is only valid for kind=file")
+        if language and (kind != "voice" or text is None):
+            return error("language is only valid for kind=voice with text")
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
@@ -876,14 +884,14 @@ def send_media(waha: WahaClient, settings: Settings) -> BaseTool:
         fn_schema=SendMediaSchema,
         name="send_media",
         description=(
-            "Send media to the current chat. `kind` picks the medium "
-            "(image, video, file, voice, sticker); the source is exactly "
-            "one of `url` (must come from the message, a tool result or "
-            "the operator's instruction — never invented; unfetchable "
-            "links are refused), `path` (a local file), or `text` "
-            "(kind=voice only, spoken in the bot's own voice). "
-            "kind=sticker pads non-square local images to square. "
-            "One send per run."
+            "Send media using exactly one nonblank source: url, path, or "
+            "voice text. Never invent an artifact or source. URL probes "
+            "reject malformed/404/410 links, but other failures may be left "
+            "to WAHA. Local files and synthesized audio have byte caps. "
+            "Local stickers are square-padded; remote stickers are not. "
+            "Voice text requires configured TTS; set language explicitly "
+            "because chat language is not detected. Shares one successful "
+            "send per run with text and forwarding."
         ),
     )
 
@@ -1085,7 +1093,12 @@ def send_media_sticker(
         return send_failed_envelope("send_media", chat_id, exc)
     delivered_to_self(chat_id, sent_id)
     target.sent = chat_id
-    return ok(chat=chat_id, kind="sticker", mimetype=file["mimetype"], square=True)
+    return ok(
+        chat=chat_id,
+        kind="sticker",
+        mimetype=file["mimetype"],
+        **({"square": True} if not from_url else {}),
+    )
 
 
 _SEND_MEDIA_HANDLERS: dict[str, Any] = {
@@ -1145,8 +1158,8 @@ def remote_file(
     """A WAHA RemoteFile for a URL, typed by the extension of its path.
 
     *curated*/*default* select the MIME map — documents by default,
-    videos pass the video map so the declared type is one WhatsApp's
-    video pipeline accepts.
+    videos pass the video map. This declares a best-effort MIME type;
+    it neither downloads nor validates the remote content or size.
     """
     file: dict[str, Any] = {
         "mimetype": infer_mimetype(url, curated or _DOC_MIME_BY_EXT, default),
@@ -1253,9 +1266,9 @@ def squared_sticker_payload(path: str, max_sticker_bytes: int) -> dict[str, Any]
 def sticker_file(name_or_url: str, max_file_bytes: int) -> dict[str, Any] | str:
     """A WAHA sticker payload for a URL or local path, or an error string.
 
-    Typed with the image MIME map (stickers are WebP stills); a local
-    ``.webp``/``.png`` must not ride the wire stamped
-    ``application/octet-stream``.
+    Typed with the image MIME map. This helper does not decode, square,
+    or convert the source to WebP; local tool sends use
+    :func:`squared_sticker_payload` for square-padding.
     """
     if "://" in name_or_url:
         return remote_file(name_or_url, _IMAGE_MIME_BY_EXT, "image/webp")
@@ -1292,9 +1305,9 @@ def slim_message(message: dict[str, Any], max_body: int = 200) -> dict[str, Any]
     reportingToken, engine flags — ~90% of the payload) that is useless
     to the model and inflates every tool result. Slimmed messages keep
     valid JSON and stay small enough for the inline preview budget.
-    Message bodies are capped at *max_body* chars for the inline slice
-    only — the full, unslimmed history is what goes to the spill file
-    (:func:`fit_messages`), so a huge paste is not lost.
+    Message bodies are capped at *max_body* chars for the inline slice.
+    ``body_truncated`` marks a cut body. ``fit_messages`` attempts to
+    spill the full fetched window, not the entire chat history.
     """
     keys = ("id", "timestamp", "from", "fromMe", "participant", "body", "hasMedia", "ack")
     slimmed = {key: message[key] for key in keys if message.get(key) is not None}
@@ -1305,29 +1318,20 @@ def slim_message(message: dict[str, Any], max_body: int = 200) -> dict[str, Any]
     return slimmed
 
 
-#: Inline result cap for the list/search readers, in serialized chars.
-#: A working slice of the newest messages rides the envelope so the model
-#: sees real content immediately; the *whole* result goes to a temp file
-#: (see :func:`fit_messages`) so asking for 600 never silently caps at
-#: whatever fits inline.
+#: Approximate serialized-item budget for list/search previews, excluding
+#: envelope/array overhead. At least one item is kept, even if oversized.
 _LIST_INLINE_BUDGET = 4000
 
 
 def fit_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """Envelope a chat summary without truncating the *full* result.
+    """Preview a fetched/matched message window and attempt a raw JSON spill.
 
-    WAHA returns messages newest-first, so the inline preview keeps the
-    head (newest are the useful ones) up to ``_LIST_INLINE_BUDGET``; the
-    envelope reports how many messages were ``returned`` inline and
-    flags ``truncated`` so the model can see the cut without counting.
-    The entire fetched list — with full, unslimmed message bodies — is
-    written to a temp JSON file, and the envelope returns the file's
-    metadata with an ``messages`` inline preview and ``message_count``
-    (the total fetched — how much exists) so the model knows it can
-    dereference the file for all of them.
-    ``file.path`` is absolute (reachable via the shell tool or the
-    operator); the file write is fail-soft, the envelope then degrades
-    to inline-only.
+    ``returned`` counts inline entries; ``truncated`` flags omitted
+    entries, independently of each message's ``body_truncated`` flag.
+    Nonempty windows also report ``message_count`` (not a history total)
+    and attempt to spill all raw entries, even for short results.
+    Empty windows omit count/file; spill failure omits file. Without
+    the shell tool only the operator can read the omitted content.
     """
 
     def inline_slice() -> list[dict[str, Any]]:
@@ -1360,20 +1364,15 @@ def fit_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
 def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
     """Build the chat-reading tool: list/search/metadata/recent/resolve.
 
-    One tool replaces the five old readers (docs/bug-report-2c665d8.md,
-    bug 7b) behind a ``mode`` argument. ``recent`` is operator-only
-    (the conversation list is cross-chat reach); the rest fence the
-    current chat like before. The reach rule lives in the system prompt
-    (``{{operator_tools}}``); ``fenced_chat`` enforces it. *settings*
-    decides how the description hints at dereferencing spill files:
-    with the shell tool enabled the model can read them itself,
-    otherwise only the operator can.
+    ``mode`` is required in model calls. List/search inspect a bounded
+    recent window; recent is operator-only; resolve searches available
+    names without accepting ``chat``. Metadata is best-effort.
+    The shell setting controls whether the model can read raw spills.
     """
     deref = (
-        "dereference `file.path` via run_shell_command (head/sed/tail) "
-        + "to read past a long preview"
+        "Read omitted content via run_shell_command and file.path."
         if settings.shell_tool
-        else "the operator can open `file.path` for the full history"
+        else "Only the preview is accessible to you; the operator can open file.path."
     )
 
     def read_chat_fn(
@@ -1396,6 +1395,8 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
         handler = _READ_CHAT_HANDLERS.get(mode)
         if handler is None:
             return error(f"unknown mode: {mode!r}")
+        if mode in ("list", "search") and limit <= 0:
+            return error("limit must be positive")
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
@@ -1408,18 +1409,17 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
         fn_schema=ReadChatSchema,
         name="read_chat",
         description=(
-            "Read the current chat. `mode=list` returns its recent "
-            "messages newest-first; short results ride the envelope, long "
-            f"ones include `file` (a path to the full JSON) with an inline "
-            f"preview — {deref}. Each message id lets you quote or "
-            "react; raise `limit` to look further back. `mode=search` "
-            "searches its history for `query`. `mode=metadata` returns "
-            "name, participant count and (for small chats) the "
-            "participant JIDs — the source for send_message mentions. "
-            "`mode=resolve` matches a person/group `name` to JIDs (in a "
-            "chat, its participants; operator commands may open the "
-            "contact book). `mode=recent` lists the newest "
-            "conversations (operator commands only)."
+            "Read available chat context. list/search preview recent messages "
+            "and attempt a raw JSON file for every nonempty result. returned "
+            "counts inline messages; message_count counts fetched/matched "
+            "messages, not all history. truncated marks omitted messages; "
+            "body_truncated marks cut text. Never quote unseen content. "
+            f"{deref} A search miss applies only to its recent window. "
+            "Metadata returns available fields/counts; missing fields are "
+            "unknown, names are display labels, and participant_list appears "
+            "only for up to 20 known JIDs. resolve returns up to five available "
+            "name matches: current roster, or operator's first 200 chats then "
+            "first 500 contacts only if no chat matches. Misses are not exhaustive."
         ),
     )
 
@@ -1427,7 +1427,7 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
 def read_recent_chats(
     waha: WahaClient, session: str, target: RunTarget, limit: int
 ) -> str:
-    """The `recent` mode: newest conversations (operator commands only)."""
+    """Newest conversations for operator commands, clamped to at most 30."""
     if not operator_run(target):
         return error(_FENCE_ERROR)
     try:
@@ -1451,8 +1451,14 @@ def read_recent_chats(
 def read_resolve_chat(
     waha: WahaClient, session: str, target: RunTarget, name: str
 ) -> str:
-    """The `resolve` mode: a person/group name to chat JIDs."""
-    if not name.strip():
+    """Available-name matching: current roster, or chats then contacts.
+
+    Operator scope is one page of 200 chats, then 500 contacts only
+    if no chat matches; any partial chat match suppresses contact lookup.
+    At most five exact/substring candidates are returned, without paging.
+    """
+    name = name.strip()
+    if not name:
         return error("name is required")
     if not target.chat_id:
         return error("no active conversation context")
@@ -1468,7 +1474,9 @@ def read_resolve_chat(
     except Exception as exc:
         return error(f"could not search chats: {exc}")
     if not matches:
-        return error(f"no chat or contact named like {name!r}")
+        return error(
+            f"no match for {name!r} in the checked chats/contacts; not exhaustive"
+        )
     return ok(name=name, matches=matches)
 
 
@@ -1477,8 +1485,8 @@ def read_chat_messages(
 ) -> str:
     """The `list` mode: recent messages from a chat, newest first.
 
-    Short chats ride the envelope inline; long ones spill the full
-    result to a temp JSON file (see :func:`fit_messages`).
+    Every nonempty fetched window attempts a raw JSON spill alongside
+    the slim inline preview (see :func:`fit_messages`). No paging.
     """
     messages = waha.fetch_chat_messages(session, chat_id, limit=limit)
     return ok(chat=chat_id, **fit_messages(messages))
@@ -1487,8 +1495,9 @@ def read_chat_messages(
 def read_search_messages(
     waha: WahaClient, session: str, chat_id: str, query: str, name: str, limit: int
 ) -> str:
-    """The `search` mode: recent messages matching *query*. Long result
-    sets spill to a temp file like ``list`` (see :func:`fit_messages`).
+    """Substring-filter the latest *limit* messages, not the full history.
+
+    All nonempty matched windows attempt a raw spill like ``list``.
     """
     if not query.strip():
         return error("query is required")
@@ -1503,7 +1512,7 @@ def read_search_messages(
 def read_chat_metadata(
     waha: WahaClient, session: str, chat_id: str, query: str, name: str, limit: int
 ) -> str:
-    """The `metadata` mode: a chat's name, participants and overview."""
+    """Available overview fields and roster summary; names may be missing."""
     overview = waha.get_chat_overview(session, chat_id)
     if not overview:
         return error(f"no metadata found for {chat_id}")
@@ -1526,12 +1535,10 @@ def summarize_chat(
     """Build a compact, model-friendly summary of a chat overview dict.
 
     Extracts the stable scalar fields and the participant roster,
-    skipping nested blobs like ``lastMessage`` and ``picture`` that
-    carry no useful metadata for the model. *names* (JID → display
-    name, see :func:`sender_names`) enriches roster entries: the
-    roster in LID groups holds bare JIDs, and names are the only way
-    the model can pair a JID with a person for mentions. Returns a
-    dict ready for the envelope.
+    normally skipping nested blobs. If only an id or no stable fields
+    remain, ``_raw`` is a possibly truncated 1000-character string
+    fallback, not structured or complete metadata. Recent display names
+    enrich roster entries but do not verify identity.
     """
     scalar = chat_scalars(overview)
     add_participant_summary(scalar, overview, names or {})
@@ -1544,7 +1551,7 @@ def summarize_chat(
 def sender_names(
     waha: WahaClient, session: str, chat_id: str, limit: int = 100
 ) -> dict[str, str]:
-    """JID → display name for a chat's recent senders.
+    """JID → recent display label, from at most *limit* messages (default 100).
 
     The group roster carries only JIDs and admin flags; display names
     ride the messages themselves (``_data.notifyName`` per sender).
@@ -1580,7 +1587,7 @@ def names_from_messages(messages: list[dict[str, Any]]) -> dict[str, str]:
 
 
 def chat_scalars(overview: dict[str, Any]) -> dict[str, Any]:
-    """Stable scalar chat fields, skipping empty/absent values."""
+    """Available scalar chat fields, preserving known false/zero values."""
     return {
         key: overview[key]
         for key in (
@@ -1593,7 +1600,7 @@ def chat_scalars(overview: dict[str, Any]) -> dict[str, Any]:
             "pinned",
             "unreadCount",
         )
-        if overview.get(key) not in (None, "", False)
+        if overview.get(key) is not None and overview.get(key) != ""
     }
 
 
@@ -1602,10 +1609,11 @@ def add_participant_summary(
     overview: dict[str, Any],
     names: dict[str, str],
 ) -> None:
-    """Add the participant count and (when small) id/name pairs.
+    """Add a nonempty roster count and up to 20 extractable id/name pairs.
 
     Names come from *names* (recent senders); roster entries without a
-    known name keep the bare JID so the model can still mention by id.
+    known name keep the bare JID. An absent/empty roster omits both
+    fields; omission does not establish that the chat has no members.
     """
     participants = roster_entries(overview)
     if not participants:
@@ -1621,7 +1629,7 @@ def add_participant_summary(
 
 
 def participant_jid(participant: Any) -> str:
-    """The JID of one participant entry (string, ``{"id": ...}``, or JID object)."""
+    """The JID of a string or roster entry wrapping a string/JID object in id."""
     if isinstance(participant, dict):
         entry: dict[str, Any] = participant
         return jid_string(entry.get("id"))
@@ -1671,10 +1679,10 @@ def dangling_mentions(text: str, roster: list[str]) -> list[str]:
     """*text*'s ``@``-tokens naming nobody on *roster*, in token order.
 
     The counterpart of :func:`resolve_mentions`: the tokens it drops.
-    A dangling token is the model's failed attempt to tag someone —
-    ``@Lorenzo`` for a member whose JID it never looked up, or a
-    stylized ``@L@s`` — and the send's way to tell the model so (the
-    envelope warning), since WhatsApp tags nobody for them.
+    Only numeric or full-JID-shaped tokens are recognized, including a
+    stylized ``@L@s``. Bare ``@Lorenzo`` is not a token. This checks
+    auto-resolution against the roster, not explicit mention JIDs or
+    notification delivery.
     """
     by_user = {jid.split("@", 1)[0] for jid in roster}
     return [
@@ -1685,7 +1693,7 @@ def dangling_mentions(text: str, roster: list[str]) -> list[str]:
 
 
 def chat_roster(waha: WahaClient, session: str, chat_id: str) -> list[str]:
-    """The chat's participant JIDs (empty for DMs and unreadable chats).
+    """Best-effort participant JIDs; may be empty for DMs or unreadable chats.
 
     Two sources, both fail-soft — the roster only enriches mentions, so
     an unavailable one must not break the send itself. The overview's
@@ -1738,10 +1746,10 @@ def deliver_chat_text(
     Every text delivery — the ``send_message`` tool and the handler's
     final-reply send alike — goes through here, so mention resolution
     is a property of sending, not of which path fired: ``@``-tokens in
-    *text* that name roster members become real mentions (highlight +
-    push) in both, and a model answering in plain final text can never
-    produce a literal ``@<number>`` that tags nobody. Explicit
-    *mentions* JIDs merge in ahead of resolved ones.
+    *text* that name roster members become mention JIDs in both.
+    Unresolved tokens remain literal text; explicit *mentions* JIDs
+    merge in ahead of resolved ones. The send response does not confirm
+    mention notification or rendering.
 
     *typing* — a ``(min_s, max_s)`` window from settings — adds the
     human-presence prelude: show "typing…", wait a length-scaled
@@ -1781,11 +1789,10 @@ def resolve_in_current_chat(
 ) -> str:
     """Name-match the current chat's roster — the chat-run resolve path.
 
-    No contact book: the search space is the chat's own participants
-    (overview roster, names backfilled from recent senders), so a
-    participant learns only who is already in the conversation with
-    them. Fails soft like every tool: an unreadable chat or a name
-    with no match is an error envelope, never a crash.
+    No contact book: only overview-roster JIDs with recent sender names
+    matching the exact JID are searched. Roster-embedded names and
+    phone/LID aliases are not resolved. A miss can mean missing names,
+    not nonmembership. Errors return an envelope.
     """
     try:
         overview = waha.get_chat_overview(session, chat_id)
@@ -1804,7 +1811,7 @@ def resolve_in_current_chat(
     ]
     if not matches:
         return error(
-            f"no participant in this chat is named like {name!r}"
+            f"no match for {name!r} in available participant names"
             + " (resolving other chats is reserved to the operator)"
         )
     return ok(name=name, matches=matches)
@@ -1837,7 +1844,12 @@ def search_matches(entries: list[dict[str, Any]], name: str) -> list[dict[str, A
 
 
 def forward_message(waha: WahaClient) -> BaseTool:
-    """Build a tool that forwards a message to a chat."""
+    """Build native forwarding from a source message id to a destination JID.
+
+    Ordinary runs fence both destination and recognizable source ids;
+    operator runs can cross chats. Success echoes the source message_id,
+    not the new forwarded id. Rendering/attribution is not verified here.
+    """
 
     def forward_message_fn(
         message_id: str, chat: str | None = None, reason: str = ""
@@ -1847,7 +1859,7 @@ def forward_message(waha: WahaClient) -> BaseTool:
             return error(
                 f"message already sent this run (to {target.sent}); do not send again"
             )
-        if not message_id:
+        if not message_id.strip():
             return error("message_id is required")
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
@@ -1872,10 +1884,11 @@ def forward_message(waha: WahaClient) -> BaseTool:
         fn_schema=ForwardMessageSchema,
         name="forward_message",
         description=(
-            "Forward an existing message (by serialized id) to the "
-            "current chat — keeps the original media and sender "
-            "attribution, no re-typing. Counts as the run's one "
-            "delivery. Operator commands may pass `chat` to forward "
-            "into another conversation."
+            "Native WAHA forwarding without retyping: message_id is the "
+            "existing source id, chat is the destination JID. Ordinary runs "
+            "must keep both in the current chat; operator commands may cross "
+            "chats. Success echoes the source id, not the new forwarded id. "
+            "Media/rendering depends on WAHA; original-author attribution "
+            "is not guaranteed. Shares the send allowance with text/media."
         ),
     )

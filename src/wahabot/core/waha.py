@@ -61,15 +61,17 @@ def response_json(response: httpx.Response) -> Any:
 def sent_message_id(response: httpx.Response) -> str:
     """The serialized id of a message a send endpoint just created.
 
-    WAHA send endpoints answer with the sent message; the id rides the
-    ``id._serialized`` field. "" when the body carries no recognizable
-    id (empty answers happen; callers fail soft on it).
+    Accepts string ``id`` or ``id._serialized`` from valid JSON, else
+    empty string. Empty/non-JSON responses raise an HTTPError.
     """
     sent = cast(dict[str, Any] | None, response_json(response))
     if isinstance(sent, dict):
-        mid = cast(dict[str, Any] | None, sent.get("id"))
+        mid = sent.get("id")
+        if isinstance(mid, str):
+            return mid
         if isinstance(mid, dict):
-            return str(mid.get("_serialized", ""))
+            serialized = cast(dict[str, Any], mid).get("_serialized")
+            return serialized if isinstance(serialized, str) else ""
     return ""
 
 
@@ -102,9 +104,9 @@ class WahaClient:
         ``reply_to`` (a serialized message id) sends the text as a native
         quote-reply to that message — the WAHA ``reply_to`` field, which
         replaced the deprecated ``POST /api/reply`` endpoint.
-        ``mentions`` is a list of JIDs whose display names appear in
-        *text* as ``@<name>``; WhatsApp highlights them and notifies the
-        mentioned people.
+        ``mentions`` contains participant JIDs paired with
+        ``@<user-part>`` tokens in *text*. The server acknowledgment
+        does not confirm recipient notification or mention rendering.
         """
         body: dict[str, Any] = {"session": session, "chatId": chat_id, "text": text}
         if reply_to:
@@ -139,7 +141,7 @@ class WahaClient:
         return response_json(response)
 
     def list_chats(self, session: str, limit: int = 200) -> list[dict[str, Any]]:
-        """All chats (id + name), newest conversation first.
+        """Up to *limit* chats (id + name), newest conversation first.
 
         WAHA ``GET /api/{session}/chats``; sorted by conversation
         timestamp descending (the endpoint default), capped at *limit*.
@@ -151,7 +153,7 @@ class WahaClient:
         return response_json(response)
 
     def list_contacts(self, session: str, limit: int = 500) -> list[dict[str, Any]]:
-        """All contacts (id + name) — WAHA ``GET /api/contacts/all``."""
+        """Up to *limit* contacts — WAHA ``GET /api/contacts/all``; no paging."""
         response = self._client.get(
             f"{API_PREFIX}/contacts/all", params={"session": session, "limit": limit}
         )
@@ -400,7 +402,11 @@ class WahaClient:
         chat_id: str,
         message_id: str,
     ) -> str:
-        """Forward a message to another chat; returns the new message id."""
+        """Forward a source id to a destination; return its new id or empty string.
+
+        HTTP and empty/non-JSON response failures raise. This endpoint
+        acknowledgment does not verify recipient rendering or attribution.
+        """
         response = self._client.post(
             f"{API_PREFIX}/forwardMessage",
             json={

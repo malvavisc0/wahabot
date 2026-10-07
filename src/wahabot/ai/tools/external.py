@@ -1,13 +1,9 @@
 """External research and host tools for the function calling agent.
 
 Builders for tools that reach outside WhatsApp: web search, page fetch
-and the (opt-in) shell. Each binds the shared settings and wraps a plain
-function from its own module, keeping the "return the JSON envelope,
-never raise" contract. The 7b merge (docs/bug-report-2c665d8.md) also
-*dropped* two niche tools: stock prices now come through web_search
-results like any other fact, and YouTube transcripts are inlined by
-``visit_url`` via yt-dlp's caption tracks. Neither niche warranted its
-own schema and tokens.
+and the (opt-in) shell. Each binds settings and returns JSON-envelope
+feedback. The workflow also wraps unexpected exceptions. Captions and
+raw output files are best-effort, not guarantees of complete content.
 """
 
 from llama_index.core.tools import BaseTool, FunctionTool
@@ -30,7 +26,12 @@ __all__ = [
 
 
 def web_search_builder(settings: Settings) -> BaseTool:
-    """Build the web search tool bound to settings."""
+    """Build bounded search with retrieval guidance matching shell availability."""
+    deref = (
+        "Read file.path via run_shell_command if needed."
+        if settings.shell_tool
+        else "Only previews are accessible to you; the operator can open file.path."
+    )
 
     def web_search_fn(
         query: str, max_results: int | None = None, reason: str = ""
@@ -42,10 +43,14 @@ def web_search_builder(settings: Settings) -> BaseTool:
         fn_schema=WebSearchSchema,
         name="web_search",
         description=(
-            "Search the web for up-to-date or external information. "
-            "Returns `results`: title, url, snippet per hit — a snippet "
-            "flagged `content_truncated` has its full text in the "
-            "`file` JSON spill. Read a promising hit with visit_url."
+            "Search external information. Returns count and results with "
+            "title, url, optional content snippet and engine. max_results "
+            "caps total valid findings across engines. partial/failed_engines "
+            "identify incomplete search; empty hits with failed engines is an error. "
+            "content_truncated "
+            "marks a cut snippet; full selected results attempt a file spill. "
+            f"{deref} Snippets are leads, not verified page contents; "
+            "open relevant hits with visit_url."
         ),
     )
 
@@ -65,23 +70,27 @@ def shell_builder(settings: Settings) -> BaseTool:
             "cannot do: filesystem, processes, system state, running "
             "utilities. The system prompt's Host block lists the "
             "available binaries; use those, do not guess others. "
-            "Returns exit_code, stdout, stderr (bounded inline preview, "
-            f"killed after {int(settings.shell_timeout)}s — keep commands "
-            "quick). When a stream was cut, its full capture rides a "
+            f"Returns exit_code, stdout, stderr (decoded, trimmed previews capped "
+            f"at {max(settings.shell_max_output, 200)} bytes per stream; "
+            f"wall-time limit {max(settings.shell_timeout, 1):g}s plus bounded cleanup — "
+            "keep commands quick). Check exit_code, not ok=true, for command success; "
+            "timeout/start failures use ok=false without an exit_code. "
+            "When a stream was cut, captured bytes attempt a "
             "spill file — `file.path` for stdout, `stderr_file.path` for "
-            "stderr — read the rest in parts with head/sed/tail."
+            "stderr — read them in bounded parts. Missing file metadata "
+            "means no full capture was provided; capture_errors marks lost output. "
+            "No stdin or sandbox."
         ),
     )
 
 
 def visit_url_builder(settings: Settings) -> BaseTool:
-    """Build the website-fetching tool bound to settings."""
+    """Build page/metadata/caption reads, not video viewing or browser automation."""
     deref = (
-        "read the rest via `transcript_file.path` (a local file) with "
-        + "the shell tool, in parts"
+        "Read provided file.path/transcript_file.path with run_shell_command "
+        + "in bounded parts."
         if settings.shell_tool
-        else "the rest waits in `transcript_file.path` (a local file "
-        + "only the operator can open)"
+        else "Only previews are accessible to you; the operator can open provided files."
     )
 
     def visit_url_fn(url: str, reason: str = "") -> str:
@@ -92,14 +101,18 @@ def visit_url_builder(settings: Settings) -> BaseTool:
         fn_schema=VisitUrlSchema,
         name="visit_url",
         description=(
-            "Read a web page's visible text. For Instagram/Facebook/"
-            "TikTok/YouTube and similar video links you get the video's "
-            "real metadata (title, description, uploader, duration, "
-            "views). A YouTube link with captions also carries its "
-            "`transcript` — the spoken content, so you can summarize or "
-            "answer about the video itself; `transcript_truncated` true "
-            f"means only the first part fit inline — {deref}. A long "
-            "page body likewise drops `file`. Say you have the video's "
-            "info or captions, never that you watched the video."
+            "Fetch HTTP(S) response text without browser rendering or available "
+            "media-host metadata via yt-dlp. kind=post includes an item_count "
+            "bounded to 100 inspected entries with item_count_truncated; video "
+            "description previews flag description_truncated after 800 characters. "
+            "ok=true means retrieval, not that "
+            "a login wall is the requested content. Text previews cap at 4000 "
+            "characters; cut bodies attempt file spills. YouTube transcript "
+            "is best-effort fetched captions, possibly auto-generated or in "
+            "another language, not verified speech. transcript_truncated "
+            "marks a 6000-character preview with an optional transcript_file. "
+            f"{deref} Missing captions are not proof none exist. "
+            "Previews are not download-size caps. Metadata/captions do not "
+            "establish what the video visually shows."
         ),
     )
