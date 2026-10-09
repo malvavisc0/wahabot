@@ -4505,7 +4505,7 @@ def test_chat_reader_documents_available_spill_access(
     assert "not all history" in description
     assert "body_truncated" in description
     assert "Never quote unseen content" in description
-    assert ("Only the preview is accessible" in description) is not shell_enabled
+    assert ("Only the inline preview is yours" in description) is not shell_enabled
 
 
 def test_chat_reader_mode_limits_and_name_caps(unit_settings: Settings) -> None:

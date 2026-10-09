@@ -1390,9 +1390,9 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
     The shell setting controls whether the model can read raw spills.
     """
     deref = (
-        "Read omitted content via run_shell_command and file.path."
+        "Read full uncut bodies via run_shell_command and file.path."
         if settings.shell_tool
-        else "Only the preview is accessible to you; the operator can open file.path."
+        else "Only the inline preview is yours; the operator can open file.path."
     )
 
     def read_chat_fn(
