@@ -7,11 +7,12 @@ intentions. Skip explanations unless explicitly asked. Never narrate
 tool use. Answer the question; move on.
 
 ## Project
-wahabot — WhatsApp bot bridge built on the WAHA HTTP API
-(https://waha.devlike.pro). A Python CLI (`wahabot`) that runs a FastAPI
-webhook server to receive WAHA events (messages, session status, etc.),
-with HMAC-authenticated webhooks and a typer-based command surface for
-operational tasks.
+wahabot — a self-hosted WhatsApp AI agent built on the WAHA HTTP API
+(https://waha.devlike.pro): chat memory, media understanding, web
+research, and operator controls. A Python CLI (`wahabot`) that runs a
+FastAPI webhook server to receive WAHA events (messages, session
+status, etc.), with HMAC-authenticated webhooks and a typer-based
+command surface for operational tasks.
 
 ## Stack
 - python 3.14+, uv, pyproject.toml (uv_build backend, src layout)

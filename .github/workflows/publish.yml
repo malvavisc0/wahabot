@@ -80,15 +80,15 @@ jobs:
             org.opencontainers.image.title=wahabot
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ github.event.repository.updated_at }}
-            org.opencontainers.image.description=WhatsApp bot bridge on the WAHA HTTP API
+            org.opencontainers.image.description=Self-hosted WhatsApp AI agent with chat memory, media understanding, web research, and operator controls via WAHA
           # index: prefix applies the annotation to the top-level OCI
           # index (the multi-arch manifest list) — that is what the GHCR
           # package page reads for the description. Bare keys only land
           # on each per-arch image manifest and GHCR ignores them there.
           annotations: |
             index:org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            index:org.opencontainers.image.description=WhatsApp bot bridge on the WAHA HTTP API
+            index:org.opencontainers.image.description=Self-hosted WhatsApp AI agent with chat memory, media understanding, web research, and operator controls via WAHA
             manifest:org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            manifest:org.opencontainers.image.description=WhatsApp bot bridge on the WAHA HTTP API
+            manifest:org.opencontainers.image.description=Self-hosted WhatsApp AI agent with chat memory, media understanding, web research, and operator controls via WAHA
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -5,7 +5,7 @@
 FROM astral/uv:python3.14-trixie AS builder
 
 ARG IMAGE_TITLE="wahabot"
-ARG IMAGE_DESCRIPTION="WhatsApp bot bridge on the WAHA HTTP API"
+ARG IMAGE_DESCRIPTION="Self-hosted WhatsApp AI agent with chat memory, media understanding, web research, and operator controls via WAHA"
 ARG IMAGE_LICENSES=MIT
 ARG IMAGE_SOURCE="https://github.com/malvavisc0/wahabot"
 ARG IMAGE_VERSION
@@ -41,7 +41,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,uid=0,gid=0 \
 FROM astral/uv:python3.14-trixie AS runtime
 
 ARG IMAGE_TITLE="wahabot"
-ARG IMAGE_DESCRIPTION="WhatsApp bot bridge on the WAHA HTTP API"
+ARG IMAGE_DESCRIPTION="Self-hosted WhatsApp AI agent with chat memory, media understanding, web research, and operator controls via WAHA"
 ARG IMAGE_LICENSES=MIT
 ARG IMAGE_SOURCE="https://github.com/malvavisc0/wahabot"
 ARG IMAGE_VERSION
