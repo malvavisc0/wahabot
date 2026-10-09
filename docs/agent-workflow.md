@@ -139,7 +139,8 @@ memory survives restarts and LRU evictions. The save points are:
    delivered reply exits inside the lock, so a save placed after would
    never run).
 2. **Album run end** — in `deliver_album_reply`, same position.
-3. **fromMe fold** — after `remember_own_message` in its locked block.
+3. **Operator fold** — after `remember_own_message` in its locked block
+   (operator-typed messages; see `docs/conversations.md` §1a).
 4. **Reaction fold** — after the note replacement in `reactions.py`,
    which now holds the chat's run lock (the WAHA fetch of the reacted-to
    message stays outside it).
@@ -207,7 +208,11 @@ Before each run reaches the LLM, the buffered history passes through two
    renders as a display name: WAHA's `replyTo` snippet carries no
    `notifyName`, so `participant_names` resolves the JID against the
    group roster (cached per chat for an hour, fails soft to the bare
-   id on any WAHA error);
+   id on any WAHA error), then the webhook-learned name book
+   (`core/identity.py`). A quote of the shared account renders as
+   `you`, `your operator`, or `this account, you or your operator`,
+   from the author book;
+   a `[mentions: …]` note names every JID in `mentionedJidList`;
 4. runs the workflow — `await agent.run(input=user_msg, image_blocks=..., ctx=ctx)`;
 5. returns `(reply, target)` — the run's final text and its run-scoped
    delivery holder (the `sent`/`reacted` latches), so the handler can
@@ -352,9 +357,11 @@ Three event flows sit outside the plain message → reply pipeline:
   chat's memory; no whitelist, no group gating. The turn is prefixed
   `[operator command]`; the session prompt keys on it (deliver with
   `send_message(chat=…)` to the named target, resolve names with
-  `read_chat` `mode=resolve`, browse recency with `mode=recent`). The shared
-  run-scoped target binding points at the event's `from` ("operator"), so a bare
-  `send_message` behaves like a DM. Two issuers reach this path:
+  `read_chat` `mode=resolve`, browse recency with `mode=recent`). The
+  run-scoped target points at the synthetic "operator" context, which
+  is not a WhatsApp chat: `fenced_chat` refuses any chat tool called
+  without an explicit JID, and the run's final text is quote-sent back
+  to the self-chat instead. Two issuers reach this path:
   `command` events posted to the webhook by `wahabot tell`
   (`wahabot.commands.build_command_event`, signed with the same HMAC
   as real WAHA traffic), and **self-chat mentions** — a `fromMe`

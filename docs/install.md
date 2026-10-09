@@ -77,8 +77,14 @@ uv run wahabot serve                  # start the webhook server
 Point WAHA at the webhook in your session config:
 
 ```json
-{"url": "http://host:8080/api/webhook/default", "events": ["message", "message.reaction", "session.status"], "hmac": {"key": "your-secret-key"}}
+{"url": "http://host:8080/api/webhook/default", "events": ["message.any", "message.reaction", "session.status"], "hmac": {"key": "your-secret-key"}}
 ```
+
+`message.any` (not `message`) is required: `message` carries incoming
+messages only, while the bot also needs the account's own messages —
+operator commands in the self-chat, and the human operator's messages
+in groups and DMs (see [How conversations work](conversations.md),
+§1a).
 
 `wahabot sessions init` writes a starter `data/sessions/default.json` — edit it
 to at least set a `system_prompt`:
@@ -145,8 +151,12 @@ The same operator path is available from WhatsApp: send a message to the
 bot's own self-chat beginning with the configured `bot_mention_regex`, for
 example `kAI do this and send a message to Roy`. Only matching messages sent
 to the bot's own JID are treated as commands — the reply lands as a
-quote-reply in that same self-chat; other `fromMe` messages remain
-memory-only.
+quote-reply in that same self-chat. An operator command has no default
+chat: name the target and the bot resolves it to a JID.
+
+Elsewhere, what the operator types on the account is remembered as the
+operator's (never as the bot's), and naming the bot in a group or DM
+wakes it there like a member would.
 
 See [Session Config](session-config.md) for the full list of CLI commands
 and every `data/sessions/<session>.json` field.

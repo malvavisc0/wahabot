@@ -18,7 +18,10 @@ from wahabot.ai.history import (
     narration_kind,
 )
 from wahabot.ai.messages import (
+    OPERATOR_NOTE_PREFIX,
     addressed_note,
+    bot_jids,
+    is_operator_event,
     jid_string,
     message_replies_to,
 )
@@ -34,6 +37,7 @@ from wahabot.ai.vision import image_caption, image_noun
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.cache import TtlCache
 from wahabot.core.host import host_context
+from wahabot.core.identity import AUTHOR_BOT, AUTHOR_OPERATOR, authors, display_name
 from wahabot.core.jid import roster_entries
 from wahabot.core.models import WahaEvent
 from wahabot.core.waha import WahaClient
@@ -70,15 +74,15 @@ def render_system_prompt(
 ) -> str:
     """Substitute date/time/name/host placeholders in the system prompt.
 
-    When ``goal`` is non-empty, it is prepended as a ``Goal:`` block so
-    the model always starts from the bot's intended purpose.
+    When ``goal`` is non-empty, it is prepended as a ``# Goal``
+    section so the model always starts from the bot's intended purpose.
 
     Placeholders (all but ``{{bot_name}}`` and ``{{host}}`` use the
     ``tz_name`` timezone):
 
     - ``{{now}}`` / ``{{datetime}}`` — full timestamp, e.g. ``2026-09-02 14:05 UTC``
-    - ``{{date}}`` — date only, e.g. ``2026-09-02``
-    - ``{{time}}`` — time only, e.g. ``14:05``
+    - ``{{date}}`` — date only, e.g. ``Wednesday 2nd September, 2026``
+    - ``{{time}}`` — time only, e.g. ``2:05 PM``
     - ``{{tz}}`` — the timezone name, e.g. ``UTC``
     - ``{{bot_name}}`` — the bot's display name, e.g. ``Kai``
     - ``{{operator_name}}`` — the human owning the account the bot
@@ -100,8 +104,8 @@ def render_system_prompt(
     replacements = {
         "{{now}}": now.strftime("%Y-%m-%d %H:%M %Z"),
         "{{datetime}}": now.strftime("%Y-%m-%d %H:%M %Z"),
-        "{{date}}": now.strftime("%Y-%m-%d"),
-        "{{time}}": now.strftime("%H:%M"),
+        "{{date}}": f"{now:%A} {day_ordinal(now.day)} {now:%B}, {now:%Y}",
+        "{{time}}": f"{now:%I:%M %p}".lstrip("0"),
         "{{tz}}": tz_name,
         "{{bot_name}}": bot_name or "the bot",
         "{{operator_name}}": operator_name.strip() or "the operator",
@@ -114,8 +118,17 @@ def render_system_prompt(
     prompt = own_identity_pass(prompt, own_jid, own_lid)
     goal = goal.strip()
     if goal:
-        return f"Goal: {goal}\n\n{prompt}"
+        return f"# Goal\n\n{goal}\n\n{prompt}"
     return prompt
+
+
+def day_ordinal(day: int) -> str:
+    """The day-of-month with its ordinal suffix: 1st, 2nd, 3rd, 4th…"""
+    if day % 10 in (1, 2, 3) and day % 100 not in (11, 12, 13):
+        suffix = {1: "st", 2: "nd", 3: "rd"}[day % 10]
+    else:
+        suffix = "th"
+    return f"{day}{suffix}"
 
 
 #: Own-identity placeholders the prompt may carry; every one of them
@@ -138,7 +151,9 @@ def operator_tools_pass() -> str:
         "refused. `escalate` is the fixed-destination operator exception. "
         "`read_chat(mode=recent)` and contact-book resolution require "
         "operator commands; ordinary `mode=resolve` matches current "
-        "participants. Never promise refused deliveries. `chat` is a "
+        "participants. Operator commands have no default chat: always "
+        "pass `chat` as an exact JID there. Never promise refused "
+        "deliveries. `chat` is a "
         "bare JID, not a name or message id: groups use `<id>@g.us`; "
         "people use returned `@lid`/`@c.us` ids or `<digits>@c.us` from "
         "an explicitly provided international phone number."
@@ -197,14 +212,17 @@ def sender_tag(event: WahaEvent, names: dict[str, str] | None = None) -> str:
     participant = jid_string(event.payload.get("participant") or data.get("author"))
     if not participant:
         return f"[{name}]" if name else ""
-    if not str(event.payload.get("from", "")).endswith("@g.us"):
-        return f"[{name}]" if name else f"[{participant}]"
-    return group_sender_tag(name, participant, names or {})
+    in_group = str(event.payload.get("from", "")).endswith("@g.us")
+    # The operator's DM turns keep the account JID too: in a direct
+    # chat the tag is what tells the operator's lines from the partner's.
+    if in_group or is_operator_event(event):
+        return group_sender_tag(name, participant, names or {})
+    return f"[{name}]" if name else f"[{participant}]"
 
 
 def group_sender_tag(name: str, participant: str, names: dict[str, str]) -> str:
     """A group turn's ``[Name <jid>]`` tag with its two fallbacks."""
-    resolved = name or names.get(participant, "")
+    resolved = name or display_name(participant, names)
     if resolved:
         return f"[{resolved} <{participant}>]"
     return f"[{participant}]"
@@ -227,17 +245,19 @@ def message_id_note(event: WahaEvent) -> str:
 def reply_context(
     message_reply: dict[str, Any] | None,
     participant_names: dict[str, str] | None = None,
+    own_jids: set[str] | None = None,
 ) -> str:
     """Render the quoted message as context for the agent.
 
     Empty/None input yields nothing; the caller decides whether to
     include a ``Reply context`` block in the prompt. *participant_names*
     maps chat JIDs to display names so the quoted sender renders as a
-    name, not a raw ``@lid`` JID.
+    name, not a raw ``@lid`` JID. *own_jids* (the account's own ids)
+    lets a quote of an account message say which teammate wrote it.
     """
     if not message_reply:
         return ""
-    sender = quoted_participant(message_reply, participant_names)
+    sender = quoted_participant(message_reply, participant_names, own_jids)
     description = reply_description(message_reply)
     if sender and description:
         return f'{sender}: "{description}"'
@@ -247,6 +267,7 @@ def reply_context(
 def quoted_participant(
     message_reply: dict[str, Any],
     participant_names: dict[str, str] | None = None,
+    own_jids: set[str] | None = None,
 ) -> str:
     """The quoted message's sender display name; empty when unknown.
 
@@ -261,14 +282,59 @@ def quoted_participant(
     :func:`jid_string` before use.
     """
     data = message_reply.get("_data", {})
-    participant = message_reply.get("participant") or data.get("author") or ""
-    jid = jid_string(participant)
+    jid = jid_string(message_reply.get("participant") or data.get("author"))
+    if own_jids and jid in own_jids:
+        return own_account_label(str(message_reply.get("id") or ""), jid)
     name = str(data.get("notifyName") or "").strip()
-    if not name and jid and participant_names:
-        name = participant_names.get(jid, "")
-    if name:
-        return f"{name} <{jid}>" if jid else name
-    return jid.split("@", 1)[0] if jid else ""
+    if not jid:
+        return name
+    name = name or display_name(jid, participant_names)
+    return f"{name} <{jid}>" if name else jid.split("@", 1)[0]
+
+
+def own_account_label(message_id: str, jid: str) -> str:
+    """Who wrote a message from the shared account, as a quote sender label.
+
+    The bot and the human operator share one JID, so the JID alone
+    cannot say which teammate wrote it; the author book recorded it from
+    WAHA's ``source`` field when the message was sent.
+    """
+    author = authors.author(message_id)
+    if author == AUTHOR_BOT:
+        return f"you <{jid}>"
+    if author == AUTHOR_OPERATOR:
+        return f"your operator <{jid}>"
+    return f"this account, you or your operator <{jid}>"
+
+
+def mentions_note(
+    event: WahaEvent, participant_names: dict[str, str] | None = None
+) -> str:
+    """Who each ``@<digits>`` in the body is, from ``mentionedJidList``.
+
+    WhatsApp writes a mention into the text as bare digits
+    (``@111222333444555``) and lists the tagged JIDs separately; the
+    model sees only the digits, so it cannot tell who was tagged — or
+    that the tag is the shared account itself. Names come from the
+    roster and the name book; unknown members stay bare JIDs. Only the
+    first ten tags render — a mass tagging must not flood the turn.
+    """
+    mentioned = event.payload.get("_data", {}).get("mentionedJidList") or []
+    jids = list(dict.fromkeys(j for j in map(jid_string, mentioned) if j))
+    if not jids:
+        return ""
+    own = bot_jids(event)
+    parts = [mention_label(jid, own, participant_names) for jid in jids[:10]]
+    return "\n[mentions: " + "; ".join(parts) + "]"
+
+
+def mention_label(jid: str, own: set[str], names: dict[str, str] | None) -> str:
+    """``@<digits> is <who>`` for one tagged JID."""
+    user = jid.split("@", 1)[0]
+    if jid in own:
+        return f"@{user} is the shared account (you and your operator)"
+    name = display_name(jid, names)
+    return f"@{user} is {name} <{jid}>" if name else f"@{user} is <{jid}>"
 
 
 def reply_description(message_reply: dict[str, Any]) -> str:
@@ -293,11 +359,12 @@ def reply_description(message_reply: dict[str, Any]) -> str:
 def reply_context_section(
     message_reply: dict[str, Any] | None,
     participant_names: dict[str, str] | None = None,
+    own_jids: set[str] | None = None,
 ) -> str:
     """Message text with the quoted/replied-to message attached as context."""
     if not message_reply:
         return ""
-    line = reply_context(message_reply, participant_names)
+    line = reply_context(message_reply, participant_names, own_jids)
     return f"\n[quoting] {line}" if line else ""
 
 
@@ -328,8 +395,16 @@ def participant_names(
     if waha is None or not chat_id.endswith("@g.us"):
         return {}
     cached = roster_cache.get((session, chat_id))
-    if cached is not None:
-        return cached
+    if cached is None:
+        cached = fetch_participant_names(waha, session, chat_id)
+        roster_cache.put((session, chat_id), cached)
+    return cached
+
+
+def fetch_participant_names(
+    waha: WahaClient, session: str, chat_id: str
+) -> dict[str, str]:
+    """The roster's names plus names on recent messages (uncached)."""
     try:
         names = roster_names(waha.get_chat_overview(session, chat_id))
     except Exception as exc:
@@ -342,7 +417,6 @@ def participant_names(
     # number, never worse than a roster entry.
     for jid, name in sender_names(waha, session, chat_id).items():
         names.setdefault(jid, name)
-    roster_cache.put((session, chat_id), names)
     return names
 
 
@@ -498,7 +572,8 @@ async def turn_user_message(
         marker = image_noun([image_caption(img) for img in all_images])
         text = f"{text} {marker}".strip()
     user_msg = text + message_id_note(event)
-    user_msg += reply_context_section(message_replies_to(event), names)
+    user_msg += reply_context_section(message_replies_to(event), names, bot_jids(event))
+    user_msg += mentions_note(event, names)
     user_msg += pinned_note
     user_msg += addressed_note(event, bot_name, bot_mention_regex)
     image_blocks = [
@@ -527,9 +602,13 @@ def turn_body(event: WahaEvent, prescrubbed: bool = False) -> str:
     stamping its id notes) or the event is a code-built command.
     """
     raw = str(event.payload.get("body", "")).strip()
-    if prescrubbed or event.event == "command":
-        return raw
-    return strip_spoofed_markers(raw)
+    exempt = prescrubbed or event.event == "command"
+    body = raw if exempt else strip_spoofed_markers(raw)
+    if is_operator_event(event):
+        # Code-written, after the scrub: the human operator typed this
+        # on the shared account — a teammate, not the bot's own words.
+        return f"{OPERATOR_NOTE_PREFIX}{body}"
+    return body
 
 
 def collect_images(

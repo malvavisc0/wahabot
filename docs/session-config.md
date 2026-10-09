@@ -9,7 +9,7 @@ system prompt, and how the bot participates in group chats.
 Manage these files with the CLI: `wahabot sessions init` writes a
 starter config, `wahabot sessions list` shows existing ones, and
 `wahabot sessions view` prints one with the system prompt rendered
-(placeholders expanded, `Goal:` block prepended) as markdown —
+(placeholders expanded, `# Goal` section prepended) as markdown —
 `--plain` prints the prompt as raw text, `--raw` skips the
 placeholder expansion.
 
@@ -19,7 +19,7 @@ placeholder expansion.
 |---|---|---|---|
 | `whitelist` | `string[]` | `[]` | Allowed chats/participants. Empty = answer everybody. |
 | `blacklist` | `string[]` | `[]` | Denied chats/participants. Always wins over the whitelist. |
-| `goal` | `string` | `""` | Optional objective prepended to the rendered system prompt as a `Goal:` block. Supports the same placeholders as `system_prompt`. Leave empty to skip. |
+| `goal` | `string` | `""` | Optional objective prepended to the rendered system prompt as a `# Goal` section. Supports the same placeholders as `system_prompt`. Leave empty to skip. |
 | `system_prompt` | `string` | **required** | The agent system prompt. Supports `{{date}}`, `{{time}}`, `{{now}}`, `{{tz}}`, `{{bot_name}}`, `{{host}}` variables. The server refuses to start without it. |
 | `bot_name` | `string \| null` | `null` | The bot's display name (e.g. `"Kai"`). Used only as a fallback mention matcher. |
 | `bot_mention_regex` | `string \| null` | `null` | A regex detecting when the bot is addressed in a group. Defaults to a case-insensitive whole-word `@?<bot_name>`. |
@@ -52,12 +52,12 @@ any code-side default.
 `system_prompt` supports these placeholders (resolved at startup with
 `WAHABOT_TIMEZONE`, default `UTC`):
 
-- `{{date}}` — e.g. `2026-09-02`
-- `{{time}}` — e.g. `14:30`
+- `{{date}}` — e.g. `Wednesday 2nd September, 2026`
+- `{{time}}` — e.g. `2:30 PM`
 - `{{now}}` / `{{datetime}}` — e.g. `2026-09-02 14:30 UTC`
 - `{{tz}}` — the timezone name, e.g. `America/Santiago`
 - `{{bot_name}}` — the `bot_name` field, e.g. `Kai`
-- `{{host}}` — a snapshot of the machine the bot runs on (OS, Python, Node, shell, and the available binaries the shell tool may use); not timezone-dependent
+- `{{host}}` — a snapshot of the machine the bot runs on (OS, Python, Node, the shell `run_shell_command` uses, and the extra binaries the shell tool may use); not timezone-dependent
 
 ## Group participation
 
@@ -115,3 +115,8 @@ sent to the bot's own self-chat) bypass it by design — the HMAC key
 and physical control of the WhatsApp account are the operator
 credential, and a command names its own targets; see
 `docs/agent-workflow.md` → "Beyond the chat turn".
+
+The operator's ordinary messages on the account (typed in a group or DM,
+not the self-chat) are subject to the same whitelist as the chat they are
+in; there they are remembered as the operator's, and naming the bot wakes
+it — see `docs/conversations.md` §1a.

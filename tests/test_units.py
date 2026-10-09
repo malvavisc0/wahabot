@@ -29,6 +29,7 @@ from llama_index.core.workflow import WorkflowTimeoutError
 from tests.harness import (
     CHAT_ID,
     FOREIGN_JID,
+    OWN_LID,
     SESSION,
     smoke_video_bytes,
 )
@@ -138,8 +139,8 @@ def unit_settings() -> Settings:
 
 
 def test_jid_string() -> None:
-    jid_obj = {"_serialized": "146406912311368@lid", "user": "146406912311368"}
-    assert jid_string(jid_obj) == "146406912311368@lid"
+    jid_obj = {"_serialized": "491555000008@lid", "user": "491555000008"}
+    assert jid_string(jid_obj) == "491555000008@lid"
     assert jid_string({"user": "1464", "server": "lid"}) == "1464@lid"
     assert jid_string("x@c.us") == "x@c.us"
     assert jid_string(None) == ""
@@ -1190,7 +1191,7 @@ def test_degrade_old_history_squeezes_old_keeps_fresh() -> None:
     degraded = degrade_old_history(messages)
     after = sum(token_count(m) for m in degraded)
 
-    # The old wifi slice: thinking gone, call body gone, stdout gone,
+    # The old wifi slice: thinking gone, call body trimmed, stdout gone,
     # verdicts kept.
     old_slice = degraded[:4]
     assert not any(isinstance(b, ThinkingBlock) for m in old_slice for b in m.blocks)
@@ -1200,7 +1201,12 @@ def test_degrade_old_history_squeezes_old_keeps_fresh() -> None:
         for b in m.blocks
         if isinstance(b, ToolCallBlock) and b.tool_call_id == "c1"
     ]
-    assert old_call.tool_kwargs == {"reason": "Revisar el estado del wifi"}
+    # Every key survives (the model copies call shapes from history);
+    # only the long value is cut to a preview.
+    assert set(old_call.tool_kwargs) == {"command", "reason"}
+    assert old_call.tool_kwargs["reason"] == "Revisar el estado del wifi"
+    assert old_call.tool_kwargs["command"].startswith("iw dev wlan0 link")
+    assert len(old_call.tool_kwargs["command"]) <= 81
     wifi_tool = next(m for m in old_slice if m.role == MessageRole.TOOL)
     assert '"ok": true' in str(wifi_tool.content)
     assert "wlan0" not in str(wifi_tool.content)
@@ -1268,21 +1274,18 @@ def test_squeeze_tool_result_keeps_verdict_only() -> None:
 
 
 def test_degrade_message_squeezes_old_tool_call_kwargs() -> None:
-    """Old assistant tool calls keep name and reason, lose their bodies.
+    """Old assistant tool calls keep every argument key, values trimmed.
 
     The meme-script incident (docs/bug-report-2c665d8.md, bug 7): a
-    3k-char ``run_shell_command`` body rode every later prompt because
-    ``degrade_message`` squeezed tool *results* but never the calls
-    themselves. After degradation the block keeps its id and name and
-    the one-line ``reason``; the ``command`` body is gone. A call
-    without a ``reason`` keeps name and empty kwargs — knowing *that*
-    the tool fired is the surviving value. Already-squeezed and
-    small calls pass through unchanged (idempotence + no pointless
-    swaps).
+    3k-char ``run_shell_command`` body rode every later prompt. Keeping
+    only ``reason`` fixed the bulk but taught the model to send
+    ``{"reason": …}`` alone; now each long value is cut to a preview
+    and every key survives. Already-squeezed and small calls pass
+    through unchanged (idempotence + no pointless swaps).
     """
     from llama_index.core.base.llms.types import TextBlock, ToolCallBlock
 
-    from wahabot.ai.history import degrade_message
+    from wahabot.ai.history import CALL_ARG_PREVIEW, degrade_message
 
     big = ChatMessage(
         role=MessageRole.ASSISTANT,
@@ -1303,8 +1306,10 @@ def test_degrade_message_squeezes_old_tool_call_kwargs() -> None:
     (block,) = [b for b in degraded.blocks if isinstance(b, ToolCallBlock)]
     assert block.tool_name == "run_shell_command"
     assert block.tool_call_id == "c-meme"
-    assert block.tool_kwargs == {"reason": "Dibujar el meme pedido"}
-    assert "gen.py" not in str(block.tool_kwargs)
+    assert set(block.tool_kwargs) == {"command", "reason"}
+    assert block.tool_kwargs["reason"] == "Dibujar el meme pedido"
+    assert len(block.tool_kwargs["command"]) == CALL_ARG_PREVIEW + 1
+    assert "from PIL import Image\n" * 10 not in str(block.tool_kwargs)
 
     no_reason = ChatMessage(
         role=MessageRole.ASSISTANT,
@@ -1319,7 +1324,7 @@ def test_degrade_message_squeezes_old_tool_call_kwargs() -> None:
     degraded_call = degrade_message(no_reason)
     (call,) = [b for b in degraded_call.blocks if isinstance(b, ToolCallBlock)]
     assert call.tool_name == "web_search"
-    assert call.tool_kwargs == {}
+    assert call.tool_kwargs == {"query": "q" * CALL_ARG_PREVIEW + "…"}
 
     small = ChatMessage(
         role=MessageRole.ASSISTANT,
@@ -3601,7 +3606,7 @@ def test_mask_value_redacts_all_jid_forms() -> None:
     assert _mask_value("491555000000@c.us") == "[jid redacted]"
     assert _mask_value("491555000000@lid") == "[jid redacted]"
     assert _mask_value("120363000000000000@g.us") == "[jid redacted]"
-    assert _mask_value("4915151503271-1630682381@g.us") == "[jid redacted]"
+    assert _mask_value("491555000009-123456789@g.us") == "[jid redacted]"
     assert _mask_value("status@broadcast") == "[jid redacted]"
     # Bare mention tokens (the @<lid-number> shape group chats show).
     assert _mask_value("Para @111222333444555") == "Para [jid redacted]"
@@ -4041,7 +4046,7 @@ def test_host_placeholder() -> None:
 
 
 def test_host_lists_only_present_binaries() -> None:
-    """The Binaries line advertises what shutil.which finds — nothing else.
+    """The Extras line advertises what shutil.which finds — nothing else.
 
     The model plans shell commands around this line, so a claimed-but-
     missing binary is a prompt lie: the Dockerfile set must render,
@@ -4068,14 +4073,14 @@ def test_host_lists_only_present_binaries() -> None:
         finally:
             host_module.available_binaries.cache_clear()
             host_module.host_context.cache_clear()
-    assert "- Binaries: ffmpeg, magick (ImageMagick), jq" in snapshot
+    assert "- Extras: ffmpeg, magick (ImageMagick), jq" in snapshot
     # absent binaries are not claimed
     assert "pandoc" not in snapshot
     assert "tesseract" not in snapshot
 
 
 def test_host_omits_binaries_line_when_none_present() -> None:
-    """A bare host renders no Binaries line at all, not an empty one."""
+    """A bare host renders no Extras line at all, not an empty one."""
     from wahabot.core import host as host_module
 
     with unittest.mock.patch("shutil.which", return_value=None):
@@ -4086,7 +4091,7 @@ def test_host_omits_binaries_line_when_none_present() -> None:
         finally:
             host_module.available_binaries.cache_clear()
             host_module.host_context.cache_clear()
-    assert "Binaries" not in snapshot
+    assert "Extras" not in snapshot
 
 
 def test_remember_strips_thinking_separator(unit_settings: Settings) -> None:
@@ -4437,9 +4442,9 @@ def test_resolve_chat_chat_run_matches_roster(unit_settings: Settings) -> None:
     finally:
         reset_target(token)
     assert hit["ok"] and hit["matches"] == [
-        {"id": "111222333444555@lid", "name": "Alex Rivers"}
+        {"id": "111222333444555@lid", "name": "Alex Rivers", "tag": "@111222333444555"}
     ]
-    assert not miss["ok"] and "available participant names" in miss["error"]
+    assert not miss["ok"] and "named members" in miss["error"]
     assert not outsider["ok"]
 
 
@@ -4775,6 +4780,7 @@ def test_send_message_warning_does_not_claim_notification_failure(
     waha = unittest.mock.Mock()
     waha.get_chat_overview.return_value = {"participants": [{"id": "491555000001@c.us"}]}
     waha.fetch_chat_messages.return_value = []
+    waha.lid_phone.return_value = ""
     waha.send_text.return_value = f"true_{CHAT_ID}_SENT"
     token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID))
     try:
@@ -5091,7 +5097,7 @@ def _group_waha() -> Any:
         def get_chat_overview(self, _session: str, chat_id: str) -> dict[str, Any]:
             return {
                 "id": chat_id,
-                "participants": [{"id": "132469693124738@lid"}],
+                "participants": [{"id": "491555000007@lid"}],
             }
 
         def fetch_chat_messages(
@@ -5102,12 +5108,12 @@ def _group_waha() -> Any:
         ) -> list[dict[str, Any]]:
             return [
                 {
-                    "participant": {"_serialized": "132469693124738@lid"},
-                    "_data": {"notifyName": "Mikhail Polozhaev"},
+                    "participant": {"_serialized": "491555000007@lid"},
+                    "_data": {"notifyName": "Milo Petrov"},
                 },
                 {
-                    "participant": {"_serialized": "74943001800935@lid"},
-                    "_data": {"notifyName": "Troche"},
+                    "participant": {"_serialized": "491555000009@lid"},
+                    "_data": {"notifyName": "Tavo Ríos"},
                 },
             ]
 
@@ -5119,8 +5125,8 @@ def test_participant_names_backfills_from_messages() -> None:
     roster_cache.clear()
     names = participant_names(_group_waha(), SESSION, CHAT_ID)
     assert names == {
-        "132469693124738@lid": "Mikhail Polozhaev",
-        "74943001800935@lid": "Troche",
+        "491555000007@lid": "Milo Petrov",
+        "491555000009@lid": "Tavo Ríos",
     }
 
 
@@ -5134,7 +5140,7 @@ def _conflicting_waha() -> Any:
         def get_chat_overview(self, _session: str, chat_id: str) -> dict[str, Any]:
             return {
                 "id": chat_id,
-                "participants": [{"id": "132469693124738@lid", "name": "Roster Name"}],
+                "participants": [{"id": "491555000007@lid", "name": "Roster Name"}],
             }
 
         def fetch_chat_messages(
@@ -5145,7 +5151,7 @@ def _conflicting_waha() -> Any:
         ) -> list[dict[str, Any]]:
             return [
                 {
-                    "participant": {"_serialized": "132469693124738@lid"},
+                    "participant": {"_serialized": "491555000007@lid"},
                     "_data": {"notifyName": "Message Name"},
                 }
             ]
@@ -5157,11 +5163,11 @@ def test_participant_names_roster_wins_over_backfill() -> None:
     """Roster names are authoritative; the message walk only backfills."""
     roster_cache.clear()
     names = participant_names(_conflicting_waha(), SESSION, CHAT_ID)
-    assert names == {"132469693124738@lid": "Roster Name"}
+    assert names == {"491555000007@lid": "Roster Name"}
 
 
 def _group_event(
-    participant: Any = "132469693124738@lid", name: str | None = None
+    participant: Any = "491555000007@lid", name: str | None = None
 ) -> WahaEvent:
     payload: dict[str, Any] = {
         "from": CHAT_ID,
@@ -5181,18 +5187,18 @@ def _group_event(
 
 
 def test_sender_tag_group_renders_name_and_jid() -> None:
-    event = _group_event(name="Mikhail Polozhaev")
-    assert sender_tag(event) == "[Mikhail Polozhaev <132469693124738@lid>]"
+    event = _group_event(name="Milo Petrov")
+    assert sender_tag(event) == "[Milo Petrov <491555000007@lid>]"
 
 
 def test_sender_tag_group_resolves_name_from_roster() -> None:
     event = _group_event()  # no notifyName on the event itself
-    names = {"132469693124738@lid": "Mikhail Polozhaev"}
-    assert sender_tag(event, names) == "[Mikhail Polozhaev <132469693124738@lid>]"
+    names = {"491555000007@lid": "Milo Petrov"}
+    assert sender_tag(event, names) == "[Milo Petrov <491555000007@lid>]"
 
 
 def test_sender_tag_group_unknown_name_falls_back_to_jid() -> None:
-    assert sender_tag(_group_event()) == "[132469693124738@lid]"
+    assert sender_tag(_group_event()) == "[491555000007@lid]"
 
 
 def test_sender_tag_dm_keeps_bare_name() -> None:
@@ -5229,30 +5235,30 @@ def test_sender_tag_dm_without_name_yields_empty() -> None:
 
 
 def test_sender_tag_normalizes_jid_object() -> None:
-    event = _group_event(participant={"_serialized": "132469693124738@lid"})
-    assert sender_tag(event) == "[132469693124738@lid]"
+    event = _group_event(participant={"_serialized": "491555000007@lid"})
+    assert sender_tag(event) == "[491555000007@lid]"
 
 
 def test_quoted_participant_renders_name_and_jid() -> None:
     reply = {
-        "participant": {"_serialized": "132469693124738@lid"},
+        "participant": {"_serialized": "491555000007@lid"},
     }
-    names = {"132469693124738@lid": "Mikhail Polozhaev"}
-    assert quoted_participant(reply, names) == "Mikhail Polozhaev <132469693124738@lid>"
+    names = {"491555000007@lid": "Milo Petrov"}
+    assert quoted_participant(reply, names) == "Milo Petrov <491555000007@lid>"
 
 
 def test_quoted_participant_notify_name_wins() -> None:
     reply = {
-        "participant": "74943001800935@lid",
-        "_data": {"notifyName": "Troche"},
+        "participant": "491555000009@lid",
+        "_data": {"notifyName": "Tavo Ríos"},
     }
-    assert quoted_participant(reply, {"74943001800935@lid": "wrong"}) == (
-        "Troche <74943001800935@lid>"
+    assert quoted_participant(reply, {"491555000009@lid": "wrong"}) == (
+        "Tavo Ríos <491555000009@lid>"
     )
 
 
 def test_quoted_participant_unknown_falls_back_to_bare_id() -> None:
-    assert quoted_participant({"participant": "74943001800935@lid"}) == "74943001800935"
+    assert quoted_participant({"participant": "491555000009@lid"}) == "491555000009"
 
 
 def test_render_system_prompt_substitutes_own_identities() -> None:
@@ -5293,7 +5299,7 @@ def test_render_system_prompt_operator_name_in_goal() -> None:
     out = render_system_prompt(
         "Rules.", goal="Serve {{operator_name}}", operator_name="Ada"
     )
-    assert out.startswith("Goal: Serve Ada\n\n")
+    assert out.startswith("# Goal\n\nServe Ada\n\n")
 
 
 def test_chat_visible_text_filters_leaked_tokens() -> None:
@@ -5712,3 +5718,321 @@ def test_run_timeout_cap_and_context_reuse(unit_settings: Settings) -> None:
     assert not isinstance(recovered, Exception), recovered
     reply, _target = recovered
     assert reply == "fine"
+
+
+def test_jid_string_strips_device_suffix() -> None:
+    """A linked-device suffix names a device, not a person."""
+    from wahabot.ai.messages import jid_string
+
+    assert jid_string("491555000000:41@lid") == "491555000000@lid"
+    assert jid_string({"_serialized": "491555000000:3@c.us"}) == "491555000000@c.us"
+    assert jid_string("1234567890-1234567890@g.us") == "1234567890-1234567890@g.us"
+
+
+def test_conversation_jid_uses_to_for_fromme() -> None:
+    """WAHA puts the account in ``from`` of its own messages; the chat is ``to``."""
+    from wahabot.ai.messages import conversation_jid
+
+    own = WahaEvent(
+        id="e",
+        timestamp=1,
+        event="message.any",
+        session=SESSION,
+        me={"id": "491555000000@c.us", "lid": OWN_LID},
+        payload={"fromMe": True, "from": "491555000000@lid", "to": CHAT_ID},
+    )
+    assert conversation_jid(own) == CHAT_ID
+    incoming = own.model_copy(update={"payload": {"from": CHAT_ID, "fromMe": False}})
+    assert conversation_jid(incoming) == CHAT_ID
+
+
+def test_chat_allowed_whitelists_fromme_by_chat() -> None:
+    """An operator message in a whitelisted group passes the whitelist."""
+    from wahabot.core.filters import chat_allowed
+
+    own = WahaEvent(
+        id="e",
+        timestamp=1,
+        event="message.any",
+        session=SESSION,
+        me={"id": "491555000000@c.us", "lid": OWN_LID},
+        payload={
+            "fromMe": True,
+            "from": "491555000000@lid",
+            "to": CHAT_ID,
+            "participant": "491555000000@lid",
+        },
+    )
+    assert chat_allowed(own, {CHAT_ID}, set())
+
+
+def member_event(**payload: Any) -> WahaEvent:
+    base: dict[str, Any] = {
+        "from": CHAT_ID,
+        "participant": "491555000001@lid",
+        "body": "",
+    }
+    base.update(payload)
+    return WahaEvent(
+        id="e",
+        timestamp=1,
+        event="message",
+        session=SESSION,
+        me={"id": "491555000000@c.us", "lid": OWN_LID},
+        payload=base,
+    )
+
+
+def test_addressed_note_distinguishes_shared_account_cases() -> None:
+    """Name, account tag and quote-reply each say what they mean."""
+    from wahabot.core.identity import AUTHOR_BOT, AUTHOR_OPERATOR, authors
+
+    named = member_event(body="kai, una pregunta")
+    assert "names you" in addressed_note(named, bot_name="kai")
+
+    tagged = member_event(
+        body="@491555000000 mira", _data={"mentionedJidList": ["491555000000@lid"]}
+    )
+    assert "may mean you or your operator" in addressed_note(tagged, bot_name="kai")
+
+    authors.record("true_x_BOTMSG", AUTHOR_BOT)
+    authors.record("true_x_OPMSG", AUTHOR_OPERATOR)
+    to_bot = member_event(
+        body="no estoy de acuerdo",
+        replyTo={"id": "BOTMSG", "participant": "491555000000@lid"},
+    )
+    assert "replies to your message" in addressed_note(to_bot, bot_name="kai")
+    to_operator = member_event(
+        body="jaja", replyTo={"id": "OPMSG", "participant": "491555000000@lid"}
+    )
+    assert "your operator typed" in addressed_note(to_operator, bot_name="kai")
+    unknown = member_event(
+        body="ok", replyTo={"id": "OLD", "participant": "491555000000@lid"}
+    )
+    assert "you or your operator" in addressed_note(unknown, bot_name="kai")
+    other = member_event(
+        body="ok", replyTo={"id": "X", "participant": "491555000002@lid"}
+    )
+    assert addressed_note(other, bot_name="kai") == ""
+
+
+def test_mentions_note_names_tagged_members() -> None:
+    """Bare ``@digits`` get a name, and the shared account is called out."""
+    from wahabot.ai.context import mentions_note
+    from wahabot.core.identity import names as name_book
+
+    name_book.learn("491555000002@lid", "Ada Lovelace")
+    event = member_event(
+        body="@491555000002 y @491555000000 y @491555000009",
+        _data={
+            "mentionedJidList": [
+                "491555000002@lid",
+                {"_serialized": "491555000000@lid"},
+                "491555000009@lid",
+            ]
+        },
+    )
+    note = mentions_note(event)
+    assert note.startswith("\n[mentions: ")
+    assert "@491555000002 is Ada Lovelace <491555000002@lid>" in note
+    assert "@491555000000 is the shared account" in note
+    assert "@491555000009 is <491555000009@lid>" in note
+    assert mentions_note(member_event(body="sin menciones")) == ""
+
+
+def test_quoted_account_message_names_the_author() -> None:
+    """A quote of the shared account says which teammate wrote it."""
+    from wahabot.ai.context import reply_context
+    from wahabot.core.identity import AUTHOR_BOT, AUTHOR_OPERATOR, authors
+
+    own = {"491555000000@lid"}
+    authors.record("BOT1", AUTHOR_BOT)
+    authors.record("OP1", AUTHOR_OPERATOR)
+    bot_quote = {"id": "BOT1", "participant": "491555000000@lid", "body": "hola"}
+    op_quote = {"id": "OP1", "participant": "491555000000@lid", "body": "hey"}
+    old_quote = {"id": "OLD", "participant": "491555000000@lid", "body": "hm"}
+    assert reply_context(bot_quote, {}, own).startswith("you <491555000000@lid>")
+    assert reply_context(op_quote, {}, own).startswith("your operator <")
+    assert reply_context(old_quote, {}, own).startswith("this account, you or your")
+
+
+def test_prepare_mentions_rewrites_names_and_jid_tails() -> None:
+    """``@Name`` and ``@digits@lid`` become the ``@digits`` WhatsApp tags."""
+    from wahabot.ai.tools.whatsapp import prepare_mentions
+    from wahabot.core.identity import names as name_book
+
+    name_book.learn("491555000002@lid", "Ada Lovelace")
+    name_book.learn("491555000003@lid", "Ada Byron")
+    name_book.learn("491555000004@lid", "Grace Hopper")
+    waha = unittest.mock.Mock()
+    waha.lid_phone.return_value = ""
+    roster = ["491555000002@lid", "491555000003@lid", "491555000004@lid"]
+
+    text, _ = prepare_mentions(waha, SESSION, "hola @491555000004@lid", roster)
+    assert text == "hola @491555000004"
+    text, _ = prepare_mentions(waha, SESSION, "gracias @Grace, bien", roster)
+    assert text == "gracias @491555000004, bien"
+    text, _ = prepare_mentions(waha, SESSION, "@Ada Lovelace tiene razón", roster)
+    assert text == "@491555000002 tiene razón"
+    # Ambiguous first name: left as typed rather than tagging a guess.
+    text, _ = prepare_mentions(waha, SESSION, "@Ada?", roster)
+    assert text == "@Ada?"
+    # Not a mention: an @ glued to a word.
+    text, _ = prepare_mentions(waha, SESSION, "L@s Grace", roster)
+    assert text == "L@s Grace"
+    # Not a mention: an @-handle inside a URL, even when the name matches.
+    text, _ = prepare_mentions(
+        waha, SESSION, "mira https://example.com/@grace ahora", roster
+    )
+    assert text == "mira https://example.com/@grace ahora"
+
+
+def test_prepare_mentions_bridges_lid_to_phone_roster() -> None:
+    """A LID token missing from a phone-JID roster is confirmed via WAHA."""
+    from wahabot.ai.tools.whatsapp import prepare_mentions
+
+    waha = unittest.mock.Mock()
+    waha.lid_phone.return_value = "491555000005@c.us"
+    _, roster = prepare_mentions(
+        waha, SESSION, "@777888999000111 mira", ["491555000005@c.us"]
+    )
+    assert "777888999000111@lid" in roster
+
+
+def test_operator_run_refuses_chatless_tools() -> None:
+    """An operator command must name its chat; "operator" never reaches WAHA."""
+    from wahabot.ai.tools.whatsapp import RunTarget, fenced_chat
+
+    target = RunTarget(session=SESSION, chat_id="operator", armed=True)
+    chat, err = fenced_chat(None, target)
+    assert chat is None and err and "no default chat" in err
+    chat, err = fenced_chat(CHAT_ID, target)
+    assert chat == CHAT_ID and err is None
+
+
+def test_degrade_repairs_reason_only_calls_from_original() -> None:
+    """Calls an older squeeze cut to ``reason`` regain their argument keys."""
+    from llama_index.core.base.llms.types import ToolCallBlock
+
+    from wahabot.ai.history import degrade_message
+
+    msg = ChatMessage(
+        role=MessageRole.ASSISTANT,
+        blocks=[
+            ToolCallBlock(
+                tool_call_id="c-old",
+                tool_name="read_chat",
+                tool_kwargs={"reason": "leer el hilo"},
+            )
+        ],
+        additional_kwargs={
+            "tool_calls": [
+                {
+                    "id": "c-old",
+                    "type": "function",
+                    "function": {
+                        "name": "read_chat",
+                        "arguments": json.dumps(
+                            {"mode": "list", "limit": 30, "reason": "leer el hilo"}
+                        ),
+                    },
+                }
+            ]
+        },
+    )
+    (block,) = [b for b in degrade_message(msg).blocks if isinstance(b, ToolCallBlock)]
+    assert block.tool_kwargs == {"mode": "list", "limit": 30, "reason": "leer el hilo"}
+
+
+def test_identity_books_persist(tmp_path: Path) -> None:
+    """Authors and names survive a restart; a corrupt file starts empty."""
+    from wahabot.core import identity
+
+    identity.configure(tmp_path, SESSION)
+    identity.authors.record("true_g@g.us_ABC_491555000000@lid", identity.AUTHOR_BOT)
+    identity.names.learn("491555000002@lid", "Ada Lovelace")
+    identity.authors.flush(force=True)
+    identity.names.flush(force=True)
+    identity.authors.clear()
+    identity.names.clear()
+    identity.configure(tmp_path, SESSION)
+    assert identity.authors.author("ABC") == identity.AUTHOR_BOT
+    assert identity.names.name("491555000002@lid") == "Ada Lovelace"
+    (tmp_path / "identity" / SESSION / "names.json").write_text("{nope")
+    identity.configure(tmp_path, SESSION)
+    assert identity.names.name("491555000002@lid") == ""
+
+
+def test_identity_flush_window_saved_by_exit_hook(tmp_path: Path) -> None:
+    """A put inside the rate-limit window defers to disk, not to memory.
+
+    The first write flushes at once; a second put within
+    ``_FLUSH_INTERVAL_S`` leaves the file stale while the in-memory
+    view is current — the exit hook's forced flush is what saves the
+    window's last write.
+    """
+    from wahabot.core import identity
+
+    identity.configure(tmp_path, SESSION)
+    names_json = tmp_path / "identity" / SESSION / "names.json"
+    identity.names.learn("491555000002@lid", "Ada Lovelace")
+    assert names_json.exists()
+    identity.names.learn("491555000002@lid", "Ada Byron")
+    assert identity.names.name("491555000002@lid") == "Ada Byron"
+    assert "Ada Byron" not in names_json.read_text()
+    identity.flush_on_exit()
+    assert "Ada Byron" in names_json.read_text()
+
+
+def test_identity_failed_write_stays_dirty(tmp_path: Path) -> None:
+    """A failed flush keeps the book dirty, so a later flush retries.
+
+    Without the retry flag, a transient write error (a full disk, a
+    blocked path) would silently drop every entry learned since the
+    last good write.
+    """
+    from wahabot.core import identity
+
+    identity.configure(tmp_path, SESSION)
+    names_json = tmp_path / "identity" / SESSION / "names.json"
+    blocker = names_json.with_suffix(".tmp")
+    blocker.mkdir(parents=True)  # write_text onto a directory fails
+    identity.names.learn("491555000002@lid", "Ada Lovelace")
+    assert not names_json.exists()
+    blocker.rmdir()
+    identity.names.flush(force=True)
+    assert "Ada Lovelace" in names_json.read_text()
+
+
+def test_identity_book_evicts_oldest_at_cap() -> None:
+    """The cap evicts least-recently-put entries; a re-put refreshes."""
+    from wahabot.core.identity import JsonBook
+
+    book = JsonBook(3)
+    for i in range(3):
+        book.put(f"k{i}", "v")
+    book.put("k3", "v")
+    assert book.get("k0") == ""
+    assert book.get("k3") == "v"
+    book.put("k1", "v2")
+    book.put("k4", "v")
+    assert book.get("k2") == ""
+    assert book.get("k1") == "v2"
+
+
+def test_sender_fields_name_and_author() -> None:
+    """Fetched messages carry participant, learned name, and account author."""
+    from wahabot.ai.tools.whatsapp import sender_fields
+    from wahabot.core.identity import AUTHOR_BOT, authors
+    from wahabot.core.identity import names as name_book
+
+    name_book.learn("491555000002@lid", "Ada Lovelace")
+    member = {"participant": "491555000002@lid", "_data": {}}
+    assert sender_fields(member) == {
+        "participant": "491555000002@lid",
+        "name": "Ada Lovelace",
+    }
+    account = {"id": "true_g@g.us_ACC", "fromMe": True, "_data": {}}
+    assert sender_fields(account)["author"] == "unknown"
+    authors.record("ACC", AUTHOR_BOT)
+    assert sender_fields(account)["author"] == AUTHOR_BOT

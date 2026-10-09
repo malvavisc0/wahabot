@@ -39,6 +39,7 @@ from wahabot.ai import bursts as bursts_module
 from wahabot.ai.albums import reset as reset_albums
 from wahabot.ai.context import roster_cache
 from wahabot.commands import register_command_handler
+from wahabot.core import identity as identity_module
 from wahabot.core.echoes import _echoes  # pyright: ignore[reportPrivateUsage]
 from wahabot.core.runs import (
     _chat_lock_pending,  # pyright: ignore[reportPrivateUsage]
@@ -180,6 +181,18 @@ def stack() -> Iterator[Stack]:
     finally:
         s.stop()
         s.llm.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_identity() -> Iterator[None]:
+    """The author/name books are process-global: wipe them around every test."""
+    identity_module.authors.clear()
+    identity_module.names.clear()
+    identity_module.authors.path = None
+    identity_module.names.path = None
+    yield
+    identity_module.authors.clear()
+    identity_module.names.clear()
 
 
 @pytest.fixture()

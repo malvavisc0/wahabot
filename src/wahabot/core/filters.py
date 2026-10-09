@@ -22,9 +22,15 @@ def chat_allowed(
     alternate identities (e.g. ``@c.us`` ↔ ``@lid``), so an operator
     may list either form. Every decision is logged.
     """
+    payload = event.payload
+    # A fromMe message's chat is its `to` (WAHA puts the account itself
+    # in `from`); checking only `from` dropped every operator-typed
+    # message as "non-whitelisted".
+    chat = str(payload.get("to", "")) if payload.get("fromMe") else ""
     senders = {
-        str(event.payload.get("from", "")),
-        str(event.payload.get("participant", "")),
+        str(payload.get("from", "")),
+        str(payload.get("participant", "")),
+        chat,
     }
     senders.discard("")
     if jid_aliases is not None:

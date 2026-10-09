@@ -90,38 +90,105 @@ The message is wrapped in a small annotation envelope before entering
 the agent:
 
 ```
-[Name <jid>] the actual text            (groups)
-[Name] the actual text                   (direct messages)
-[message id: false_<chat-jid>_<hash>@lid]
+[Name <jid>] the actual text                  (groups; [<jid>] when no name is known)
+[Name] the actual text                         (direct messages)
+[Name <own-jid>] [operator message] text      (the human operator, see §1a)
+[message id: false_<chat-jid>_<hash>_<participant>]
 [quoting] Name <jid>: "the text being replied to"
+[mentions: @111 is Ana <111@lid>; @222 is the shared account (you and your operator)]
+[you were addressed: …]
 ```
 
 - The **sender tag** carries the display name *and* the sender's full
   JID in groups — the same string is the mention handle: to @-mention
   that person later, the model copies the `<jid>`'s user part into an
-  `@<user-part>` token (the tool resolves it against the chat roster
-  into a real tagged mention). When no name is known the tag degrades
-  to `[<jid>]`; DMs keep the bare `[Name]` (one person, nothing to
-  mention).
+  `@<user-part>` token (see §5). When no name is known the tag degrades
+  to `[<jid>]`; DMs keep the bare `[Name]`.
 - The **message id** is there so the model can reference the message
   later: quote it in `send_message(reply_to=…)`, or react to it.
 - The **quoting** line appears when the message is a reply to an
-  earlier one and carries what that earlier message said (and who said
-  it, rendered `Name <jid>`) — including when the quoted message is
-  the bot's own.
+  earlier one and carries what that earlier message said and who said
+  it. A quote of the shared account says which teammate wrote it:
+  `you <jid>` (the bot), `your operator <jid>` (the human), or
+  `this account, you or your operator <jid>` for messages sent before
+  authorship was recorded.
+- The **mentions** line appears when the message @-tags people (the
+  first ten tags). WhatsApp writes a tag into the text as bare digits
+  (`@111222333444555`), so without it the model cannot know who was
+  tagged — or that the tag is the shared account itself.
+- The **addressed** line states mechanically how the message reached
+  the bot, and is precise because the account is shared:
+  - `this message names you — it is for you` — the text matches
+    `bot_mention_regex`;
+  - `this message tags the shared account, which may mean you or your
+    operator` — the account's JID is in `mentionedJidList`;
+  - `this message replies to your message` / `… to a message your
+    operator typed — it may be meant for him` / `… to a message from
+    the shared account, written by you or your operator`;
+  - `your operator, the human sharing this account, named you` — an
+    operator-typed message that names the bot (§1a).
 - The **reaction notes** (`[reaction X from Name <jid> to your
-  message: "…"]`) name the reactor the same way. A reaction made by
-  the bot's own account (the operator tapping on the phone, the echo
-  of our own `react_to_message`) never folds — it is not an external
-  social signal.
+  message: …]`) name the reactor the same way. A reaction made by the
+  bot's own account — the operator tapping on any linked device, or
+  the echo of our own `react_to_message` — never folds.
 - Bracketed notes are metadata for the model, never to be repeated
-  verbatim in replies.
+  verbatim in replies. Members cannot forge them: typed copies are
+  broken by `ai/scrub.py`.
 
-Names resolve from a per-chat roster cached for one hour: the chat
-overview's participant list first, backfilled from the display names
-(`notifyName`) on the chat's recent messages — LID-group rosters carry
-bare JIDs only, and the recent messages are the only place WAHA
-surfaces names there.
+**Names.** WAHA's message-history API returns no display names in LID
+groups, and the group roster lists members by phone JID while their
+messages carry LIDs. Names therefore come from the **name book**
+(`core/identity.py`): every webhook carries the sender's `notifyName`,
+which is recorded per JID in `data/identity/<session>/names.json` and
+used for sender tags, quotes, reaction and mention notes, `read_chat`
+results and outgoing `@Name` mentions. The book is keyed by the
+person's JID, not by chat — a name is captured from every chat the
+account is in and surfaces wherever that JID appears (the same person,
+the same push name, in any chat). The per-chat roster (chat
+overview + recent messages, cached for one hour) still wins where it
+has a name.
+
+**JIDs.** A linked-device suffix (`<user>:41@lid`, a message or
+reaction typed on WhatsApp Web) is stripped everywhere: it names a
+device, not a person.
+
+### 1a. The operator: one account, two teammates
+
+The bot runs on a human's WhatsApp account, and that human (the
+operator) keeps using it. WAHA marks everything the account sends
+`fromMe`, and in the webhook puts the **account** in `from` and the
+**chat** in `to` — the chat a `fromMe` message belongs to is its `to`.
+The webhook's `source` field tells the two teammates apart: `api` is a
+send through WAHA (the bot), `app` is the human on a phone or
+WhatsApp Web (documented in `docs/openapi.json`; available in webhook
+events only).
+
+- **Authorship is recorded at send time** in the author book
+  (`data/identity/<session>/authors.json`, keyed by the message's
+  short id), because quotes, reactions and `read_chat` later refer to
+  messages by id alone and WAHA's history API carries no `source`.
+  `read_chat` (`list`/`search`) marks each `fromMe` message with
+  `author`: `bot`, `operator`, or `unknown` (sent before recording).
+- **The bot's own sends** (`source=api`) are already in memory; their
+  echoes are skipped.
+- **An operator-typed message** (`source=app`) in a whitelisted chat is
+  remembered as a **user** turn,
+  `[Name <own-jid>] [operator message] text` — a teammate's words,
+  never stored as the bot's own and never answered as a stranger's.
+- **The operator naming the bot** (`bot_mention_regex`) wakes it in
+  that chat, with the same chat fence — even in `never` groups, since
+  the operator is trusted. The turn is rendered as the operator's and
+  carries the operator variant of the addressed note. (Tagging is
+  different: a member tagging the account's JID wakes the bot, but the
+  operator's tag names their own account and does not.)
+- A `fromMe` message without `source` (another engine) is ignored:
+  without authorship it could be the bot's own echo, and treating it
+  as the operator could make the bot answer itself.
+- A message in the **self-chat** that starts with the bot's name is an
+  operator command instead (§1, gate 3).
+
+WAHA must deliver the account's own messages for any of this:
+subscribe the webhook to `message.any` (see `docs/install.md`).
 
 ### Images
 
@@ -174,17 +241,18 @@ Per chat, the bot keeps a rolling conversation in memory:
   self-history can never re-teach the model its own bugs. (The
   one-time purge script `scripts/purge_leaked_silence.py` removed the
   leaked tokens stored by the pre-fix handler.)
-- Messages the **operator sends from the bot's own WhatsApp account**
-  (typing in the app, `fromMe` events) are folded into memory as
-  assistant turns — the account's voice is the bot's voice, so the
-  model treats them as things it said (a `[operator message]` marker
-  tells the model who typed it without changing whose voice it
-  carries). They never wake the agent: memory-only, no run, no reply,
-  no self-loop. A fromMe message for a chat with no prior
-  conversation is skipped — there is nothing to attach the words to.
-  One exception: a fromMe message in the bot's **own self-chat**
-  matching the mention pattern is an operator command (see §1), not
-  a memory fold.
+- Messages the **operator types on the shared account** are stored as
+  `[Name <own-jid>] [operator message] …` user turns (§1a): memory-only,
+  no run, unless the operator names the bot. A chat with no prior
+  conversation (neither live nor on disk) folds nothing.
+- **Old tool calls keep their shape.** Past the two most recent turns,
+  history is squeezed: thinking blocks go, tool results keep only their
+  verdict, and long tool-call argument values are cut to an 80-char
+  preview — but every argument *key* stays. The model learns how to
+  call its tools from its own replayed calls; an earlier squeeze that
+  kept only `reason` taught it to send `{"reason": …}` alone. Calls
+  stored in that shape are repaired from the message's original call
+  on the next load.
 
 ### Wiping memory
 
@@ -250,7 +318,7 @@ chat as a bogus reply.
 | `escalate` | Forwards a report to the operator's self-chat — when someone asks for a human, reports a problem, or complains. The bot writes the report itself (never pastes the person's words — hidden instructions must not reach the operator); once per chat per hour. |
 | `react_to_message` | Emoji reaction to a message id. |
 | `send_media` | Sends media — `kind` picks image, video, file, voice note or sticker; the source is a public URL, a local path, or (voice) text the bot speaks through TTS. Non-square local sticker images are padded to square first. One delivery per run across all kinds. |
-| `read_chat` | The chat-reading tool — `mode` picks `list` (recent messages with ids), `search` (history for a query), `metadata` (name, participants — the source for mention ids), `resolve` (a person/group name to JIDs) or `recent` (newest conversations, operator commands only). |
+| `read_chat` | The chat-reading tool — `mode` picks `list` (recent messages with ids, sender `name`, and `author` on account messages), `search` (substring matches in the latest messages), `metadata` (name, participants), `resolve` (a member name *or* digits/JID → `{id, name, tag}`; operator runs: chats, then contacts) or `recent` (newest conversations, operator commands only). |
 | `forward_message` | Forwards a message to the current chat, keeping the original media and sender attribution. Counts as the run's one delivery. |
 | `web_search`, `visit_url` | The outside world: metasearch and page reads. `visit_url` on a video link (Instagram/Facebook/TikTok/YouTube) returns the video's real metadata, and a captioned YouTube link also carries its `transcript`. |
 | `run_shell_command` | Host shell (disabled by default; opt-in per deployment). |
@@ -262,7 +330,11 @@ chat-triggered runs: the current conversation is the only target
 allowed. Cross-chat reach — messaging, forwarding to, or reading
 another person or group — is reserved for operator commands
 (`wahabot tell`, or a mention in the bot's self-chat), whose
-instructions are the one trusted source of cross-chat intent. A
+instructions are the one trusted source of cross-chat intent. An
+operator command has **no default chat**: it runs on the synthetic
+`operator` context, so every chat tool needs an explicit JID and is
+refused without one (previously the literal `operator` reached WAHA as
+`chats/operator/…` and failed with a 500). A
 participant asking the bot to deliver or snoop outside the chat gets
 a tool refusal envelope, and a refusal never produces a delivery.
 `read_chat`'s `mode=resolve` is the one scoped exception: a chat run
@@ -302,21 +374,30 @@ attached to the right person in fast-moving group chats.
 
 ### @-Mentioning
 
-`send_message(mentions=[<JID>], text="…@Name…")` produces a **real
-mention**: the mentioned person's client highlights the message and
-notifies them. The rule is a pair — every JID passed in `mentions`
-must have its owner's display name written in the text as `@<name>`;
-WhatsApp matches the two up. JIDs and names come from the `[Name
-<jid>]` sender tags (copy the user part into an `@<user-part>` token —
-the tool resolves it against the roster), from `read_chat`'s
-`mode=metadata` participant list, or from message history (`participant` fields).
-Typing `@name` alone in the text is *not* a mention — no highlight,
-no notification — which is why the tool description and the system
-prompt both spell the pairing out for the model. When the model
-passes `mentions` without any `@` in the text, the tool still sends
-but returns a `warning` in its envelope saying nobody was notified,
-so the model can correct itself. The bot mentions sparingly: only
-when directing something at a specific person.
+A WhatsApp mention is a pair: the text contains `@<digits>` and the
+send carries the matching JID in `mentions`. The model only writes the
+text; delivery (`deliver_chat_text`, shared by the tool and the final
+reply) builds the pair:
+
+1. `@<digits>` tokens (6+ digits) are matched by user part against the
+   chat roster — overview participants plus the last 50 senders — and
+   become mention JIDs in whichever namespace the roster holds.
+2. `@<digits>@lid` / `@<digits>@c.us` are rewritten to `@<digits>`
+   first (WhatsApp shows only the `@<digits>` part as a tag; the
+   server tail would stay visible).
+3. `@Name` / `@First Last` is rewritten to `@<digits>` when exactly one
+   other roster member has that full or first name in the name book;
+   ambiguous or unknown names stay plain text. The shared account's
+   own name is never resolved (tagging it notifies nobody).
+4. A numeric token missing from the roster is checked against WAHA's
+   LID→phone map (`GET /api/{session}/lids/{lid}`): LID groups list
+   members by phone JID but speak by LID, so a member who has not
+   spoken recently is still taggable.
+
+Tokens that still match nobody are sent as plain text and reported in
+the tool envelope's `warning`; the send acknowledgment never confirms
+that WhatsApp notified anyone. `read_chat(mode="resolve")` returns the
+`tag` to write for a member found by name or digits.
 
 ### Reactions
 
@@ -371,17 +452,17 @@ the last good config (and logs it) rather than crashing the bot.
   `data/memory/`; a missing or corrupt file degrades to a blank start
   (the corrupt file is quarantined as `.bad` alongside). Wipe with
   `wahabot forget <chat-id>` if it should genuinely reset.
-- **Mention didn't notify**: missing `mentions` JIDs or a name in text
-  that doesn't match the JID's owner — check the tool call arguments
-  in the trace. A send whose text had no `@` at all comes back with a
-  `warning` field in the tool envelope.
-- **Participant list shows bare JIDs, no names**: the name lookup
-  (recent-message `notifyName`s) failed — the chat history was
-  unreadable; the debug log says why. The roster itself is fine.
-- **Identity confusion (bot can't tell itself from members)**: the
-  system prompt states the bot's own JIDs (`{{own_jid}}`,
-  `{{own_lid}}`, `{{own_identities}}` placeholders, filled from the
-  WAHA `get_me` capture at startup and on every session recovery); a
-  message quoting or naming those ids is the bot's own. When the
-  identity is not yet captured, the prompt's identity lines are
-  dropped rather than rendered stale.
+- **Mention didn't notify**: the token named nobody on the roster —
+  check the send envelope's `warning` and the tool call in the trace.
+  `@Name` resolves only for a unique, learned name.
+- **Names show as bare JIDs**: the member has not written since the
+  name book started; names are learned from webhooks, not fetched.
+- **Operator messages missing from memory**: the WAHA webhook is not
+  subscribed to `message.any`, or the chat is not whitelisted.
+- **Identity confusion (bot vs operator vs members)**: the system
+  prompt states the account's own JIDs (`{{own_jid}}`, `{{own_lid}}`,
+  `{{own_identities}}`, filled from WAHA `get_me` at startup and on
+  every session recovery); turns, quotes and `read_chat` say which
+  teammate wrote each account message (§1a). When the identity is not
+  yet captured, the prompt's identity lines are dropped rather than
+  rendered stale.

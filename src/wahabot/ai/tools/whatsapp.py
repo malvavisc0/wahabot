@@ -20,6 +20,7 @@ import json
 import mimetypes
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -44,6 +45,8 @@ from wahabot.ai.tools.schemas import (
 )
 from wahabot.core.audit import save_action
 from wahabot.core.echoes import remember_self_echo
+from wahabot.core.identity import authors, display_name
+from wahabot.core.identity import names as name_book
 from wahabot.core.jid import chat_from_message_id, roster_entries, same_chat
 from wahabot.core.presence import clear_typing, typing_pause
 from wahabot.core.tts import synthesize
@@ -424,7 +427,17 @@ def fenced_chat(
     chat (the fence invariant, see docs/agent-workflow.md).
     """
     if operator_run(target):
-        return chat_jid(chat, target), None
+        resolved = chat_jid(chat, target)
+        if "@" not in resolved:
+            # An operator command runs on the synthetic "operator"
+            # context, not a WhatsApp chat: an omitted (or name-only)
+            # chat would reach WAHA as `chats/operator/...` and 500.
+            return None, (
+                "operator commands have no default chat: pass `chat` as the exact"
+                " JID (e.g. 1234567890-111111@g.us); resolve names with"
+                " read_chat mode=resolve or mode=recent first"
+            )
+        return resolved, None
     current = (
         target.chat_id if isinstance(target, RunTarget) else target.get("chat_id", "")
     )
@@ -1311,11 +1324,35 @@ def slim_message(message: dict[str, Any], max_body: int = 200) -> dict[str, Any]
     """
     keys = ("id", "timestamp", "from", "fromMe", "participant", "body", "hasMedia", "ack")
     slimmed = {key: message[key] for key in keys if message.get(key) is not None}
+    slimmed.update(sender_fields(message))
     body = slimmed.get("body")
     if isinstance(body, str) and len(body) > max_body:
         slimmed["body"] = body[:max_body] + "…"
         slimmed["body_truncated"] = True
     return slimmed
+
+
+def sender_fields(message: dict[str, Any]) -> dict[str, str]:
+    """Who wrote a fetched message: normalized JID, name, and account author.
+
+    WAHA's history API carries no ``notifyName`` in LID groups, so the
+    name comes from the webhook-learned name book. The bot and the
+    human operator share the account, so ``fromMe`` alone cannot say
+    who wrote a message: ``author`` is the recorded teammate
+    (``bot``/``operator``) or ``unknown`` for messages from before the
+    record started.
+    """
+    data = message.get("_data", {})
+    sender = jid_string(message.get("participant") or data.get("author"))
+    fields: dict[str, str] = {}
+    if sender:
+        fields["participant"] = sender
+    name = str(data.get("notifyName") or "").strip() or display_name(sender)
+    if name:
+        fields["name"] = name
+    if message.get("fromMe"):
+        fields["author"] = authors.author(str(message.get("id") or "")) or "unknown"
+    return fields
 
 
 #: Approximate serialized-item budget for list/search previews, excluding
@@ -1583,6 +1620,7 @@ def names_from_messages(messages: list[dict[str, Any]]) -> dict[str, str]:
         name = str(message.get("_data", {}).get("notifyName") or "").strip()
         if jid and name and jid not in names:
             names[jid] = name
+            name_book.learn(jid, name)
     return names
 
 
@@ -1619,13 +1657,16 @@ def add_participant_summary(
     if not participants:
         return
     scalar["participants"] = len(participants)
-    pairs = [
-        {"id": jid, "name": names[jid]} if jid in names else {"id": jid}
-        for jid in (participant_jid(p) for p in participants)
-        if jid
-    ]
+    jids = [jid for jid in map(participant_jid, participants) if jid]
+    pairs = [roster_pair(jid, names) for jid in jids]
     if 0 < len(pairs) <= 20:
         scalar["participant_list"] = pairs
+
+
+def roster_pair(jid: str, names: dict[str, str]) -> dict[str, str]:
+    """One ``participant_list`` entry: the JID, plus its name when known."""
+    name = display_name(jid, names)
+    return {"id": jid, "name": name} if name else {"id": jid}
 
 
 def participant_jid(participant: Any) -> str:
@@ -1723,6 +1764,90 @@ def chat_roster(waha: WahaClient, session: str, chat_id: str) -> list[str]:
     return list(dict.fromkeys(roster))
 
 
+#: A full-JID mention token (``@123@lid``): WhatsApp renders only the
+#: ``@<user>`` part as a tag, so the ``@server`` tail would stay visible.
+_FULL_JID_TOKEN_RE = re.compile(r"@(\d{6,})@(?:lid|c\.us|s\.whatsapp\.net)\b")
+
+#: A name-shaped mention (``@Ana``, ``@Ángel Blanco``): letters only, not
+#: glued to a preceding word, slash or @ (``L@s``, a URL's ``/@user``
+#: are not mentions), one or two words.
+_NAME_TOKEN_RE = re.compile(r"(?<![\w@/])@([^\W\d_]{2,}(?:[ \u00a0][^\W\d_]{2,})?)")
+
+
+def fold_name(name: str) -> str:
+    """Case- and accent-insensitive comparison key for a display name."""
+    decomposed = unicodedata.normalize("NFKD", name)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
+def roster_name_index(roster: list[str], own: set[str]) -> dict[str, set[str]]:
+    """Folded full name / first name → roster JIDs, other members only.
+
+    The shared account's own JIDs are excluded: tagging "@kAI" or the
+    operator would tag the account itself, which notifies nobody.
+    """
+    index: dict[str, set[str]] = {}
+    for jid in roster:
+        if jid in own:
+            continue
+        name = name_book.name(jid)
+        if not name:
+            continue
+        folded = fold_name(name)
+        index.setdefault(folded, set()).add(jid)
+        first = folded.split()[0] if folded.split() else ""
+        if first and first != folded:
+            index.setdefault(first, set()).add(jid)
+    return index
+
+
+def prepare_mentions(
+    waha: WahaClient, session: str, text: str, roster: list[str]
+) -> tuple[str, list[str]]:
+    """Rewrite *text*'s mention tokens into the shape WhatsApp tags.
+
+    Three repairs, all conservative:
+
+    1. ``@123@lid`` → ``@123``: the JID tail would stay visible text.
+    2. ``@Ana`` → ``@<digits>`` when exactly one other roster member is
+       known by that full or first name; ambiguous or unknown names are
+       left untouched (they stay plain text, as before).
+    3. A numeric token missing from the roster is checked against
+       WAHA's LID↔phone map, so a member who has not spoken recently
+       (LID groups list members by phone number, messages by LID) is
+       still taggable.
+
+    Returns the rewritten text and the roster extended with any JID
+    the LID map confirmed.
+    """
+    text = _FULL_JID_TOKEN_RE.sub(lambda m: f"@{m.group(1)}", text)
+    own = {jid for jid in (_status_state.operator_jid, _status_state.operator_lid) if jid}
+    index = roster_name_index(roster, own)
+    if index:
+
+        def by_name(match: re.Match[str]) -> str:
+            words = match.group(1)
+            for candidate in (words, words.split()[0]):
+                jids = index.get(fold_name(candidate))
+                if jids and len(jids) == 1:
+                    (jid,) = jids
+                    rest = words[len(candidate) :]
+                    return f"@{jid.split('@', 1)[0]}{rest}"
+            return match.group(0)
+
+        text = _NAME_TOKEN_RE.sub(by_name, text)
+    extended = list(roster)
+    phones = {jid.split("@", 1)[0] for jid in roster if jid.endswith("@c.us")}
+    for token in dangling_mentions(text, roster):
+        user = token.split("@", 1)[0]
+        if not user.isdigit():
+            continue
+        phone = waha.lid_phone(session, f"{user}@lid")
+        if phone and phone.split("@", 1)[0] in phones:
+            extended.append(f"{user}@lid")
+    return text, extended
+
+
 def ordered_merge(explicit: list[str], resolved: list[str]) -> list[str]:
     """Explicit mention JIDs first, then newly resolved ones; no dupes.
 
@@ -1770,6 +1895,7 @@ def deliver_chat_text(
     )
     try:
         roster = chat_roster(waha, session, chat_id)
+        text, roster = prepare_mentions(waha, session, text, roster)
         merged = ordered_merge(mentions or [], resolve_mentions(text, roster))
         dangling = dangling_mentions(text, roster)
         sent_id = waha.send_text(
@@ -1787,34 +1913,49 @@ def deliver_chat_text(
 def resolve_in_current_chat(
     waha: WahaClient, session: str, chat_id: str, name: str
 ) -> str:
-    """Name-match the current chat's roster — the chat-run resolve path.
+    """Match a name — or digits/JID — against the current chat's members.
 
-    No contact book: only overview-roster JIDs with recent sender names
-    matching the exact JID are searched. Roster-embedded names and
-    phone/LID aliases are not resolved. A miss can mean missing names,
-    not nonmembership. Errors return an envelope.
+    Members come from the overview roster plus recent senders (LID
+    groups list the roster by phone JID but speak by LID), named by
+    the overview, recent messages and the webhook-learned name book.
+    Digits or a JID match the member's id directly, so the model can
+    ask who a bare ``@<digits>`` is. Each match carries the ``tag`` to write in a
+    reply. A miss can mean an unnamed member, not absence.
     """
     try:
-        overview = waha.get_chat_overview(session, chat_id)
+        roster = chat_roster(waha, session, chat_id)
         names = sender_names(waha, session, chat_id)
     except Exception as exc:
         return error(f"could not read the chat's participants: {exc}")
-    roster = [
-        {"id": jid, "name": names.get(jid, "")}
-        for jid in (participant_jid(p) for p in roster_entries(overview))
-        if jid
-    ]
-    matches = [
-        {"id": m["id"], "name": m["name"]}
-        for m in search_matches(roster, name)
-        if m["name"]
-    ]
-    if not matches:
+    members = [{"id": jid, "name": display_name(jid, names)} for jid in roster]
+    query = name.strip().lstrip("@")
+    digits = query.split("@", 1)[0]
+    hits = (
+        members_by_id(members, digits)
+        if digits.isdigit()
+        else [m for m in search_matches(members, query) if m["name"]]
+    )
+    if not hits:
         return error(
-            f"no match for {name!r} in available participant names"
+            f"no match for {name!r} among this chat's named members"
             + " (resolving other chats is reserved to the operator)"
         )
-    return ok(name=name, matches=matches)
+    return ok(name=name, matches=[tagged(m) for m in hits[:_RESOLVE_CHAT_CANDIDATES]])
+
+
+def members_by_id(members: list[dict[str, str]], digits: str) -> list[dict[str, str]]:
+    """Members whose JID user part is *digits*, else a name-book hit."""
+    hits = [m for m in members if m["id"].split("@", 1)[0] == digits]
+    if hits:
+        return hits
+    jid = f"{digits}@lid"
+    learned = name_book.name(jid)
+    return [{"id": jid, "name": learned}] if learned else []
+
+
+def tagged(member: dict[str, str]) -> dict[str, str]:
+    """A resolve match with the ``@<digits>`` tag to write in a reply."""
+    return {**member, "tag": "@" + member["id"].split("@", 1)[0]}
 
 
 #: Cap on read_chat's `recent` output: one line per conversation, newest first.

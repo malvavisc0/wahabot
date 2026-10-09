@@ -3,6 +3,7 @@
 import re
 from typing import Any
 
+from wahabot.core.identity import authors
 from wahabot.core.models import WahaEvent
 from wahabot.core.waha import media_with_url
 
@@ -30,6 +31,10 @@ TURN_HANDLED_KWARG = "turn_handled"
 #: message the chat saw.
 WRAP_UP_NOTE_KWARG = "wrap_up_note"
 
+#: Kwarg tagging a folded operator-typed message: a no-run user turn,
+#: handled by construction (never the trailing scaffolding of a run).
+OPERATOR_FOLD_KWARG = "operator_fold"
+
 
 def jid_string(value: Any) -> str:
     """A JID field as a plain ``user@server`` string.
@@ -45,10 +50,62 @@ def jid_string(value: Any) -> str:
     if isinstance(value, dict):
         entry: dict[str, Any] = value
         if entry.get("_serialized"):
-            return str(entry["_serialized"])
+            return strip_device(str(entry["_serialized"]))
         user, server = entry.get("user"), entry.get("server")
         return f"{user}@{server}" if user and server else ""
-    return str(value or "")
+    return strip_device(str(value or ""))
+
+
+def strip_device(jid: str) -> str:
+    """*jid* without a linked-device suffix (``123:41@lid`` → ``123@lid``).
+
+    WhatsApp tags a message or reaction typed on a secondary device of
+    an account with that device's index. The suffix names a device, not
+    a person: the operator reacting from WhatsApp Web arrives as
+    ``<own-lid-user>:41@lid`` and must still compare equal to the
+    account's own LID, or the bot mistakes its operator for a stranger.
+    """
+    user, at, server = jid.partition("@")
+    if not at or ":" not in user:
+        return jid
+    return f"{user.split(':', 1)[0]}@{server}"
+
+
+def conversation_jid(event: WahaEvent) -> str:
+    """The chat a message belongs to, whoever sent it.
+
+    WAHA puts the *sender* in ``from``: an incoming message's ``from``
+    is the chat (group or person), but a ``fromMe`` message's ``from``
+    is the account itself and the chat is in ``to``. Using ``from`` for
+    both silently filed every operator-typed message under the
+    account's own JID, where the whitelist dropped it.
+    """
+    payload = event.payload
+    if payload.get("fromMe"):
+        return jid_string(payload.get("to")) or jid_string(payload.get("from"))
+    return jid_string(payload.get("from"))
+
+
+def sent_by_bot_api(event: WahaEvent) -> bool:
+    """True for the echo of a message the bot itself sent through WAHA.
+
+    WAHA's ``source`` field (webhook events only, ``fromMe`` messages
+    only — docs/openapi.json) is ``api`` for a send through the API,
+    i.e. the bot, and ``app`` for the human typing on a phone or
+    WhatsApp Web. The bot's own output is already in memory, so its
+    echo must never be folded again or treated as an operator message.
+    """
+    return bool(event.payload.get("fromMe")) and event.payload.get("source") == "api"
+
+
+def typed_by_operator(event: WahaEvent) -> bool:
+    """True for a message the human operator typed on the shared account.
+
+    Requires WAHA's explicit ``source == "app"``: without the field the
+    message could be the bot's own echo, and treating it as the operator
+    could make the bot answer itself.
+    """
+    return bool(event.payload.get("fromMe")) and event.payload.get("source") == "app"
 
 
 def is_replyable(event: WahaEvent) -> bool:
@@ -159,14 +216,7 @@ def bot_mentioned(
     carries mentions of the account's phone JID (``@c.us``) or its
     linked-device LID (``@lid``) depending on the group type.
     """
-    payload = event.payload
-    me_ids = bot_jids(event)
-    mentioned = payload.get("_data", {}).get("mentionedJidList", [])
-    if me_ids & {jid_string(jid) for jid in mentioned}:
-        return True
-    pattern = bot_mention_pattern(bot_name, bot_mention_regex)
-    body = str(payload.get("body", ""))
-    return bool(pattern.search(body))
+    return account_tagged(event) or name_mentioned(event, bot_name, bot_mention_regex)
 
 
 def self_command_instruction(
@@ -268,29 +318,103 @@ def replies_to_bot(
     return bool(jid_string(reply.get("participant")) in bot_jids(event))
 
 
+#: Payload flag set on an operator-typed ``fromMe`` message once the
+#: handler normalized it into an ordinary group/DM message shape.
+OPERATOR_PAYLOAD_FLAG = "_wahabot_operator"
+
+#: Prefix of every turn the human operator typed on the shared account.
+OPERATOR_NOTE_PREFIX = "[operator message] "
+
+
+def is_operator_event(event: WahaEvent) -> bool:
+    """True for an operator-typed message the handler normalized."""
+    return bool(event.payload.get(OPERATOR_PAYLOAD_FLAG))
+
+
+def name_mentioned(
+    event: WahaEvent,
+    bot_name: str | None = None,
+    bot_mention_regex: str | None = None,
+) -> bool:
+    """Whether the body names the bot (regex / bot-name match)."""
+    pattern = bot_mention_pattern(bot_name, bot_mention_regex)
+    return bool(pattern.search(str(event.payload.get("body", ""))))
+
+
+def account_tagged(event: WahaEvent) -> bool:
+    """Whether ``mentionedJidList`` tags the shared account's own JID."""
+    mentioned = event.payload.get("_data", {}).get("mentionedJidList", []) or []
+    return bool(bot_jids(event) & {jid_string(jid) for jid in mentioned})
+
+
+def quoted_account_author(event: WahaEvent) -> str | None:
+    """Who wrote the quoted message, when it came from the shared account.
+
+    ``None`` when the message quotes nothing or someone else; otherwise
+    ``"bot"``, ``"operator"`` or ``""`` (an account message from before
+    authors were recorded — it could be either teammate).
+    """
+    quoted = message_replies_to(event)
+    if not quoted:
+        return None
+    reply: dict[str, Any] = quoted
+    if jid_string(reply.get("participant")) not in bot_jids(event):
+        return None
+    return authors.author(str(reply.get("id") or ""))
+
+
 def addressed_note(
     event: WahaEvent,
     bot_name: str | None = None,
     bot_mention_regex: str | None = None,
 ) -> str:
-    """The turn-level proof that this message explicitly addressed the bot.
+    """The turn-level statement of *how* this message reached the bot.
 
-    The wake gate decides mechanically (regex name match, tagged JID, or
-    quote of a bot message) but the model never sees that decision —
-    in ``judicious`` groups every message wakes it, so being awake proves
-    nothing and the model re-derives "am I addressed?" from text alone.
-    A flash-model with a room history of "@kai, stay silent" commands
-    then pattern-matches the wrong way and stays silent on a genuine
-    mention. This note hands the gate's verdict over as turn context —
-    the same evidence-not-inference cure as the operator pin — so a
-    literal mention can never lose to a vibe.
+    The wake gate decides mechanically, but the model never sees that
+    decision — in ``judicious`` groups every message wakes it, so being
+    awake proves nothing. This note hands the mechanical facts over as
+    turn context, precisely, because the account is shared with the
+    human operator and "addressed" has three different meanings:
 
-    DM turns carry no note (every DM is for the bot); so do unmentioned
-    group turns — the silence default stays the model's call there.
+    - the text names the bot (regex / bot name): it is for the bot;
+    - the message tags the account's JID: that is the shared account,
+      which may mean the bot *or* the human operator;
+    - the message quote-replies to an account message: the note says
+      whether the bot or the operator wrote it, when that is recorded.
+
+    An operator-typed message that names the bot carries its own
+    variant: the teammate is asking the bot directly.
+
+    DM turns carry no note (every DM is for the bot).
     """
     payload = event.payload
+    if is_operator_event(event):
+        if name_mentioned(event, bot_name, bot_mention_regex):
+            return (
+                "\n[you were addressed: your operator, the human sharing this"
+                " account, named you — this is for you]"
+            )
+        return ""
     if not str(payload.get("from", "")).endswith("@g.us") or payload.get("fromMe"):
         return ""
-    if not bot_mentioned(event, bot_name, bot_mention_regex):
-        return ""
-    return "\n[you were addressed: this message names you — it is for you]"
+    if name_mentioned(event, bot_name, bot_mention_regex):
+        return "\n[you were addressed: this message names you — it is for you]"
+    if account_tagged(event):
+        return (
+            "\n[you were addressed: this message tags the shared account, which"
+            " may mean you or your operator]"
+        )
+    author = quoted_account_author(event)
+    if author == "bot":
+        return "\n[you were addressed: this message replies to your message]"
+    if author == "operator":
+        return (
+            "\n[you were addressed: this message replies to a message your"
+            " operator typed — it may be meant for him]"
+        )
+    if author == "":
+        return (
+            "\n[you were addressed: this message replies to a message from the"
+            " shared account, written by you or your operator]"
+        )
+    return ""

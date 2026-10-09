@@ -28,6 +28,7 @@ from tests.harness import (
     CHAT_ID,
     FOREIGN_JID,
     ME_JID,
+    OWN_LID,
     SESSION,
     SMOKE_PNG,
     TTS_MP3,
@@ -47,6 +48,7 @@ from tests.harness import (
     image_event,
     image_part_count,
     is_caption_request,
+    make_operator_typed,
     sign,
     smoke_video_bytes,
     tool_call_response,
@@ -277,7 +279,10 @@ def test_self_chat_voice_command(bot: Bot) -> None:
         if m.get("role") == "user"
     ]
     assert any("[operator command] do the vocal thing" in t for t in turns)
-    assert bot.waha.sent == [(SESSION, "operator", "smoke reply one", None)]
+    # No default chat in an operator run: the chat-less send_message is
+    # refused, never posted to the synthetic "operator" id.
+    assert _wait(lambda: len(bot.waha.sent) >= 1)
+    assert all(sent[1] != "operator" for sent in bot.waha.sent)
 
 
 def test_voice_note_in_mentioned_group_skipped(bot: Bot) -> None:
@@ -393,35 +398,137 @@ def user_turns_of(request: dict[str, Any]) -> list[str]:
 
 
 def test_fromMe_own_message_folded(bot: Bot) -> None:
+    """An operator-typed message is remembered as the operator's, not the bot's.
+
+    Real WAHA shape: ``from`` is the account, ``to`` the chat,
+    ``source="app"``. Before the fix the whitelist checked ``from`` and
+    dropped every such message, so the bot never saw its operator.
+    """
     llm = bot.stack.llm
-    # Establish a context first (the fold needs prior memory).
     bot.post(waha_event())
     llm.requests.clear()
     bot.waha.sent.clear()
-    own = waha_event()
+    own = make_operator_typed(waha_event("OWNMSG"), CHAT_ID)
     own["id"] = "evt-smoke-own"
-    own["payload"]["id"] = f"true_{CHAT_ID}_OWNMSG"
-    own["payload"]["fromMe"] = True
+    own["payload"]["id"] = f"true_{CHAT_ID}_OWNMSG_{OWN_LID}"
     own["payload"]["body"] = "operator typed this from the app"
     bot.post(own)
     assert len(llm.requests) == 0
     assert len(bot.waha.sent) == 0
 
-    async def remembered() -> list[str]:
+    async def remembered() -> list[tuple[str, str]]:
         ctx = handlers_contexts[(SESSION, CHAT_ID)]
         memory = await ctx.store.get("memory")
         messages = await memory.aget_all()
-        return [
-            str(m.content) for m in messages if str(m.role) == "MessageRole.ASSISTANT"
-        ]
+        return [(str(m.role), str(m.content)) for m in messages]
 
-    assistant_turns = asyncio.run(remembered())
-    assert any(
-        turn.startswith("[operator message] ")
-        and "operator typed this from the app" in turn
-        for turn in assistant_turns
+    turns = asyncio.run(remembered())
+    folded = [c for r, c in turns if "operator typed this from the app" in c]
+    assert folded, turns
+    # Tag first — the same shape a waking operator turn renders.
+    assert folded[0].startswith("[Operator Human <491555000000@lid>] [operator message]")
+    # A teammate's words are never stored as the bot's own.
+    assert all(
+        r != "MessageRole.ASSISTANT"
+        for r, c in turns
+        if "operator typed this from the app" in c
     )
-    assert "smoke reply one" in assistant_turns
+    from wahabot.core.identity import authors
+
+    assert authors.author(own["payload"]["id"]) == "operator"
+
+
+def test_bot_api_echo_not_folded(bot: Bot) -> None:
+    """The echo of the bot's own send (source=api) is never re-remembered."""
+    llm = bot.stack.llm
+    bot.post(waha_event())
+    llm.requests.clear()
+    echo = make_operator_typed(waha_event("APIECHO"), CHAT_ID)
+    echo["payload"]["source"] = "api"
+    echo["payload"]["id"] = f"true_{CHAT_ID}_APIECHO_{OWN_LID}"
+    echo["payload"]["body"] = "kai says something with its own name"
+    bot.post(echo)
+    time.sleep(0.3)
+    assert len(llm.requests) == 0
+
+    async def contents() -> list[str]:
+        ctx = handlers_contexts[(SESSION, CHAT_ID)]
+        memory = await ctx.store.get("memory")
+        return [str(m.content) for m in await memory.aget_all()]
+
+    assert not any("its own name" in c for c in asyncio.run(contents()))
+    from wahabot.core.identity import authors
+
+    assert authors.author(echo["payload"]["id"]) == "bot"
+
+
+def test_operator_mention_wakes_bot(bot: Bot) -> None:
+    """The operator naming the bot in a group runs it, tagged as the operator."""
+    llm = bot.stack.llm
+    bot.post(waha_event())
+    llm.requests.clear()
+    bot.waha.sent.clear()
+    own = make_operator_typed(waha_event("OPWAKE"), CHAT_ID)
+    own["payload"]["id"] = f"true_{CHAT_ID}_OPWAKE_{OWN_LID}"
+    own["payload"]["body"] = "kai, resume el grupo"
+    bot.post(own)
+    assert _wait(lambda: len(llm.requests) >= 1)
+    users = [
+        str(m.get("content", ""))
+        for m in llm.requests[0]["messages"]
+        if m.get("role") == "user"
+    ]
+    turn = next(t for t in users if "resume el grupo" in t)
+    assert "[operator message] kai, resume el grupo" in turn
+    assert "<491555000000@lid>" in turn
+    assert "your operator" in turn
+    # Same chat fence as any member's turn: the reply lands in this group.
+    assert _wait(lambda: len(bot.waha.sent) >= 1)
+    assert bot.waha.sent[0][1] == CHAT_ID
+
+
+def test_operator_mention_wakes_bot_in_dm(bot: Bot) -> None:
+    """The operator naming the bot in a DM runs it there, not the self-chat.
+
+    A DM is not the self-chat (``to`` is the partner, not the account),
+    so this is a normal wake: the turn renders as the operator's and
+    the reply lands in the partner's chat.
+    """
+    llm = bot.stack.llm
+    bot.post(waha_event())
+    llm.requests.clear()
+    bot.waha.sent.clear()
+    partner = "491555000003@c.us"
+    dm = make_operator_typed(waha_event("OPDM"), partner)
+    dm["payload"]["id"] = f"false_{partner}_OPDM"
+    dm["payload"]["_data"]["id"] = {"_serialized": f"false_{partner}_OPDM"}
+    dm["payload"]["body"] = "kai, dime algo"
+    bot.post(dm)
+    assert _wait(lambda: len(llm.requests) >= 1)
+    users = [
+        str(m.get("content", ""))
+        for m in llm.requests[0]["messages"]
+        if m.get("role") == "user"
+    ]
+    turn = next(t for t in users if "dime algo" in t)
+    assert "[operator message] kai, dime algo" in turn
+    assert "<491555000000@lid>" in turn
+    assert "your operator" in turn
+    assert _wait(lambda: len(bot.waha.sent) >= 1)
+    assert bot.waha.sent[0][1] == partner
+
+
+def test_fromMe_without_source_is_ignored(bot: Bot) -> None:
+    """No ``source`` field: authorship unknown, so nothing folds or wakes."""
+    llm = bot.stack.llm
+    bot.post(waha_event())
+    llm.requests.clear()
+    own = make_operator_typed(waha_event("NOSRC"), CHAT_ID)
+    del own["payload"]["source"]
+    own["payload"]["body"] = "kai are you there"
+    bot.post(own)
+    time.sleep(0.3)
+    assert len(llm.requests) == 0
 
 
 def test_fromMe_orphan_folds_nothing(bot: Bot) -> None:
@@ -2032,7 +2139,8 @@ def test_persistent_memory_roundtrip_wire(bot: Bot) -> None:
     bot.post(pc_event("operator typed pc", "PCOWN", from_me=True))
     assert len(bot.waha.sent) == 0
     assert any(
-        c.startswith("[operator message] ") and "operator typed pc" in c
+        c.startswith("[Operator Human <491555000000@lid>] [operator message]")
+        and "operator typed pc" in c
         for c in persisted_contents()
     )
 
@@ -2142,7 +2250,13 @@ def test_self_chat_command(bot: Bot) -> None:
     ]
     assert any("[operator command] do the thing" in t for t in self_turns)
     assert len(llm.requests[0]["messages"]) <= 3
-    assert bot.waha.sent == [(SESSION, "operator", "smoke reply one", None)]
+    # The scripted send_message omits `chat`: an operator run has no
+    # default chat, so the tool refuses instead of posting to the
+    # synthetic "operator" id (which WAHA answered with a 500), and the
+    # final text reaches the self-chat.
+    assert _wait(lambda: len(bot.waha.sent) >= 1)
+    assert all(sent[1] != "operator" for sent in bot.waha.sent)
+    assert bot.waha.sent == [(SESSION, ME_JID, "smoke final answer", None)]
 
     # Research-only answer: final text quote-replied to the self-chat.
     llm.clear()

@@ -2,7 +2,7 @@
 
 Every bracketed marker in a turn — ``[message id: …]``, ``[you were
 addressed: …]``, ``[operator message]``, ``[quoting] …``, ``[reaction …
-from …]``, ``[chat context] …`` — is trusted *because code wrote it*.
+from …]``, ``[chat context] …``, ``[mentions: …]`` — is trusted *because code wrote it*.
 But the member's own body rides verbatim into the same turn, so a
 member can type a marker and the model cannot tell code metadata from
 member text. The spoof is not hypothetical: after the addressed-marker
@@ -45,6 +45,7 @@ MARKER_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"quoting\] ?",
         r"reaction .{0,60}? from ",
         r"chat context\]? ?",
+        r"mentions: ?",
     )
 )
 

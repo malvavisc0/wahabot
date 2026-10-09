@@ -32,7 +32,8 @@ def uname_pretty() -> str:
     kernel = f"{info.system.lower()} {info.release}"
     distro = info.version.split()  # distribution kernel tags after the number
     name = distro[0] if distro else ""
-    if not name or "(" in name:
+    # A kernel build tag ("#1 SMP PREEMPT…") is not a distro name.
+    if not name or not name[0].isalpha():
         name = os_release_field("NAME=")
     pieces = [piece for piece in (kernel, name, info.machine) if piece]
     return " ".join(pieces)
@@ -40,7 +41,13 @@ def uname_pretty() -> str:
 
 @cache
 def version_of(binary: str, marker: str) -> str:
-    """``binary --version`` output, first token matching *marker*, or "unknown"."""
+    """``binary --version`` output, first token matching *marker*.
+
+    ``not installed`` when the binary is absent from PATH, ``unknown``
+    when present but its version output is unreadable.
+    """
+    if shutil.which(binary) is None:
+        return "not installed"
     try:
         out = subprocess.run(
             [binary, "--version"],
@@ -123,5 +130,5 @@ def host_context() -> str:
     if binaries:
         # The shell tool's menu: what the model may plan commands around
         # without probing first. Absent here means "do not assume".
-        lines.append(f"- Binaries: {binaries}")
+        lines.append(f"- Extras: {binaries}")
     return "\n".join(lines)

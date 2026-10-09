@@ -152,6 +152,27 @@ class WahaClient:
         response.raise_for_status()
         return response_json(response)
 
+    def lid_phone(self, session: str, lid: str) -> str:
+        """The phone JID WAHA maps *lid* to, or "" when unknown/unreachable.
+
+        ``GET /api/{session}/lids/{lid}`` answers ``{"lid", "pn"}``. LID
+        groups name members by phone JID in their roster but by LID in
+        their messages, so this is the bridge between the two. Fail-soft:
+        mention resolution must never break a send.
+        """
+        try:
+            response = self._client.get(
+                f"{API_PREFIX}/{quote(session, safe='')}/lids/{quote(lid, safe='')}"
+            )
+            response.raise_for_status()
+            data = response_json(response)
+        except Exception as exc:
+            logger.debug("LID lookup failed for {lid}: {exc}", lid=lid, exc=exc)
+            return ""
+        if isinstance(data, dict):
+            return str(cast(dict[str, Any], data).get("pn") or "")
+        return ""
+
     def list_contacts(self, session: str, limit: int = 500) -> list[dict[str, Any]]:
         """Up to *limit* contacts — WAHA ``GET /api/contacts/all``; no paging."""
         response = self._client.get(

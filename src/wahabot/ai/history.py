@@ -50,7 +50,11 @@ from llama_index.core.base.llms.types import (
     ToolCallBlock,
 )
 
-from wahabot.ai.messages import REACTION_TARGET_KWARG, TURN_HANDLED_KWARG
+from wahabot.ai.messages import (
+    OPERATOR_FOLD_KWARG,
+    REACTION_TARGET_KWARG,
+    TURN_HANDLED_KWARG,
+)
 
 __all__ = [
     "ToolCall",
@@ -149,7 +153,7 @@ EMOJI_NARRATION_RE = re.compile(
 def is_emoji_narration(reply: str) -> bool:
     """True when *reply* is one emoji plus a report about that action.
 
-    ``👍\\nReaccioné con 👍 al matiz de Francisco, sin escribir por el
+    ``👍\\nReaccioné con 👍 al matiz de Bruno, sin escribir por el
     modo silencio.`` — the model narrated the reaction it meant to
     deliver instead of calling the tool (or after a tool round). The
     emoji half makes it *look* like a lone-emoji reaction; the words
@@ -490,6 +494,7 @@ def is_handled(msg: ChatMessage) -> bool:
     return (
         TURN_HANDLED_KWARG in msg.additional_kwargs
         or REACTION_TARGET_KWARG in msg.additional_kwargs
+        or OPERATOR_FOLD_KWARG in msg.additional_kwargs
     )
 
 
@@ -627,11 +632,9 @@ FRESH_TURNS = 2
 #: payload the model already consumed when the run was live.
 VERDICT_KEYS = ("ok", "error", "outcome", "chat", "tool", "exit_code", "capture_errors")
 
-#: Tool-call keys that survive degradation. ``reason`` is the audit
-#: trail's one-line "what and why" (every tool takes it); everything
-#: else — ``command`` bodies, search queries, URLs, page text — is the
-#: work the model already did.
-CALL_VERDICT_KEYS = ("reason",)
+#: Longest a string argument of an old tool call stays; longer values
+#: are cut to this many characters plus an ellipsis.
+CALL_ARG_PREVIEW = 80
 
 #: Shortest a squeezed tool-call kwargs dict may be, relative to the
 #: original — below this the squeeze saves nothing worth the swap.
@@ -639,28 +642,87 @@ MIN_SQUEEZE_GAIN = 32
 
 
 def squeeze_tool_call_kwargs(kwargs: dict[str, Any]) -> dict[str, Any] | None:
-    """Tool-call kwargs reduced to their ``reason``, or None when unchanged."""
+    """Tool-call kwargs with long string values trimmed, or None when unchanged.
+
+    Every argument *key* survives, with its value cut to a short preview:
+    the model learns how to call its tools from its own replayed calls,
+    and an older squeeze that kept only ``reason`` taught it to send
+    ``{"reason": …}`` alone — the dominant cause of "missing a required
+    argument" failures (16 of 27 replayed calls in one group's history
+    had that shape). Trimming the values still drops the bulk (shell
+    bodies, page text) that motivated the squeeze.
+    """
     if not kwargs:
         return None
-    verdict = {k: kwargs[k] for k in CALL_VERDICT_KEYS if k in kwargs}
-    squeezed = json.dumps(verdict, ensure_ascii=False)
-    if len(squeezed) + MIN_SQUEEZE_GAIN > len(json.dumps(kwargs, ensure_ascii=False)):
+    squeezed = {key: trim_call_value(value) for key, value in kwargs.items()}
+    before = len(json.dumps(kwargs, ensure_ascii=False))
+    if len(json.dumps(squeezed, ensure_ascii=False)) + MIN_SQUEEZE_GAIN > before:
         return None
-    return verdict
+    return squeezed
 
 
-def degraded_tool_call_block(block: ToolCallBlock) -> ToolCallBlock:
-    """A ``ToolCallBlock`` with its kwargs squeezed to the verdict."""
-    kwargs = block.tool_kwargs
-    if isinstance(kwargs, str):
-        try:
-            kwargs = json.loads(kwargs)
-        except ValueError:
-            return block
-    if not isinstance(kwargs, dict):
+def trim_call_value(value: Any) -> Any:
+    """A long string cut to :data:`CALL_ARG_PREVIEW` chars plus an ellipsis."""
+    if isinstance(value, str) and len(value) > CALL_ARG_PREVIEW:
+        return value[:CALL_ARG_PREVIEW] + "…"
+    return value
+
+
+def original_call_kwargs(msg: ChatMessage, call_id: str) -> dict[str, Any] | None:
+    """The full arguments a tool call was issued with, from the raw message.
+
+    ``additional_kwargs["tool_calls"]`` keeps the provider's original
+    call, untouched by squeezing — the source for repairing calls an
+    older squeeze cut down to ``reason`` only.
+    """
+    calls = cast(list[Any], msg.additional_kwargs.get("tool_calls") or [])
+    for call in calls:
+        if isinstance(call, dict):
+            entry = cast(dict[str, Any], call)
+            if entry.get("id") == call_id:
+                return parsed_arguments(entry.get("function", {}).get("arguments"))
+    return None
+
+
+def parsed_arguments(raw: Any) -> dict[str, Any] | None:
+    """A tool call's arguments (JSON text or dict) as a dict, else None."""
+    try:
+        parsed: Any = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return None
+    return cast(dict[str, Any], parsed) if isinstance(parsed, dict) else None
+
+
+def block_kwargs(block: ToolCallBlock) -> dict[str, Any] | None:
+    """A block's kwargs as a dict (they may be stored as JSON text)."""
+    return parsed_arguments(block.tool_kwargs)
+
+
+def repaired_kwargs(
+    block: ToolCallBlock, kwargs: dict[str, Any], msg: ChatMessage | None
+) -> dict[str, Any] | None:
+    """The original arguments of a call an older squeeze cut to ``reason``."""
+    if msg is None or not block.tool_call_id or set(kwargs) - {"reason"}:
+        return None
+    original = original_call_kwargs(msg, block.tool_call_id)
+    return original if original and set(original) - {"reason"} else None
+
+
+def degraded_tool_call_block(
+    block: ToolCallBlock, msg: ChatMessage | None = None
+) -> ToolCallBlock:
+    """A ``ToolCallBlock`` with long argument values trimmed.
+
+    A block an older squeeze reduced to ``{"reason": …}`` is repaired
+    from the message's original call (*msg*) when that is available.
+    """
+    kwargs = block_kwargs(block)
+    if kwargs is None:
         return block
-    verdict = squeeze_tool_call_kwargs(cast(dict[str, Any], kwargs))
-    if verdict is None:
+    repaired = repaired_kwargs(block, kwargs, msg)
+    source = repaired or kwargs
+    verdict = squeeze_tool_call_kwargs(source) or (repaired and source)
+    if not verdict:
         return block
     return ToolCallBlock(
         tool_call_id=block.tool_call_id,
@@ -681,11 +743,12 @@ def degrade_old_history(messages: list[ChatMessage]) -> list[ChatMessage]:
     - old tool results keep only their verdict (``ok``, ``error``, …)
       — the model needs to remember *that* a command worked, not the
       2k characters of ``stdout`` it printed;
-    - old ``ToolCallBlock`` kwargs keep only their ``reason`` — the
-      meme-script incident (docs/bug-report-2c665d8.md, bug 7: a 3k-char
+    - old ``ToolCallBlock`` kwargs keep every key but trim long values
+      to a short preview — the meme-script incident
+      (docs/bug-report-2c665d8.md, bug 7: a 3k-char
       ``run_shell_command`` body rode every later prompt as dead
-      weight): the model needs to remember *that* it drew a meme, not
-      the Python it drew it with.
+      weight) — without teaching the model call shapes that lack
+      their required arguments.
 
     Destructive on purpose: the caller (``chat_history``) persists the
     result back into memory, so degradation compounds across runs. A
@@ -707,8 +770,8 @@ def degrade_message(msg: ChatMessage) -> ChatMessage:
 
     ``role=TOOL`` results are reduced to their verdict envelope
     (:func:`squeeze_tool_result`); assistant messages lose their
-    ``ThinkingBlock``s and have every ``ToolCallBlock``'s kwargs
-    squeezed to the call's ``reason`` (:func:`degraded_tool_call_block`).
+    ``ThinkingBlock``s and have every ``ToolCallBlock``'s long argument
+    values trimmed, keys kept (:func:`degraded_tool_call_block`).
     A message with nothing to squeeze passes through as the same
     object. The rebuild passes ``content=None``: ``ChatMessage.__init__``
     treats any non-None content — the empty string included — as an
@@ -721,7 +784,8 @@ def degrade_message(msg: ChatMessage) -> ChatMessage:
     if not blocks:
         return msg
     squeezed = [
-        degraded_tool_call_block(b) if isinstance(b, ToolCallBlock) else b for b in blocks
+        degraded_tool_call_block(b, msg) if isinstance(b, ToolCallBlock) else b
+        for b in blocks
     ]
     stripped = [b for b in squeezed if not isinstance(b, ThinkingBlock)]
     if stripped == blocks:

@@ -30,6 +30,7 @@ from wahabot.ai.context import participant_names
 from wahabot.ai.messages import REACTION_TARGET_KWARG, bot_jids, jid_string
 from wahabot.ai.scrub import strip_spoofed_markers
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+from wahabot.core.identity import display_name
 from wahabot.core.jid import chat_from_message_id, is_own_message_id
 from wahabot.core.models import WahaEvent
 from wahabot.core.runs import chat_lock, context_for, persist_memory
@@ -104,7 +105,7 @@ def register_reaction_handler(
         names = await asyncio.to_thread(participant_names, waha, event.session, chat_id)
         sender = str(event.payload.get("participant") or event.payload.get("from") or "")
         sender = jid_string(sender) or "someone"
-        display = names.get(sender)
+        display = display_name(sender, names)
         sender = f"{display} <{sender}>" if display else sender
         note = f"[reaction {emoji} from {sender} to your message: {preview}]"
         async with chat_lock(event.session, chat_id):

@@ -38,6 +38,7 @@ from wahabot.settings import Settings
 CHAT_ID = "1234567890-1234567890@g.us"
 SESSION = "default"
 ME_JID = "491555000000@c.us"
+OWN_LID = "491555000000@lid"
 
 #: A foreign JID nobody in a test run inhabits — the cross-chat target
 #: the fence must refuse on chat runs.
@@ -276,12 +277,33 @@ def chat_event(
     ev["payload"]["from"] = chat
     ev["payload"]["fromMe"] = from_me
     ev["payload"]["body"] = body
+    if from_me:
+        make_operator_typed(ev, chat)
     # Real WAHA keeps payload.id and _data.id._serialized in sync (both
     # are the same serialized id); the inbound-note fallback reads
     # _data first, so a stale base fixture id here would make every
     # event share one message id — the redelivery dedup keys on it.
     ev["payload"]["_data"] = dict(ev["payload"]["_data"])
     ev["payload"]["_data"]["id"] = {"_serialized": f"{prefix}_{chat}_{mid}"}
+    return ev
+
+
+def make_operator_typed(ev: dict[str, Any], chat: str) -> dict[str, Any]:
+    """Reshape *ev* into what WAHA (WEBJS) sends when the human types.
+
+    Captured from production webhooks: a ``fromMe`` message carries the
+    account itself in ``from``, the chat in ``to``, the account's LID as
+    ``participant`` and ``source="app"`` (``"api"`` marks the bot's own
+    sends through WAHA).
+    """
+    payload = ev["payload"]
+    payload["fromMe"] = True
+    payload["from"] = OWN_LID
+    payload["to"] = chat
+    payload["participant"] = OWN_LID
+    payload["source"] = "app"
+    payload["_data"] = dict(payload["_data"])
+    payload["_data"]["notifyName"] = "Operator Human"
     return ev
 
 

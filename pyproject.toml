@@ -1,6 +1,6 @@
 [project]
 name = "wahabot"
-version = "0.9.9"
+version = "1.0.0"
 description = "Self-hosted WhatsApp AI agent with chat memory, media understanding, web research, and operator controls via WAHA"
 readme = "README.md"
 authors = [
@@ -15,6 +15,11 @@ dependencies = [
     "llama-index-core",
     "llama-index-llms-openai-like",
     "loguru",
+    # pydantic 2.14 changes WrapSerializer's handler contract (it now
+    # receives SerializationInfo), which llama-index-core 0.14.x's
+    # SimpleChatStore serializer is not built for — memory saves fail.
+    # Unpin once llama-index ships the fix.
+    "pydantic<2.14",
     "pydantic-settings",
     "typer",
     "uvicorn[standard]",
