@@ -16,7 +16,6 @@ operator destination.
 import base64
 import contextvars
 import io
-import json
 import mimetypes
 import re
 import time
@@ -1317,10 +1316,11 @@ def slim_message(message: dict[str, Any], max_body: int = 200) -> dict[str, Any]
     WAHA messages carry a raw ``_data`` blob (messageSecret,
     reportingToken, engine flags — ~90% of the payload) that is useless
     to the model and inflates every tool result. Slimmed messages keep
-    valid JSON and stay small enough for the inline preview budget.
-    Message bodies are capped at *max_body* chars for the inline slice.
-    ``body_truncated`` marks a cut body. ``fit_messages`` attempts to
-    spill the full fetched window, not the entire chat history.
+    valid JSON and stay small enough for the inline preview. Message
+    bodies are capped at *max_body* chars for the inline slice;
+    ``body_truncated`` marks a cut body, whose full text lives in the
+    spill file :func:`fit_messages` writes — nothing requested is
+    silently dropped.
     """
     keys = ("id", "timestamp", "from", "fromMe", "participant", "body", "hasMedia", "ack")
     slimmed = {key: message[key] for key in keys if message.get(key) is not None}
@@ -1355,39 +1355,22 @@ def sender_fields(message: dict[str, Any]) -> dict[str, str]:
     return fields
 
 
-#: Approximate serialized-item budget for list/search previews, excluding
-#: envelope/array overhead. At least one item is kept, even if oversized.
-_LIST_INLINE_BUDGET = 4000
-
-
 def fit_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """Preview a fetched/matched message window and attempt a raw JSON spill.
+    """Slim every fetched message inline and spill the raw window to a file.
 
-    ``returned`` counts inline entries; ``truncated`` flags omitted
-    entries, independently of each message's ``body_truncated`` flag.
-    Nonempty windows also report ``message_count`` (not a history total)
-    and attempt to spill all raw entries, even for short results.
-    Empty windows omit count/file; spill failure omits file. Without
-    the shell tool only the operator can read the omitted content.
+    Nothing requested is silently dropped: every message appears in
+    the slimmed inline list (bodies capped by :func:`slim_message`),
+    and the full raw window — complete ``_data``, uncapped bodies —
+    goes to the spill file, whose metadata rides along as ``file``.
+    ``returned``/``message_count`` agree; each message's
+    ``body_truncated`` flags cut text whose full form is in the file.
+    Empty windows omit count/file; spill failure omits ``file`` (and
+    the inline list is still complete).
     """
-
-    def inline_slice() -> list[dict[str, Any]]:
-        slimmed = [slim_message(message) for message in messages]
-        kept: list[dict[str, Any]] = []
-        used = 0
-        for item in slimmed:
-            serialized = json.dumps(item, ensure_ascii=False)
-            if kept and used + len(serialized) > _LIST_INLINE_BUDGET:
-                break
-            kept.append(item)
-            used += len(serialized)
-        return kept
-
-    kept = inline_slice()
+    kept = [slim_message(message) for message in messages]
     out: dict[str, Any] = {
         "messages": kept,
         "returned": len(kept),
-        "truncated": len(kept) < len(messages),
     }
     if messages:
         out["message_count"] = len(messages)
@@ -1446,11 +1429,12 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
         fn_schema=ReadChatSchema,
         name="read_chat",
         description=(
-            "Read available chat context. list/search preview recent messages "
-            "and attempt a raw JSON file for every nonempty result. returned "
-            "counts inline messages; message_count counts fetched/matched "
-            "messages, not all history. truncated marks omitted messages; "
-            "body_truncated marks cut text. Never quote unseen content. "
+            "Read available chat context. list/search return every fetched "
+            "message slimmed (bodies capped at 200 chars) and spill the "
+            "full raw window to a JSON file whose metadata comes back as "
+            "file. returned/message_count count fetched/matched messages, "
+            "not all history. body_truncated marks cut text whose full form "
+            "is in the file. Never quote unseen content. "
             f"{deref} A search miss applies only to its recent window. "
             "Metadata returns available fields/counts; missing fields are "
             "unknown, names are display labels, and participant_list appears "

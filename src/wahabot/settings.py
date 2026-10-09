@@ -266,9 +266,19 @@ class HealthCheckFilter(logging.Filter):
 
 
 def setup_logging(settings: Settings) -> None:
-    """Configure loguru sinks and route stdlib logging (uvicorn) through it."""
+    """Configure loguru sinks and route stdlib logging (uvicorn) through it.
+
+    The format keeps only what an operator scans logs for — time,
+    level, the message — and drops loguru's default source-location
+    scaffold (``file:func:line``), which tripled every line's width
+    without adding anything the journal doesn't already carry.
+    """
     logger.remove()
-    logger.add(sys.stderr, level=settings.log_level.upper())
+    logger.add(
+        sys.stderr,
+        level=settings.log_level.upper(),
+        format="<green>{time:HH:mm:ss.SSS}</green> <level>{level: <5}</level> {message}",
+    )
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "httpx"):
         std_logger = logging.getLogger(name)

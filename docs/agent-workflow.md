@@ -603,7 +603,7 @@ Underneath it calls WAHA `PUT /api/reaction` (see
 
 | Tool | Purpose |
 |---|---|
-| `read_chat(mode="list", chat=None, limit=20)` | Recent-message window with a slim inline preview; every nonempty window attempts a raw JSON spill, not the full history. `returned` counts preview entries, `message_count` counts fetched/matched entries, `truncated` marks omitted entries, and `body_truncated` marks cut text |
+| `read_chat(mode="list", chat=None, limit=20)` | Recent-message window: every fetched message slimmed inline (bodies capped at 200 chars) plus a raw JSON spill of the full window. `returned`/`message_count` count fetched/matched entries (nothing is dropped), and `body_truncated` marks cut text whose full form is in the spill |
 | `read_chat(mode="metadata", chat=None)` | Available fields and roster count; up to 20 known JIDs appear inline. Missing fields do not imply zero/false; names are recent display labels |
 | `read_chat(mode="search", query=…, chat=None, limit=20)` | Case-insensitive substring filter within the latest `limit` messages, not `limit` hits or all history. Matches body and available filename/mimetype, not attachment contents |
 | `read_chat(mode="resolve", name=…)` | Up to five available-name candidates. Operator: first 200 chats, then first 500 contacts only if no chat matches. Ordinary: roster JIDs with names recovered from recent messages. Misses are not exhaustive |

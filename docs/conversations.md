@@ -350,9 +350,10 @@ notification scrolled away.
 
 Tool results come back as JSON envelopes — `{"ok": true, …}` or
 `{"ok": false, "error": "…"}` — never as raised exceptions; failures
-are data the model can react to. List tools trim themselves to whole
-messages within a character budget and flag `truncated`, so the model
-always reads parseable results and knows when to fetch more.
+are data the model can react to. List tools slim messages inline
+(bodies capped, raw `_data` noise dropped) and spill the full raw
+window to a temp file whose `file.path` rides along, so every result
+is parseable and nothing requested is silently dropped.
 
 ---
 

@@ -2777,47 +2777,46 @@ _PIN_MESSAGES = [
 
 
 def test_fit_messages_spills_full_history_to_file() -> None:
-    """Inline preview is capped, but the full history rides a temp file.
+    """Every fetched message rides inline slimmed; the full raw window in a file.
 
-    The old behavior silently cut the envelope at 1800 chars, so asking
-    for 600 messages never gave the model more than a sliver. New
-    behavior: the newest messages appear in ``messages`` inline (bounded),
-    and the *entire* list — full bodies, not the slimmed preview — is
-    persisted to ``file.path`` with its ``message_count``, so a long
-    read is never truncated at the source.
+    Nothing requested is silently dropped (outfile.py's contract): all
+    20 messages appear in ``messages`` (bodies capped at 200 chars),
+    and the *entire* raw window — full bodies, no slimming — is
+    persisted to ``file.path``, so a long read is never truncated at
+    the source.
     """
     messages = [
-        {"id": f"false_{CHAT_ID}_M{i}", "body": f"message {i}" * 20} for i in range(20)
+        {"id": f"false_{CHAT_ID}_M{i}", "body": f"message {i}" * 40} for i in range(20)
     ]
     fitted = fit_messages(messages)
     assert fitted["message_count"] == 20
-    assert fitted["truncated"] is True
-    assert fitted["returned"] == len(fitted["messages"])
-    assert fitted["returned"] < 20  # inline preview is bounded
+    assert fitted["returned"] == len(fitted["messages"]) == 20
     assert "file" in fitted
     assert fitted["file"]["bytes"] > 0
     newest = messages[0]["id"]
     assert fitted["messages"][0]["id"] == newest
+    assert fitted["messages"][-1]["id"] == messages[-1]["id"]
     spill = json.loads(Path(fitted["file"]["path"]).read_text(encoding="utf-8"))
     assert len(spill) == 20
     assert spill[0]["id"] == newest
     assert spill[-1]["id"] == messages[-1]["id"]
     # the spill holds the full bodies, not the slimmed inline previews
     assert spill[0]["body"] == messages[0]["body"]
+    # the inline slice caps bodies; the cut is flagged, not hidden
+    assert fitted["messages"][0]["body_truncated"] is True
 
 
 def test_fit_messages_short_list_rides_inline() -> None:
-    """A short history fits inline: no truncation, but still spilled.
+    """A short history fits inline: everything returned, still spilled.
 
-    Even when everything fits the inline budget the full bodies ride
-    the file (the inline slice is slimmed — bodies cut at 200 chars),
-    and `returned`/`truncated` tell the model exactly what it has.
+    Even when everything fits inline the full bodies ride the file (the
+    inline slice is slimmed — bodies cut at 200 chars), and
+    `returned` matches `message_count`: nothing is dropped.
     """
     messages = [{"id": f"false_{CHAT_ID}_M{i}", "body": f"note {i}"} for i in range(3)]
     fitted = fit_messages(messages)
     assert fitted["message_count"] == 3
     assert fitted["returned"] == 3
-    assert fitted["truncated"] is False
     assert "file" in fitted
 
 
@@ -2827,12 +2826,11 @@ def test_chat_preview_body_and_message_truncation_are_independent() -> None:
         long_body = [{"id": "one", "body": "x" * 300}]
         fitted = fit_messages(long_body)
         assert fitted["returned"] == fitted["message_count"] == 1
-        assert fitted["truncated"] is False
         assert fitted["messages"][0]["body_truncated"] is True
         assert len(fitted["messages"][0]["body"]) == 201
         spill.assert_called_once()
         assert spill.call_args.args[1] == long_body
-        assert fit_messages([]) == {"messages": [], "returned": 0, "truncated": False}
+        assert fit_messages([]) == {"messages": [], "returned": 0}
         spill.assert_called_once()
     with unittest.mock.patch(
         "wahabot.ai.tools.whatsapp.write_json_output", side_effect=OSError("unavailable")
