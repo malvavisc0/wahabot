@@ -4533,6 +4533,192 @@ def test_chat_reader_mode_limits_and_name_caps(unit_settings: Settings) -> None:
     waha.search_messages.assert_not_called()
 
 
+def _journal_fixture_lines() -> list[dict[str, Any]]:
+    """Three chat rows plus noise: member, operator (`app`), bot (`api`)."""
+    return [
+        {
+            "event": "message.any",
+            "session": SESSION,
+            "payload": {
+                "id": f"false_{CHAT_ID}_MEMBER_491555000001@c.us",
+                "timestamp": 300,
+                "from": CHAT_ID,
+                "fromMe": False,
+                "participant": "491555000001@c.us",
+                "body": "member asking",
+                "_data": {"notifyName": "Alex Rivers"},
+            },
+        },
+        {
+            "event": "message.any",
+            "session": SESSION,
+            "payload": {
+                "id": f"true_{CHAT_ID}_OP_{OWN_LID}",
+                "timestamp": 100,
+                "from": OWN_LID,
+                "fromMe": True,
+                "to": CHAT_ID,
+                "source": "app",
+                "participant": OWN_LID,
+                "body": "operator typing on the phone",
+                "_data": {"notifyName": "Operator Human"},
+            },
+        },
+        {
+            "event": "message.any",
+            "session": SESSION,
+            "payload": {
+                "id": f"true_{CHAT_ID}_BOT_{OWN_LID}",
+                "timestamp": 200,
+                "from": OWN_LID,
+                "fromMe": True,
+                "to": CHAT_ID,
+                "source": "api",
+                "participant": OWN_LID,
+                # A body longer than the inline list cap stays whole in export.
+                "body": "bot reply " + "x" * 260,
+            },
+        },
+        {
+            # Same id twice: redelivered backlog must collapse to one row.
+            "event": "message.any",
+            "session": SESSION,
+            "payload": {
+                "id": f"false_{CHAT_ID}_MEMBER_491555000001@c.us",
+                "timestamp": 301,
+                "from": CHAT_ID,
+                "fromMe": False,
+                "participant": "491555000001@c.us",
+                "body": "member asking",
+            },
+        },
+        {
+            "event": "message.reaction",
+            "session": SESSION,
+            "payload": {"id": "react", "to": CHAT_ID, "fromMe": True, "timestamp": 250},
+        },
+        {
+            "event": "message.any",
+            "session": SESSION,
+            "payload": {"id": "elsewhere", "from": "19999999999-1@g.us", "timestamp": 5},
+        },
+    ]
+
+
+def _write_journal(day: Path, lines: list[dict[str, Any]], torn: bool = False) -> None:
+    """Write *lines* as the session's daily journal file."""
+    with (day / "2026-01-01.jsonl").open("w", encoding="utf-8") as handle:
+        for line in lines:
+            handle.write(json.dumps(line) + "\n")
+        if torn:
+            handle.write('{"event": "message.any", "payl')
+
+
+def test_journal_chat_messages_keeps_both_directions_deduped(tmp_path: Path) -> None:
+    """The reader collects both directions: one filter is the trap.
+
+    A member's row has ``from`` = the chat, an account row has ``to`` =
+    the chat with ``fromMe`` — collecting only ``from``-side rows is
+    exactly how a shared account silently disappears from a register.
+    Reactions, other chats and redelivered duplicates stay out; a torn
+    line from a crashed append is skipped, not raised.
+    """
+    from wahabot.core.journal import chat_messages
+
+    events = tmp_path / "events" / SESSION
+    events.mkdir(parents=True)
+    _write_journal(events, _journal_fixture_lines(), torn=True)
+
+    payloads = chat_messages(tmp_path / "events", SESSION, CHAT_ID)
+
+    ids = [payload["id"] for payload in payloads]
+    assert ids == [
+        f"true_{CHAT_ID}_OP_{OWN_LID}",
+        f"true_{CHAT_ID}_BOT_{OWN_LID}",
+        f"false_{CHAT_ID}_MEMBER_491555000001@c.us",
+    ]
+
+
+def test_read_chat_export_labels_teammates_and_spills(
+    tmp_path: Path, unit_settings: Settings
+) -> None:
+    """The export keeps both teammates visible, per name and count.
+
+    The envelope names the account's presence itself (one count per
+    author) and the rows carry identity: operator rows keep the
+    account's display name, bot rows drop it — the shared name belongs
+    to the operator, and on a bot row it would read as his words.
+    """
+    from wahabot.ai.tools.whatsapp import RunTarget, bind_target, read_chat, reset_target
+
+    settings = unit_settings.model_copy(update={"data_dir": tmp_path})
+    events = tmp_path / "events" / SESSION
+    events.mkdir(parents=True)
+    _write_journal(events, _journal_fixture_lines())
+
+    waha = unittest.mock.Mock()
+    tool = cast(Any, read_chat(waha, settings)).fn
+    token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID))
+    try:
+        out = json.loads(tool(mode="export"))
+    finally:
+        reset_target(token)
+
+    assert out["ok"] is True
+    assert out["recorded"] == 3 and out["returned"] == 3
+    assert out["account_messages"] == {"operator": 1, "bot": 1}
+    assert out["members"] == {"Alex Rivers": 1}
+    assert out["span"] == [100, 300]
+    rows = json.loads(Path(out["file"]["path"]).read_text(encoding="utf-8"))
+    operator_row, bot_row = rows[0], rows[1]
+    assert operator_row["author"] == "operator"
+    assert operator_row["name"] == "Operator Human"
+    assert bot_row["author"] == "bot"
+    assert "name" not in bot_row
+    assert len(bot_row["body"]) > 200
+    waha.fetch_chat_messages.assert_not_called()
+
+
+def test_read_chat_export_limit_caps_rejects_and_fences(
+    tmp_path: Path, unit_settings: Settings
+) -> None:
+    """Limit keeps the newest recorded rows; the fence still applies.
+
+    A chat run may export only its own conversation; an operator run
+    keeps the cross-chat reach every other read mode has. The limit
+    caps file rows while ``recorded`` keeps the whole truth.
+    """
+    from wahabot.ai.tools.whatsapp import RunTarget, bind_target, read_chat, reset_target
+
+    settings = unit_settings.model_copy(update={"data_dir": tmp_path})
+    events = tmp_path / "events" / SESSION
+    events.mkdir(parents=True)
+    _write_journal(events, _journal_fixture_lines())
+
+    tool = cast(Any, read_chat(unittest.mock.Mock(), settings)).fn
+    token = bind_target(RunTarget(session=SESSION, chat_id=CHAT_ID))
+    try:
+        refused = json.loads(tool(mode="export", limit=0))
+        fenced = json.loads(tool(mode="export", chat=FOREIGN_JID))
+        capped = json.loads(tool(mode="export", limit=1))
+    finally:
+        reset_target(token)
+    assert refused["ok"] is False and "positive" in refused["error"]
+    assert fenced["ok"] is False
+
+    assert capped["ok"] is True
+    assert capped["returned"] == 1 and capped["recorded"] == 3
+    rows = json.loads(Path(capped["file"]["path"]).read_text(encoding="utf-8"))
+    assert rows[0]["id"] == f"false_{CHAT_ID}_MEMBER_491555000001@c.us"
+
+    armed_token = bind_target(RunTarget(session=SESSION, armed=True))
+    try:
+        across = json.loads(tool(mode="export", chat=CHAT_ID))
+    finally:
+        reset_target(armed_token)
+    assert across["ok"] is True and across["recorded"] == 3
+
+
 def test_chat_search_scans_one_window_and_filters_available_fields() -> None:
     messages = [
         {"id": "body", "body": "Needle in body"},

@@ -169,6 +169,14 @@ events only).
   messages by id alone and WAHA's history API carries no `source`.
   `read_chat` (`list`/`search`) marks each `fromMe` message with
   `author`: `bot`, `operator`, or `unknown` (sent before recording).
+  `read_chat` `mode="export"` serves deep history from the event
+  journal instead of WAHA's engine: one spill file of slim rows
+  (full bodies, per-row `author` — author book first, else the
+  journal event's `source`, which labels the whole recorded span),
+  plus inline counts per teammate and per member, so month-scale
+  figures cannot silently lose the account. It holds what the
+  journal recorded while the service ran; downtime gaps and WAHA's
+  own window may differ.
 - **The bot's own sends** (`source=api`) are already in memory; their
   echoes are skipped.
 - **An operator-typed message** (`source=app`) in a whitelisted chat is
@@ -318,7 +326,7 @@ chat as a bogus reply.
 | `escalate` | Forwards a report to the operator's self-chat — when someone asks for a human, reports a problem, or complains. The bot writes the report itself (never pastes the person's words — hidden instructions must not reach the operator); once per chat per hour. |
 | `react_to_message` | Emoji reaction to a message id. |
 | `send_media` | Sends media — `kind` picks image, video, file, voice note or sticker; the source is a public URL, a local path, or (voice) text the bot speaks through TTS. Non-square local sticker images are padded to square first. One delivery per run across all kinds. |
-| `read_chat` | The chat-reading tool — `mode` picks `list` (recent messages with ids, sender `name`, and `author` on account messages), `search` (substring matches in the latest messages), `metadata` (name, participants), `resolve` (a member name *or* digits/JID → `{id, name, tag}`; operator runs: chats, then contacts) or `recent` (newest conversations, operator commands only). |
+| `read_chat` | The chat-reading tool — `mode` picks `list` (recent messages with ids, sender `name`, and `author` on account messages), `search` (substring matches in the latest messages), `metadata` (name, participants), `resolve` (a member name *or* digits/JID → `{id, name, tag}`; operator runs: chats, then contacts), `recent` (newest conversations, operator commands only) or `export` (the chat's deep recorded history: one spill file of slim identity-annotated rows, teammate and member counts inline). |
 | `forward_message` | Forwards a message to the current chat, keeping the original media and sender attribution. Counts as the run's one delivery. |
 | `web_search`, `visit_url` | The outside world: metasearch and page reads. `visit_url` on a video link (Instagram/Facebook/TikTok/YouTube) returns the video's real metadata, and a captioned YouTube link also carries its `transcript`. |
 | `run_shell_command` | Host shell (disabled by default; opt-in per deployment). |

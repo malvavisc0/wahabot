@@ -44,9 +44,10 @@ from wahabot.ai.tools.schemas import (
 )
 from wahabot.core.audit import save_action
 from wahabot.core.echoes import remember_self_echo
-from wahabot.core.identity import authors, display_name
+from wahabot.core.identity import AUTHOR_BOT, AUTHOR_OPERATOR, authors, display_name
 from wahabot.core.identity import names as name_book
 from wahabot.core.jid import chat_from_message_id, roster_entries, same_chat
+from wahabot.core.journal import chat_messages
 from wahabot.core.presence import clear_typing, typing_pause
 from wahabot.core.tts import synthesize
 from wahabot.core.waha import WahaClient
@@ -63,13 +64,17 @@ __all__ = [
     "current_target",
     "deliver_chat_text",
     "delivered_to_self",
+    "dispatch_export",
     "escalate",
+    "export_counts",
+    "export_row",
     "fenced_chat",
     "fenced_message_id",
     "fit_messages",
     "forward_message",
     "image_file",
     "infer_mimetype",
+    "journal_author",
     "local_file",
     "log_action_reason",
     "operator_run",
@@ -77,6 +82,7 @@ __all__ = [
     "probe_media_url",
     "react_to_message",
     "read_chat",
+    "read_export_journal",
     "remote_file",
     "reset_target",
     "resolve_mentions",
@@ -1381,6 +1387,120 @@ def fit_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+#: Journal events of the shared account, by WAHA's ``source`` field:
+#: ``api`` is a send through WAHA's HTTP API (the bot), ``app`` is a
+#: human typing on the phone or WhatsApp Web (the operator).
+_JOURNAL_AUTHORS_BY_SOURCE: dict[str, str] = {"api": AUTHOR_BOT, "app": AUTHOR_OPERATOR}
+
+#: Row window for ``list``/``search`` when the call omits ``limit``.
+_LIST_WINDOW = 20
+
+
+def journal_author(payload: dict[str, Any], recorded: Any) -> str:
+    """Who wrote an account's journal row: live record first, else source.
+
+    ``recorded`` is the author book's entry for the id (``"unknown"``
+    when absent): the book is the recorded truth for ids seen live,
+    since WAHA history and later quote lookups lose ``source``. The
+    journal keeps ``source`` on every event, so it authorizes the whole
+    recorded span — including rows from before the book began.
+    """
+    if recorded not in (None, "", "unknown"):
+        return str(recorded)
+    return _JOURNAL_AUTHORS_BY_SOURCE.get(str(payload.get("source") or ""), "unknown")
+
+
+def export_row(payload: dict[str, Any]) -> dict[str, Any]:
+    """One slim, identity-annotated row of exported history; full body.
+
+    Same shape as the ``list`` preview but with an uncapped body, so a
+    script over the spill file greps what ``list`` would have shown.
+    Account rows carry ``author`` (see :func:`journal_author`); bot rows
+    drop ``name`` — the shared account's display name belongs to the
+    operator, and on a bot row it would read as his words.
+    """
+    row = {
+        key: payload[key]
+        for key in ("id", "timestamp", "from", "fromMe", "hasMedia")
+        if payload.get(key) is not None
+    }
+    row.update(sender_fields(payload))
+    row["body"] = str(payload.get("body") or "")
+    if row.get("fromMe"):
+        row["author"] = journal_author(payload, row.get("author"))
+        if row["author"] == AUTHOR_BOT:
+            row.pop("name", None)
+    return row
+
+
+def export_counts(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The inline export summary: author and member counts plus the spill.
+
+    The envelope states the shared account's presence itself — one
+    count per teammate — so figures built from the file cannot "lose"
+    either of them; the rows, full bodies included, go to the file,
+    not the context.
+    """
+    if not rows:
+        return {}
+    account: dict[str, int] = {}
+    members: dict[str, int] = {}
+    for row in rows:
+        if row.get("fromMe"):
+            author = str(row.get("author") or "unknown")
+            account[author] = account.get(author, 0) + 1
+        else:
+            member = str(row.get("name") or row.get("participant") or "?")
+            members[member] = members.get(member, 0) + 1
+    out: dict[str, Any] = {
+        "account_messages": account,
+        "members": members,
+        "span": (rows[0].get("timestamp"), rows[-1].get("timestamp")),
+    }
+    try:
+        out["file"] = write_json_output("chat_export", rows)
+    except Exception as exc:
+        logger.warning("could not spill exported rows to file: {exc}", exc=exc)
+    return out
+
+
+def read_export_journal(
+    settings: Settings, session: str, chat_id: str, limit: int | None
+) -> str:
+    """The ``export`` mode: the chat's recorded history in one file.
+
+    Month-scale material for figures and registers: every journal row
+    of the chat, slimmed, identity-annotated, full bodies — bounded by
+    ``limit`` (newest kept) when the call asks for less.
+    """
+    payloads = chat_messages(settings.journal_dir, session, chat_id)
+    recorded = len(payloads)
+    if limit is not None and limit < recorded:
+        payloads = payloads[-limit:]
+    rows = [export_row(payload) for payload in payloads]
+    return ok(
+        chat=chat_id,
+        mode="export",
+        returned=len(rows),
+        recorded=recorded,
+        **export_counts(rows),
+    )
+
+
+def dispatch_export(
+    settings: Settings, chat: str | None, target: RunTarget, limit: int | None
+) -> str:
+    """Fence then export: only operator runs may select another chat."""
+    chat_id, fence_error = fenced_chat(chat, target)
+    if fence_error:
+        return error(fence_error)
+    if not chat_id:
+        return error("no active conversation context")
+    if limit is not None and limit <= 0:
+        return error("limit must be positive")
+    return read_export_journal(settings, target.session, chat_id, limit)
+
+
 def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
     """Build the chat-reading tool: list/search/metadata/recent/resolve.
 
@@ -1400,7 +1520,7 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
         chat: str | None = None,
         query: str = "",
         name: str = "",
-        limit: int = 20,
+        limit: int | None = None,
         reason: str = "",
     ) -> str:
         target = current_target()
@@ -1412,10 +1532,12 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
             if mode == "recent":
                 return read_recent_chats(waha, target.session, target, limit)
             return read_resolve_chat(waha, target.session, target, name)
+        if mode == "export":
+            return dispatch_export(settings, chat, target, limit)
         handler = _READ_CHAT_HANDLERS.get(mode)
         if handler is None:
             return error(f"unknown mode: {mode!r}")
-        if mode in ("list", "search") and limit <= 0:
+        if mode in ("list", "search") and limit is not None and limit <= 0:
             return error("limit must be positive")
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
@@ -1440,21 +1562,21 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
             "unknown, names are display labels, and participant_list appears "
             "only for up to 20 known JIDs. resolve returns up to five available "
             "name matches: current roster, or operator's first 200 chats then "
-            "first 500 contacts only if no chat matches. Misses are not exhaustive."
+            "first 500 contacts only if no chat matches. Misses are not "
+            "exhaustive. export spills the chat's deep recorded history to one "
+            "annotated file, teammates and members counted inline."
         ),
     )
 
 
 def read_recent_chats(
-    waha: WahaClient, session: str, target: RunTarget, limit: int
+    waha: WahaClient, session: str, target: RunTarget, limit: int | None
 ) -> str:
     """Newest conversations for operator commands, clamped to at most 30."""
     if not operator_run(target):
         return error(_FENCE_ERROR)
-    try:
-        limit = int(limit)
-    except TypeError, ValueError:
-        return error("limit must be a number")
+    if limit is None:
+        limit = _RECENT_CHATS_CAP
     if limit <= 0:
         return error("limit must be positive")
     try:
@@ -1502,19 +1624,29 @@ def read_resolve_chat(
 
 
 def read_chat_messages(
-    waha: WahaClient, session: str, chat_id: str, query: str, name: str, limit: int
+    waha: WahaClient,
+    session: str,
+    chat_id: str,
+    query: str,
+    name: str,
+    limit: int | None,
 ) -> str:
     """The `list` mode: recent messages from a chat, newest first.
 
     Every nonempty fetched window attempts a raw JSON spill alongside
     the slim inline preview (see :func:`fit_messages`). No paging.
     """
-    messages = waha.fetch_chat_messages(session, chat_id, limit=limit)
+    messages = waha.fetch_chat_messages(session, chat_id, limit=limit or _LIST_WINDOW)
     return ok(chat=chat_id, **fit_messages(messages))
 
 
 def read_search_messages(
-    waha: WahaClient, session: str, chat_id: str, query: str, name: str, limit: int
+    waha: WahaClient,
+    session: str,
+    chat_id: str,
+    query: str,
+    name: str,
+    limit: int | None,
 ) -> str:
     """Substring-filter the latest *limit* messages, not the full history.
 
@@ -1522,7 +1654,7 @@ def read_search_messages(
     """
     if not query.strip():
         return error("query is required")
-    messages = waha.search_messages(session, query, chat_id, limit=limit)
+    messages = waha.search_messages(session, query, chat_id, limit=limit or _LIST_WINDOW)
     return ok(
         chat=chat_id,
         query=query,

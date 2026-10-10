@@ -122,11 +122,11 @@ class SendMediaSchema(BaseModel):
 class ReadChatSchema(BaseModel):
     """Read bounded recent messages, available metadata, or name matches."""
 
-    mode: Literal["recent", "search", "metadata", "list", "resolve"] = Field(
+    mode: Literal["recent", "search", "metadata", "list", "resolve", "export"] = Field(
         description=(
-            "list: latest messages; search: substring matches in the latest "
-            "limit messages, not all history; metadata: available chat fields; "
-            "resolve: available name matches; recent: operator conversation list."
+            "Which mode: list, search (needs query), metadata, resolve (needs "
+            "name), recent (operator-only conversation list), or export (the "
+            "chat's deep recorded history)."
         )
     )
     chat: str | None = Field(
@@ -147,11 +147,13 @@ class ReadChatSchema(BaseModel):
             "exact/substring matching, up to five available-name candidates."
         ),
     )
-    limit: int = Field(
-        default=20,
+    limit: int | None = Field(
+        default=None,
         description=(
-            "Positive recent-message window for list/search, not number of "
-            "search hits. Recent conversations cap at 30. Ignored by metadata/resolve."
+            "Positive recent-message window for list/search (default 20), "
+            "not number of search hits. export: row cap keeping the newest; "
+            "omit for everything recorded. Recent conversations cap at 30. "
+            "Ignored by metadata/resolve."
         ),
     )
     reason: str = Field(default="", description=REASON_DESCRIPTION)
