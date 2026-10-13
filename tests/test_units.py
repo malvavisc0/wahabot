@@ -1836,6 +1836,21 @@ def test_caption_fetch_uses_configured_proxy_and_timeout(unit_settings: Settings
     assert get.call_args.kwargs["timeout"] == 3.5
 
 
+def test_caption_fetch_empty_proxy_sends_none(unit_settings: Settings) -> None:
+    from wahabot.ai.tools.visit_url import (
+        _fetch_captions,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    settings = unit_settings.model_copy(update={"web_search_proxy": ""})
+    response = unittest.mock.Mock(text="captions")
+    with unittest.mock.patch(
+        "wahabot.ai.tools.visit_url.httpx.get", return_value=response
+    ) as get:
+        assert _fetch_captions("https://captions.invalid/data", settings) == "captions"
+    assert get.call_args.kwargs["proxy"] is None
+    assert get.call_args.kwargs["timeout"] == max(settings.web_search_timeout, 2.0)
+
+
 @pytest.mark.parametrize(
     "body",
     [

@@ -449,11 +449,13 @@ def _fetch_captions(track_url: str, settings: Settings | None = None) -> str:
     """
     if not track_url:
         return ""
+    proxy = (settings.web_search_proxy or None) if settings else None
+    timeout = max(settings.web_search_timeout, 2.0) if settings else 10.0
     try:
         response = httpx.get(
             track_url,
-            timeout=max(settings.web_search_timeout, 2.0) if settings else 10.0,
-            proxy=settings.web_search_proxy if settings else None,
+            timeout=timeout,
+            proxy=proxy,
             headers={"User-Agent": "Mozilla/5.0"},
             follow_redirects=True,
         )
