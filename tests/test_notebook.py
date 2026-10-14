@@ -226,16 +226,31 @@ def test_notebook_scopes_and_forget_are_independent(tmp_path: Path) -> None:
 
 
 def test_notebook_scope_listing_newest_first_and_session_scoped(tmp_path: Path) -> None:
-    """scopes() lists chat_id + count for one session, newest writes first."""
+    """scopes() lists session + chat_id + count, newest first.
+
+    Chats are scoped by session — one server can run several — so the
+    listing carries the session on every row; without a session filter
+    every bot's scopes are listed, and the chat JID never spans them.
+    """
     store = Notebook(tmp_path)
     store.write(SESSION, CHAT, "older", "Old fact.")
     time.sleep(0.01)
     store.write(SESSION, OTHER_CHAT, "newer", "New fact.")
     store.write(SESSION, OTHER_CHAT, "newer-still", "Another new fact.")
     store.write(OTHER_SESSION, CHAT, "other-session", "Not this session.")
-    assert store.scopes(SESSION) == [(OTHER_CHAT, 2), (CHAT, 1)]
-    assert store.scopes(OTHER_SESSION) == [(CHAT, 1)]
+    assert store.scopes(SESSION) == [
+        (SESSION, OTHER_CHAT, 2),
+        (SESSION, CHAT, 1),
+    ]
+    assert store.scopes(OTHER_SESSION) == [(OTHER_SESSION, CHAT, 1)]
     assert store.scopes("missing") == []
+    # No filter: newest write first across every session — the
+    # OTHER_SESSION note is the last write, so its scope leads.
+    assert store.scopes() == [
+        (OTHER_SESSION, CHAT, 1),
+        (SESSION, OTHER_CHAT, 2),
+        (SESSION, CHAT, 1),
+    ]
 
 
 def test_concurrent_writes_and_replacements_preserve_unrelated_notes(

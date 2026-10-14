@@ -126,19 +126,29 @@ class Notebook:
                         + "before adding more"
                     )
 
-    def scopes(self, session: str) -> list[tuple[str, int]]:
-        """Every chat scope with at least one note, newest first.
+    def scopes(self, session: str | None = None) -> list[tuple[str, str, int]]:
+        """Every scope holding notes — (session, chat_id, count), newest first.
 
-        The operator-facing listing (``wahabot notebook list``): one
-        row per chat_id with its note count, empty scopes omitted.
+        The operator-facing listing (``wahabot notebook``): chats are
+        scoped by session — one server can run several — so the
+        session rides every row. Pass *session* to filter to one bot
+        instance; None lists across all of them.
         """
         with self.connection() as connection:
-            rows = connection.execute(
-                """SELECT chat_id, COUNT(*) FROM notes WHERE session = ?
-                    GROUP BY chat_id ORDER BY MAX(updated_at) DESC""",
-                (session,),
-            )
-            return [(str(row[0]), int(row[1])) for row in rows]
+            if session is None:
+                rows = connection.execute(
+                    """SELECT session, chat_id, COUNT(*) FROM notes
+                        GROUP BY session, chat_id
+                        ORDER BY MAX(updated_at) DESC"""
+                )
+            else:
+                rows = connection.execute(
+                    """SELECT session, chat_id, COUNT(*) FROM notes WHERE session = ?
+                        GROUP BY session, chat_id
+                        ORDER BY MAX(updated_at) DESC""",
+                    (session,),
+                )
+            return [(str(row[0]), str(row[1]), int(row[2])) for row in rows]
 
     def delete(self, session: str, chat_id: str, key: str) -> bool:
         """Delete one named note, returning whether it existed."""

@@ -314,37 +314,49 @@ def notebook(
         "", "--chat", "-c", help="Show this chat's notes only (JID, or '@session')."
     ),
     session: str = typer.Option(
-        None, "--session", "-s", help="WAHA session name. [default: WAHABOT_SESSION]"
+        None,
+        "--session",
+        "-s",
+        help="WAHA session name. [default: all sessions; with --chat, WAHABOT_SESSION]",
     ),
 ) -> None:
     """List the bot's durable notebook notes.
 
     Read-only view of the notebooks the ``notebook`` tool and the
-    wrap-up lessons write (``data/notebook.sqlite3``): without
-    ``--chat`` every scope is listed with its note count; with
-    ``--chat`` that scope's notes are shown in full, newest first.
+    wrap-up lessons write (``data/notebook.sqlite3``). Chats are
+    scoped by session — one server can run several — so the listing
+    shows the session on every row: without flags, every session's
+    scopes with note counts; with ``--session``, that bot's scopes;
+    with ``--chat``, that scope's notes in full, newest first.
     """
     from wahabot.core.notebook import Notebook
 
     settings = get_settings()
-    # Read-only view: never mutate the process-wide cached settings.
-    session_name = session or settings.session
     store = Notebook(settings.data_dir)
     if not store.path.exists():
         console.print(f"[dim]No notebook yet at {store.path}[/]")
         return
     if not chat:
-        scopes = store.scopes(session_name)
+        # No --chat: a scope listing. --session filters to one bot;
+        # without it every session's scopes are listed (the default
+        # WAHABOT_SESSION would hide the other bots on this server).
+        scopes = store.scopes(session)
         if not scopes:
-            console.print(f"[dim]No notes in any scope for session {session_name}[/]")
+            scope_of = f"session {session}" if session else "any session"
+            console.print(f"[dim]No notes in any scope for {scope_of}[/]")
             return
         table = Table(box=None, show_header=True, pad_edge=False)
+        table.add_column("session", overflow="fold")
         table.add_column("chat", overflow="fold")
         table.add_column("notes", justify="right")
-        for chat_id, count in scopes:
-            table.add_row(chat_id, str(count))
+        for session_name, chat_id, count in scopes:
+            table.add_row(session_name, chat_id, str(count))
         console.print(table)
         return
+    # --chat reads one scope's notes; scopes are session-scoped, so the
+    # chat JID alone identifies nothing. Default to WAHABOT_SESSION like
+    # every other read-only command instead of guessing.
+    session_name = session or settings.session
     notes = store.read(session_name, chat)
     if not notes:
         console.print(f"[dim]No notes for {chat} in session {session_name}[/]")
@@ -353,7 +365,7 @@ def notebook(
         console.print(
             Panel(
                 note.text,
-                title=note.key,
+                title=f"{session_name} · {note.key}",
                 border_style="dim",
                 expand=False,
             )
