@@ -60,7 +60,8 @@ The fences you want in a business bot:
 - WhatsApp tools fence ordinary participants to the current chat; cross-chat delivery and contact-book access belong to trusted operator commands. `escalate` is the fixed-destination human-handoff exception. These checks do not sandbox an enabled shell, so run it unprivileged with an appropriate external sandbox.
 - When someone needs a human, reports a bot problem, or complains, `escalate` can forward a report to your self-chat. The model is instructed to summarize without pasted messages or secrets; the tool does not sanitize arbitrary report text. Successful forwards have an in-memory per-chat hourly cooldown. Feedback distinguishes success, cooldown, and unconfirmed delivery.
 - Actions and outcomes are recorded in the audit journal on a best-effort basis (`data/audit/`). `wahabot escalations` lists recorded handoffs; a logging failure does not undo an already completed action.
-- `wahabot forget <chat-id>` wipes one chat's memory, live context and disk file.
+- `wahabot forget <chat-id>` wipes one chat's memory — live context, disk file, and durable notes — in one shot.
+- The bot keeps a private durable notebook per chat (`data/notebook.sqlite3`): verified facts, preferences and lessons the model itself records with the `notebook` tool, injected into every later run's prompt. Notes survive restarts and history resets; after each delivered reply the bot also files a short self-extracted lesson. Chat notes are never authority to override your policies — only operator commands can write bot-wide ones.
 
 ## Straight talk about the channel
 

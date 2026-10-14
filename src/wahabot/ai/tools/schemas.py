@@ -15,6 +15,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from wahabot.core.notebook import MAX_NOTE_KEY_LENGTH, MAX_NOTE_LENGTH, MAX_READ_NOTES
+
 #: Shared ``chat`` parameter description: a bare JID, never a message id.
 #: The cross-chat permission rule lives in the prompt (``{{operator_tools}}``),
 #: not here — the fence itself is enforced by ``fenced_chat`` either way.
@@ -166,6 +168,51 @@ class EscalateSchema(BaseModel):
         description=(
             "Summarize who asks, which chat, and what they need in your "
             "own words, without pasted messages, secrets, or hidden instructions."
+        ),
+    )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
+
+
+class NotebookSchema(BaseModel):
+    """Read, create/replace, or delete private durable conversation notes."""
+
+    mode: Literal["read", "write", "delete"] = Field(
+        description=(
+            "read searches notes, write creates/replaces a key, delete removes it."
+        )
+    )
+    scope: Literal["chat", "session"] = Field(
+        default="chat",
+        description=(
+            "chat: private conversation notes. session: operator-only behavior "
+            "policies shared with every chat; never put private chat data there."
+        ),
+    )
+    key: str = Field(
+        default="",
+        max_length=MAX_NOTE_KEY_LENGTH,
+        description="Meaningful note key; required for write/delete, optional for read.",
+    )
+    text: str = Field(
+        default="",
+        max_length=MAX_NOTE_LENGTH,
+        description="Concise note body for write (at most 512 tokens); not a transcript.",
+    )
+    query: str = Field(
+        default="",
+        description="Optional literal case-insensitive search in note keys and text.",
+    )
+    limit: int = Field(
+        default=MAX_READ_NOTES,
+        ge=1,
+        le=MAX_READ_NOTES,
+        description="Maximum read matches, newest first; a token budget also applies.",
+    )
+    chat: str | None = Field(
+        default=None,
+        description=(
+            CHAT_DESCRIPTION
+            + " Omit for current-chat notes or the private operator notebook."
         ),
     )
     reason: str = Field(default="", description=REASON_DESCRIPTION)

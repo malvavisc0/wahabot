@@ -20,6 +20,7 @@ import mimetypes
 import re
 import time
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -65,6 +66,7 @@ __all__ = [
     "deliver_chat_text",
     "delivered_to_self",
     "dispatch_export",
+    "dispatch_media",
     "escalate",
     "export_counts",
     "export_row",
@@ -77,11 +79,15 @@ __all__ = [
     "journal_author",
     "local_file",
     "log_action_reason",
+    "media_argument_error",
+    "media_source_error",
+    "normalize_media_source",
     "operator_run",
     "participant_jid",
     "probe_media_url",
     "react_to_message",
     "read_chat",
+    "read_chat_directory",
     "read_export_journal",
     "remote_file",
     "reset_target",
@@ -91,7 +97,9 @@ __all__ = [
     "search_matches",
     "send_media",
     "send_message",
+    "send_voice_text",
     "sender_names",
+    "sent_message_envelope",
     "slim_message",
     "squared_sticker_payload",
     "stay_silent",
@@ -561,24 +569,7 @@ def send_message(waha: WahaClient) -> BaseTool:
             return send_failed_envelope("send_message", chat_id, exc)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
-        fields: dict[str, Any] = {
-            "chat": chat_id,
-            "text": text,
-            "mentions": merged,
-        }
-        if merged and not mention_tokens(text):
-            fields["warning"] = (
-                "mention JIDs were supplied without @<user-part> tokens; "
-                "the text was sent, but mention rendering and notification "
-                "are not confirmed"
-            )
-        elif dangling:
-            fields["warning"] = (
-                f"{' and '.join(f'`@{t}`' for t in dangling)} could not be "
-                "auto-resolved against the roster; other explicit or resolved "
-                "mentions may still be present. Resolve JIDs before future sends."
-            )
-        return ok(**fields)
+        return sent_message_envelope(chat_id, text, merged, dangling)
 
     return FunctionTool.from_defaults(
         fn=send_message_fn,
@@ -592,6 +583,30 @@ def send_message(waha: WahaClient) -> BaseTool:
             "Shares one successful send per run with media and forwarding."
         ),
     )
+
+
+def sent_message_envelope(
+    chat_id: str, text: str, merged: list[str], dangling: list[str]
+) -> str:
+    """Describe a confirmed text send, retaining any mention-resolution warning."""
+    fields: dict[str, Any] = {
+        "chat": chat_id,
+        "text": text,
+        "mentions": merged,
+    }
+    if merged and not mention_tokens(text):
+        fields["warning"] = (
+            "mention JIDs were supplied without @<user-part> tokens; "
+            "the text was sent, but mention rendering and notification "
+            "are not confirmed"
+        )
+    elif dangling:
+        fields["warning"] = (
+            f"{' and '.join(f'`@{t}`' for t in dangling)} could not be "
+            "auto-resolved against the roster; other explicit or resolved "
+            "mentions may still be present. Resolve JIDs before future sends."
+        )
+    return ok(**fields)
 
 
 def stay_silent() -> BaseTool:
@@ -842,21 +857,14 @@ def send_media(waha: WahaClient, settings: Settings) -> BaseTool:
         # Blank sources count as absent (a whitespace-only url must not
         # outrank a real path below) — normalize before the XOR check
         # and the dispatch, so both see the same source.
-        url, path, text = (
-            (stripped or None)
-            if source is not None and (stripped := str(source).strip())
-            else None
-            for source in (url, path, text)
+        url = normalize_media_source(url)
+        path = normalize_media_source(path)
+        text = normalize_media_source(text)
+        arg_error = media_argument_error(
+            url, path, text, kind, caption, filename, language
         )
-        arg_error = _media_source_error(url, path, text, kind)
         if arg_error:
             return error(arg_error)
-        if caption and kind in _UNCAPTIONABLE_KINDS:
-            return error(f"caption is not supported for kind={kind}")
-        if filename and kind != "file":
-            return error("filename is only valid for kind=file")
-        if language and (kind != "voice" or text is None):
-            return error("language is only valid for kind=voice with text")
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
@@ -867,35 +875,22 @@ def send_media(waha: WahaClient, settings: Settings) -> BaseTool:
             probe_error = probe_media_url(url)
             if probe_error:
                 return error(probe_error)
-        from_url = url is not None
-        source = text if text is not None else (url if from_url else path)
         log_action_reason("send_media", reason, chat=chat_id, kind=kind)
-        if kind == "voice":
-            return handler(
-                waha,
-                settings,
-                session,
-                chat_id,
-                target,
-                source,
-                text is not None,
-                language,
-            )
-        if kind in ("image", "video"):
-            return handler(waha, settings, session, chat_id, target, source, caption)
-        if kind == "file":
-            return handler(
-                waha,
-                settings,
-                session,
-                chat_id,
-                target,
-                source,
-                from_url,
-                caption,
-                filename,
-            )
-        return handler(waha, settings, session, chat_id, target, source, from_url)
+        return dispatch_media(
+            waha,
+            settings,
+            handler,
+            kind,
+            session,
+            chat_id,
+            target,
+            url,
+            path,
+            text,
+            caption,
+            language,
+            filename,
+        )
 
     return FunctionTool.from_defaults(
         fn=send_media_fn,
@@ -914,7 +909,14 @@ def send_media(waha: WahaClient, settings: Settings) -> BaseTool:
     )
 
 
-def _media_source_error(
+def normalize_media_source(source: str | None) -> str | None:
+    """Strip a media source, treating missing or blank values as absent."""
+    if source is None:
+        return None
+    return str(source).strip() or None
+
+
+def media_source_error(
     url: str | None, path: str | None, text: str | None, kind: str
 ) -> str | None:
     """The argument-error message for send_media's source, or None.
@@ -929,6 +931,59 @@ def _media_source_error(
     if text is not None and kind != "voice":
         return "text is only valid for kind=voice"
     return None
+
+
+def media_argument_error(
+    url: str | None,
+    path: str | None,
+    text: str | None,
+    kind: str,
+    caption: str,
+    filename: str | None,
+    language: str | None,
+) -> str | None:
+    """Validate normalized media sources and kind-specific options in order."""
+    source_error = media_source_error(url, path, text, kind)
+    if source_error:
+        return source_error
+    if caption and kind in _UNCAPTIONABLE_KINDS:
+        return f"caption is not supported for kind={kind}"
+    if filename and kind != "file":
+        return "filename is only valid for kind=file"
+    if language and (kind != "voice" or text is None):
+        return "language is only valid for kind=voice with text"
+    return None
+
+
+def dispatch_media(
+    waha: WahaClient,
+    settings: Settings,
+    handler: Callable[..., str],
+    kind: str,
+    session: str,
+    chat_id: str,
+    target: RunTarget,
+    url: str | None,
+    path: str | None,
+    text: str | None,
+    caption: str,
+    language: str | None,
+    filename: str | None,
+) -> str:
+    """Pass one validated media source to its existing kind-specific sender."""
+    from_url = url is not None
+    source = text if text is not None else (url if from_url else path)
+    if kind == "voice":
+        return handler(
+            waha, settings, session, chat_id, target, source, text is not None, language
+        )
+    if kind in ("image", "video"):
+        return handler(waha, settings, session, chat_id, target, source, caption)
+    if kind == "file":
+        return handler(
+            waha, settings, session, chat_id, target, source, from_url, caption, filename
+        )
+    return handler(waha, settings, session, chat_id, target, source, from_url)
 
 
 def send_media_image(
@@ -1033,9 +1088,7 @@ def send_media_voice(
 ) -> str:
     """Send the single `voice` source: spoken text is TTS'd, else relayed."""
     if spoken:
-        return _send_voice_text(
-            waha, settings, session, chat_id, target, source, language
-        )
+        return send_voice_text(waha, settings, session, chat_id, target, source, language)
     file = voice_file(source, settings.max_voice_upload_bytes)
     if isinstance(file, str):
         return error(file)
@@ -1053,7 +1106,7 @@ def send_media_voice(
     )
 
 
-def _send_voice_text(
+def send_voice_text(
     waha: WahaClient,
     settings: Settings,
     session: str,
@@ -1119,7 +1172,7 @@ def send_media_sticker(
     )
 
 
-_SEND_MEDIA_HANDLERS: dict[str, Any] = {
+_SEND_MEDIA_HANDLERS: dict[str, Callable[..., str]] = {
     "image": send_media_image,
     "video": send_media_video,
     "file": send_media_file,
@@ -1527,11 +1580,7 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
         if not target.session:
             return error("no active conversation context")
         if mode in ("recent", "resolve"):
-            if chat:
-                return error(f"`chat` is not valid for mode={mode}")
-            if mode == "recent":
-                return read_recent_chats(waha, target.session, target, limit)
-            return read_resolve_chat(waha, target.session, target, name)
+            return read_chat_directory(waha, target, mode, chat, name, limit)
         if mode == "export":
             return dispatch_export(settings, chat, target, limit)
         handler = _READ_CHAT_HANDLERS.get(mode)
@@ -1567,6 +1616,22 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
             "annotated file, teammates and members counted inline."
         ),
     )
+
+
+def read_chat_directory(
+    waha: WahaClient,
+    target: RunTarget,
+    mode: str,
+    chat: str | None,
+    name: str,
+    limit: int | None,
+) -> str:
+    """Handle recent/resolve lookups, which do not accept a chat argument."""
+    if chat:
+        return error(f"`chat` is not valid for mode={mode}")
+    if mode == "recent":
+        return read_recent_chats(waha, target.session, target, limit)
+    return read_resolve_chat(waha, target.session, target, name)
 
 
 def read_recent_chats(

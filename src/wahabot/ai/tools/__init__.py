@@ -17,6 +17,7 @@ from wahabot.ai.tools.external import (
     visit_url_builder,
     web_search_builder,
 )
+from wahabot.ai.tools.notebook import notebook_builder
 from wahabot.ai.tools.whatsapp import (
     EscalationChannel,
     escalate,
@@ -59,6 +60,7 @@ def build_default_tools(
         react_to_message(waha),
         send_media(waha, settings),
         read_chat(waha, settings),
+        notebook_builder(settings),
         forward_message(waha),
         web_search_builder(settings),
         visit_url_builder(settings),

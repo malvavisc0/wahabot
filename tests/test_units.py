@@ -97,9 +97,9 @@ from wahabot.ai.tools.whatsapp import (
     voice_file,
 )
 from wahabot.ai.video import extract_frames, join_anchor, probe_duration, video_marker
-from wahabot.cli import build_forget_event
 from wahabot.commands import build_command_event, chat_display_name
 from wahabot.core.cache import TtlCache
+from wahabot.core.cli import build_forget_event
 from wahabot.core.echoes import is_self_echo, remember_self_echo
 from wahabot.core.filters import chat_allowed
 from wahabot.core.host import host_context
@@ -127,13 +127,16 @@ from wahabot.status import (
 
 
 @pytest.fixture()
-def unit_settings() -> Settings:
+def unit_settings(tmp_path: Path) -> Settings:
     return Settings(
         webhook_hmac_key="k",
         waha_url="http://waha.invalid",
         waha_api_key="k",
         llm_api_base="http://llm.invalid",
         llm_api_key="k",
+        data_dir=tmp_path,
+        langfuse_public_key="",
+        langfuse_secret_key="",
         _env_file=None,
     )
 
@@ -1386,8 +1389,8 @@ def test_burst_refuses_unresolvable_sender() -> None:
 
 def test_escalation_cli_rows(tmp_path: Path) -> None:
     """escalation_entries filters by kind and date, newest first."""
-    from wahabot.cli import escalation_entries
     from wahabot.core.audit import save_action
+    from wahabot.core.cli import escalation_entries
 
     # The writer stamps day files in UTC, so the since boundary is a
     # UTC date too.
@@ -1407,7 +1410,7 @@ def test_escalation_cli_rows_across_days(tmp_path: Path) -> None:
     outrank today's). Each file's entries must be reversed before
     joining the newest-first file order.
     """
-    from wahabot.cli import escalation_entries
+    from wahabot.core.cli import escalation_entries
 
     directory = tmp_path / "audit" / SESSION
     directory.mkdir(parents=True)
@@ -5501,6 +5504,57 @@ def test_render_system_prompt_operator_name_in_goal() -> None:
     assert out.startswith("# Goal\n\nServe Ada\n\n")
 
 
+def test_render_system_prompt_memory_section() -> None:
+    out = render_system_prompt("Rules.", goal="Goal.", memory="Never mention X.")
+    assert out == "# Goal\n\nGoal.\n\n# Memory\n\nNever mention X.\n\nRules."
+
+
+def test_render_system_prompt_memory_empty_omitted() -> None:
+    assert render_system_prompt("Rules.", goal="Goal.") == "# Goal\n\nGoal.\n\nRules."
+    assert render_system_prompt("Rules.", memory="   ") == "Rules."
+
+
+def test_render_system_prompt_memory_placeholders() -> None:
+    now = datetime.datetime(2026, 10, 14, tzinfo=datetime.UTC)
+    with unittest.mock.patch("wahabot.ai.context.datetime.datetime") as clock:
+        clock.now.return_value = now
+        out = render_system_prompt("Rules.", memory="Today is {{date}}.", tz_name="UTC")
+    assert out == "# Memory\n\nToday is Wednesday 14th October, 2026.\n\nRules."
+    assert "{{date}}" not in out
+
+
+def test_render_system_prompt_memory_identity_placeholders() -> None:
+    jid = "491555000000@c.us"
+    lid = "491555000000@lid"
+    out = render_system_prompt(
+        "Rules.",
+        goal="Account {{own_jid}}.",
+        memory="Account {{own_jid}} and {{own_lid}}: {{own_identities}}.",
+        own_jid=jid,
+        own_lid=lid,
+    )
+    assert out == (
+        f"# Goal\n\nAccount {jid}.\n\n# Memory\n\n"
+        f"Account {jid} and {lid}: `{jid}` or `{lid}`.\n\nRules."
+    )
+    assert "{{own_" not in out
+
+
+def test_render_system_prompt_memory_unknown_identity() -> None:
+    out = render_system_prompt(
+        "Rules.",
+        memory=(
+            "Account {{own_jid}}.\nLID {{own_lid}}.\nIDs {{own_identities}}.\nKeep this."
+        ),
+    )
+    assert out == "# Memory\n\nKeep this.\n\nRules."
+
+
+def test_render_system_prompt_rejects_oversized_memory() -> None:
+    with pytest.raises(ValueError, match="Session memory exceeds"):
+        render_system_prompt("Rules.", memory="fact " * 8100)
+
+
 def test_chat_visible_text_filters_leaked_tokens() -> None:
     assert chat_visible_text("stay_silent") == ""
     assert chat_visible_text('{"error": {"message": "boom"}}') == ""
@@ -5825,6 +5879,8 @@ def test_prepared_tool_specs_are_slimmed_and_valid() -> None:
             for name, field in schema.model_fields.items()
         }
         call["reason"] = "prueba"
+        if tool.metadata.name == "notebook":
+            call["mode"] = "read"
         schema.model_validate(call)
 
 

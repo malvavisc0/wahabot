@@ -102,11 +102,7 @@ def register_reaction_handler(
         # shape sender tags carry); the bare JID stays when the roster
         # knows no name.
         chat_id = chat_id_from_message_id(str(target_id))
-        names = await asyncio.to_thread(participant_names, waha, event.session, chat_id)
-        sender = str(event.payload.get("participant") or event.payload.get("from") or "")
-        sender = jid_string(sender) or "someone"
-        display = display_name(sender, names)
-        sender = f"{display} <{sender}>" if display else sender
+        sender = await reaction_sender(waha, event, chat_id)
         note = f"[reaction {emoji} from {sender} to your message: {preview}]"
         async with chat_lock(event.session, chat_id):
             await remember_reaction_note(
@@ -118,6 +114,15 @@ def register_reaction_handler(
             preview=preview,
             sender=sender,
         )
+
+
+async def reaction_sender(waha: WahaClient, event: WahaEvent, chat_id: str) -> str:
+    """Resolve a reactor to the same name-and-JID shape as a sender tag."""
+    names = await asyncio.to_thread(participant_names, waha, event.session, chat_id)
+    sender = str(event.payload.get("participant") or event.payload.get("from") or "")
+    sender = jid_string(sender) or "someone"
+    display = display_name(sender, names)
+    return f"{display} <{sender}>" if display else sender
 
 
 async def remember_reaction_note(

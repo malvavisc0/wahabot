@@ -235,11 +235,15 @@ Per chat, the bot keeps a rolling conversation in memory:
   LRU-evicted chat (past 1000 live contexts) reloads from disk instead of
   starting blank. The load/save/restore implementation lives in
   `wahabot.core.persistence`; this section summarizes its behavior.
-- Memory is **continuity, not learning**: everything older than the
-  token budget is trimmed and forgotten — corrections, tone norms and
-  facts included. The planned learned-memory layer (rolling summary +
-  typed fact store injected into the system prompt) is specified in
-  `docs/plans/learned-memory.md`.
+- The rolling buffer is **continuity, not learning**: everything older
+  than the token budget is trimmed and forgotten — corrections, tone
+  norms and facts included. Learning lives one layer up, in the
+  **durable notebook** (`data/notebook.sqlite3`): the model saves
+  verified facts, preferences and lessons per chat with the `notebook`
+  tool, and every delivered run leaves a short self-extracted lesson
+  (the post-delivery wrap-up note). Notes ride the system prompt each
+  run — the trim can never evict them — and survive restarts, history
+  resets and the buffer's token budget. Design: `docs/plans/learned-memory.md`.
 - Memory **mirrors the chat**: what the model's self-history records as
   its own words is exactly what the chat saw. A reply that was never
   delivered — a leaked `stay_silent` token written as text instead of
@@ -265,11 +269,13 @@ Per chat, the bot keeps a rolling conversation in memory:
 ### Wiping memory
 
 `wahabot forget <chat-id>` wipes one chat's memory — it posts a signed
-`forget` event to the running bot, which drops the live context and the
-file under the chat's run lock (so an in-flight run can't resurrect it).
+`forget` event to the running bot, which drops the live context, the
+file and the chat's durable notebook under the chat's run lock (so an
+in-flight run can't resurrect it).
 `wahabot forget operator` wipes the shared operator-command history the
 same way. With
-the bot stopped, the equivalent is `rm data/memory/<session>/<chat-id>.json`.
+the bot stopped, the equivalent is `rm data/memory/<session>/<chat-id>.json`
+(plus the chat's rows in `data/notebook.sqlite3`).
 There is no retention TTL: memory is kept forever until wiped. `data/memory/`
 carries the same privacy weight as `data/events/` — back it up and
 exclude it the same way.

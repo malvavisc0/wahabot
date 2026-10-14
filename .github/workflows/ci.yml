@@ -47,7 +47,7 @@ jobs:
       # hard rule). The grep must find nothing.
       - name: Complexity (radon, no C+ blocks)
         run: |
-          uv run radon cc src -s | tee radon.out
+          uv run radon cc src -s --show-closures | tee radon.out
           if grep -qE -- '\- (C|D|E|F) ' radon.out; then
             echo "::error::complexity budget exceeded — C+ blocks found" >&2
             exit 1

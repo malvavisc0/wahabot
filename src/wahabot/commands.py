@@ -22,11 +22,14 @@ import asyncio
 import time
 import uuid
 
+from llama_index.core.workflow import Context
 from loguru import logger
 
 from wahabot.ai.context import handle_message
+from wahabot.ai.history import ContextBudgetError
 from wahabot.ai.observability import chat_trace_attributes
 from wahabot.ai.resolve import chat_context_note, resolve_last_message
+from wahabot.ai.tools.whatsapp import RunTarget
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.audit import save_action
 from wahabot.core.models import WahaEvent
@@ -122,6 +125,7 @@ async def run_command(
         resolve_last_message, waha, event.session, instruction
     )
     pinned_note = chat_context_note(resolved) if resolved else ""
+    budget_error: ContextBudgetError | None = None
     async with chat_lock(event.session, OPERATOR_CHAT_ID):
         ctx = await context_for(event.session, OPERATOR_CHAT_ID, agent, settings)
         with chat_trace_attributes("operator-command"):
@@ -129,30 +133,85 @@ async def run_command(
             # channel; the fence in the WhatsApp tools opens for this run
             # alone (the arming flag rides the run's own target binding,
             # so a concurrent chat run can never inherit it).
-            try:
-                reply, target = await handle_message(
-                    event,
-                    agent,
-                    ctx=ctx,
-                    settings=settings,
-                    waha=waha,
-                    armed=True,
-                    pinned_note=pinned_note,
-                )
-            except Exception as exc:
-                # Same failure classification as the chat path. Commands
-                # have no seen marker to drop (their ids are unique), so
-                # the duties are the notifies — and the exception
-                # re-raises: the self-chat caller drops its own seen
-                # marker so the command retries on redelivery, exactly
-                # like every other command failure.
-                await classify_llm_failure(
-                    waha, event.session, exc, settings.llm_timeout, settings.run_timeout
-                )
-                raise
-            await mark_llm_recovered(waha, event.session)
+            reply, target, budget_error = await run_command_turn(
+                event, agent, ctx, settings, waha, pinned_note
+            )
         await persist_memory(settings, event.session, OPERATOR_CHAT_ID, ctx)
+    return command_reply(event, settings, reply, target, waha, budget_error)
+
+
+async def run_command_turn(
+    event: WahaEvent,
+    agent: FunctionCallingAgentWorkflow,
+    ctx: Context,
+    settings: Settings,
+    waha: WahaClient,
+    pinned_note: str,
+) -> tuple[str, RunTarget, ContextBudgetError | None]:
+    """Run one operator-command turn, classifying its failures.
+
+    Returns the final text, run target, and a ``ContextBudgetError``
+    when the command could never fit the context budget — a permanent
+    failure: logging and re-raising would only put a redelivered
+    command (or a self-chat retry) back on the same doomed path, so
+    the error is reported to the caller for journaling instead. Any
+    other exception keeps the shared classification and re-raises:
+    commands have no seen marker (their ids are unique), so the duties
+    are the notifies, and the self-chat caller drops its own seen
+    marker so the command retries on redelivery.
+    """
+    try:
+        reply, target = await handle_message(
+            event,
+            agent,
+            ctx=ctx,
+            settings=settings,
+            waha=waha,
+            armed=True,
+            pinned_note=pinned_note,
+        )
+    except ContextBudgetError as exc:
+        logger.warning(
+            "Command {id} exceeds the context budget ({limit} tokens): {exc}",
+            id=event.payload.get("id"),
+            limit=settings.memory_token_limit,
+            exc=exc,
+        )
+        return "", RunTarget(session=event.session, chat_id=OPERATOR_CHAT_ID), exc
+    except Exception as exc:
+        await classify_llm_failure(
+            waha, event.session, exc, settings.llm_timeout, settings.run_timeout
+        )
+        raise
+    await mark_llm_recovered(waha, event.session)
+    return reply, target, None
+
+
+def command_reply(
+    event: WahaEvent,
+    settings: Settings,
+    reply: str,
+    target: RunTarget,
+    waha: WahaClient,
+    budget_error: ContextBudgetError | None = None,
+) -> str:
+    """Journal the command's outcome and return its operator-facing text."""
     reply = (reply or "").strip()
+    if budget_error is not None:
+        # Permanent failure, its own audit kind: never borrowed silence
+        # ("the log must say why"), and the returned text rides the
+        # self-chat reply so the operator's phone shows it.
+        save_action(
+            settings.data_dir,
+            event.session,
+            "operator_budget_error",
+            chat_id=OPERATOR_CHAT_ID,
+            error=str(budget_error),
+        )
+        return (
+            f"⚠️ command rejected: {budget_error}."
+            " Shorten it, lower the pinned context, or raise WAHABOT_MEMORY_TOKEN_LIMIT."
+        )
     if not reply and target.sent and target.sent != OPERATOR_CHAT_ID:
         name = chat_display_name(waha, event.session, target.sent)
         reply = f"✅ done — delivered to {name}"

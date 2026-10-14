@@ -35,11 +35,13 @@ from wahabot.ai.tools.whatsapp import (
 )
 from wahabot.ai.vision import image_caption, image_noun
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+from wahabot.core.access import CONFIG_MEMORY_TOKEN_LIMIT
 from wahabot.core.cache import TtlCache
 from wahabot.core.host import host_context
 from wahabot.core.identity import AUTHOR_BOT, AUTHOR_OPERATOR, authors, display_name
 from wahabot.core.jid import roster_entries
 from wahabot.core.models import WahaEvent
+from wahabot.core.tokens import text_tokens
 from wahabot.core.waha import WahaClient
 from wahabot.settings import Settings
 
@@ -68,6 +70,7 @@ def render_system_prompt(
     tz_name: str = "UTC",
     bot_name: str | None = None,
     goal: str = "",
+    memory: str = "",
     own_jid: str = "",
     own_lid: str = "",
     operator_name: str = "",
@@ -76,6 +79,8 @@ def render_system_prompt(
 
     When ``goal`` is non-empty, it is prepended as a ``# Goal``
     section so the model always starts from the bot's intended purpose.
+    When ``memory`` is non-empty, it follows as a ``# Memory`` section
+    with durable operator-maintained facts (at most 1024 tokens).
 
     Placeholders (all but ``{{bot_name}}`` and ``{{host}}`` use the
     ``tz_name`` timezone):
@@ -115,10 +120,19 @@ def render_system_prompt(
     for key, value in replacements.items():
         prompt = prompt.replace(key, value)
         goal = goal.replace(key, value)
+        memory = memory.replace(key, value)
     prompt = own_identity_pass(prompt, own_jid, own_lid)
-    goal = goal.strip()
+    goal = own_identity_pass(goal, own_jid, own_lid).strip()
+    memory = own_identity_pass(memory, own_jid, own_lid).strip()
+    if text_tokens(memory) > CONFIG_MEMORY_TOKEN_LIMIT:
+        raise ValueError(f"Session memory exceeds {CONFIG_MEMORY_TOKEN_LIMIT} tokens")
+    sections: list[str] = []
     if goal:
-        return f"# Goal\n\n{goal}\n\n{prompt}"
+        sections.append(f"# Goal\n\n{goal}")
+    if memory:
+        sections.append(f"# Memory\n\n{memory}")
+    if sections:
+        return "\n\n".join([*sections, prompt])
     return prompt
 
 
@@ -173,13 +187,13 @@ def own_identity_pass(prompt: str, own_jid: str, own_lid: str) -> str:
     """
     ids = [jid for jid in dict.fromkeys(j for j in (own_jid, own_lid) if j)]
     if not ids:
-        return _drop_placeholder_lines(prompt)
+        return drop_placeholder_lines(prompt)
     prompt = prompt.replace("{{own_jid}}", own_jid or "unknown")
     prompt = prompt.replace("{{own_lid}}", own_lid or "unknown")
     return prompt.replace("{{own_identities}}", " or ".join(f"`{jid}`" for jid in ids))
 
 
-def _drop_placeholder_lines(prompt: str) -> str:
+def drop_placeholder_lines(prompt: str) -> str:
     """*prompt* without any line carrying an own-identity placeholder."""
     return "".join(
         line

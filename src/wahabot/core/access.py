@@ -7,6 +7,10 @@ from pathlib import Path
 from loguru import logger
 from pydantic import BaseModel
 
+from wahabot.core.tokens import text_tokens
+
+CONFIG_MEMORY_TOKEN_LIMIT = 1024
+
 
 class SessionConfig(BaseModel):
     """Per-session settings read from `<data>/sessions/<session>.json`.
@@ -21,7 +25,10 @@ class SessionConfig(BaseModel):
     can defer questions meant for that human (empty renders "the
     operator"). ``goal`` is an optional
     statement of what the bot should aim for; when set it is prepended
-    to the rendered system prompt. ``group_participation``
+    to the rendered system prompt. ``memory`` is an optional
+    free-text list of durable facts the operator maintains; when set it
+    is rendered as a ``# Memory`` section after the goal, before the
+    system prompt. ``group_participation``
     controls whether/how the bot joins group conversations:
 
     - ``never`` — never reply in groups.
@@ -34,6 +41,7 @@ class SessionConfig(BaseModel):
     whitelist: set[str] = set()
     blacklist: set[str] = set()
     goal: str = ""
+    memory: str = ""
     system_prompt: str
     bot_name: str | None = None
     bot_mention_regex: str | None = None
@@ -59,6 +67,10 @@ def parse_session_config(raw: str, path: Path) -> SessionConfig:
     config = SessionConfig.model_validate(json.loads(raw))
     if not config.system_prompt.strip():
         raise ValueError(f"Session config {path} has an empty system_prompt")
+    if text_tokens(config.memory) > CONFIG_MEMORY_TOKEN_LIMIT:
+        raise ValueError(
+            f"Session config {path} memory exceeds {CONFIG_MEMORY_TOKEN_LIMIT} tokens"
+        )
     return config
 
 
@@ -102,7 +114,7 @@ class SessionConfigReloader:
                 logger.warning(
                     "Session config {path} is gone; keeping last good", path=self.path
                 )
-                return self._cached()
+                return self.cached_config()
             fingerprint = (stat.st_mtime, stat.st_size)
             if fingerprint != self._fingerprint:
                 try:
@@ -117,13 +129,13 @@ class SessionConfigReloader:
                         exc=exc,
                     )
                     self._fingerprint = fingerprint
-                    return self._cached()
+                    return self.cached_config()
                 self._config = config
                 self._fingerprint = fingerprint
                 log_config_load(self.path, config)
-            return self._cached()
+            return self.cached_config()
 
-    def _cached(self) -> SessionConfig:
+    def cached_config(self) -> SessionConfig:
         """The last good config; raises when none was ever loaded."""
         if self._config is None:
             raise FileNotFoundError(f"Session config not found: {self.path}")

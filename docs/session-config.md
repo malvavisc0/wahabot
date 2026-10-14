@@ -20,6 +20,7 @@ placeholder expansion.
 | `whitelist` | `string[]` | `[]` | Allowed chats/participants. Empty = answer everybody. |
 | `blacklist` | `string[]` | `[]` | Denied chats/participants. Always wins over the whitelist. |
 | `goal` | `string` | `""` | Optional objective prepended to the rendered system prompt as a `# Goal` section. Supports the same placeholders as `system_prompt`. Leave empty to skip. |
+| `memory` | `string` | `""` | Optional free-text durable facts the operator maintains, rendered as a `# Memory` section after `# Goal`. Supports the same placeholders as `system_prompt`; limited to 1024 tokens (the server refuses to start a config that exceeds it). Like `goal`, it is read through the hot reloader — edits apply to the next run without a restart. |
 | `system_prompt` | `string` | **required** | The agent system prompt. Supports `{{date}}`, `{{time}}`, `{{now}}`, `{{tz}}`, `{{bot_name}}`, `{{host}}` variables. The server refuses to start without it. |
 | `bot_name` | `string \| null` | `null` | The bot's display name (e.g. `"Kai"`). Used only as a fallback mention matcher. |
 | `bot_mention_regex` | `string \| null` | `null` | A regex detecting when the bot is addressed in a group. Defaults to a case-insensitive whole-word `@?<bot_name>`. |
@@ -32,12 +33,19 @@ Example:
   "whitelist": ["<group-jid>@g.us"],
   "blacklist": [],
   "goal": "Be a warm, super helpful chat participant.",
+  "memory": "The workshop meets on Thursdays. Never mention the Bridge Club in groups.",
   "system_prompt": "You are Kai, a friend in this WhatsApp group... Today is {{date}}. Current time {{time}} ({{tz}}).",
   "bot_name": "Kai",
   "bot_mention_regex": "(?i)(?<![a-z@])@?k[aā]i(?![a-z])",
   "group_participation": "judicious"
 }
 ```
+
+Use `goal` for what the bot should aim for and `memory` for durable
+facts it should know (people's preferences, standing decisions,
+corrections). The model-facing `notebook` tool keeps its own per-chat
+durable notes in `data/notebook.sqlite3`; `memory` is the one the
+operator edits directly.
 
 The `system_prompt` is the bot's whole personality — how it talks,
 what it knows, when to stay quiet. Write it as a persona description

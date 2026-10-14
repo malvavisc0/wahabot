@@ -18,10 +18,7 @@ from PIL import Image
 from wahabot.ai import bursts
 from wahabot.ai.albums import (
     AlbumBuffer,
-    add_album_image,
-    is_album_container,
     set_completion_handler,
-    start_album,
 )
 from wahabot.ai.context import (
     handle_message,
@@ -30,11 +27,11 @@ from wahabot.ai.context import (
     render_system_prompt,
     sender_tag,
 )
+from wahabot.ai.history import ContextBudgetError
 from wahabot.ai.messages import (
     OPERATOR_FOLD_KWARG,
     OPERATOR_NOTE_PREFIX,
     OPERATOR_PAYLOAD_FLAG,
-    bot_jids,
     conversation_jid,
     extract_text,
     image_media,
@@ -58,13 +55,20 @@ from wahabot.ai.video import caption_video, extract_frames, join_anchor, video_m
 from wahabot.ai.vision import caption_images
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
 from wahabot.core import identity
-from wahabot.core.access import SessionConfigReloader, load_session_config
+from wahabot.core.access import SessionConfig, SessionConfigReloader, load_session_config
 from wahabot.core.audit import save_action
 from wahabot.core.cache import TtlCache
 from wahabot.core.echoes import is_self_echo, remember_self_echo
 from wahabot.core.filters import chat_allowed, jid_alias_lookup
 from wahabot.core.identity import AUTHOR_BOT, AUTHOR_OPERATOR
+from wahabot.core.inbound import (
+    buffer_album_message,
+    can_prepare_video,
+    self_chat_needs_transcript,
+    url_video_enabled,
+)
 from wahabot.core.models import WahaEvent
+from wahabot.core.notebook import Notebook, notebook_operation
 from wahabot.core.persistence import forget_memory, memory_file
 from wahabot.core.presence import mark_seen
 from wahabot.core.transcribe import fetch_transcript, transcribe_voice_note
@@ -661,8 +665,9 @@ def register_forget_handler(settings: Settings) -> None:
     runs here, in the bot process, under the chat's run lock so it
     serializes with that chat's runs: an in-flight run finishes and
     saves first, then the live context and the memory file are dropped
-    — no resurrection window.
+    along with the chat's notebook, with no resurrection window.
     """
+    notebook = Notebook(settings.data_dir)
 
     @on_forget
     async def handle_forget(event: WahaEvent) -> None:
@@ -673,6 +678,7 @@ def register_forget_handler(settings: Settings) -> None:
         async with chat_lock(event.session, chat_id):
             live = contexts.pop((event.session, chat_id), None) is not None
             removed = forget_memory(settings.data_dir, event.session, chat_id)
+            await notebook_operation(notebook.forget, event.session, chat_id)
             logger.info(
                 "Forgot {chat_id}: context {live}, file {removed}",
                 chat_id=chat_id,
@@ -715,6 +721,14 @@ def register_agent_handler(
         """
         try:
             await deliver_album_reply(buffer)
+        except ContextBudgetError:
+            # The album's images can never fit the budget; keep every
+            # seen marker or redelivery retries the album forever.
+            logger.warning(
+                "Album in {chat_id} exceeds the context budget ({limit} tokens)",
+                chat_id=str(buffer.container.payload.get("from", "")),
+                limit=settings.memory_token_limit,
+            )
         except Exception:
             for image_event in buffer.images:
                 forget_seen(str(image_event.payload.get("id", "")))
@@ -803,13 +817,23 @@ def register_agent_handler(
         try:
             await deliver_burst_reply(buffer)
         except Exception as exc:
-            for burst_id in buffer.ids():
-                forget_seen(burst_id)
             # Same failure classes as the chat path: a timeout or an
             # outage notifies cleanly (never the false "unreachable"
             # narrative for a mere slow generation); anything else is
-            # a bug with the full traceback. The dropped seen markers
-            # let WAHA's redelivery retry the whole burst either way.
+            # a bug with the full traceback. An oversized burst is
+            # permanent — the same messages can never fit — so its
+            # seen markers stay and no retry loop starts. The dropped
+            # seen markers let WAHA's redelivery retry the whole burst
+            # in every other case.
+            if isinstance(exc, ContextBudgetError):
+                logger.warning(
+                    "Burst in {chat_id} exceeds the context budget ({limit} tokens)",
+                    chat_id=buffer.key[1],
+                    limit=settings.memory_token_limit,
+                )
+                return
+            for burst_id in buffer.ids():
+                forget_seen(burst_id)
             failure_class = await classify_llm_failure(
                 waha, buffer.key[0], exc, settings.llm_timeout, settings.run_timeout
             )
@@ -819,73 +843,75 @@ def register_agent_handler(
                     chat_id=buffer.key[1],
                 )
 
-    async def prepare_burst_media(
-        burst_event: WahaEvent,
-        images: list[dict[str, Any]],
-    ) -> str | None:
-        """One buffered message's media prep; its text body, or None.
-
-        Matches the single-message path exactly — voice transcription,
-        image download + caption, video frames + transcript — plus the
-        URL-video path a plain text line can carry. Mutates the event's
-        body (transcript / video marker) and appends image blocks; all
-        stages are fail-soft like their single-message twins.
-        """
-        body = None
-        if message_kind(burst_event) == "audio" and settings.transcribe_url:
-            transcript = await transcribe_voice_note(burst_event, waha, settings)
+    async def transcribe_message(event: WahaEvent, body: str | None) -> str | None:
+        """Replace an audio turn's body with its available voice transcript."""
+        if message_kind(event) == "audio" and settings.transcribe_url:
+            transcript = await transcribe_voice_note(event, waha, settings)
             if transcript:
-                burst_event.payload["body"] = f"[voice note] {transcript}"
-        body = extract_text(burst_event)
-        if message_kind(burst_event) in ("image", "sticker") and settings.vision:
-            media = image_media(burst_event)
-            if media is not None:
-                image = await asyncio.to_thread(
-                    download_image,
-                    waha,
-                    media,
-                    str(burst_event.payload.get("id", "")),
-                    settings.max_image_bytes,
-                )
-                if image is not None:
-                    # Caption before the lock: the vision call must
-                    # not extend the serialized agent-run section.
-                    captions = await caption_images(
-                        agent.llm, [image], semaphore=agent.llm_semaphore
-                    )
-                    image["caption"] = captions[0]
-                    images.append(image)
-        if message_kind(burst_event) in ("video", "ptv") and settings.video:
-            video = (
-                await prepare_video(
-                    burst_event, waha, settings, agent.llm, agent.llm_semaphore
-                )
-                if settings.vision
-                else None
+                body = f"[voice note] {transcript}"
+                event.payload["body"] = body
+        return body
+
+    async def download_captioned_image(
+        media: dict[str, Any] | None, message_id: str
+    ) -> dict[str, Any] | None:
+        """Download and caption an image before taking the chat's run lock."""
+        if media is None:
+            return None
+        image = await asyncio.to_thread(
+            download_image, waha, media, message_id, settings.max_image_bytes
+        )
+        if image is not None:
+            captions = await caption_images(
+                agent.llm, [image], semaphore=agent.llm_semaphore
+            )
+            image["caption"] = captions[0]
+        return image
+
+    async def prepare_message_videos(
+        event: WahaEvent, body: str | None, *, burst: bool = False
+    ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]:
+        """Prepare attached or linked video and stamp its marker on the turn."""
+        video = None
+        if can_prepare_video(event, settings):
+            video = await prepare_video(
+                event, waha, settings, agent.llm, agent.llm_semaphore
             )
             if video is not None:
-                burst_event.payload["body"] = join_anchor(body or "", video["marker"])
-                body = burst_event.payload["body"]
-                images.extend(video["frames"])
+                body = join_anchor(body or "", video["marker"])
+                event.payload["body"] = body
+        # Bursts exclude attached videos even after a failed download;
+        # single turns try body URLs whenever no attached video resolved.
+        excluded = message_kind(event) in ("video", "ptv") if burst else video is not None
         url_video = None
-        if (
-            settings.video
-            and settings.vision
-            and settings.max_url_videos > 0
-            and message_kind(burst_event) not in ("video", "ptv")
-            and body
-        ):
-            # A media URL in a text line gets the same frames +
-            # transcript treatment as a forwarded video — the
-            # single-message path (prepare_url_video) runs only when
-            # no WAHA video attached, so the same exclusion holds.
+        if url_video_enabled(settings) and not excluded and body:
             url_video = await prepare_url_video(
                 settings, agent.llm, agent.llm_semaphore, body
             )
             if url_video is not None:
                 body = join_anchor(body, url_video["marker"])
-                burst_event.payload["body"] = body
-                images.extend(url_video["frames"])
+                event.payload["body"] = body
+        return body, video, url_video
+
+    async def prepare_burst_media(
+        burst_event: WahaEvent,
+        images: list[dict[str, Any]],
+    ) -> str | None:
+        """Prepare one buffered turn's text and append its captioned media."""
+        await transcribe_message(burst_event, None)
+        body = extract_text(burst_event)
+        if message_kind(burst_event) in ("image", "sticker") and settings.vision:
+            image = await download_captioned_image(
+                image_media(burst_event), str(burst_event.payload.get("id", ""))
+            )
+            if image is not None:
+                images.append(image)
+        body, video, url_video = await prepare_message_videos(
+            burst_event, body, burst=True
+        )
+        for source in (video, url_video):
+            if source is not None:
+                images.extend(source["frames"])
         return body
 
     async def deliver_burst_reply(buffer: bursts.BurstBuffer) -> None:
@@ -997,6 +1023,7 @@ def register_agent_handler(
             settings.timezone,
             current.bot_name,
             current.goal,
+            current.memory,
             own_jid=status_state.operator_jid,
             own_lid=status_state.operator_lid,
             operator_name=current.operator_name,
@@ -1018,9 +1045,8 @@ def register_agent_handler(
     )
     started_at = time.time()
 
-    @on_message
-    async def reply_with_agent(event: WahaEvent) -> None:
-        """Run the agent over an incoming message and send its reply via WAHA."""
+    async def accept_message(event: WahaEvent) -> SessionConfig | None:
+        """Check health, dedup and freshness before learning the sender's identity."""
         message_id = str(event.payload.get("id", ""))
         if not message_id:
             logger.debug(
@@ -1060,25 +1086,22 @@ def register_agent_handler(
             return
         # Off the event loop: a rate-limited identity flush writes disk.
         await asyncio.to_thread(learn_identity, event)
+        return config
+
+    async def handle_self_command(
+        event: WahaEvent, config: SessionConfig
+    ) -> tuple[bool, str | None]:
+        """Run a self-chat command before chat gates, preserving retry and echo rules."""
+        message_id = str(event.payload.get("id", ""))
         body = extract_text(event)
-        if (
-            body is None
-            and message_kind(event) == "audio"
-            and settings.transcribe_url
-            and event.payload.get("fromMe")
-            and conversation_jid(event) in bot_jids(event)
-            and not is_self_echo(message_id)
-        ):
+        if self_chat_needs_transcript(event, body, settings):
             # The self-chat is the operator console: a voice note there
             # can only come from the operator's own devices, so it is
             # always worth transcribing early — it may be a spoken
             # command ("kai do x"). Everywhere else transcription stays
             # behind the chat gates. The transcript becomes the body;
             # the mention check below runs on it like typed text.
-            transcript = await transcribe_voice_note(event, waha, settings)
-            if transcript:
-                event.payload["body"] = f"[voice note] {transcript}"
-                body = event.payload["body"]
+            body = await transcribe_message(event, body)
         instruction = (
             None
             if is_self_echo(message_id)
@@ -1088,66 +1111,60 @@ def register_agent_handler(
                 bot_mention_regex=config.bot_mention_regex,
             )
         )
-        if instruction:
-            # A self-chat mention is the WhatsApp equivalent of `wahabot
-            # tell`: shared operator context, chat gates bypassed. The
-            # reply lands in the same self-chat so the operator sees it
-            # on their phone, and its id is marked as run output so the
-            # echo event cannot re-trigger the command path.
-            from wahabot.commands import build_command_event, run_command
+        if not instruction:
+            return False, body
+        # Commands share the operator context and bypass chat gates;
+        # send_self_reply remembers the reply id to suppress its echo.
+        from wahabot.commands import build_command_event, run_command
 
-            command = WahaEvent.model_validate(
-                build_command_event(event.session, instruction)
+        command = WahaEvent.model_validate(
+            build_command_event(event.session, instruction)
+        )
+        command.payload["reply_chat_id"] = str(event.payload.get("from", ""))
+        command.payload["reply_to"] = message_id
+        try:
+            reply = await run_command(command, agent, settings, waha)
+        except Exception as exc:
+            # Retry failed runs, even if a tool delivered before the crash;
+            # the delivery latch is per-run, not a durable command receipt.
+            # A permanent ContextBudgetError never reaches here: the
+            # command path reports it as the reply (journaled, delivered
+            # back to this self-chat) instead of raising.
+            forget_seen(message_id)
+            if llm_call_timed_out(exc):
+                detail = (
+                    f"LLM call timed out after {settings.llm_timeout}s on"
+                    f" self-chat command {message_id} ({settings.llm_model} via"
+                    f" {settings.llm_api_base}); dropped for redelivery"
+                )
+                logger.warning("{detail}", detail=detail)
+            else:
+                logger.exception("Failed to handle self-chat command {id}", id=message_id)
+            return True, body
+        try:
+            await send_self_reply(waha, command, reply)
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            # The command completed: keep its seen marker even when only
+            # the final reply failed, or redelivery duplicates its actions.
+            journal_send_failure(
+                settings,
+                event.session,
+                str(command.payload.get("reply_chat_id", "")),
+                "send_text",
+                message_id,
+                exc,
             )
-            command.payload["reply_chat_id"] = str(event.payload.get("from", ""))
-            command.payload["reply_to"] = message_id
-            try:
-                reply = await run_command(command, agent, settings, waha)
-            except Exception as exc:
-                # Same contract as the chat path: drop the seen marker
-                # so WAHA's redelivery retries the command. Accepted
-                # trade-off: a command that crashed *after* a tool
-                # delivery already went out will deliver it again on
-                # the retry (the at-most-once send latch is per-run) —
-                # the alternative, never retrying, loses the command
-                # outright. A timeout gets the clean one-line failure
-                # (the 60s default's chained httpx/openai traceback is
-                # noise for a mere slow generation); anything else
-                # keeps the full traceback a bug deserves.
-                forget_seen(message_id)
-                if llm_call_timed_out(exc):
-                    detail = (
-                        f"LLM call timed out after {settings.llm_timeout}s on"
-                        f" self-chat command {message_id} ({settings.llm_model} via"
-                        f" {settings.llm_api_base}); dropped for redelivery"
-                    )
-                    logger.warning("{detail}", detail=detail)
-                else:
-                    logger.exception(
-                        "Failed to handle self-chat command {id}", id=message_id
-                    )
-                return
-            try:
-                await send_self_reply(waha, command, reply)
-            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-                # The command ran — its deliveries may already be out.
-                # A redelivery would re-run it and duplicate them, so
-                # the seen marker stays; only the reply is lost. A WAHA
-                # outage is an expected failure: one clean line plus the
-                # journal row, not a traceback.
-                journal_send_failure(
-                    settings,
-                    event.session,
-                    str(command.payload.get("reply_chat_id", "")),
-                    "send_text",
-                    message_id,
-                    exc,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to deliver self-chat reply for command {id}", id=message_id
-                )
-            return
+        except Exception:
+            logger.exception(
+                "Failed to deliver self-chat reply for command {id}", id=message_id
+            )
+        return True, body
+
+    async def prepare_chat_message(
+        event: WahaEvent, config: SessionConfig, body: str | None
+    ) -> bool | None:
+        """Apply access gates and fold or buffer turns that need no immediate run."""
+        message_id = str(event.payload.get("id", ""))
         operator_wakes = False
         if event.payload.get("fromMe"):
             if not typed_by_operator(event):
@@ -1182,16 +1199,14 @@ def register_agent_handler(
                 if ctx is not None:
                     await persist_memory(settings, event.session, chat, ctx)
             return
-        if not operator_wakes and is_album_container(event):
-            start_album(event)
+        if buffer_album_message(event, operator_wakes):
             return
-        if (
-            not operator_wakes
-            and message_kind(event) in ("image", "sticker")
-            and add_album_image(event)
-        ):
-            return
-        image = image_media(event) if settings.vision else None
+        return operator_wakes
+
+    async def skip_or_buffer_message(
+        event: WahaEvent, config: SessionConfig, operator_wakes: bool
+    ) -> bool:
+        """Apply group addressing, send read receipts and queue eligible bursts."""
         if not operator_wakes and not is_group_addressed(
             event,
             bot_name=config.bot_name,
@@ -1201,7 +1216,7 @@ def register_agent_handler(
             logger.debug(
                 "Ignoring unaddressed group message {id}", id=event.payload.get("id")
             )
-            return
+            return True
         if settings.send_seen and not operator_wakes:
             # The read receipt answers *their* message, not the bot's
             # reply — it goes out even when the run later stays silent.
@@ -1219,63 +1234,25 @@ def register_agent_handler(
             # buffer"); albums never reach this line (the album
             # branches above), and unknown kinds run the pre-burst path.
             bursts.add_message(event)
-            return
-        if message_kind(event) == "audio" and settings.transcribe_url:
-            transcript = await transcribe_voice_note(event, waha, settings)
-            if transcript:
-                event.payload["body"] = f"[voice note] {transcript}"
-                body = event.payload["body"]
-        video = None
-        if message_kind(event) in ("video", "ptv") and settings.video:
-            # Frames ride the vision path, so an endpoint that rejects
-            # image inputs (settings.vision=false) gets no video prep
-            # either — the whole download+ffmpeg+caption pass would be
-            # wasted work before a doomed caption call.
-            if settings.vision:
-                video = await prepare_video(
-                    event, waha, settings, agent.llm, agent.llm_semaphore
-                )
-            if video is not None:
-                event.payload["body"] = join_anchor(body or "", video["marker"])
-                body = event.payload["body"]
-        url_video = None
-        if (
-            settings.video
-            and settings.vision
-            and settings.max_url_videos > 0
-            and video is None
-            and body
-        ):
-            # A media URL in text ("watch this reel link") gets the same
-            # frames + transcript treatment as a forwarded video. Runs
-            # before the lock like prepare_video; a miss keeps the link
-            # as ordinary text.
-            url_video = await prepare_url_video(
-                settings, agent.llm, agent.llm_semaphore, body
-            )
-            if url_video is not None:
-                body = join_anchor(body, url_video["marker"])
-                event.payload["body"] = body
-        if body is None and image is None and video is None and url_video is None:
-            logger.debug("Skipping media/album message {id}", id=event.payload.get("id"))
-            return
+            return True
+        return False
+
+    async def deliver_single_reply(
+        event: WahaEvent,
+        config: SessionConfig,
+        image: dict[str, Any] | None,
+        video: dict[str, Any] | None,
+        url_video: dict[str, Any] | None,
+    ) -> None:
+        """Run and persist one turn under its chat lock, then deliver its reply."""
+        message_id = str(event.payload.get("id", ""))
         # jid_string, not the raw payload value: a `from` carrying a
         # linked-device suffix must key the same memory (and lock) as
         # the operator fold's device-stripped chat id, or one DM splits
         # in two.
         chat_id = jid_string(event.payload["from"])
         try:
-            if image is not None:
-                image = await asyncio.to_thread(
-                    download_image, waha, image, message_id, settings.max_image_bytes
-                )
-                if image is not None:
-                    # Caption before the lock: the vision call must not
-                    # extend the serialized agent-run section.
-                    captions = await caption_images(
-                        agent.llm, [image], semaphore=agent.llm_semaphore
-                    )
-                    image["caption"] = captions[0]
+            image = await download_captioned_image(image, message_id)
             async with chat_lock(event.session, chat_id):
                 # Runs in the same chat serialize on its memory and
                 # timeline; runs in different chats proceed in parallel
@@ -1314,8 +1291,19 @@ def register_agent_handler(
             # line (the chained httpx/openai traceback is noise for a
             # mere slow generation), an outage the operator notify —
             # both with the seen-marker drop so WAHA's redelivery
-            # retries; the run is just as lost either way. Anything
-            # else is a bug: full traceback, also redeliverable.
+            # retries; the run is just as lost either way. An
+            # oversized turn is permanent — the same message can
+            # never fit — so its seen marker stays and no retry loop
+            # starts. Anything else is a bug: full traceback, also
+            # redeliverable.
+            if isinstance(exc, ContextBudgetError):
+                logger.warning(
+                    "Message {id} in {chat_id} exceeds the budget ({limit} tokens)",
+                    id=message_id,
+                    chat_id=chat_id,
+                    limit=settings.memory_token_limit,
+                )
+                return
             failure_class = await classify_llm_failure(
                 waha, event.session, exc, settings.llm_timeout, settings.run_timeout
             )
@@ -1329,5 +1317,27 @@ def register_agent_handler(
                 detail="(seen marker dropped; a WAHA redelivery will retry)",
             )
             return
+
+    @on_message
+    async def reply_with_agent(event: WahaEvent) -> None:
+        """Run the agent over an incoming message and send its reply via WAHA."""
+        config = await accept_message(event)
+        if config is None:
+            return
+        handled, body = await handle_self_command(event, config)
+        if handled:
+            return
+        operator_wakes = await prepare_chat_message(event, config, body)
+        if operator_wakes is None:
+            return
+        image = image_media(event) if settings.vision else None
+        if await skip_or_buffer_message(event, config, operator_wakes):
+            return
+        body = await transcribe_message(event, body)
+        body, video, url_video = await prepare_message_videos(event, body)
+        if body is None and image is None and video is None and url_video is None:
+            logger.debug("Skipping media/album message {id}", id=event.payload.get("id"))
+            return
+        await deliver_single_reply(event, config, image, video, url_video)
 
     return agent, config_reloader

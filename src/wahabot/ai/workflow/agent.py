@@ -8,7 +8,10 @@ back in ``StopEvent.result``.
 """
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from typing import Any, cast, override
 
 from llama_index.core.base.llms.types import (
@@ -32,24 +35,40 @@ from loguru import logger
 
 from wahabot.ai.events import InputEvent, ToolCallEvent
 from wahabot.ai.history import (
+    ContextBudgetError,
     chat_visible_text,
     degrade_old_history,
     inbound_message_id,
     is_single_emoji,
+    minimum_turn,
     sanitize_chat_history,
     trim_to_budget,
 )
 from wahabot.ai.messages import TURN_HANDLED_KWARG, WRAP_UP_NOTE_KWARG
+from wahabot.ai.tools.notebook import (
+    MAX_NOTE_TOKENS,
+    NOTEBOOK_INSTRUCTIONS,
+    NOTEBOOK_TOKEN_LIMIT,
+    OPERATOR_NOTEBOOK_HEADING,
+    notebook_prompt,
+)
 from wahabot.ai.tools.slim import slim_tool_specs
 from wahabot.ai.tools.whatsapp import current_target, log_action_reason
 from wahabot.ai.workflow.delivery import DELIVERY_TOOLS, SILENCE_TOOL, collapse_send_group
-from wahabot.ai.workflow.text import token_count
+from wahabot.ai.workflow.text import message_text
 from wahabot.ai.workflow.toolkit import (
     run_tool_call,
     tool_call_key,
     tool_outcome,
 )
 from wahabot.core.audit import save_action
+from wahabot.core.notebook import (
+    MAX_NOTE_LENGTH,
+    SESSION_NOTEBOOK_CHAT,
+    Notebook,
+    notebook_operation,
+)
+from wahabot.core.tokens import text_tokens, truncate_to_tokens
 from wahabot.settings import Settings
 
 #: Mirrors LlamaIndex's DEFAULT_EARLY_STOPPING_PROMPT (base_agent.py):
@@ -63,22 +82,24 @@ _EARLY_STOPPING_PROMPT = (
     "answer with an empty message."
 )
 
-#: After a delivery tool fired, the run's remaining purpose is the
-#: self-record: a one-sentence note of what was done and why, stored in
-#: the model's own history (never sent to the chat — the one-delivery
-#: latch holds). Without it the post-delivery round had exactly one
-#: legal output, an empty message, the model guessed at that and its
-#: chatter was discarded (docs/bug-report-2c665d8.md, bug 6); with it
-#: the round produces the context the *next* run needs — why the meme
-#: went out as a sticker, what the failed send attempt taught.
+#: After delivery, extract a reusable private lesson rather than an activity log.
 _POST_DELIVERY_WRAP_UP_PROMPT = (
-    "You already delivered your reply to the chat this run — nothing "
-    "more will be sent, no matter what you write. In one short "
-    "sentence, note for your own record what you did and why (the "
-    "delivery that worked, and anything that failed or was skipped "
-    "along the way). This note is stored for your next conversation "
-    "turn, not sent to the chat. Do not use any tools."
+    "You already delivered your reply. Do not send more replies or use any tools. "
+    "Review this run for a verified, reusable lesson, not an activity summary. "
+    "Record only a new correction, confirmed preference, or demonstrated "
+    "workaround missing from the notebook. State the situation, what was wrong "
+    "or clarified, the evidence, and what to do differently next time in at "
+    "most two concise sentences. Do not infer success from an attempted action, "
+    "invent facts, repeat existing notes, or turn your inference into operator "
+    "policy. This is a private chat-scoped lesson for later runs, never a "
+    "message to the chat. If nothing new and lasting was learned, return an "
+    "empty message."
 )
+
+#: Appended to a wrap-up note cut down to the notebook's caps, so a
+#: later reader knows the lesson was shortened by storage, not by the
+#: model's own wording.
+_TRUNCATED_NOTE_SUFFIX = "\n[Truncated wrap-up note]"
 
 
 def raise_missing_llm() -> FunctionCallingLLM:
@@ -116,6 +137,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         tool_round_limit: int = 50,
         max_concurrent_llm: int = 4,
         settings: Settings | None = None,
+        notebook: Notebook | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -127,6 +149,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         self.tool_round_limit = tool_round_limit
         self.llm_semaphore = asyncio.Semaphore(max_concurrent_llm)
         self.settings = settings
+        self.notebook = notebook
         assert self.llm.metadata.is_function_calling_model
 
     def audit(self, kind: str, **fields: Any) -> None:
@@ -161,6 +184,8 @@ class FunctionCallingAgentWorkflow(Workflow):
     def system_message(self) -> ChatMessage | None:
         """The system prompt as a message, or None when unset."""
         prompt = self.rendered_system_prompt()
+        if self.notebook is not None:
+            prompt = f"{prompt or ''}\n\n# Notebook\n\n{NOTEBOOK_INSTRUCTIONS}".strip()
         if not prompt:
             return None
         return ChatMessage(role="system", content=prompt)
@@ -168,48 +193,83 @@ class FunctionCallingAgentWorkflow(Workflow):
     async def chat_history(self, ctx: Context) -> list[ChatMessage]:
         """The trimmed, structurally valid conversation plus system prompt.
 
-        The conversation is sanitised (balanced tool groups, alternating
-        turns), degraded (old groups lose thinking blocks and tool-
-        result payloads — their conclusions stay), and trimmed to the
-        memory token budget. The system message is kept out of the
-        rolling buffer so the token trim can never evict it; its cost
-        is accounted via ``initial_token_count`` so the whole prompt
-        still fits the budget.
+        Reserve the current query and newest whole tool group before
+        selecting notebook data and older history. Do not let the library
+        trim a second time: its last-message fallback can orphan tools.
         """
         memory = await ctx.store.get("memory")
         system = self.system_message()
         messages = await memory.aget_all()
         messages = sanitize_chat_history(messages, drop_trailing_user=False)
         messages = degrade_old_history(messages)
-        messages = trim_to_budget(messages, self.memory_token_limit, token_count)
-        await memory.aset(messages)
-        initial = self.system_token_count(memory)
-        history = await memory.aget(input=None, initial_token_count=initial)
-        return ([system] if system else []) + history
-
-    def system_token_count(self, memory: ChatMemoryBuffer) -> int:
-        """Tokens the system prompt costs, clamped to the memory budget.
-
-        ``ChatMemoryBuffer.get`` raises when ``initial_token_count``
-        exceeds its token limit; a huge system prompt would crash every
-        run. Clamp so the conversation simply gets no room instead.
-        """
-        prompt = self.rendered_system_prompt()
-        if not prompt:
-            return 0
         tokenizer = cast(Callable[[str], list[Any]], memory.tokenizer_fn)
-        tokens = len(tokenizer(prompt))
-        if tokens >= memory.token_limit:
-            logger.warning(
-                (
-                    "System prompt ({tokens} tokens) meets or exceeds "
-                    "memory_token_limit ({limit}); conversation history gets no room"
-                ),
-                tokens=tokens,
-                limit=memory.token_limit,
+
+        def count_message_tokens(message: ChatMessage) -> int:
+            return text_tokens(message_text(message), tokenizer)
+
+        budget = self.memory_token_limit - (
+            count_message_tokens(system) if system is not None else 0
+        )
+        required = sum(
+            count_message_tokens(message) for message in minimum_turn(messages)
+        )
+        if required > budget:
+            raise ContextBudgetError(
+                "System prompt and current query/tool group exceed token budget"
             )
-            return max(memory.token_limit - 1, 0)
-        return tokens
+        notes = await self.saved_notebook_prompt(
+            min(NOTEBOOK_TOKEN_LIMIT, self.memory_token_limit // 4),
+            tokenizer,
+            f"{system.content if system is not None else ''}\n\n",
+            self.memory_token_limit - required,
+        )
+        if notes:
+            system = ChatMessage(
+                role=MessageRole.SYSTEM,
+                content=f"{system.content if system is not None else ''}\n\n{notes}",
+            )
+            budget = self.memory_token_limit - count_message_tokens(system)
+        history = trim_to_budget(messages, budget, count_message_tokens)
+        await memory.aset(history)
+        return ([system] if system is not None else []) + history
+
+    async def saved_notebook_prompt(
+        self,
+        token_budget: int,
+        tokenizer: Callable[[str], list[Any]],
+        prompt_prefix: str,
+        prompt_budget: int,
+    ) -> str:
+        """Load this run's durable notes without spending its reserved context."""
+        if self.notebook is None or token_budget <= 0:
+            return ""
+        target = current_target()
+        policies = await notebook_operation(
+            self.notebook.read, target.session, SESSION_NOTEBOOK_CHAT
+        )
+        policy_prompt = (
+            OPERATOR_NOTEBOOK_HEADING
+            + json.dumps([asdict(note) for note in policies], ensure_ascii=False)
+            if policies
+            else ""
+        )
+        if policy_prompt:
+            prompt_prefix += policy_prompt + "\n\n"
+            if text_tokens(prompt_prefix, tokenizer) > prompt_budget:
+                raise ContextBudgetError(
+                    "Operator policies and current query exceed token budget"
+                )
+        notes = await notebook_operation(
+            self.notebook.read, target.session, target.chat_id
+        )
+        local_prompt = notebook_prompt(
+            notes,
+            token_budget,
+            tokenizer,
+            prompt_prefix=prompt_prefix,
+            prompt_budget=prompt_budget,
+        )
+        return "\n\n".join(part for part in (policy_prompt, local_prompt) if part)
 
     async def repair_memory(self, ctx: Context) -> None:
         """Repair dangling state left by a failed workflow run.
@@ -693,8 +753,33 @@ class FunctionCallingAgentWorkflow(Workflow):
                     additional_kwargs={WRAP_UP_NOTE_KWARG: True},
                 )
             )
+            if self.notebook is not None and note.strip():
+                target = current_target()
+                key = "wrap-up-" + hashlib.sha256(note.encode()).hexdigest()[:24]
+                # The same caps the notebook tool enforces (512 tokens,
+                # 2000 chars): a longer lesson would be unwritable via
+                # the tool and silently dropped from every later prompt
+                # snapshot, so the model could never read or clean up
+                # what it wrote. The suffix rides inside both caps, and
+                # only a cut note carries it.
+                if text_tokens(note) > MAX_NOTE_TOKENS or len(note) > MAX_NOTE_LENGTH:
+                    room = MAX_NOTE_LENGTH - len(_TRUNCATED_NOTE_SUFFIX)
+                    note = (
+                        truncate_to_tokens(
+                            note[:room],
+                            MAX_NOTE_TOKENS - text_tokens(_TRUNCATED_NOTE_SUFFIX),
+                        )
+                        + _TRUNCATED_NOTE_SUFFIX
+                    )
+                await notebook_operation(
+                    self.notebook.write,
+                    target.session,
+                    target.chat_id,
+                    key,
+                    note,
+                )
         except Exception:
-            logger.debug("Could not store post-delivery wrap-up note")
+            logger.exception("Could not store post-delivery wrap-up note")
 
     def audit_wrap_up_note(self, note: str) -> None:
         """Journal the run's self-report (empty note included, visibly so)."""
@@ -897,4 +982,5 @@ def build_agent(
         memory_token_limit=settings.memory_token_limit,
         tool_round_limit=settings.tool_round_limit,
         settings=settings,
+        notebook=Notebook(settings.data_dir),
     )

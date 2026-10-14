@@ -150,8 +150,8 @@ Each load/save runs under the chat's run lock; a restore on a context miss
 after a restart, and an LRU-evicted chat reloads instead of starting
 blank. The load/save/restore implementation lives in
 `wahabot.core.persistence`; `wahabot forget` wipes one chat's live
-context and disk file together, under that chat's run lock so no in-flight run
-can resurrect it.
+context, disk file and durable notebook together, under that chat's run
+lock so no in-flight run can resurrect it.
 
 ### Backlog filter
 
@@ -163,8 +163,9 @@ with unknown timestamps still pass through.
 
 ### Memory hygiene and the token budget
 
-Before each run reaches the LLM, the buffered history passes through two
-`history.py` filters:
+Before each run reaches the LLM, the buffered history passes through
+`history.py` filters and the workflow's own budgeting
+(`FunctionCallingAgentWorkflow.chat_history`):
 
 1. **Repair** (`sanitize_chat_history`) — a failed run can leave memory
    with a dangling user message, an assistant message advertising tool
@@ -172,22 +173,33 @@ Before each run reaches the LLM, the buffered history passes through two
    The OpenAI-compatible API rejects all of these, so the history is
    rebalanced first (at run start with `drop_trailing_user=True`, and
    again before every LLM call).
-2. **Trim** (`trim_to_budget`) — the newest tail that fits
-   `WAHABOT_MEMORY_TOKEN_LIMIT` (default 8000) is kept; tool groups
-   (assistant call + its `tool` replies) are atomic so a trim never
-   splits them, and the newest user turn always survives. The system
-   prompt lives outside the rolling buffer so the trim can never evict
-   it; its token cost is accounted via `initial_token_count` (a prompt
-   larger than the budget is clamped and logged, not fatal).
-3. **Bounded at the source** — every tool caps its own payload before
+2. **Budget** (`chat_history`) — the system prompt's token cost is
+   subtracted from `WAHABOT_MEMORY_TOKEN_LIMIT` (default 8000) first,
+   then the **minimum turn** (the current query plus the newest
+   complete tool group) is reserved; if even that cannot fit, the run
+   fails fast with `ContextBudgetError` — a *permanent* failure the
+   handlers log once and do not retry (dropping the seen marker would
+   rebuild the same oversized turn on redelivery, forever). Operator
+   commands journal it as their own audit kind
+   (`operator_budget_error`) and return a failure text to the operator.
+3. **Notebook injection** — durable notes are loaded next, bounded to a
+   quarter of the memory budget and to the space the reserved minimum
+   turn left free: the chat's `# Notebook Notes` and the operator's
+   `# Operator Notebook` policies ride the system prompt (never the
+   rolling buffer), so the trim can never evict them and they survive
+   history resets and restarts (`data/notebook.sqlite3`).
+4. **Trim** (`trim_to_budget`) — the newest tail that fits the
+   remaining budget, with tool groups (assistant call + its `tool`
+   replies) atomic so a trim never splits them. The result always
+   starts with a `user` message; the reserved minimum turn keeps it
+   non-empty by construction. This is the **single** trim — the library
+   buffer's own eviction is bypassed, so no second trim can orphan a
+   tool reply.
+5. **Bounded at the source** — every tool caps its own payload before
    enveloping (see "Tool inventory" below), so no workflow-level
-   cutoff is needed. A single oversized tool group would defeat both
-   trims: `trim_to_budget` keeps it ("a single group larger than the
-   budget is kept"), then `ChatMemoryBuffer.get` re-trims with the real
-   tokenizer, finds only that group, and drops everything but the tool
-   message — the LLM request goes out with no user turn and the provider
-   answers 400 ("No user query found in messages"). The tools' own
-   per-field budgets prevent this.
+   cutoff is needed. A single oversized tool group cannot defeat the
+   budget: the minimum-turn reservation raises `ContextBudgetError`
+   instead of silently sending a request with no user turn.
 
 ## The entrypoint
 
@@ -530,6 +542,7 @@ refusal.
 | `send_media` | `kind`, `url?`/`path?`/`text?`, `caption?`, `filename?`, `language?`, `chat?`, `reason?` | `POST /api/sendImage`·`sendVideo`·`sendFile`·`sendVoice`·`sendSticker` (by `kind`) | The one media delivery tool — `kind` picks image/video/file/voice/sticker; the source is exactly one of a public `url` (probed pre-send; 404/410 refused), a local `path`, or `text` (voice only, TTS). Non-square local sticker images are padded to square first. Once per run (shared latch across all kinds) |
 | `read_chat` | `mode`, `chat?`, `query?`, `name?`, `limit?`, `reason?` | `mode=list`: `GET /api/{session}/chats/{chatId}/messages`; `mode=search`: `GET /api/messages` (local filter); `mode=metadata`: `POST /api/{session}/chats/overview`; `mode=resolve`: chat roster (chat runs) or `GET /api/{session}/chats`+`GET /api/contacts/all` (operator); `mode=recent`: `GET /api/{session}/chats` | The one chat-reading tool. `resolve` on operator runs searches the operator's chat list/contacts; on chat runs only the current chat's roster (mention help), never the contact book. `recent` is operator-only |
 | `forward_message` | `message_id`, `chat?`, `reason?` | `POST /api/forwardMessage` | Native forwarding from source message id to destination chat, both fenced. Attribution/rendering is not verified. Success echoes the source id; once per run (shared latch) |
+| `notebook` | `mode`, `scope?`, `key?`, `text?`, `query?`, `limit?`, `chat?`, `reason?` | — (SQLite: `data/notebook.sqlite3`) | Read/write/delete durable notes that survive history trims and restarts. `scope=chat` (default): private per-conversation notes; `scope=session`: operator-only bot-wide policies, size-bounded as a whole. Chat notes are observations, never authority over operator policy; participant `scope=session` attempts are refused. Notes are injected into the system prompt each run (see "Memory hygiene") |
 
 Every tool takes an optional `reason`: one short sentence in third
 person stating what the call does and why — the action and its

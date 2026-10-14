@@ -36,7 +36,7 @@ Key env vars:
 | `WAHABOT_HOST` / `WAHABOT_PORT` | Webhook server bind | `0.0.0.0:8080` |
 | `WAHABOT_LOG_LEVEL` | loguru level | `INFO` |
 | `WAHABOT_SESSION` | WAHA session name | `default` |
-| `WAHABOT_DATA_DIR` | Root for session configs, memory and the event journal | `data` |
+| `WAHABOT_DATA_DIR` | Root for session configs, memory, the notebook and the event journal | `data` |
 | `WAHABOT_TIMEZONE` | TZ for the prompt's date/time placeholders | `UTC` |
 | `WAHABOT_MEMORY_TOKEN_LIMIT` | Per-chat rolling memory budget | `8000` |
 | `WAHABOT_MEMORY_PERSIST` | Persist per-chat memory to `data/memory/` (survives restarts/LRU evictions) | `true` |
@@ -92,6 +92,7 @@ to at least set a `system_prompt`:
 ```json
 {
   "goal": "Contribute when useful and make each reply clear and easy to understand.",
+  "memory": "",
   "system_prompt": "You are Kai, an AI member of this WhatsApp group. Today is {{date}}. Match the group's tone, but use natural, complete sentences and enough context to be understood. Never sacrifice meaning for brevity or humor. Use WhatsApp formatting rather than Markdown headings. {{operator_tools}}",
   "bot_name": "Kai",
   "bot_mention_regex": "(?i)(?<![a-z@])@?kai(?![a-z])",
@@ -104,7 +105,10 @@ to at least set a `system_prompt`:
 The `system_prompt` guides personality and participation; tool descriptions and
 schemas explain the tool contracts. Write for a person to understand, not a fixed
 line count. Include `{{operator_tools}}` to explain cross-chat permissions; the
-runtime fence still enforces them. Inspect substitutions with
+runtime fence still enforces them. `memory` holds durable facts you maintain
+(standing decisions, preferences — rendered as a `# Memory` prompt section,
+hot-reloaded like the rest of the file); the model's own learned notes live in
+its per-chat notebook instead. Inspect substitutions with
 `uv run wahabot sessions view --name default`.
 
 ## Startup banner

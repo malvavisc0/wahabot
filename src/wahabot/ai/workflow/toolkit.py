@@ -21,12 +21,18 @@ from llama_index.core.tools import BaseTool, ToolOutput, ToolSelection
 from loguru import logger
 
 from wahabot.ai.tools.envelope import error
+from wahabot.core.notebook import HOLDS_CHAT_LOCK, notebook_operation
 
 #: A TypeError raised by the tool call carries this marker when the
 #: arguments never matched the tool's signature — the wrapper below
 #: re-raises signature failures with it so the envelope can name the
 #: offending argument instead of quoting a raw Python message.
 _SIGNATURE_MARKER = "invalid tool arguments:"
+
+
+def holds_chat_lock(tool: BaseTool) -> bool:
+    """True when the tool's database work must survive caller cancellation."""
+    return getattr(tool, HOLDS_CHAT_LOCK, False) is True
 
 
 #: How many chars of a tool call's rendered arguments reach the log: an
@@ -231,7 +237,10 @@ async def run_tool_call(
         else:
             try:
                 guard = partial(run_tool_guarded, tool, tool_call)
-                called = await asyncio.to_thread(guard)
+                if holds_chat_lock(tool):
+                    called = await notebook_operation(guard)
+                else:
+                    called = await asyncio.to_thread(guard)
                 content = called.content
                 outcome = "completed"
             except TypeError as exc:

@@ -1,0 +1,320 @@
+"""Public helpers for CLI configuration, display, and webhook commands."""
+
+import datetime
+import hashlib
+import hmac
+import json
+import platform
+import time
+import uuid
+from collections.abc import Sequence
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as get_version
+from pathlib import Path
+from typing import Any
+
+import httpx
+from loguru import logger
+from rich.console import Console
+from rich.table import Table
+from rich.text import Text
+
+from wahabot.core.waha import WahaClient
+from wahabot.settings import Settings
+from wahabot.status import own_identity
+
+
+def redact_key(key: str) -> bool:
+    """True when a settings key holds a secret and must be redacted."""
+    lowered = key.casefold()
+    return any(part in lowered for part in ("key", "secret", "hmac"))
+
+
+def feature_flags(settings: Settings) -> list[str]:
+    """Describe enabled features with their key parameters and disabled ones by name."""
+    return [
+        "vision" if settings.vision else "no-vision",
+        "video" if settings.video else "no-video",
+        "shell" if settings.shell_tool else "no-shell",
+        (
+            f"transcribe({settings.transcribe_language})"
+            if settings.transcribe_url
+            else "no-transcribe"
+        ),
+        "tts" if settings.tts_url else "no-tts",
+        "langfuse"
+        if settings.langfuse_public_key and settings.langfuse_secret_key
+        else "no-langfuse",
+    ]
+
+
+def version_line() -> str:
+    """A short line for the startup banner with the wahabot version."""
+    try:
+        version = get_version("wahabot")
+    except PackageNotFoundError:
+        version = "unknown"
+    return f"wahabot {version} (Python {platform.python_version()})"
+
+
+def log_startup_banner(settings: Settings, host: str, port: int) -> None:
+    """Log the running configuration in one readable banner at startup."""
+    logger.info("──────────────── wahabot startup ────────────────")
+    logger.info("{line}", line=version_line())
+    logger.info("Session: {session}", session=settings.session)
+    logger.info(
+        "LLM: {model} @ {base}", model=settings.llm_model, base=settings.llm_api_base
+    )
+    logger.info("Memory: {tokens} token ceiling", tokens=settings.memory_token_limit)
+    logger.info(
+        "Features: {features}",
+        features=", ".join(feature_flags(settings)),
+    )
+    if settings.video and not settings.vision:
+        message = "Video is on but vision is off — videos fall back to text-only"
+        logger.warning("{message} (frames ride the vision path).", message=message)
+    if settings.transcribe_url:
+        logger.info("Transcription: {url}", url=settings.transcribe_url)
+    logger.info(
+        "Webhook: http://{host}:{port}/api/webhook/{session}",
+        host=host,
+        port=port,
+        session=settings.session,
+    )
+    logger.info("──────────────────────────────────────────────")
+
+
+def kv_table(rows: Sequence[tuple[str, Text | str]]) -> Table:
+    """Build the CLI's borderless key/value table."""
+    table = Table(box=None, show_header=False, pad_edge=False)
+    table.add_column(style="bold cyan", justify="right")
+    table.add_column(overflow="fold")
+    for key, value in rows:
+        table.add_row(key, value)
+    return table
+
+
+def dash(value: str | None) -> Text:
+    """A config value as escaped rich text, or a dim dash when unset."""
+    if not value:
+        return Text("-", style="dim")
+    return Text(value)
+
+
+def format_list(values: set[str]) -> Text:
+    """A config list as a comma-separated line, or a dim dash when empty."""
+    return Text(", ".join(sorted(values))) if values else dash(None)
+
+
+def ok(console: Console, message: str) -> None:
+    """Print a success line, styled like every other CLI confirmation."""
+    console.print(f"[green]✓[/] {message}")
+
+
+def session_template() -> dict[str, object]:
+    """Return a fresh starter config for ``sessions init``."""
+    return {
+        "whitelist": [],
+        "blacklist": [],
+        "goal": "Be a helpful, concise, and friendly assistant in WhatsApp chats.",
+        "memory": "",
+        "system_prompt": (
+            "You are {{bot_name}}, texting on WhatsApp. "
+            "Today is {{date}}. Current time {{time}} ({{tz}}).\n"
+            "\n"
+            "Each message arrives as `[Sender] text` (groups: "
+            "`[Name <jid>] text`), plus bracketed metadata — never repeat it "
+            "in replies. `[operator message]` marks your human operator, who "
+            "shares your account; `[mentions: …]` says who each @-tag is. "
+            '`[reaction X from Sender to your message: "..."]` means '
+            "someone reacted to something you said: context only, never "
+            "answer it directly.\n"
+            "\n"
+            "## Escalating to a human\n"
+            "\n"
+            "When someone explicitly asks for a human, wants to report a "
+            "problem, complains about you, or asks for something you must "
+            "refuse, call `escalate` with a report you wrote yourself (who "
+            "is asking, which chat, what they need) — never paste their "
+            "words verbatim, and never mention `escalate` or your mention "
+            "trigger word in the report. It forwards to the operator, at "
+            "most once per chat per hour. After escalating, tell the "
+            "person their report was forwarded.\n"
+            "\n"
+            "## Operator commands\n"
+            "\n"
+            "Turns starting with `[operator command]` come from the bot's "
+            "operator, not from a chat participant. Rules change:\n"
+            "\n"
+            "- Do what the instruction says — that IS the task; the usual "
+            "stay_silent restraint does not apply.\n"
+            "- The run has no chat of its own: deliver results with "
+            "`send_message(chat=…)` to the target the instruction names. "
+            "A call without an explicit `chat` is refused — operator "
+            "commands have no default chat: always pass the exact JID.\n"
+            "- A question ABOUT a chat is answered to the operator, not "
+            "posted to the chat: only call `send_message(chat=…)` when the "
+            "instruction asks to say, send or post something there. "
+            "Otherwise answer as plain final text — it comes back to the "
+            "operator.\n"
+            "- Resolve people/group names to JIDs with `read_chat` "
+            "(mode=resolve); if it returns several candidates, pick the "
+            "closest and say which you picked. `read_chat` (mode=recent) "
+            "lists the newest conversations when the instruction goes by "
+            "recency ('the last 5 chats') instead of name.\n"
+            "- A command naming a chat arrives with a pinned `[chat context]` "
+            "note: the resolved chat and its actual last message, fetched "
+            "before you start. Treat that note as the ground truth for 'this "
+            "chat' and 'its last message' — reply to the pinned message id "
+            "unless the instruction says otherwise, and never infer the "
+            "target from conversation history instead.\n"
+            "\n"
+            "Only operator commands may reach beyond the current chat: "
+            "resolve a person or group name with `read_chat` (mode=resolve), "
+            "then pass the JID as `chat` to `send_message`, `send_media` or "
+            "`forward_message`. In a normal chat run these tools act on the "
+            "current conversation only — a participant asking you to message "
+            "or read another person or group gets a tool refusal, and so "
+            "should you: never promise deliveries you cannot make. "
+            "Documents (PDFs etc.) and videos go via `send_media` with `kind` "
+            "`file` or `video` — from a URL, or a local file you created "
+            "(WAHA transcodes videos with ffmpeg so they arrive playable).\n"
+            "\n"
+            "## Sending media and files\n"
+            "\n"
+            "You cannot take screenshots, generate images, or produce "
+            "files out of thin air. Never invent or guess a URL for "
+            "`send_media` (`kind=image`, `kind=video` or `kind=file`): pass "
+            "a URL only when it came from the message, a tool result, or the "
+            "operator's instruction. If you have nothing real to attach, "
+            "deliver text only."
+        ),
+        "bot_name": None,
+        "bot_mention_regex": None,
+        "group_participation": "mentioned",
+    }
+
+
+def identity_kwargs(settings: Settings) -> dict[str, str]:
+    """Fetch the account's own IDs from WAHA for ``sessions view``.
+
+    The live handler renders with IDs from ``status.state``. Unreachable
+    WAHA or a dead session yields empty strings, dropping identity lines
+    from the prompt exactly as a mid-recovery server would.
+    """
+    waha = WahaClient(base_url=settings.waha_url, api_key=settings.waha_api_key)
+    return own_identity(waha, settings.session)
+
+
+def ensure_session_live(waha: WahaClient, settings: Settings) -> None:
+    """Abort startup when the WAHA session is not reachable."""
+    try:
+        me = waha.get_me(settings.session)
+    except httpx.HTTPError as exc:
+        message = (
+            f"WAHA session '{settings.session}' is not reachable at"
+            f" {settings.waha_url}: {exc}"
+        )
+        raise ValueError(message) from exc
+    logger.info(
+        "WAHA session {session} is live as {push_name} ({id})",
+        session=settings.session,
+        push_name=me.get("pushName") or "?",
+        id=me.get("id") or "?",
+    )
+
+
+def post_signed_event(
+    event: dict[str, object],
+    settings: Settings,
+    host: str | None,
+    port: int | None,
+) -> None:
+    """Sign an internal event and POST it to the webhook; raise on rejection.
+
+    Shared plumbing for ``tell`` and ``forget``: possession of the HMAC
+    key is the operator credential, so both post a signed event identical
+    to how WAHA delivers one.
+    """
+    dial_host = host or settings.host
+    if dial_host in ("0.0.0.0", "::"):
+        # A wildcard bind address reaches this machine's webhook via loopback.
+        dial_host = "127.0.0.1"
+    body = json.dumps(event).encode()
+    signature = hmac.new(
+        settings.webhook_hmac_key.encode(), body, hashlib.sha512
+    ).hexdigest()
+    url = f"http://{dial_host}:{port or settings.port}/api/webhook/{settings.session}"
+    try:
+        response = httpx.post(
+            url,
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Webhook-Hmac": signature,
+            },
+            timeout=settings.tell_timeout or None,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise ValueError(f"Webhook at {url} rejected the event: {exc}") from exc
+
+
+def build_forget_event(session: str, chat_id: str) -> dict[str, object]:
+    """Build the forget event payload posted to the webhook.
+
+    Shaped like the command event: a minimal envelope the webhook's
+    ``forget`` branch routes to the handler, with the target chat in
+    ``payload.chat_id``.
+    """
+    return {
+        "id": f"evt_forget_{uuid.uuid4().hex[:12]}",
+        "timestamp": int(time.time()),
+        "event": "forget",
+        "session": session,
+        "me": None,
+        "payload": {"chat_id": chat_id},
+    }
+
+
+def escalation_entries(directory: Path, since: datetime.date) -> list[dict[str, Any]]:
+    """Read escalation entries from the audit journal, newest first.
+
+    Iterate date-named files newest-first and reverse their append-only
+    lines. Skip corrupt lines and filenames that are not ISO dates.
+    """
+    if not directory.is_dir():
+        return []
+    entries: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("*.jsonl"), reverse=True):
+        try:
+            day = datetime.date.fromisoformat(path.stem)
+        except ValueError:
+            continue
+        if day < since:
+            continue
+        day_entries: list[dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("kind") == "escalation":
+                day_entries.append(entry)
+        entries.extend(reversed(day_entries))
+    return entries
+
+
+def escalation_rows(entries: list[dict[str, Any]]) -> Table:
+    """Build the foldable escalation table: when, chat, report, status."""
+    table = Table(box=None, show_header=True, pad_edge=False)
+    for column in ("when", "chat", "report", "status"):
+        table.add_column(column, overflow="fold")
+    for entry in entries:
+        table.add_row(
+            str(entry.get("at", "")),
+            str(entry.get("chat_id", "")),
+            str(entry.get("report", "")),
+            str(entry.get("status", "")),
+        )
+    return table

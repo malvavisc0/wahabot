@@ -57,6 +57,7 @@ from wahabot.ai.messages import (
 )
 
 __all__ = [
+    "ContextBudgetError",
     "ToolCall",
     "chat_visible_text",
     "degrade_old_history",
@@ -74,6 +75,17 @@ __all__ = [
 #: The serialized id note an inbound turn carries (``context.py``
 #: appends it as the turn's last line): the id inside brackets.
 INBOUND_ID_RE = re.compile(r"\[message id: ([^\]]+)\]")
+
+
+class ContextBudgetError(ValueError):
+    """The reserved context (current query, newest tool group, required
+    prompt sections) cannot fit the memory token budget.
+
+    Permanent for the triggering message: a redelivery would rebuild
+    the same oversized turn and fail identically, so callers must not
+    drop their seen markers for this class — they log once and let the
+    message go instead of entering a retry loop.
+    """
 
 
 #: Emoji-only replies.  Small models often output a lone emoji (👋, 🤣,
@@ -577,14 +589,16 @@ def trim_to_budget(
        atomic — a trim never leaves a dangling tool call or an orphan
        tool reply.
     2. The returned list must start with a ``user`` message.
-    3. The newest user turn is never silently lost: if nothing else
-       fits, the result is the last user-led group alone.
-
-    A single group larger than the budget is kept so nothing
-    disappears.
+    3. The current question and its newest atomic response group are
+       never lost. Older groups may be dropped; an oversized minimum
+       raises clearly rather than sending an orphan tool response.
 
     *token_counter* returns the token count for one message.
     """
+    if sum(token_counter(message) for message in minimum_turn(messages)) > budget:
+        raise ContextBudgetError(
+            "Current query and newest tool group exceed the token budget"
+        )
     groups = split_groups(messages)
     kept = newest_within_budget(groups, budget, token_counter)
     if not kept:
@@ -593,25 +607,35 @@ def trim_to_budget(
     while kept and kept[-1][0].role != MessageRole.USER:
         kept.pop()
     if not kept:
-        return last_user_turn(groups)
+        return last_user_turn(groups, budget, token_counter)
 
     return [m for group in reversed(kept) for m in group]
 
 
-def last_user_turn(groups: list[list[ChatMessage]]) -> list[ChatMessage]:
-    """Return the last user-led group alone.
+def minimum_turn(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """The current query plus the newest complete assistant/tool group."""
+    groups = split_groups(messages)
+    for index in range(len(groups) - 1, -1, -1):
+        if groups[index][0].role == MessageRole.USER:
+            if index == len(groups) - 1:
+                return list(groups[index])
+            return [*groups[index], *groups[-1]]
+    return []
 
-    Fallback for :func:`trim_to_budget` when the budget is so small that
-    only non-user groups fit. Only the user group is returned: appending
-    the group that follows it can re-add an oversized tool group, and
-    ``ChatMemoryBuffer.get`` — trimming with the real tokenizer — would
-    then drop everything but that tool message, sending the LLM a
-    request with no user turn ("No user query found in messages").
-    """
-    for group in reversed(groups):
-        if group[0].role == MessageRole.USER:
-            return list(group)
-    return groups[-1] if groups else []
+
+def last_user_turn(
+    groups: list[list[ChatMessage]],
+    budget: int,
+    token_counter: Callable[[ChatMessage], int],
+) -> list[ChatMessage]:
+    """Keep the current query with the newest whole groups that fit."""
+    for index in range(len(groups) - 1, -1, -1):
+        user = groups[index]
+        if user[0].role == MessageRole.USER:
+            remaining = budget - sum(token_counter(message) for message in user)
+            kept = newest_within_budget(groups[index + 1 :], remaining, token_counter)
+            return [*user, *(message for group in reversed(kept) for message in group)]
+    return []
 
 
 #: How many of the newest *user turns* stay verbatim. A user turn and
