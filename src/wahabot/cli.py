@@ -10,6 +10,7 @@ import uvicorn
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from wahabot.ai.context import render_system_prompt
@@ -305,6 +306,58 @@ def escalations(
         console.print(f"[dim]No escalations in the last {days} day(s).[/]")
         return
     console.print(cli_helpers.escalation_rows(entries))
+
+
+@app.command()
+def notebook(
+    chat: str = typer.Option(
+        "", "--chat", "-c", help="Show this chat's notes only (JID, or '@session')."
+    ),
+    session: str = typer.Option(
+        None, "--session", "-s", help="WAHA session name. [default: WAHABOT_SESSION]"
+    ),
+) -> None:
+    """List the bot's durable notebook notes.
+
+    Read-only view of the notebooks the ``notebook`` tool and the
+    wrap-up lessons write (``data/notebook.sqlite3``): without
+    ``--chat`` every scope is listed with its note count; with
+    ``--chat`` that scope's notes are shown in full, newest first.
+    """
+    from wahabot.core.notebook import Notebook
+
+    settings = get_settings()
+    # Read-only view: never mutate the process-wide cached settings.
+    session_name = session or settings.session
+    store = Notebook(settings.data_dir)
+    if not store.path.exists():
+        console.print(f"[dim]No notebook yet at {store.path}[/]")
+        return
+    if not chat:
+        scopes = store.scopes(session_name)
+        if not scopes:
+            console.print(f"[dim]No notes in any scope for session {session_name}[/]")
+            return
+        table = Table(box=None, show_header=True, pad_edge=False)
+        table.add_column("chat", overflow="fold")
+        table.add_column("notes", justify="right")
+        for chat_id, count in scopes:
+            table.add_row(chat_id, str(count))
+        console.print(table)
+        return
+    notes = store.read(session_name, chat)
+    if not notes:
+        console.print(f"[dim]No notes for {chat} in session {session_name}[/]")
+        return
+    for note in notes:
+        console.print(
+            Panel(
+                note.text,
+                title=note.key,
+                border_style="dim",
+                expand=False,
+            )
+        )
 
 
 def main() -> None:

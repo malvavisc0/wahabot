@@ -126,6 +126,20 @@ class Notebook:
                         + "before adding more"
                     )
 
+    def scopes(self, session: str) -> list[tuple[str, int]]:
+        """Every chat scope with at least one note, newest first.
+
+        The operator-facing listing (``wahabot notebook list``): one
+        row per chat_id with its note count, empty scopes omitted.
+        """
+        with self.connection() as connection:
+            rows = connection.execute(
+                """SELECT chat_id, COUNT(*) FROM notes WHERE session = ?
+                    GROUP BY chat_id ORDER BY MAX(updated_at) DESC""",
+                (session,),
+            )
+            return [(str(row[0]), int(row[1])) for row in rows]
+
     def delete(self, session: str, chat_id: str, key: str) -> bool:
         """Delete one named note, returning whether it existed."""
         key = valid_note_key(key)

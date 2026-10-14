@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import threading
+import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -222,6 +223,19 @@ def test_notebook_scopes_and_forget_are_independent(tmp_path: Path) -> None:
         assert Notebook(tmp_path).read(session, chat) == [
             Note("same-key", f"Fictional fact {index}.")
         ]
+
+
+def test_notebook_scope_listing_newest_first_and_session_scoped(tmp_path: Path) -> None:
+    """scopes() lists chat_id + count for one session, newest writes first."""
+    store = Notebook(tmp_path)
+    store.write(SESSION, CHAT, "older", "Old fact.")
+    time.sleep(0.01)
+    store.write(SESSION, OTHER_CHAT, "newer", "New fact.")
+    store.write(SESSION, OTHER_CHAT, "newer-still", "Another new fact.")
+    store.write(OTHER_SESSION, CHAT, "other-session", "Not this session.")
+    assert store.scopes(SESSION) == [(OTHER_CHAT, 2), (CHAT, 1)]
+    assert store.scopes(OTHER_SESSION) == [(CHAT, 1)]
+    assert store.scopes("missing") == []
 
 
 def test_concurrent_writes_and_replacements_preserve_unrelated_notes(
