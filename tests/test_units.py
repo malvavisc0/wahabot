@@ -1796,6 +1796,70 @@ def test_visit_url_short_page_stays_inline(unit_settings: Settings) -> None:
     assert "file" not in result
 
 
+def test_visit_url_js_shell_page_uses_meta_description(unit_settings: Settings) -> None:
+    """A JS-shell page's caption rides the envelope, not its site name.
+
+    Instagram and X serve non-logged-in fetches an empty render: the
+    tag strip leaves the site name while the ``og:`` meta tags hold
+    the post's real title and caption (the live 14:41 failure). The
+    page's own description of itself beats the empty render.
+    """
+    from wahabot.ai.tools.visit_url import visit_url
+
+    body = (
+        "<head><title>Instagram</title>"
+        '<meta property="og:title" content="Revista Pacto on Instagram:'
+        ' &quot;El DANE report&#xf3; la tasa de desocupaci&#xf3;n&quot;" />'
+        '<meta property="og:image" content="https://x.jpg" />'
+        '<meta property="og:description" content="39K likes, 3,028 comments -'
+        ' revista_pacto on October 1, 2026: &quot;la tasa subi&#xf3; 0,8 puntos&quot;" />'
+        "</head><body><script>/* 700KB of JS shell */</script></body>"
+    )
+
+    class FakeResponse:
+        url = "https://www.instagram.com/p/fake/"
+        status_code = 200
+        text = body
+        headers: ClassVar[dict[str, str]] = {"content-type": "text/html"}
+
+    with unittest.mock.patch(
+        "wahabot.ai.tools.visit_url._fetch",
+        lambda url, settings: FakeResponse(),  # pyright: ignore[reportUnknownLambdaType]
+    ):
+        result = json.loads(visit_url(unit_settings, "https://www.instagram.com/p/fake/"))
+    assert result["ok"] is True
+    assert "Revista Pacto" in result["text"]
+    assert "39K likes" in result["text"]
+    assert "0,8 puntos" in result["text"]
+    assert result["text"] != "Instagram"
+
+
+def test_visit_url_rendered_text_beats_meta_when_richer(unit_settings: Settings) -> None:
+    """A page with real content never trades it for its meta tags."""
+    from wahabot.ai.tools.visit_url import visit_url
+
+    body = (
+        '<html><head><meta name="description" content="a short blurb">'
+        "</head><body><p>A full article with paragraphs of researched text that"
+        " is far longer than the meta description could ever be.</p></body></html>"
+    )
+
+    class FakeResponse:
+        url = "https://example.com/article"
+        status_code = 200
+        text = body
+        headers: ClassVar[dict[str, str]] = {"content-type": "text/html"}
+
+    with unittest.mock.patch(
+        "wahabot.ai.tools.visit_url._fetch",
+        lambda url, settings: FakeResponse(),  # pyright: ignore[reportUnknownLambdaType]
+    ):
+        result = json.loads(visit_url(unit_settings, "https://example.com/article"))
+    assert result["ok"] is True
+    assert "full article" in result["text"]
+    assert "a short blurb" not in result["text"]
+
+
 @pytest.mark.parametrize(
     ("content_type", "body"),
     [

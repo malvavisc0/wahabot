@@ -51,6 +51,26 @@ _DESCRIPTION_CHARS = 800
 _MAX_TRANSCRIPT_CHARS = 6000
 _MAX_POST_ITEMS = 100
 
+#: A whole ``<meta …>`` tag; the key/content pair is read from its
+#: attributes regardless of order. A JS-shell page (Instagram, X…)
+#: renders as almost no visible text while the OpenGraph/Apple tags
+#: hold the real caption — the page's own description of itself — so
+#: they are extracted before tag-stripping discards them.
+_META_TAG_RE = re.compile(r"<meta\s[^>]*>", re.I)
+_META_KEY_RE = re.compile(
+    r"""(?:property|name)=["'](og:title|og:description|description|twitter:title|twitter:description)["']""",
+    re.I,
+)
+_META_CONTENT_RE = re.compile(r"""content=["']([\s\S]*?)["']""", re.I)
+_META_KEYS = {
+    "og:title": "title",
+    "og:description": "description",
+    "description": "description",
+    "twitter:title": "title",
+    "twitter:description": "description",
+}
+_MAX_META_CHARS = 2000
+
 # Strip common non-content tags in one pass, cheaply.
 _TAG_RE = re.compile(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>|<[^>]+>", re.I)
 _WHITESPACE_RE = re.compile(r"[ \t\r\f\v]{2,}| *\n *|\n{3,}")
@@ -176,7 +196,13 @@ def _page_envelope(url: str, settings: Settings) -> str:
     """The fetched page's envelope, or an error envelope on failure."""
     try:
         response = _fetch(url, settings)
+        meta = _meta_description(response.text)
         text = _to_text(response)
+        if meta and len(text) < len(meta):
+            # A JS-shell page (Instagram, X…) strips down to its site
+            # name while the meta tags carry the real caption: the
+            # page's own description of itself beats the empty render.
+            text = meta
         return ok(
             url=str(response.url),
             status=response.status_code,
@@ -185,6 +211,29 @@ def _page_envelope(url: str, settings: Settings) -> str:
     except Exception as exc:
         logger.warning("visit_url failed for {url}: {exc}", url=url, exc=exc)
         return error(f"visit_url failed: {exc}")
+
+
+def _meta_description(body: str) -> str:
+    """OpenGraph/Apple description text from a page's meta tags, or "".
+
+    Title and description are concatenated (title first), both capped,
+    with HTML-escaped entities decoded and whitespace collapsed to one
+    readable line.
+    """
+    parts: dict[str, str] = {}
+    for tag in _META_TAG_RE.findall(body):
+        key_match = _META_KEY_RE.search(tag)
+        if key_match is None:
+            continue
+        field = _META_KEYS.get(key_match.group(1).lower())
+        content = _META_CONTENT_RE.search(tag)
+        if field is None or content is None or not content.group(1).strip():
+            continue
+        parts.setdefault(field, unescape(content.group(1)).strip())
+    if not parts:
+        return ""
+    joined = " ".join(parts.get(key, "") for key in ("title", "description"))
+    return _WHITESPACE_RE.sub(" ", joined[:_MAX_META_CHARS]).strip()
 
 
 def page_fields(text: str) -> dict[str, Any]:
