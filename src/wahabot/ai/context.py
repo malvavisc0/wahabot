@@ -539,12 +539,8 @@ async def handle_message(
             await ctx.store.set("triage_result", None)
             await ctx.store.set("triage_audit", None)
             if not await agent.start_triage(ctx, target, user_msg, addressed, gate_first):
-                memory = await ctx.store.get("memory", default=None)
-                if memory is not None:
-                    await memory.aput(
-                        ChatMessage(role=MessageRole.USER, content=user_msg)
-                    )
-                    await ctx.store.set("memory", memory)
+                memory = await agent.ensure_memory(ctx)
+                await memory.aput(ChatMessage(role=MessageRole.USER, content=user_msg))
                 return "", target
         # WAHABOT_RUN_TIMEOUT as a true per-run wall-clock cap. The
         # library's own timeout= must stay None: on the reused per-chat

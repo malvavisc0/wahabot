@@ -467,6 +467,22 @@ class FunctionCallingAgentWorkflow(Workflow):
             required_notes=required_notes,
         )
 
+    async def ensure_memory(self, ctx: Context) -> ChatMemoryBuffer:
+        """The chat's buffer, created with the same defaults as a run.
+
+        A gated group turn can be stored without ever starting the
+        agent, so the block path cannot assume ``prepare_chat_history``
+        created the buffer first.
+        """
+        memory = await ctx.store.get("memory", default=None)
+        if memory is None:
+            from_defaults = cast(
+                Callable[..., ChatMemoryBuffer], ChatMemoryBuffer.from_defaults
+            )
+            memory = from_defaults(token_limit=self.memory_token_limit, llm=self.llm)
+            await ctx.store.set("memory", memory)
+        return cast(ChatMemoryBuffer, memory)
+
     def triage_context(
         self,
         target: RunTarget,
@@ -511,8 +527,8 @@ class FunctionCallingAgentWorkflow(Workflow):
         if self.triage is None or target.chat_id == OPERATOR_CHAT_ID:
             return True
         try:
-            memory = await ctx.store.get("memory", default=None)
-            prior = await memory.aget_all() if memory is not None else []
+            memory = await self.ensure_memory(ctx)
+            prior = await memory.aget_all()
             context = self.triage_context(target, user_msg, prior, addressed)
             await ctx.store.set(
                 "triage_audit",

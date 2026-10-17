@@ -15,6 +15,8 @@ from llama_index.core.tools import FunctionTool, ToolSelection
 from llama_index.core.workflow import Context
 from workflows.context.serializers import JsonSerializer
 
+from tests.harness import CHAT_ID, chat_event
+from tests.harness import SESSION as HARNESS_SESSION
 from wahabot.ai.context import handle_message
 from wahabot.ai.events import ToolCallEvent
 from wahabot.ai.triage import (
@@ -35,6 +37,7 @@ from wahabot.ai.triage import (
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.ai.workflow.toolkit import denied_tool_message
 from wahabot.core.models import WahaEvent
+from wahabot.core.persistence import load_memory
 from wahabot.evals.fixtures import GateLabel, load_gate_labels
 from wahabot.settings import Settings
 
@@ -580,6 +583,28 @@ def test_operator_run_never_calls_the_gate(monkeypatch: pytest.MonkeyPatch) -> N
         asyncio.run(scenario())
 
     assert gate.calls == 0
+
+
+def test_gate_blocks_an_unaddressed_group_on_the_wire(bot: Any) -> None:
+    config_path = bot.settings.access_config
+    config = json.loads(config_path.read_text())
+    config["group_participation"] = "judicious"
+    config_path.write_text(json.dumps(config))
+    gate = FakeGate(result=TriageResult(TriageVerdict(participate=False)))
+    bot.agent.triage = cast(Any, gate)
+    before = len(bot.stack.llm.requests)
+
+    bot.post(chat_event(body="lol did you see that", mid="GATE-BLOCK"))
+
+    assert gate.calls == 1
+    assert len(bot.stack.llm.requests) == before
+    assert bot.waha.sent == []
+    assert (HARNESS_SESSION, CHAT_ID) in bot.waha.seen_chats
+    memory = load_memory(bot.settings.data_dir, HARNESS_SESSION, CHAT_ID)
+    assert memory is not None
+    assert any(
+        "lol did you see that" in str(message.content) for message in memory.get_all()
+    )
 
 
 def test_load_gate_labels_reads_recorded_verdicts(tmp_path: Path) -> None:
