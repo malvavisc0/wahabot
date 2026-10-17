@@ -30,21 +30,50 @@ def redact_key(key: str) -> bool:
     return any(part in lowered for part in ("key", "secret", "hmac"))
 
 
+def recall_flag(settings: Settings) -> str:
+    """Describe thread recall's dense, FTS-only or disabled state."""
+    if not settings.thread_recall:
+        return "no-recall"
+    return "recall(dense)" if settings.embed_api_base else "recall(fts)"
+
+
+def on_off(enabled: bool, name: str) -> str:
+    """The feature name, or its ``no-`` form when disabled."""
+    return name if enabled else f"no-{name}"
+
+
+def transcribe_flag(settings: Settings) -> str:
+    """Describe voice-note transcription with its language mode."""
+    if not settings.transcribe_url:
+        return "no-transcribe"
+    return f"transcribe({settings.transcribe_language})"
+
+
+def gate_flag(settings: Settings) -> str:
+    """Whether the triage gate is configured and enabled."""
+    return on_off(bool(settings.triage_gate and settings.gate_api_base), "gate")
+
+
+def langfuse_flag(settings: Settings) -> str:
+    """Whether both Langfuse credentials are present."""
+    return on_off(
+        bool(settings.langfuse_public_key and settings.langfuse_secret_key),
+        "langfuse",
+    )
+
+
 def feature_flags(settings: Settings) -> list[str]:
     """Describe enabled features with their key parameters and disabled ones by name."""
     return [
-        "vision" if settings.vision else "no-vision",
-        "video" if settings.video else "no-video",
-        "shell" if settings.shell_tool else "no-shell",
-        (
-            f"transcribe({settings.transcribe_language})"
-            if settings.transcribe_url
-            else "no-transcribe"
-        ),
-        "tts" if settings.tts_url else "no-tts",
-        "langfuse"
-        if settings.langfuse_public_key and settings.langfuse_secret_key
-        else "no-langfuse",
+        on_off(settings.vision, "vision"),
+        on_off(settings.video, "video"),
+        on_off(settings.shell_tool, "shell"),
+        transcribe_flag(settings),
+        on_off(bool(settings.tts_url), "tts"),
+        on_off(settings.learned_memory, "recap"),
+        recall_flag(settings),
+        gate_flag(settings),
+        langfuse_flag(settings),
     ]
 
 

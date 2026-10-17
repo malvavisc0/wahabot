@@ -35,7 +35,7 @@ uv run wahabot serve [--port N] [--reload]   # webhook server
 uv run ruff check --fix .               # lint
 uv run ruff format .                   # format
 uv run basedpyright ./src/wahabot       # type check
-uv run radon cc ./src/wahabot -s        # complexity (must show no C/D/E/F blocks)
+uv run radon cc ./src/wahabot -s --show-closures   # complexity (no C/D/E/F blocks)
 uvx --python 3.14 vulture src/ --min-confidence 60   # dead code
 uv run pytest                           # end-to-end smoke + unit suite
 uv run wahabot --help                   # CLI surface
@@ -54,7 +54,7 @@ it into smaller functions (early returns, extract helpers, dispatch
 tables) instead of adding `if` branches, and fix any pre-existing C+
 blocks in the same pass. Verify with:
 ```bash
-uv run radon cc src -s | grep -E '\-\s(C|D|E|F)\s'   # must be empty
+uv run radon cc src -s --show-closures | grep -E '\-\s(C|D|E|F)\s'   # must be empty
 ```
 
 ## Dead code

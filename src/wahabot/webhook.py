@@ -74,13 +74,17 @@ async def dispatch(event: WahaEvent) -> None:
     for handler in _registries[event_type]:
         try:
             await handler(event)
-        except Exception:
-            logger.exception(
-                "Handler {handler} failed for {event} event {id}",
+        except Exception as exc:
+            logger.error(
+                "Handler {handler} failed for {event} event {id}: "
+                + "{error_type}: {error}",
                 handler=getattr(handler, "__name__", handler),
                 event=event.event,
                 id=event.payload.get("id", event.id),
+                error_type=type(exc).__name__,
+                error=exc,
             )
+            logger.opt(exception=exc).debug("Handler failure detail")
 
 
 @app.post("/api/webhook/{session}")

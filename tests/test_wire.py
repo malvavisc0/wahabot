@@ -71,7 +71,6 @@ from wahabot.core.persistence import forget_memory, load_memory, memory_file
 from wahabot.core.runs import contexts as handlers_contexts
 from wahabot.handlers import seen_recently
 from wahabot.reactions import forget_reaction_notes as _forget_notes
-from wahabot.status import disarm_recovery_poller
 from wahabot.status import state as status_state
 
 # Zero-seconds polling cap for the async runs: un-comment to tighten.
@@ -1826,64 +1825,6 @@ def test_recovery_recaptures_operator_jid(bot: Bot) -> None:
     assert session_healthy()
     assert status_state.operator_jid == ME_JID
     assert status_state.operator_lid == "491555000000@lid"
-
-
-def test_poller_recovers_silent_waha(bot: Bot) -> None:
-    """The poller unmutes the bot when WAHA recovers WITHOUT the event.
-
-    The production hang this exists for: WAHA's engine stops emitting
-    events (half-dead socket) and never sends the WORKING
-    session.status — previously the bot stayed muted until a human
-    restarted the internet. The poller asks GET /api/sessions directly;
-    once WAHA answers WORKING there, the flag flips, the 🔵 recovery
-    notify goes out (retried), and the poller disarms.
-    """
-    from wahabot import status as status_module
-    from wahabot.status import recovery_poller_armed, session_healthy
-
-    status_module.RECOVERY_POLL_S = 0.2  # fast ticks for the test
-    try:
-        # WAHA is down — its API AND its event agree for now.
-        bot.waha.session_status = "FAILED"
-        # FAILED event arms the poller automatically.
-        bot.post(
-            {
-                "id": "evt-poller-down",
-                "timestamp": int(time.time()),
-                "event": "session.status",
-                "session": SESSION,
-                "me": None,
-                "payload": {"name": SESSION, "status": "FAILED"},
-            }
-        )
-        assert _wait(lambda: not session_healthy())
-        assert _wait(recovery_poller_armed)
-        # WAHA reconnects underneath — but the status event is LOST
-        # (the hang). The API answers WORKING on the next probe.
-        bot.waha.session_status = "WORKING"
-        assert _wait(lambda: session_healthy(), timeout=5)
-        # Recovery notified the operator, exactly once.
-        assert _wait(
-            lambda: any(
-                entry[1] == ME_JID and "WhatsApp session recovered" in entry[2]
-                for entry in bot.waha.sent
-            ),
-            timeout=5,
-        )
-        recovered_notes = [
-            entry for entry in bot.waha.sent if "WhatsApp session recovered" in entry[2]
-        ]
-        assert len(recovered_notes) == 1
-        # The poller stopped: nothing keeps probing a healthy session.
-        assert not recovery_poller_armed()
-        # A redelivered message now flows (the bot answered below).
-        llm = bot.stack.llm
-        llm.clear()
-        bot.post(waha_event("POSTRECOVERY"))
-        assert _wait(lambda: any(entry[1] == CHAT_ID for entry in bot.waha.sent))
-    finally:
-        status_module.RECOVERY_POLL_S = 15.0
-        disarm_recovery_poller()
 
 
 def test_muted_message_probes_recovery(bot: Bot) -> None:

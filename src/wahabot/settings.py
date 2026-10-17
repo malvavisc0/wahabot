@@ -317,6 +317,8 @@ def setup_logging(settings: Settings) -> None:
         sys.stderr,
         level=settings.log_level.upper(),
         format="<green>{time:HH:mm:ss.SSS}</green> <level>{level: <5}</level> {message}",
+        backtrace=False,
+        diagnose=False,
     )
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "httpx"):

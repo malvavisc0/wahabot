@@ -62,6 +62,8 @@ from wahabot.ai.triage import (
     enrich_recall_query,
     format_turns,
     is_tool_allowed,
+    result_from_dict,
+    result_to_dict,
 )
 from wahabot.ai.workflow.delivery import DELIVERY_TOOLS, SILENCE_TOOL, collapse_send_group
 from wahabot.ai.workflow.text import message_text
@@ -220,6 +222,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         self.support_provider = support_provider
         self.rules_renderer = rules_renderer
         self.triage = triage
+        self.triage_tasks: dict[int, asyncio.Task[TriageResult]] = {}
         # Tier 1: the per-chat rolling recap. Only a
         # persisted session can carry one (the recap is a file next to the
         # memory buffer), and memory_persist is the family kill switch.
@@ -308,10 +311,10 @@ class FunctionCallingAgentWorkflow(Workflow):
                 "System prompt and current query/tool group exceed token budget"
             )
         prompt = system.content if system is not None else ""
-        triage = await ctx.store.get("triage_result", default=None)
+        triage = await self.stored_triage_result(ctx)
         query = recall_query(messages)
         fact_keys: tuple[str, ...] = ()
-        if isinstance(triage, TriageResult):
+        if triage is not None:
             query = enrich_recall_query(query, triage.verdict.needs)
             fact_keys = triage.verdict.fact_keys
         block = await self.pinned_block(
@@ -507,31 +510,72 @@ class FunctionCallingAgentWorkflow(Workflow):
         """
         if self.triage is None or target.chat_id == OPERATOR_CHAT_ID:
             return True
-        memory = await ctx.store.get("memory", default=None)
-        prior = await memory.aget_all() if memory is not None else []
-        context = self.triage_context(target, user_msg, prior, addressed)
-        await ctx.store.set("triage_context", context)
-        if not gate_first:
-            task = asyncio.create_task(self.triage.classify_bounded(context))
-            await ctx.store.set("triage_task", task)
-            return True
-        result = await self.triage.classify_bounded(context)
-        await ctx.store.set("triage_result", result)
-        if result.failed or result.timed_out:
-            return False
-        return result.verdict.participate
+        try:
+            memory = await ctx.store.get("memory", default=None)
+            prior = await memory.aget_all() if memory is not None else []
+            context = self.triage_context(target, user_msg, prior, addressed)
+            await ctx.store.set(
+                "triage_audit",
+                {"session": context.session, "chat_id": context.chat_id},
+            )
+            if not gate_first:
+                task = asyncio.create_task(self.triage.classify_bounded(context))
+                self.set_triage_task(ctx, task)
+                return True
+            result = await self.triage.classify_bounded(context)
+            await ctx.store.set("triage_result", result_to_dict(result))
+            if result.failed or result.timed_out:
+                return False
+            return result.verdict.participate
+        except Exception as exc:
+            logger.warning(
+                "Triage gate unavailable for {chat_id}: {error}",
+                chat_id=target.chat_id,
+                error=exc,
+            )
+            logger.opt(exception=exc).debug("Triage gate failure detail")
+            return not gate_first
+
+    async def stored_triage_result(self, ctx: Context) -> TriageResult | None:
+        """The verdict already in this context, if any, as an object."""
+        try:
+            stored = await ctx.store.get("triage_result", default=None)
+        except Exception as exc:
+            logger.warning("Triage state unavailable: {error}", error=exc)
+            return None
+        if isinstance(stored, TriageResult):
+            return stored
+        if isinstance(stored, dict):
+            try:
+                return result_from_dict(stored)
+            except Exception as exc:
+                logger.warning("Triage verdict unreadable: {error}", error=exc)
+        return None
+
+    def set_triage_task(self, ctx: Context, task: asyncio.Task[TriageResult]) -> None:
+        """Track the run's gate task outside the serialized context store."""
+        self.triage_tasks[id(ctx)] = task
+
+    def pop_triage_task(self, ctx: Context) -> asyncio.Task[TriageResult] | None:
+        """Take the run's gate task, if one was started."""
+        return self.triage_tasks.pop(id(ctx), None)
+
+    def cancel_triage(self, ctx: Context) -> None:
+        """Cancel any gate task the run left behind."""
+        task = self.pop_triage_task(ctx)
+        if task is not None and not task.done():
+            task.cancel()
 
     async def triage_result(self, ctx: Context) -> TriageResult | None:
         """Await the run's gate verdict once; fallback results are audited."""
         if self.triage is None:
             return None
-        result = await ctx.store.get("triage_result", default=None)
-        if isinstance(result, TriageResult):
+        result = await self.stored_triage_result(ctx)
+        if result is not None:
             return result
-        task = await ctx.store.get("triage_task", default=None)
+        task = self.pop_triage_task(ctx)
         if task is None:
             return None
-        await ctx.store.set("triage_task", None)
         fallback: TriageResult | None = None
         try:
             result = await asyncio.wait_for(task, timeout=self.triage.timeout + 0.05)
@@ -543,13 +587,23 @@ class FunctionCallingAgentWorkflow(Workflow):
             self.triage.warn_once("await", "Triage task failed: {exc}", exc=exc)
             fallback = TriageResult.fallback(failed=True)
             result = fallback
-        if not isinstance(result, TriageResult):
-            result = TriageResult.fallback(failed=True)
-        await ctx.store.set("triage_result", result)
+        try:
+            await ctx.store.set("triage_result", result_to_dict(result))
+        except Exception as exc:
+            logger.warning("Could not store triage verdict: {error}", error=exc)
         if fallback is not None:
-            context = await ctx.store.get("triage_context", default=None)
-            if isinstance(context, TriageContext):
-                self.triage.audit(context, fallback)
+            try:
+                audit = await ctx.store.get("triage_audit", default=None)
+            except Exception as exc:
+                logger.warning("Triage audit state unavailable: {error}", error=exc)
+                audit = None
+            if isinstance(audit, dict):
+                values = cast(dict[str, Any], audit)
+                self.triage.audit(
+                    str(values.get("session", "")),
+                    str(values.get("chat_id", "")),
+                    fallback,
+                )
         return result
 
     def deny_tool_call(self, tool_call: ToolSelection) -> ChatMessage:

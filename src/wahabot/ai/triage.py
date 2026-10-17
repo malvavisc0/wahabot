@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -297,7 +297,7 @@ class TriageGate:
             self.down_until = time.monotonic() + GATE_RETRY_S
         else:
             self.down_until = 0.0
-        self.audit(context, result)
+        self.audit(context.session, context.chat_id, result)
         return result
 
     async def classify(self, context: TriageContext) -> TriageResult:
@@ -363,13 +363,13 @@ class TriageGate:
             f"triage flagged this chat: {reason}",
         )
 
-    def audit(self, context: TriageContext, result: TriageResult) -> None:
+    def audit(self, session: str, chat_id: str, result: TriageResult) -> None:
         """Journal one verdict, including timeouts and parse failures."""
         save_action(
             self.settings.data_dir,
-            context.session,
+            session,
             "triage",
-            chat_id=context.chat_id,
+            chat_id=chat_id,
             adversarial=result.verdict.adversarial,
             escalate=result.verdict.escalate,
             participate=result.verdict.participate,
@@ -386,6 +386,37 @@ class TriageGate:
             return
         self.warned.add(kind)
         logger.warning(message, **fields)
+
+
+def result_to_dict(result: TriageResult) -> dict[str, Any]:
+    """A JSON-safe verdict for ``Context.store`` (which serializes state)."""
+    return {
+        "adversarial": result.verdict.adversarial,
+        "escalate": result.verdict.escalate,
+        "participate": result.verdict.participate,
+        "why": result.verdict.why,
+        "needs": list(result.verdict.needs),
+        "latency_ms": result.latency_ms,
+        "timed_out": result.timed_out,
+        "failed": result.failed,
+    }
+
+
+def result_from_dict(payload: Mapping[str, Any]) -> TriageResult:
+    """Rebuild a verdict stored by :func:`result_to_dict`."""
+    needs = payload.get("needs") or ()
+    return TriageResult(
+        TriageVerdict(
+            adversarial=bool(payload.get("adversarial", False)),
+            escalate=bool(payload.get("escalate", False)),
+            participate=bool(payload.get("participate", True)),
+            why=str(payload.get("why") or ""),
+            needs=tuple(str(item) for item in needs if isinstance(item, str)),
+        ),
+        latency_ms=int(payload.get("latency_ms") or 0),
+        timed_out=bool(payload.get("timed_out", False)),
+        failed=bool(payload.get("failed", False)),
+    )
 
 
 def render_context(context: TriageContext) -> str:

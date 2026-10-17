@@ -13,6 +13,7 @@ from llama_index.core.llms.function_calling import FunctionCallingLLM
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.tools import FunctionTool, ToolSelection
 from llama_index.core.workflow import Context
+from workflows.context.serializers import JsonSerializer
 
 from wahabot.ai.context import handle_message
 from wahabot.ai.events import ToolCallEvent
@@ -28,6 +29,8 @@ from wahabot.ai.triage import (
     parse_verdict,
     render_context,
     restore_cross_sender_attack,
+    result_from_dict,
+    result_to_dict,
 )
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.ai.workflow.toolkit import denied_tool_message
@@ -106,7 +109,7 @@ class FakeGate:
     def warn_once(self, kind: str, message: str, **fields: Any) -> None:
         pass
 
-    def audit(self, context: TriageContext, result: TriageResult) -> None:
+    def audit(self, session: str, chat_id: str, result: TriageResult) -> None:
         pass
 
 
@@ -218,6 +221,26 @@ def test_cross_sender_probe_is_restored_when_the_model_names_it() -> None:
     )
 
     assert restored.adversarial is True
+
+
+def test_triage_result_roundtrips_through_json() -> None:
+    result = TriageResult(
+        TriageVerdict(
+            adversarial=True,
+            escalate=False,
+            participate=False,
+            why="data probe",
+            needs=("fact:refund", "history:upload"),
+        ),
+        latency_ms=42,
+        timed_out=False,
+        failed=False,
+    )
+
+    payload = result_to_dict(result)
+
+    assert json.loads(json.dumps(payload)) == payload
+    assert result_from_dict(payload) == result
 
 
 def test_dm_participation_is_forced_true(tmp_path: Path) -> None:
@@ -400,7 +423,7 @@ def test_hardened_run_denies_media_and_allows_reads() -> None:
         await ctx.store.set("memory", memory)
         await ctx.store.set(
             "triage_result",
-            TriageResult(TriageVerdict(adversarial=True)),
+            result_to_dict(TriageResult(TriageVerdict(adversarial=True))),
         )
         await agent.handle_tool_calls(
             ctx,
@@ -430,7 +453,7 @@ def test_blocked_group_does_not_start_the_agent(monkeypatch: pytest.MonkeyPatch)
     run = AsyncMock(side_effect=AssertionError("agent must not run"))
     monkeypatch.setattr(agent, "run", run)
 
-    async def scenario() -> tuple[str, Any, list[ChatMessage]]:
+    async def scenario() -> tuple[str, Any, list[ChatMessage], Context]:
         ctx = Context(agent)
         memory = ChatMemoryBuffer(token_limit=100, tokenizer_fn=str.split)
         await ctx.store.set("memory", memory)
@@ -441,14 +464,17 @@ def test_blocked_group_does_not_start_the_agent(monkeypatch: pytest.MonkeyPatch)
             addressed=False,
             gate_first=True,
         )
-        return reply, target, await memory.aget_all()
+        return reply, target, await memory.aget_all(), ctx
 
-    reply, target, stored = asyncio.run(scenario())
+    reply, target, stored, ctx = asyncio.run(scenario())
 
     assert reply == ""
     assert target.chat_id == GROUP
     assert gate.calls == 1
     assert any("lol did you see that" in str(message.content) for message in stored)
+    # Regression: everything the gate leaves in the context must survive
+    # the workflow's JSON state serialization.
+    ctx.store.to_dict(JsonSerializer())
     run.assert_not_awaited()
 
 
@@ -495,6 +521,32 @@ def test_dm_starts_the_gate_before_the_agent(monkeypatch: pytest.MonkeyPatch) ->
         raise Sentinel
 
     monkeypatch.setattr(agent, "run", fail_run)
+
+    async def scenario() -> None:
+        ctx = Context(agent)
+        await handle_message(message_event(CHAT, "hello"), agent, ctx=ctx)
+
+    with pytest.raises(Sentinel):
+        asyncio.run(scenario())
+
+    assert gate.calls == 1
+
+
+def test_race_gate_state_is_serializable(monkeypatch: pytest.MonkeyPatch) -> None:
+    gate = FakeGate()
+    agent = FunctionCallingAgentWorkflow(
+        llm=Mock(spec=FunctionCallingLLM),
+        system_prompt="x",
+        triage=cast(Any, gate),
+    )
+
+    async def serialize_then_fail(**kwargs: Any) -> None:
+        await asyncio.sleep(0)
+        ctx = kwargs["ctx"]
+        ctx.store.to_dict(JsonSerializer())
+        raise Sentinel
+
+    monkeypatch.setattr(agent, "run", serialize_then_fail)
 
     async def scenario() -> None:
         ctx = Context(agent)

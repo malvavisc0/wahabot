@@ -537,8 +537,7 @@ async def handle_message(
     try:
         if ctx is not None:
             await ctx.store.set("triage_result", None)
-            await ctx.store.set("triage_context", None)
-            await ctx.store.set("triage_task", None)
+            await ctx.store.set("triage_audit", None)
             if not await agent.start_triage(ctx, target, user_msg, addressed, gate_first):
                 memory = await ctx.store.get("memory", default=None)
                 if memory is not None:
@@ -559,10 +558,7 @@ async def handle_message(
         )
     finally:
         if ctx is not None:
-            task = await ctx.store.get("triage_task", default=None)
-            if task is not None and not task.done():
-                task.cancel()
-            await ctx.store.set("triage_task", None)
+            agent.cancel_triage(ctx)
         reset_target(token)
     return final_reply(result), target
 
