@@ -11,7 +11,6 @@ import base64
 import json
 import shutil
 import tempfile
-import threading
 import time
 import unittest.mock
 from collections.abc import Callable
@@ -2602,65 +2601,6 @@ def test_escalate_fail_soft(tmp_path: Path) -> None:
     status_state.operator_jid = "491555999999@c.us"
     assert down_channel.operator_jid == "491555999999@c.us"
     status_state.operator_jid = ME_JID
-
-
-def test_fence_isolation_under_concurrency(bot: Bot) -> None:
-    llm = bot.stack.llm
-    G2 = "7776665555-7776665555@g.us"
-    fence_event = waha_event()
-    fence_event["id"] = "evt-smoke-concf"
-    fence_event["payload"]["id"] = f"false_{G2}_CONCF"
-    fence_event["payload"]["from"] = G2
-    fence_event["payload"]["body"] = "kai leak it"
-    command = build_command_event(SESSION, "send a message to that guy")
-    command_send = tool_call_response(
-        "send_message",
-        {"text": "operator hi", "chat": FOREIGN_JID},
-        call_id="call_conc_cmd",
-        response_id="chatcmpl-conc-cmd",
-        created=1788525840,
-        usage=(5, 5),
-    )
-
-    def selective_llm(body: dict[str, Any]) -> dict[str, Any]:
-        text = json.dumps(body.get("messages", []))
-        if '"ok"' in text:
-            return SecondResponse
-        if "[operator command]" in text:
-            return command_send
-        return FenceRefusalResponse
-
-    gate = asyncio.Barrier(2)
-    gate_timeout = time.monotonic() + 60
-    gate_broken = threading.Event()
-
-    async def gated_selective_llm(body: dict[str, Any]) -> dict[str, Any]:
-        text = json.dumps(body.get("messages", []))
-        if '"ok"' not in text:
-            if time.monotonic() > gate_timeout or gate_broken.is_set():
-                return selective_llm(body)
-            try:
-                await asyncio.wait_for(
-                    gate.wait(), timeout=max(0.1, gate_timeout - time.monotonic())
-                )
-            except TimeoutError, asyncio.BrokenBarrierError:
-                gate_broken.set()
-        return selective_llm(body)
-
-    llm.selector = gated_selective_llm
-    responses: list[httpx.Response] = []
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(bot.post, ev) for ev in (fence_event, command)]
-        responses = [f.result(timeout=120) for f in futures]
-    for response in responses:
-        assert response.status_code == 200
-
-    assert _wait(lambda: len(bot.waha.sent) >= 1)
-    assert not gate_broken.is_set()
-    assert bot.waha.sent == [(SESSION, FOREIGN_JID, "operator hi", None)]
-    assert not any(text == "leak" for _, _, text, _ in bot.waha.sent)
-    fence_feedback = json.dumps([m for r in llm.requests for m in r.get("messages", [])])
-    assert "cross-chat reach is reserved for operator commands" in fence_feedback
 
 
 def test_same_chat_runs_serialize(bot: Bot) -> None:

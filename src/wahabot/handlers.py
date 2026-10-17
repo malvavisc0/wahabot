@@ -51,7 +51,7 @@ from wahabot.ai.observability import chat_trace_attributes, enable_langfuse
 from wahabot.ai.scrub import strip_spoofed_markers
 from wahabot.ai.tools import build_default_tools
 from wahabot.ai.tools.url_videos import fetch_url_video, video_urls
-from wahabot.ai.tools.whatsapp import EscalationChannel, deliver_chat_text
+from wahabot.ai.tools.whatsapp import EscalationChannel, RunTarget, deliver_chat_text
 from wahabot.ai.triage import TriageGate
 from wahabot.ai.video import caption_video, extract_frames, join_anchor, video_marker
 from wahabot.ai.vision import caption_images
@@ -422,6 +422,41 @@ async def remember_own_message(
         chat=chat_id,
     )
     return ctx
+
+
+def operator_wake(event: WahaEvent, config: SessionConfig) -> bool | None:
+    """Whether an operator message wakes the bot; None means skip it.
+
+    A ``fromMe`` message with no explicit source cannot be attributed
+    safely: folding the bot's own echo as the operator's would make it
+    answer itself. A known operator message is normalized to the chat
+    it belongs to, then only a mention of the bot wakes the agent.
+    """
+    if not event.payload.get("fromMe"):
+        return False
+    if not typed_by_operator(event):
+        logger.debug(
+            "Skipping own message {id} (source={source})",
+            id=str(event.payload.get("id", "")),
+            source=event.payload.get("source"),
+        )
+        return None
+    normalize_operator_event(event)
+    return name_mentioned(event, config.bot_name, config.bot_mention_regex)
+
+
+async def fold_operator_message(
+    event: WahaEvent,
+    agent: FunctionCallingAgentWorkflow,
+    settings: Settings,
+    body: str | None,
+) -> None:
+    """Store an operator-typed message in the chat's memory, no run."""
+    chat = str(event.payload.get("from", ""))
+    async with chat_lock(event.session, chat):
+        ctx = await remember_own_message(event, agent, settings, body)
+        if ctx is not None:
+            await persist_memory(settings, event.session, chat, ctx)
 
 
 def normalize_operator_event(event: WahaEvent) -> None:
@@ -939,20 +974,22 @@ def register_agent_handler(
                 images.extend(source["frames"])
         return body
 
-    async def deliver_burst_reply(buffer: bursts.BurstBuffer) -> None:
-        """Prepare each buffered message's media, run the agent once.
+    async def merge_burst(
+        buffer: bursts.BurstBuffer,
+    ) -> tuple[WahaEvent, list[dict[str, Any]]] | None:
+        """Merge a burst into one turn; None when it has no usable content.
 
-        One ``handle_message`` call over a merged turn whose text joins
-        every message's body — each part annotated with its original
-        message id so quoting, audit and evidence links survive the
-        merge. Media
-        rides as image blocks; quote/reply targets the LAST buffered
-        message (the natural anchor for a reply to a burst).
+        Each part keeps its original message id so quoting, audit and
+        evidence links survive the merge. The anchor's own id rides
+        ``handle_message``'s message-id note on the merged event; a
+        per-part note would duplicate it. Member words are scrubbed here,
+        the last point the part is pure member text; the code-stamped id
+        notes must survive unscrubbed, so the merged turn rides with
+        ``body_scrubbed=True``.
         """
         if not buffer.messages:
-            return
+            return None
         last = buffer.messages[-1]
-        chat_id = buffer.key[1]
         images: list[dict[str, Any]] = []
         parts: list[str] = []
         for burst_event in buffer.messages:
@@ -960,42 +997,36 @@ def register_agent_handler(
             if body is None:
                 continue
             if burst_event is last:
-                # The anchor's own id rides handle_message's
-                # message_id_note on the merged event — annotating it
-                # here too would duplicate it in the turn text. Safe
-                # to skip: a per-part note only ever fires when
-                # message_id_note finds an id, and the same lookup
-                # backs the anchor, so the id is always stamped
-                # exactly once.
                 parts.append(body)
                 continue
             part_id = message_id_note(burst_event).strip()
-            # Scrub the member's own words here — this is the last
-            # point the part is pure member text. The code-stamped id
-            # notes must survive unscrubbed, so the merged turn rides
-            # handle_message with body_scrubbed=True.
             clean = strip_spoofed_markers(body)
             parts.append(f"{clean}\n{part_id}" if part_id else clean)
         if not parts and not images:
-            logger.debug("Burst in {chat_id} yielded no usable content", chat_id=chat_id)
-            return
+            logger.debug(
+                "Burst in {chat_id} yielded no usable content",
+                chat_id=buffer.key[1],
+            )
+            return None
         merged = last.model_copy(deep=True)
         merged.payload["id"] = str(last.payload.get("id", ""))
         merged.payload["body"] = "\n".join(parts)
         merged.payload["hasMedia"] = bool(images)
-        # A burst turn must not inherit one member's quote context —
-        # the quoted-message context of any single member is its
-        # member's context, not the burst's.
+        # A burst turn must not inherit one member's quote context.
         merged.payload.pop("replyTo", None)
         merged.payload.get("_data", {}).pop("quotedMsg", None)
-        message_id = str(last.payload.get("id", ""))
+        return merged, images
+
+    async def run_burst_turn(
+        buffer: bursts.BurstBuffer,
+        merged: WahaEvent,
+        images: list[dict[str, Any]],
+    ) -> tuple[str, RunTarget]:
+        """Run one merged burst turn under the chat lock."""
+        chat_id = buffer.key[1]
         async with chat_lock(merged.session, chat_id):
             ctx = await context_for(merged.session, chat_id, agent, settings)
             with chat_trace_attributes(chat_id):
-                # A mention anywhere in the burst already passed the
-                # wake gate, so the gate bypass is per burst. The
-                # agent's own addressed marker still follows the merged
-                # event's last member (the reply anchor).
                 current = config_reloader.current_config()
                 addressed = any(
                     group_message_addressed(member, current) for member in buffer.messages
@@ -1010,16 +1041,28 @@ def register_agent_handler(
                     waha=waha,
                     bot_name=current.bot_name,
                     bot_mention_regex=current.bot_mention_regex,
-                    # Member text was scrubbed per-part before the id
-                    # notes were stamped; a second scrub would break
-                    # those code-written ids.
                     body_scrubbed=True,
                     addressed=addressed,
                     gate_first=gate_first,
                 )
             await persist_memory(settings, merged.session, chat_id, ctx)
             await agent.merge_learned()
-            delivered = bool(target.sent or target.reacted)
+        return reply, target
+
+    async def deliver_burst_reply(buffer: bursts.BurstBuffer) -> None:
+        """Prepare each buffered message's media, run the agent once.
+
+        One ``handle_message`` call over a merged turn whose text joins
+        every message's body. Media rides as image blocks; quote/reply
+        targets the LAST buffered message (the natural reply anchor).
+        """
+        merged_burst = await merge_burst(buffer)
+        if merged_burst is None:
+            return
+        merged, images = merged_burst
+        chat_id = buffer.key[1]
+        message_id = str(merged.payload.get("id", ""))
+        reply, target = await run_burst_turn(buffer, merged, images)
         # The provider answered: flip the LLM health flag back up
         # (once-per-transition notify) outside the chat lock — the
         # burst path shares the single-message path's contract.
@@ -1030,7 +1073,7 @@ def register_agent_handler(
             chat_id,
             message_id,
             reply,
-            delivered,
+            bool(target.sent or target.reacted),
             settings,
             emoji_reaction=True,
         )
@@ -1229,27 +1272,9 @@ def register_agent_handler(
         event: WahaEvent, config: SessionConfig, body: str | None
     ) -> bool | None:
         """Apply access gates and fold or buffer turns that need no immediate run."""
-        message_id = str(event.payload.get("id", ""))
-        operator_wakes = False
-        if event.payload.get("fromMe"):
-            if not typed_by_operator(event):
-                # The bot's own send (source=api) is already in memory;
-                # a fromMe message without an explicit source cannot be
-                # attributed safely, and folding the bot's own echo as
-                # the operator's would make it answer itself.
-                logger.debug(
-                    "Skipping own message {id} (source={source})",
-                    id=message_id,
-                    source=event.payload.get("source"),
-                )
-                return
-            normalize_operator_event(event)
-            # The operator mentioning the bot asks it something, like a
-            # member would; anything else is a teammate's remark that the
-            # bot should remember but not answer.
-            operator_wakes = name_mentioned(
-                event, config.bot_name, config.bot_mention_regex
-            )
+        operator_wakes = operator_wake(event, config)
+        if operator_wakes is None:
+            return
         if not chat_allowed(
             event,
             config.whitelist,
@@ -1266,11 +1291,7 @@ def register_agent_handler(
                 mark_seen, waha, event.session, str(event.payload["from"])
             )
         if is_operator_event(event) and not operator_wakes:
-            chat = str(event.payload.get("from", ""))
-            async with chat_lock(event.session, chat):
-                ctx = await remember_own_message(event, agent, settings, body)
-                if ctx is not None:
-                    await persist_memory(settings, event.session, chat, ctx)
+            await fold_operator_message(event, agent, settings, body)
             return
         if buffer_album_message(event, operator_wakes):
             return
