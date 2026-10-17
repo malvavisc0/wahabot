@@ -1589,6 +1589,12 @@ def test_visit_url_media_returns_video_meta(unit_settings: Settings) -> None:
         "duration_s": 32,
         "view_count": 1_200_000,
         "id": "DdXprrXGx5e",
+        "content_kind": "caption",
+        "metadata_only": True,
+        "note": (
+            "Caption/metadata only; the video itself was not watched. "
+            + "Do not claim to have watched or verified the video."
+        ),
     }
 
 
@@ -1644,6 +1650,9 @@ def test_visit_url_youtube_inlines_transcript(unit_settings: Settings) -> None:
     assert result["transcript_truncated"] is True
     assert len(result["transcript"]) == _MAX_TRANSCRIPT_CHARS
     assert "transcript_file" in result
+    assert result["content_kind"] == "transcript"
+    assert result["note"] == "Transcript only; the video itself was not watched."
+    assert "metadata_only" not in result
     spill = Path(result["transcript_file"]["path"]).read_text(encoding="utf-8")
     assert len(spill) > _MAX_TRANSCRIPT_CHARS
     assert "Sentence 500 keeps going." in spill
@@ -1710,6 +1719,12 @@ def test_visit_url_media_skips_playlist_info(unit_settings: Settings) -> None:
         "view_count": None,
         "id": "DdXprrXGx5e",
         "item_count": 3,
+        "content_kind": "caption",
+        "metadata_only": True,
+        "note": (
+            "Caption/metadata only; the video itself was not watched. "
+            + "Do not claim to have watched or verified the video."
+        ),
     }
 
 

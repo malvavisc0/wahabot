@@ -171,6 +171,16 @@ def _media_envelope(url: str, settings: Settings) -> str | None:
         meta = video_meta(url, settings)
         if meta is not None:
             fields = _with_transcript(url, meta, settings)
+            if "transcript" in fields:
+                fields["content_kind"] = "transcript"
+                fields["note"] = "Transcript only; the video itself was not watched."
+            else:
+                fields["content_kind"] = "caption"
+                fields["metadata_only"] = True
+                fields["note"] = (
+                    "Caption/metadata only; the video itself was not watched. "
+                    "Do not claim to have watched or verified the video."
+                )
             return ok(source="yt-dlp", url=url, **fields)
     except Exception as exc:
         logger.info("Media processing failed for {url}: {exc}", url=url, exc=exc)
