@@ -125,8 +125,8 @@ def _dedupe_tool_spans() -> None:
     LlamaIndex's ``__init_subclass__`` auto-decorates every public
     method with ``dispatcher.span``, so a tool call nests two identical
     spans — one around ``__call__``, one around the ``call`` it
-    delegates to — doubling the trace payload for every tool execution
-    (docs/bug-report-2c665d8.md, bug 5). Removing the outer
+    delegates to — doubling the trace payload for every tool execution.
+    Removing the outer
     decoration leaves the single ``call`` span, which carries the same
     input/output and is the one the failure marking (bug 4) targets.
     Fail-soft: an unexpected layout logs and leaves the duplicate in

@@ -56,11 +56,50 @@ class Settings(BaseSettings):
     #: Per-request HTTP timeout (seconds) for LLM calls; must stay below
     #: the workflow timeout so a hung provider fails fast and clean.
     llm_timeout: float = 60.0
+    #: The served model's context window, in tokens. 0 (the default)
+    #: means unknown — llama-index's metadata still reports its legacy
+    #: default (3900), which says nothing about the model behind the
+    #: endpoint, so the memory-limit guard only warns when this is set
+    #: to the real value (e.g. 131072). aria-ai lesson: a budget bigger
+    #: than the window is silently truncated by the provider.
+    llm_context_window: int = 0
+    #: Triage gate: a small classifier that labels each inbound
+    #: message for adversarial input, escalation, and (unaddressed
+    #: groups only) whether to participate. ``triage_gate`` is the
+    #: kill switch; the gate also needs ``gate_api_base``. Empty URL
+    #: falls back to the pre-gate behavior.
+    triage_gate: bool = True
+    #: OpenAI-compatible chat base URL for the gate, including /v1.
+    #: Empty disables the gate (this is what tests pin).
+    gate_api_base: str = "http://omnitron.tago.lan:9194/v1"
+    gate_model: str = "d1-3B"
+    gate_api_key: str = ""
+    #: Hard cap on one gate verdict, in seconds. A timeout falls back
+    #: to a normal run.
+    gate_timeout: float = 0.8
     memory_token_limit: int = 8000
     #: Persist each chat's memory to disk (data/memory/). When false,
     #: loads and saves are skipped — exactly the pre-persistence
     #: blank-start behavior. The one kill switch; no TTL ships.
     memory_persist: bool = True
+    #: Tier 1 rolling recap: when the trim drops
+    #: turns, merge them into a per-chat recap that rides the pinned
+    #: state block. Requires memory_persist — the recap is a file next
+    #: to the buffer, wiped together with it.
+    learned_memory: bool = True
+    #: Thread recall: index trimmed-away user/assistant turns
+    #: per chat under data/memory/<session>/ and retrieve older slices
+    #: into the pinned block. Requires memory_persist (the index is a
+    #: file next to the buffer); the dense half additionally requires
+    #: embed_api_base, otherwise recall is FTS5/BM25-only.
+    thread_recall: bool = True
+    #: OpenAI-compatible embeddings base URL, including the provider's
+    #: ``/v1`` (e.g. http://localhost:9195/v1). Empty disables dense
+    #: recall; the per-chat FTS5 floor still works.
+    embed_api_base: str = ""
+    embed_model: str = "embeddinggemma-2"
+    #: Per-request HTTP timeout (s) for query and batch embeddings.
+    embed_timeout: float = 10.0
     #: Max LLM→tool round trips per agent run (above LlamaIndex's
     #: default max_iterations of 20, to leave room for long research
     #: runs). Past the limit the model gets one final tool-free call
@@ -136,8 +175,8 @@ class Settings(BaseSettings):
     #: does. Failures are swallowed (presence must never break a run).
     send_seen: bool = True
 
-    #: Multi-message burst assembly (see docs/plans/commercial-roadmap.md,
-    #: "Multi-Message Turns"): hold same-sender messages in a per-chat
+    #: Multi-message burst assembly: hold same-sender messages in a
+    #: per-chat
     #: buffer so "leak" + "flat 3B" + [video] becomes one agent turn.
     #: Off → every message runs the agent immediately (pre-burst
     #: behavior). Ships off so existing deployments keep their
@@ -173,9 +212,9 @@ class Settings(BaseSettings):
     #: service documents 30-60 s cold loads.
     tts_timeout: float = 120.0
     #: Language-code → voice-id map for synthesis (JSON env var
-    #: WAHABOT_TTS_VOICES). Seeded from the operator audition
-    #: (docs/plans/tts-integration.md): the `_casual` variants won for
-    #: en/de; Spanish has no `_casual` so the base voice stays.
+    #: WAHABOT_TTS_VOICES). Seeded from the operator audition: the
+    #: `_casual` variants won for en/de; Spanish has no `_casual` so the
+    #: base voice stays.
     tts_voices: dict[str, str] = Field(
         default_factory=lambda: {
             "en": "vd_british_male_casual",

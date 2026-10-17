@@ -477,7 +477,7 @@ def run_timed_out(exc: Exception) -> bool:
     ``asyncio.wait_for`` cap around ``agent.run`` in
     :func:`wahabot.ai.context.handle_message`, the enforcement point
     since the library's own ``timeout=`` proved cumulative across a
-    reused Context (docs/incident-2026-10-06-run-timeout.md) — and
+    reused Context — and
     ``WorkflowTimeoutError``, should a library timeout ever fire again.
     ``openai.APITimeoutError`` does not subclass ``TimeoutError``, so
     the per-call budget class keeps its own, earlier branch.

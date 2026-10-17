@@ -9,9 +9,7 @@ back in ``StopEvent.result``.
 
 import asyncio
 import hashlib
-import json
 from collections.abc import Callable, Sequence
-from dataclasses import asdict
 from typing import Any, cast, override
 
 from llama_index.core.base.llms.types import (
@@ -35,6 +33,7 @@ from loguru import logger
 
 from wahabot.ai.events import InputEvent, ToolCallEvent
 from wahabot.ai.history import (
+    INBOUND_ID_RE,
     ContextBudgetError,
     chat_visible_text,
     degrade_old_history,
@@ -44,29 +43,47 @@ from wahabot.ai.history import (
     sanitize_chat_history,
     trim_to_budget,
 )
-from wahabot.ai.messages import TURN_HANDLED_KWARG, WRAP_UP_NOTE_KWARG
-from wahabot.ai.tools.notebook import (
-    MAX_NOTE_TOKENS,
-    NOTEBOOK_INSTRUCTIONS,
-    NOTEBOOK_TOKEN_LIMIT,
-    OPERATOR_NOTEBOOK_HEADING,
-    notebook_prompt,
+from wahabot.ai.messages import TURN_HANDLED_KWARG
+from wahabot.ai.pinned_state import (
+    PINNED_STATE_TOKEN_LIMIT,
+    SupportStateProvider,
+    pinned_state_block,
 )
+from wahabot.ai.tools.notebook import MAX_NOTE_TOKENS, NOTEBOOK_INSTRUCTIONS
 from wahabot.ai.tools.slim import slim_tool_specs
-from wahabot.ai.tools.whatsapp import current_target, log_action_reason
+from wahabot.ai.tools.whatsapp import RunTarget, current_target, log_action_reason
+from wahabot.ai.triage import (
+    MUTE_NOTE_KEY,
+    TRIAGE_MESSAGE_CHARS,
+    TRIAGE_MUTE_CHARS,
+    TriageContext,
+    TriageGate,
+    TriageResult,
+    enrich_recall_query,
+    format_turns,
+    is_tool_allowed,
+)
 from wahabot.ai.workflow.delivery import DELIVERY_TOOLS, SILENCE_TOOL, collapse_send_group
 from wahabot.ai.workflow.text import message_text
 from wahabot.ai.workflow.toolkit import (
+    denied_tool_message,
     run_tool_call,
     tool_call_key,
     tool_outcome,
 )
 from wahabot.core.audit import save_action
+from wahabot.core.embeddings import LanEmbedding
+from wahabot.core.learned import RecapMerger, load_learned
 from wahabot.core.notebook import (
     MAX_NOTE_LENGTH,
-    SESSION_NOTEBOOK_CHAT,
+    Note,
     Notebook,
     notebook_operation,
+)
+from wahabot.core.thread_index import (
+    OPERATOR_CHAT_ID,
+    ThreadIndexer,
+    recall_query,
 )
 from wahabot.core.tokens import text_tokens, truncate_to_tokens
 from wahabot.settings import Settings
@@ -107,6 +124,52 @@ def raise_missing_llm() -> FunctionCallingLLM:
     raise ValueError("FunctionCallingAgentWorkflow requires an llm")
 
 
+def recap_line(message: ChatMessage) -> str:
+    """One recap line, or "" when the message has no visible text.
+
+    The recap must never carry tool-call arguments or narration: a
+    model's tool payload is not conversation, and a private self-report
+    was never sent to the chat. ``message_text`` is the token counter's
+    view (content plus tool args), not this one.
+    """
+    if message.role not in (MessageRole.USER, MessageRole.ASSISTANT):
+        return ""
+    text = str(message.content or "").strip()
+    if message.role == MessageRole.ASSISTANT:
+        text = chat_visible_text(text)
+    return f"[{message.role.value}] {text}" if text else ""
+
+
+def build_thread_index(
+    settings: Settings | None, thread_index: ThreadIndexer | None
+) -> ThreadIndexer | None:
+    """The per-chat recall index, or None when its kill switch is off.
+
+    An injected index wins (tests, alternate wiring). Otherwise the index
+    requires ``memory_persist`` (it is a file next to the buffer) and
+    ``thread_recall``; a missing ``embed_api_base`` leaves it FTS5-only,
+    so the exact-token floor works without the LAN embedding service.
+    """
+    if thread_index is not None:
+        return thread_index
+    if settings is None or not settings.memory_persist or not settings.thread_recall:
+        return None
+    embed_model = (
+        LanEmbedding(
+            api_base=settings.embed_api_base,
+            model_name=settings.embed_model,
+            timeout=settings.embed_timeout,
+        )
+        if settings.embed_api_base
+        else None
+    )
+    return ThreadIndexer(
+        settings.data_dir,
+        embed_model,
+        query_timeout=max(0.1, min(settings.embed_timeout, 2.0)),
+    )
+
+
 class FunctionCallingAgentWorkflow(Workflow):
     """Stateful function calling agent built from plain workflow steps.
 
@@ -138,6 +201,10 @@ class FunctionCallingAgentWorkflow(Workflow):
         max_concurrent_llm: int = 4,
         settings: Settings | None = None,
         notebook: Notebook | None = None,
+        support_provider: SupportStateProvider | None = None,
+        rules_renderer: Callable[[], str] | None = None,
+        thread_index: ThreadIndexer | None = None,
+        triage: TriageGate | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -150,10 +217,30 @@ class FunctionCallingAgentWorkflow(Workflow):
         self.llm_semaphore = asyncio.Semaphore(max_concurrent_llm)
         self.settings = settings
         self.notebook = notebook
+        self.support_provider = support_provider
+        self.rules_renderer = rules_renderer
+        self.triage = triage
+        # Tier 1: the per-chat rolling recap. Only a
+        # persisted session can carry one (the recap is a file next to the
+        # memory buffer), and memory_persist is the family kill switch.
+        self.recap_merger = (
+            RecapMerger(self.llm, settings.data_dir, self.llm_semaphore)
+            if settings is not None
+            and settings.memory_persist
+            and settings.learned_memory
+            else None
+        )
+        # Thread recall shares the same file family and kill
+        # switches. Without an embeddings URL the index is FTS5-only.
+        self.thread_index = build_thread_index(settings, thread_index)
+        warn_context_mismatch(
+            settings.llm_context_window if settings is not None else 0,
+            self.memory_token_limit,
+        )
         assert self.llm.metadata.is_function_calling_model
 
     def audit(self, kind: str, **fields: Any) -> None:
-        """Journal one bot action (roadmap: "journal everything").
+        """Journal one bot action.
 
         Fail-soft by construction (``save_action`` swallows disk
         errors), so auditing never breaks a run. No-op without
@@ -194,8 +281,11 @@ class FunctionCallingAgentWorkflow(Workflow):
         """The trimmed, structurally valid conversation plus system prompt.
 
         Reserve the current query and newest whole tool group before
-        selecting notebook data and older history. Do not let the library
-        trim a second time: its last-message fallback can orphan tools.
+        assembling the pinned state block and older history. The block
+        rides the system message (``system_message`` + block), so it
+        sits before the FIFO and history trimming can never evict it.
+        Do not let the library trim a second time: its last-message
+        fallback can orphan tools.
         """
         memory = await ctx.store.get("memory")
         system = self.system_message()
@@ -217,59 +307,271 @@ class FunctionCallingAgentWorkflow(Workflow):
             raise ContextBudgetError(
                 "System prompt and current query/tool group exceed token budget"
             )
-        notes = await self.saved_notebook_prompt(
-            min(NOTEBOOK_TOKEN_LIMIT, self.memory_token_limit // 4),
+        prompt = system.content if system is not None else ""
+        triage = await ctx.store.get("triage_result", default=None)
+        query = recall_query(messages)
+        fact_keys: tuple[str, ...] = ()
+        if isinstance(triage, TriageResult):
+            query = enrich_recall_query(query, triage.verdict.needs)
+            fact_keys = triage.verdict.fact_keys
+        block = await self.pinned_block(
             tokenizer,
-            f"{system.content if system is not None else ''}\n\n",
+            f"{prompt}\n\n",
             self.memory_token_limit - required,
+            query=query,
+            fact_keys=fact_keys,
         )
-        if notes:
+        if block:
             system = ChatMessage(
-                role=MessageRole.SYSTEM,
-                content=f"{system.content if system is not None else ''}\n\n{notes}",
+                role=MessageRole.SYSTEM, content=f"{prompt}\n\n{block}".strip()
             )
             budget = self.memory_token_limit - count_message_tokens(system)
         history = trim_to_budget(messages, budget, count_message_tokens)
         await memory.aset(history)
+        self.schedule_recap_merge(messages, history)
+        self.schedule_thread_index(messages, history)
         return ([system] if system is not None else []) + history
 
-    async def saved_notebook_prompt(
+    def schedule_recap_merge(
+        self, messages: list[ChatMessage], history: list[ChatMessage]
+    ) -> None:
+        """Record the trimmed-away prefix for a later recap merge.
+
+        The trim just evicted the dropped turns from the buffer
+        (``memory.aset`` kept only *history*), so this is the only
+        moment they exist. Recording is pure state (``RecapMerger.
+        schedule`` never calls the LLM); the merge itself runs when
+        handlers await :meth:`merge_learned` after the reply is out.
+        Operator runs are typed, not conversational — no recap — and
+        only user/assistant text merges (never tool results, the
+        recap trust boundary).
+        """
+        if self.recap_merger is None or len(history) >= len(messages):
+            return
+        try:
+            target = current_target()
+        except RuntimeError:
+            return
+        if target.chat_id == "operator":
+            return
+        dropped = messages[: len(messages) - len(history)]
+        lines = [line for message in dropped if (line := recap_line(message))]
+        self.recap_merger.schedule(target.session, target.chat_id, "\n".join(lines))
+
+    def schedule_thread_index(
+        self, messages: list[ChatMessage], history: list[ChatMessage]
+    ) -> None:
+        """Record the trimmed-away turns for the per-chat thread index.
+
+        The same trim hook as the recap: ``memory.aset`` kept only
+        *history*, so the dropped prefix exists only here. Recording is
+        pure state (no I/O, no embedding); :meth:`merge_learned` drains
+        it after the reply is out. Operator runs are commands, not
+        conversation, and are never indexed.
+        """
+        if self.thread_index is None or len(history) >= len(messages):
+            return
+        try:
+            target = current_target()
+        except RuntimeError:
+            return
+        dropped = messages[: len(messages) - len(history)]
+        self.thread_index.schedule(target.session, target.chat_id, dropped)
+
+    async def merge_learned(self) -> None:
+        """Run the post-reply memory jobs: recap merge and index drain.
+
+        Called at the persist points, after the reply has been sent —
+        the extraction LLM call and the embedding batch never delay a
+        customer-facing turn. The two jobs are independent and run
+        concurrently; each is single-flight and fail-soft, so one
+        service being down never blocks the other.
+        """
+        tasks: list[Any] = []
+        if self.recap_merger is not None:
+            tasks.append(self.recap_merger.merge_pending())
+        if self.thread_index is not None:
+            tasks.append(self.thread_index.drain())
+        if not tasks:
+            return
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("Post-reply memory job failed: {error}", error=result)
+
+    async def recall_slices(self, target: RunTarget, query: str) -> list[str]:
+        """Lead slices for this chat; [] when recall is off or empty."""
+        if self.thread_index is None or not query or target.chat_id == OPERATOR_CHAT_ID:
+            return []
+        return await self.thread_index.recall(target.session, target.chat_id, query)
+
+    def fact_notes(self, target: RunTarget, fact_keys: Sequence[str]) -> list[Note]:
+        """Notebook notes the gate asked the run to pin into the block."""
+        if self.notebook is None:
+            return []
+        notes: list[Note] = []
+        for key in fact_keys:
+            notes.extend(
+                self.notebook.read(target.session, target.chat_id, key=key, limit=1)
+            )
+        return notes
+
+    async def pinned_block(
         self,
-        token_budget: int,
         tokenizer: Callable[[str], list[Any]],
         prompt_prefix: str,
         prompt_budget: int,
+        query: str = "",
+        fact_keys: Sequence[str] = (),
     ) -> str:
-        """Load this run's durable notes without spending its reserved context."""
-        if self.notebook is None or token_budget <= 0:
+        """Assemble this run's pinned state block (fail-soft, bounded).
+
+        Restructures what the notebook already injects — notebook
+        facts, operator policies — plus the session rules and, when a
+        support store exists, its ticket-shaped fields, into one
+        never-evicted block. The lead-only recall section comes from
+        this chat's thread index, queried with the latest user text.
+        Skipped whole for bare workflows with no source wired, which
+        also keeps unbound runs off ``current_target``.
+        """
+        if (
+            self.notebook is None
+            and self.support_provider is None
+            and self.rules_renderer is None
+            and self.settings is None
+        ):
             return ""
         target = current_target()
-        policies = await notebook_operation(
-            self.notebook.read, target.session, SESSION_NOTEBOOK_CHAT
-        )
-        policy_prompt = (
-            OPERATOR_NOTEBOOK_HEADING
-            + json.dumps([asdict(note) for note in policies], ensure_ascii=False)
-            if policies
+        recap = (
+            load_learned(self.settings.data_dir, target.session, target.chat_id)
+            if self.settings is not None
             else ""
         )
-        if policy_prompt:
-            prompt_prefix += policy_prompt + "\n\n"
-            if text_tokens(prompt_prefix, tokenizer) > prompt_budget:
-                raise ContextBudgetError(
-                    "Operator policies and current query exceed token budget"
-                )
-        notes = await notebook_operation(
-            self.notebook.read, target.session, target.chat_id
-        )
-        local_prompt = notebook_prompt(
-            notes,
-            token_budget,
-            tokenizer,
+        recall = await self.recall_slices(target, query)
+        required_notes = self.fact_notes(target, fact_keys)
+        return await pinned_state_block(
+            notebook=self.notebook,
+            provider=self.support_provider,
+            session=target.session,
+            chat_id=target.chat_id,
+            token_budget=min(PINNED_STATE_TOKEN_LIMIT, self.memory_token_limit // 4),
+            tokenizer=tokenizer,
             prompt_prefix=prompt_prefix,
             prompt_budget=prompt_budget,
+            rules=self.rendered_session_rules(),
+            recap=recap,
+            recall=recall,
+            required_notes=required_notes,
         )
-        return "\n\n".join(part for part in (policy_prompt, local_prompt) if part)
+
+    def triage_context(
+        self,
+        target: RunTarget,
+        message: str,
+        messages: Sequence[ChatMessage],
+        addressed: bool,
+    ) -> TriageContext:
+        """Build the bounded gate input: message, last turns, mute, rules."""
+        mute = ""
+        if self.notebook is not None:
+            notes = self.notebook.read(target.session, target.chat_id, key=MUTE_NOTE_KEY)
+            mute = " | ".join(f"{note.key}: {note.text}" for note in notes)[
+                :TRIAGE_MUTE_CHARS
+            ]
+        return TriageContext(
+            session=target.session,
+            chat_id=target.chat_id,
+            message=INBOUND_ID_RE.sub("", message).strip()[:TRIAGE_MESSAGE_CHARS],
+            turns=format_turns(messages),
+            mute=mute,
+            rules=self.rendered_session_rules(),
+            group=target.chat_id.endswith("@g.us"),
+            addressed=addressed,
+        )
+
+    async def start_triage(
+        self,
+        ctx: Context,
+        target: RunTarget,
+        user_msg: str,
+        addressed: bool,
+        gate_first: bool,
+    ) -> bool:
+        """Start or await the gate; False means the run must stay silent.
+
+        Race mode (DMs, addressed turns) always returns True: the gate
+        can only tighten tools there. Block mode (unaddressed groups)
+        runs only on an explicit participate verdict; a failed or
+        timed-out gate keeps the group silent rather than waking the
+        expensive agent.
+        """
+        if self.triage is None or target.chat_id == OPERATOR_CHAT_ID:
+            return True
+        memory = await ctx.store.get("memory", default=None)
+        prior = await memory.aget_all() if memory is not None else []
+        context = self.triage_context(target, user_msg, prior, addressed)
+        await ctx.store.set("triage_context", context)
+        if not gate_first:
+            task = asyncio.create_task(self.triage.classify_bounded(context))
+            await ctx.store.set("triage_task", task)
+            return True
+        result = await self.triage.classify_bounded(context)
+        await ctx.store.set("triage_result", result)
+        if result.failed or result.timed_out:
+            return False
+        return result.verdict.participate
+
+    async def triage_result(self, ctx: Context) -> TriageResult | None:
+        """Await the run's gate verdict once; fallback results are audited."""
+        if self.triage is None:
+            return None
+        result = await ctx.store.get("triage_result", default=None)
+        if isinstance(result, TriageResult):
+            return result
+        task = await ctx.store.get("triage_task", default=None)
+        if task is None:
+            return None
+        await ctx.store.set("triage_task", None)
+        fallback: TriageResult | None = None
+        try:
+            result = await asyncio.wait_for(task, timeout=self.triage.timeout + 0.05)
+        except TimeoutError:
+            task.cancel()
+            fallback = TriageResult.fallback(timed_out=True)
+            result = fallback
+        except Exception as exc:
+            self.triage.warn_once("await", "Triage task failed: {exc}", exc=exc)
+            fallback = TriageResult.fallback(failed=True)
+            result = fallback
+        if not isinstance(result, TriageResult):
+            result = TriageResult.fallback(failed=True)
+        await ctx.store.set("triage_result", result)
+        if fallback is not None:
+            context = await ctx.store.get("triage_context", default=None)
+            if isinstance(context, TriageContext):
+                self.triage.audit(context, fallback)
+        return result
+
+    def deny_tool_call(self, tool_call: ToolSelection) -> ChatMessage:
+        """Journal and answer a tool call the hardened policy refused."""
+        self.audit(
+            "tool_call",
+            tool=tool_call.tool_name,
+            args={key: str(value)[:300] for key, value in tool_call.tool_kwargs.items()},
+            ok=False,
+            outcome="denied",
+        )
+        return denied_tool_message(tool_call, "tool unavailable in this run")
+
+    def rendered_session_rules(self) -> str:
+        """The session rules line, or ""; rules never fail a run."""
+        if self.rules_renderer is None:
+            return ""
+        try:
+            return self.rules_renderer().strip()
+        except Exception:
+            logger.warning("Session rules rendering failed; continuing without rules")
+            return ""
 
     async def repair_memory(self, ctx: Context) -> None:
         """Repair dangling state left by a failed workflow run.
@@ -429,9 +731,9 @@ class FunctionCallingAgentWorkflow(Workflow):
         if any(call.tool_name == SILENCE_TOOL for call in tool_calls):
             self.log_silence_reason(tool_calls)
             logger.debug("Stopping run: model chose stay_silent")
-            return await self.stop_with(ctx, self.stopped_response(), note=False)
+            return await self.stop_with(ctx, self.stopped_response())
         if tool_calls and await self.repeats_tool_call(ctx, tool_calls):
-            return await self.stop_with(ctx, self.stopped_response(), note=False)
+            return await self.stop_with(ctx, self.stopped_response())
         if not tool_calls:
             return await self.finish_text_round(ctx, response, rounds)
         if self.delivery_complete(tool_calls) or rounds >= self.tool_round_limit:
@@ -443,23 +745,19 @@ class FunctionCallingAgentWorkflow(Workflow):
                 else f"round limit {self.tool_round_limit}"
             )
             result = await self.wrap_up_response(ctx, reason)
-            return await self.stop_with(ctx, StopEvent(result=result), note=True)
+            return await self.stop_with(ctx, StopEvent(result=result))
         await self.remember(ctx, response, tool_calls)
         return ToolCallEvent(tool_calls=tool_calls)
 
-    async def stop_with(self, ctx: Context, event: StopEvent, *, note: bool) -> StopEvent:
-        """End the run with *event*: stamp the turn, collapse, flush the note.
+    async def stop_with(self, ctx: Context, event: StopEvent) -> StopEvent:
+        """End the run with *event*: stamp the turn and collapse the delivery group.
 
-        *note* is True only for the wrap-up path, which stages its
-        note during ``wrap_up_response`` and needs it flushed after the
-        collapse — the note must never land before the delivery group
-        folds (``batch_closes_history`` would leave the scaffolding
-        raw).
+        The wrap-up note is journalled and written to the notebook by
+        ``wrap_up_response`` itself — it is a durable fact, never an
+        assistant turn, so nothing is staged for storage here.
         """
         await self.mark_turn_handled(ctx)
         await self.collapse_delivery(ctx)
-        if note:
-            await self.flush_pending_wrap_up_note(ctx)
         return event
 
     async def finish_text_round(
@@ -470,14 +768,11 @@ class FunctionCallingAgentWorkflow(Workflow):
         delivered = self.any_delivery()
         note = str(response.message.content or "").strip() if delivered else ""
         await self.remember(ctx, response, [], skip_text=delivered)
-        # Collapse before storing the note: the note appended after
-        # the tool results would break ``batch_closes_history`` and
-        # the group would never fold.
         await self.mark_turn_handled(ctx)
         await self.collapse_delivery(ctx)
         if delivered:
             if note:
-                await self.store_wrap_up_note(ctx, note)
+                await self.store_wrap_up_note(note)
             self.audit_wrap_up_note(note)
         return StopEvent(result=self.drop_post_delivery_text(response))
 
@@ -611,14 +906,14 @@ class FunctionCallingAgentWorkflow(Workflow):
         leaked non-answers at the source: a plain-text round whose
         content is not chat-visible (``chat_visible_text`` — the
         identical predicates ``final_reply`` applies to delivery: a
-        leaked ``stay_silent`` token, an invented error payload) is
-        never stored, so the model's self-history cannot re-teach it
-        its own bugs. A lone-emoji final reply is dropped here for the
-        same reason (the handler converts it to a reaction or silence —
-        it never lands as text), while delivery keeps receiving it so
-        the conversion can happen. A message with tool calls always
-        stores: the calls will execute and their results belong to the
-        run.
+        leaked ``stay_silent`` token, an invented error payload, a
+        private self-report appended to the reply) is never stored, so
+        the model's self-history cannot re-teach it its own bugs. A
+        lone-emoji final reply is dropped here for the same reason (the
+        handler converts it to a reaction or silence — it never lands as
+        text), while delivery keeps receiving it so the conversion can
+        happen. A message with tool calls always stores: the calls will
+        execute and their results belong to the run.
 
         Thinking models separate the reasoning block from the text with
         a leading blank line inside the text block; that separator is
@@ -634,8 +929,32 @@ class FunctionCallingAgentWorkflow(Workflow):
         if visible and is_single_emoji(visible) and not tool_calls:
             visible = ""
         if tool_calls or visible:
-            await memory.aput(message)
+            await memory.aput(self.visible_message(message, visible, tool_calls))
         await ctx.store.set("memory", memory)
+
+    @staticmethod
+    def visible_message(
+        message: ChatMessage, visible: str, tool_calls: list[ToolSelection]
+    ) -> ChatMessage:
+        """The message to store: *message*, minus a leaked trailing note.
+
+        ``visible`` is the chat-visible text (``chat_visible_text``).
+        When it differs from the raw text the model emitted a private
+        self-report (a leaked wrap-up note) the chat never saw, so the
+        stored turn is rebuilt from *visible*: storing the raw text would
+        put the note back in front of the model on the next run and
+        re-teach the pattern. Tool-call
+        messages store as they are — their words are not what the chat
+        saw, and their blocks carry the calls.
+        """
+        raw = str(message.content or "").strip()
+        if tool_calls or visible == raw:
+            return message
+        return ChatMessage(
+            role=message.role,
+            content=visible,
+            additional_kwargs=dict(message.additional_kwargs),
+        )
 
     async def collapse_delivery(self, ctx: Context) -> None:
         """Replace the last delivered tool group with plain assistant text.
@@ -646,7 +965,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         reads like the chat it mirrors. The whole group is replaced
         atomically: a dangling tool call without its result is exactly
         what :func:`repair_memory` must never find. No-op when nothing
-        was delivered (see docs/agent-workflow.md).
+        was delivered.
         """
         memory = await ctx.store.get("memory")
         messages = await memory.aget_all()
@@ -693,11 +1012,10 @@ class FunctionCallingAgentWorkflow(Workflow):
 
         A delivered reply changes the ask: the final text can never be
         sent (the one-delivery latch holds), so the round produces the
-        post-delivery wrap-up note instead — one sentence of what was
-        done and why, stored in the model's history for the next run
-        and journaled, never sent to the chat (bug 6 of
-        docs/bug-report-2c665d8.md: the un-nudged model burned the
-        round on chatter that could only be discarded).
+        post-delivery wrap-up note instead — one private lesson written
+        to the notebook and journalled, never an assistant turn and never
+        sent to the chat (the un-nudged model burned the round on
+        chatter that could only be discarded).
         """
         limit = self.tool_round_limit
         logger.warning("Generating wrap-up response ({reason})", reason=reason)
@@ -714,70 +1032,46 @@ class FunctionCallingAgentWorkflow(Workflow):
         if delivered:
             note = str(response.message.content or "").strip()
             if note:
-                # Stored by the caller after collapse_delivery: the note
-                # appended before the collapse would break the group's
-                # closes-history precondition and leave scaffolding raw.
-                await ctx.store.set("pending_wrap_up_note", note)
+                await self.store_wrap_up_note(note)
             self.audit_wrap_up_note(note)
         return self.drop_post_delivery_text(response)
 
-    async def flush_pending_wrap_up_note(self, ctx: Context) -> None:
-        """Store the wrap-up note ``wrap_up_response`` staged, if any.
+    async def store_wrap_up_note(self, note: str) -> None:
+        """Persist the post-delivery wrap-up note as a durable notebook fact.
 
-        The note lands only after ``collapse_delivery`` folded the
-        tool group: appended before the fold it would break the
-        group's closes-history precondition and leave the scaffolding
-        raw in memory.
+        The note is a private lesson, never a message the chat saw: it is
+        written to the notebook — the durable fact store — and journalled,
+        and never stored as an assistant turn. Seeing notes in its own
+        history taught the model to append them to its replies; the
+        notebook copy is the record.
         """
-        note = await ctx.store.get("pending_wrap_up_note", default="")
-        if not note:
+        if self.notebook is None or not note.strip():
             return
-        await self.store_wrap_up_note(ctx, note)
-        await ctx.store.set("pending_wrap_up_note", "")
-
-    async def store_wrap_up_note(self, ctx: Context, note: str) -> None:
-        """Append the post-delivery wrap-up note to the run's memory.
-
-        The note rides memory as an assistant message tagged with
-        ``WRAP_UP_NOTE_KWARG`` so history readers can tell it from a
-        message the chat saw — the note was never sent to the chat,
-        the one-delivery latch held. Always stored *after* the
-        delivery group collapsed (see ``flush_pending_wrap_up_note``).
-        """
         try:
-            memory = await ctx.store.get("memory")
-            await memory.aput(
-                ChatMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=note,
-                    additional_kwargs={WRAP_UP_NOTE_KWARG: True},
-                )
-            )
-            if self.notebook is not None and note.strip():
-                target = current_target()
-                key = "wrap-up-" + hashlib.sha256(note.encode()).hexdigest()[:24]
-                # The same caps the notebook tool enforces (512 tokens,
-                # 2000 chars): a longer lesson would be unwritable via
-                # the tool and silently dropped from every later prompt
-                # snapshot, so the model could never read or clean up
-                # what it wrote. The suffix rides inside both caps, and
-                # only a cut note carries it.
-                if text_tokens(note) > MAX_NOTE_TOKENS or len(note) > MAX_NOTE_LENGTH:
-                    room = MAX_NOTE_LENGTH - len(_TRUNCATED_NOTE_SUFFIX)
-                    note = (
-                        truncate_to_tokens(
-                            note[:room],
-                            MAX_NOTE_TOKENS - text_tokens(_TRUNCATED_NOTE_SUFFIX),
-                        )
-                        + _TRUNCATED_NOTE_SUFFIX
+            target = current_target()
+            key = "wrap-up-" + hashlib.sha256(note.encode()).hexdigest()[:24]
+            # The same caps the notebook tool enforces (512 tokens,
+            # 2000 chars): a longer lesson would be unwritable via the
+            # tool and silently dropped from every later prompt
+            # snapshot, so the model could never read or clean up
+            # what it wrote. The suffix rides inside both caps, and
+            # only a cut note carries it.
+            if text_tokens(note) > MAX_NOTE_TOKENS or len(note) > MAX_NOTE_LENGTH:
+                room = MAX_NOTE_LENGTH - len(_TRUNCATED_NOTE_SUFFIX)
+                note = (
+                    truncate_to_tokens(
+                        note[:room],
+                        MAX_NOTE_TOKENS - text_tokens(_TRUNCATED_NOTE_SUFFIX),
                     )
-                await notebook_operation(
-                    self.notebook.write,
-                    target.session,
-                    target.chat_id,
-                    key,
-                    note,
+                    + _TRUNCATED_NOTE_SUFFIX
                 )
+            await notebook_operation(
+                self.notebook.write,
+                target.session,
+                target.chat_id,
+                key,
+                note,
+            )
         except Exception:
             logger.exception("Could not store post-delivery wrap-up note")
 
@@ -819,10 +1113,18 @@ class FunctionCallingAgentWorkflow(Workflow):
         ordered_calls = sorted(
             ev.tool_calls, key=lambda call: call.tool_name in DELIVERY_TOOLS
         )
-        tool_msgs = [
-            await self.run_and_audit_tool_call(tools_by_name, tool_call)
-            for tool_call in ordered_calls
-        ]
+        verdict = await self.triage_result(ctx)
+        hardened = bool(
+            verdict is not None and verdict.verdict.adversarial and not verdict.failed
+        )
+        tool_msgs: list[ChatMessage] = []
+        for tool_call in ordered_calls:
+            if hardened and not is_tool_allowed(tool_call):
+                tool_msgs.append(self.deny_tool_call(tool_call))
+            else:
+                tool_msgs.append(
+                    await self.run_and_audit_tool_call(tools_by_name, tool_call)
+                )
         memory = await ctx.store.get("memory")
         for msg in tool_msgs:
             await memory.aput(msg)
@@ -832,7 +1134,7 @@ class FunctionCallingAgentWorkflow(Workflow):
     async def run_and_audit_tool_call(
         self, tools_by_name: dict[str, BaseTool], tool_call: ToolSelection
     ) -> ChatMessage:
-        """Run one tool call and journal it (roadmap: "journal everything").
+        """Run one tool call and journal it.
 
         The audit entry carries the tool name, its arguments (the
         model's *why* included), and the outcome — the fields the
@@ -858,11 +1160,11 @@ class ObservableOpenAILike(OpenAILike):
 
     Exists because the OTel llama-index instrumentor reads
     ``model_dict["model"]``/``["temperature"]`` for its span attributes
-    but the base ``to_payload`` exposes neither (external constraint;
-    see docs/agent-workflow.md). Also slims the tool specs of every
-    request (``wahabot.ai.tools.slim``): the base ``_prepare_chat_
-    with_tools`` builds them from Pydantic's JSON schema. Titles and
-    redundant ``strict: false`` are removed, and nullable unions are
+    but the base ``to_payload`` exposes neither (external constraint).
+    Also slims the tool specs of every request (``wahabot.ai.tools.slim``):
+    the base ``_prepare_chat_with_tools`` builds them from Pydantic's
+    JSON schema. Titles and redundant ``strict: false`` are removed, and
+    nullable unions are
     compacted without dropping explicit null support.
     """
 
@@ -915,8 +1217,7 @@ def load_llm(settings: Settings) -> FunctionCallingLLM:
     ``top_p``/``presence_penalty`` ride ``additional_kwargs`` (merged
     into the request body); ``top_k``/``min_p``/``repetition_penalty``
     ride ``extra_body`` because the OpenAI SDK's typed ``create()``
-    signature rejects them (external constraint; see
-    docs/agent-workflow.md).
+    signature rejects them (external constraint).
     """
     kwargs: dict[str, Any] = {
         "top_p": settings.llm_top_p,
@@ -951,17 +1252,44 @@ def load_llm(settings: Settings) -> FunctionCallingLLM:
     )
 
 
+def warn_context_mismatch(context_window: int, memory_token_limit: int) -> bool:
+    """Warn loudly when the memory budget exceeds the model's context window.
+
+    The aria-ai lesson: a budget larger than what the server can actually
+    hold is silently clamped (or truncated) by the provider, and the
+    memory system quietly believes it has room
+    it does not. The window is the operator-declared
+    ``WAHABOT_LLM_CONTEXT_WINDOW`` — llama-index's metadata default
+    (3900) describes no real deployment, so it is never consulted.
+    Returns True when the mismatch was found; 0 (unknown) is not one.
+    """
+    if context_window > 0 and memory_token_limit > context_window:
+        logger.warning(
+            "Memory token limit {limit} exceeds the model context window {window}",
+            limit=memory_token_limit,
+            window=context_window,
+        )
+        return True
+    return False
+
+
 def build_agent(
     settings: Settings,
     tools: list[BaseTool] | None = None,
     system_prompt: str = "",
     prompt_renderer: Callable[[], str] | None = None,
+    support_provider: SupportStateProvider | None = None,
+    rules_renderer: Callable[[], str] | None = None,
+    triage: TriageGate | None = None,
 ) -> FunctionCallingAgentWorkflow:
     """Build the function calling agent workflow with the configured LLM.
 
     ``prompt_renderer`` (optional) returns the freshly rendered system
     prompt on every run, so date/time placeholders and config edits stay
-    current for the life of the process.
+    current for the life of the process. ``rules_renderer`` (optional)
+    feeds the pinned state block's session rules the same way.
+    ``support_provider`` (optional) supplies the block's ticket-shaped
+    fields; none exists until the v1.2.0 support store.
     """
     if not system_prompt:
         raise ValueError("build_agent requires a system_prompt")
@@ -974,8 +1302,7 @@ def build_agent(
         # timeout= as a cumulative alive-time budget over the whole
         # Context, and this bot reuses one Context per chat — the
         # budget would silently sum every run's latency and
-        # permanently kill busy chats at the cap
-        # (docs/incident-2026-10-06-run-timeout.md). WAHABOT_RUN_TIMEOUT
+        # permanently kill busy chats at the cap. WAHABOT_RUN_TIMEOUT
         # is a true per-run wall-clock cap enforced around agent.run()
         # in wahabot.ai.context.handle_message.
         timeout=None,
@@ -983,4 +1310,7 @@ def build_agent(
         tool_round_limit=settings.tool_round_limit,
         settings=settings,
         notebook=Notebook(settings.data_dir),
+        support_provider=support_provider,
+        rules_renderer=rules_renderer,
+        triage=triage,
     )

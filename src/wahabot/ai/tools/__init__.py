@@ -5,7 +5,7 @@ forward/escalate), ``external`` the research and host tools (web
 search, page fetch, shell), ``schemas`` the Pydantic parameter schemas
 for all of them, and ``envelope`` the unified JSON envelope
 (``ok`` / ``error``) every tool returns. The 20 tools were merged into
-10 (docs/bug-report-2c665d8.md, bug 7b): the five media senders became
+10: the five media senders became
 ``send_media`` (``kind``), the five chat readers ``read_chat``
 (``mode``), and the two niche research tools were dropped.
 """

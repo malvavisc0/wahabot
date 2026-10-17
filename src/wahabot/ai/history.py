@@ -54,6 +54,7 @@ from wahabot.ai.messages import (
     OPERATOR_FOLD_KWARG,
     REACTION_TARGET_KWARG,
     TURN_HANDLED_KWARG,
+    WRAP_UP_NOTE_KWARG,
 )
 
 __all__ = [
@@ -65,8 +66,10 @@ __all__ = [
     "is_emoji_narration",
     "is_error_narration",
     "is_silence_narration",
+    "is_trailing_note_text",
     "narration_kind",
     "sanitize_chat_history",
+    "strip_trailing_note",
     "tool_calls",
     "trim_to_budget",
     "wire_call",
@@ -307,6 +310,108 @@ def narration_kind(reply: str) -> str:
     return ""
 
 
+_NOTE_VERBS_EN = "".join(
+    (
+        r"(?:sent|replied|reacted|answered|responded|forwarded|shared|declined|",
+        r"told|confirmed|acknowledged|delivered|handled|escalated|notified|",
+        r"recorded|saved|wrote|drafted|posted|kept)",
+    )
+)
+_NOTE_VERBS_DE = (
+    r"(?:geantwortet|reagiert|geschickt|gesendet|hingewiesen|verwiesen|informiert)"
+)
+_NOTE_VERBS_ES = "".join(
+    (
+        r"(?:envié|envió|respondí|respondió|reaccioné|reaccionó|contesté|contestó|",
+        r"mandé|mandó|compartí|compartió|confirmé|confirmó|informé|informó)",
+    )
+)
+
+#: A third-person action report about the run just finished — the
+#: observed leak shape ("Sent Tobias a final confirmation that …",
+#: "Auf Tobias' Scherz … geantwortet"). This is what the wrap-up
+#: prompt asks the model for, so the grammar that matches it is
+#: deliberately narrow: an agentless English past-tense opening, a
+#: German "auf <dative> … <verb>" report, or a Spanish third-person
+#: preterite — each followed by a self-reference cue. The cue is
+#: required for every branch: without it a genuine reply line that
+#: merely opens with a past-tense verb ("Sent the invoice and the
+#: receipt.") would be deleted as a note. First-person openers
+#: ("I sent you the PDF") are deliberately NOT matched: they are a
+#: normal way to answer a customer, while the wrap-up prompt elicits
+#: third-person reports. This filter is defence in depth behind the
+#: structural fix (notes are never stored as turns at all); a false
+#: positive here deletes a real reply line, a false negative only
+#: leaks a cosmetic self-report.
+_NOTE_REPORT_RE = re.compile(
+    "".join(
+        (
+            r"^(?:",
+            _NOTE_VERBS_EN,
+            r"\b[^.!?]*?\b",
+            r"|auf\s+\S+?\s+(?:habe\s+|hab(?:e)?\s+)?[^.!?]*?\b",
+            _NOTE_VERBS_DE,
+            r"\b",
+            r"|",
+            _NOTE_VERBS_ES,
+            r"\b[^.!?]*?\b",
+            r")",
+        )
+    ),
+    re.IGNORECASE,
+)
+#: Only cues that describe the *run*, never the customer: "her files"
+#: is an answer, "a final confirmation that …" is a report about the
+#: run. Pronoun cues alone (him/her/them) are excluded on purpose. The
+#: German branches add the observed report tails: the observed leaks
+#: narrate a reaction "statt/instead of" messaging again, or end the
+#: sentence in the dative-of-person report shape itself.
+_NOTE_CUE_RE = re.compile(
+    "".join(
+        (
+            r"\b(?:the message|the reply|the request|the chat|the conversation|",
+            r"instead of|als antwort statt|statt einer nachricht|als reaktion statt|",
+            r"as requested|as asked|as he|as she|as they|",
+            r"no further|anymore|private conversation|",
+            r"a final|a short|a text(?:-based)?|a confirmation|a mini-lesson|",
+            r"a lesson|a spanish mini-lesson|that i|",
+            r"mit trockenem selbstkommentar|mit einem scherz|",
+            r"scherz über|frage, ob|frage, wie)\b",
+        )
+    ),
+    re.IGNORECASE,
+)
+
+
+def is_trailing_note_text(text: str) -> bool:
+    """True when *text* reads as a private self-report (a wrap-up note).
+
+    Only the wrap-up grammar qualifies: a third-person action report
+    about the run ("Sent Tobias a final confirmation …", "Auf Roys
+    Frage … geantwortet") that also carries a self-reference cue. The
+    cue requirement and the third-person restriction are what keep a
+    genuine reply line from being deleted — "I sent you the PDF" and
+    "Sent the invoice and the receipt" are customer answers, not
+    notes.
+    """
+    line = text.strip()
+    return bool(_NOTE_REPORT_RE.match(line) and _NOTE_CUE_RE.search(line))
+
+
+def strip_trailing_note(reply: str) -> str:
+    """*reply* without an appended self-report line, or *reply* unchanged.
+
+    Only a reply of two or more lines whose *last* line reads as a
+    self-report is affected; the genuine reply above the note is kept
+    (the note itself is dropped, never sent). A single line is never
+    stripped — a chat message may legitimately open with "Sent".
+    """
+    lines = reply.rstrip().splitlines()
+    if len(lines) < 2 or not is_trailing_note_text(lines[-1]):
+        return reply
+    return "\n".join(lines[:-1]).rstrip()
+
+
 def chat_visible_text(content: Any) -> str:
     """The chat-visible text of *content*.
 
@@ -314,18 +419,19 @@ def chat_visible_text(content: Any) -> str:
 
     One definition of "this text would reach the chat" shared by both
     ends of a run — delivery (``final_reply``) and storage
-    (``remember``) — so a leaked ``stay_silent`` token or an invented
-    error payload is filtered at the source and can never drift back
-    into the model's self-history (the exact string it pattern-
-    completes on). Thinking blocks are ignored: only the *text* blocks
-    decide visibility.
+    (``remember``) — so a leaked ``stay_silent`` token, an invented
+    error payload, or a private wrap-up note appended to a reply is
+    filtered at the source and can never drift back into the model's
+    self-history (the exact string it pattern-completes on). A genuine
+    reply keeps its words and loses only the trailing note. Thinking
+    blocks are ignored: only the *text* blocks decide visibility.
     """
     reply = str(content or "").strip() if content is not None else ""
     if not reply:
         return ""
     if narration_kind(reply):
         return ""
-    return reply
+    return strip_trailing_note(reply)
 
 
 def inbound_message_id(incoming: str) -> str:
@@ -384,6 +490,21 @@ def is_tool_message(msg: ChatMessage) -> bool:
     return msg.role == MessageRole.TOOL
 
 
+def is_wrap_up_note(msg: ChatMessage) -> bool:
+    """True when *msg* is a private wrap-up note (never sent to the chat)."""
+    return bool(msg.additional_kwargs.get(WRAP_UP_NOTE_KWARG))
+
+
+def merges_across_wrap_up_boundary(first: ChatMessage, second: ChatMessage) -> bool:
+    """True when merging *first*/*second* would cross the private boundary.
+
+    A wrap-up note is private by construction; concatenating it with a
+    chat turn (in either order) erases the distinction the tag exists to
+    preserve and hands the model its own notes as chat style.
+    """
+    return is_wrap_up_note(first) != is_wrap_up_note(second)
+
+
 def deduplicate_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
     """Step 1: Merge consecutive duplicate-role messages (keep every word).
 
@@ -392,7 +513,8 @@ def deduplicate_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
     reaction note before the next user message); merging keeps
     everything the chat actually saw.
 
-    Never merges tool messages or assistant-with-tool-call messages.
+    Never merges tool messages, assistant-with-tool-call messages, or
+    pairs that would fold a private wrap-up note into a chat turn.
     """
     merged: list[ChatMessage] = []
     for msg in messages:
@@ -403,6 +525,7 @@ def deduplicate_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
             and not is_tool_message(msg)
             and message_tool_call_count(prev) == 0
             and message_tool_call_count(msg) == 0
+            and not merges_across_wrap_up_boundary(prev, msg)
         )
         if prev is not None and can_merge:
             merged[-1] = merge_pair(prev, msg)
@@ -418,7 +541,15 @@ def merge_pair(first: ChatMessage, second: ChatMessage) -> ChatMessage:
     carried by the first message — a reaction note's
     ``reaction_target_id`` — survives into the merged turn; the
     superseded-note removal filters on that tag.
+
+    Refuses to cross the private boundary: folding a wrap-up note into a
+    chat turn (or the reverse) would erase the distinction the tag
+    exists to preserve.
+    :func:`deduplicate_messages` applies the same rule before calling,
+    so a raise here is a violated invariant, never a fallback.
     """
+    if merges_across_wrap_up_boundary(first, second):
+        raise ValueError("refusing to merge a wrap-up note with a chat turn")
     return ChatMessage(
         role=first.role,
         content=f"{first.content or ''}\n{second.content or ''}",
@@ -645,7 +776,7 @@ def last_user_turn(
 #: output may still be the subject of the next message), the one before
 #: gives one run of full-fidelity hindsight — past that, the delivered
 #: words matter but the *how* (thinking blocks, raw shell output) does
-#: not (docs/bug-report-2c665d8.md, bug 7).
+#: not.
 FRESH_TURNS = 2
 
 #: Tool-result keys that survive degradation. ``ok``/``error``/``outcome``
@@ -768,8 +899,7 @@ def degrade_old_history(messages: list[ChatMessage]) -> list[ChatMessage]:
       — the model needs to remember *that* a command worked, not the
       2k characters of ``stdout`` it printed;
     - old ``ToolCallBlock`` kwargs keep every key but trim long values
-      to a short preview — the meme-script incident
-      (docs/bug-report-2c665d8.md, bug 7: a 3k-char
+      to a short preview — the meme-script incident (a 3k-char
       ``run_shell_command`` body rode every later prompt as dead
       weight) — without teaching the model call shapes that lack
       their required arguments.

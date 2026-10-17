@@ -101,7 +101,7 @@ async def run_command(
     via ``reply_chat_id``. When the run delivered via a tool instead,
     the caller gets a short delivered-notice so the console is never
     silent about where the answer went. Either way the decision is
-    journaled to the audit file (roadmap: "journal everything") — an
+    journaled to the audit file — an
     operator command is a bot action too.
     """
     instruction = str(event.payload.get("body", "")).strip()
@@ -115,10 +115,9 @@ async def run_command(
     )
     # Ground truth before the model: when the command names a chat,
     # resolve it against the operator's chat list and pin that chat's
-    # real last message into the turn (docs/bug-report-wrong-message-
-    # voice-note.md). The shared operator history is channel-agnostic
-    # — it cannot answer "the last message in <chat>" — so the note
-    # replaces the inference, not supplements it. A command naming no
+    # real last message into the turn. The shared operator history is
+    # channel-agnostic — it cannot answer "the last message in <chat>" —
+    # so the note replaces the inference, not supplements it. A command naming no
     # chat resolves to nothing and runs unchanged. Failures are
     # swallowed inside: pinning is best-effort, never a blocker.
     resolved = await asyncio.to_thread(

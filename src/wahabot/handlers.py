@@ -41,6 +41,7 @@ from wahabot.ai.messages import (
     jid_string,
     message_kind,
     name_mentioned,
+    replies_to_bot,
     self_command_instruction,
     sent_by_bot_api,
     typed_by_operator,
@@ -51,6 +52,7 @@ from wahabot.ai.scrub import strip_spoofed_markers
 from wahabot.ai.tools import build_default_tools
 from wahabot.ai.tools.url_videos import fetch_url_video, video_urls
 from wahabot.ai.tools.whatsapp import EscalationChannel, deliver_chat_text
+from wahabot.ai.triage import TriageGate
 from wahabot.ai.video import caption_video, extract_frames, join_anchor, video_marker
 from wahabot.ai.vision import caption_images
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
@@ -67,10 +69,12 @@ from wahabot.core.inbound import (
     self_chat_needs_transcript,
     url_video_enabled,
 )
+from wahabot.core.learned import forget_learned
 from wahabot.core.models import WahaEvent
 from wahabot.core.notebook import Notebook, notebook_operation
 from wahabot.core.persistence import forget_memory, memory_file
 from wahabot.core.presence import mark_seen
+from wahabot.core.thread_index import forget_thread_index
 from wahabot.core.transcribe import fetch_transcript, transcribe_voice_note
 from wahabot.core.waha import MediaTooLargeError, WahaClient
 from wahabot.settings import Settings
@@ -176,7 +180,7 @@ def journal_send_failure(
     message_id: str,
     exc: Exception,
 ) -> None:
-    """Journal a failed final-reply send (roadmap: "journal everything").
+    """Journal a failed final-reply send.
 
     The single, burst and album reply paths share this: a send that
     raised left nothing in the chat, so the audit row must say the
@@ -226,7 +230,7 @@ async def finish_agent_reply(
     otherwise it is dropped as silence. The burst path opts in, so a
     burst's lone-emoji answer reacts like a single message's.
 
-    Every branch journals its decision (roadmap: "journal everything")
+    Every branch journals its decision
     — the audit timeline shows *why* a chat saw nothing: delivered via
     tool, silence, or a dropped emoji. Records for actions that send
     (``reply``, ``reaction``) are written only after the send
@@ -533,8 +537,8 @@ def first_frame_png(data: bytes) -> bytes:
 async def video_transcript(settings: Settings, data: bytes, filename: str) -> str:
     """The video's spoken track via WhisperX, or "" when unavailable.
 
-    Posts the whole video file — the service demuxes audio itself
-    (verified in the plan's evidence table), so this deliberately
+    Posts the whole video file — the service demuxes audio itself, so
+    this deliberately
     bypasses ``is_transcribable_mimetype``: that gate exists for the
     voice-note path. Audio-less videos (loops, screen recordings) get
     a 500 from the service every time — expected traffic, not an
@@ -658,14 +662,19 @@ def video_frames(
     return None
 
 
-def register_forget_handler(settings: Settings) -> None:
+def register_forget_handler(
+    settings: Settings,
+    agent: FunctionCallingAgentWorkflow | None = None,
+) -> None:
     """Register the ``forget`` webhook handler that wipes a chat's memory.
 
     The ``wahabot forget`` CLI posts a signed ``forget`` event; the wipe
     runs here, in the bot process, under the chat's run lock so it
     serializes with that chat's runs: an in-flight run finishes and
     saves first, then the live context and the memory file are dropped
-    along with the chat's notebook, with no resurrection window.
+    along with the chat's notebook, recap and thread index, with no
+    resurrection window. When *agent* is supplied, its in-memory index
+    queue is cleared too.
     """
     notebook = Notebook(settings.data_dir)
 
@@ -678,12 +687,19 @@ def register_forget_handler(settings: Settings) -> None:
         async with chat_lock(event.session, chat_id):
             live = contexts.pop((event.session, chat_id), None) is not None
             removed = forget_memory(settings.data_dir, event.session, chat_id)
+            forgot_learned = forget_learned(settings.data_dir, event.session, chat_id)
+            forgot_index = forget_thread_index(settings.data_dir, event.session, chat_id)
+            if agent is not None and agent.thread_index is not None:
+                agent.thread_index.forget(event.session, chat_id)
             await notebook_operation(notebook.forget, event.session, chat_id)
             logger.info(
-                "Forgot {chat_id}: context {live}, file {removed}",
+                "Forgot {chat_id}: context {live}, file {removed}, "
+                + "recap {recap}, index {index}",
                 chat_id=chat_id,
                 live="present" if live else "absent",
                 removed="deleted" if removed else "absent",
+                recap="deleted" if forgot_learned else "absent",
+                index="deleted" if forgot_index else "absent",
             )
 
 
@@ -766,6 +782,12 @@ def register_agent_handler(
         )
         for image, caption in zip(downloaded, captions, strict=True):
             image["caption"] = caption
+        current = config_reloader.current_config()
+        addressed = any(
+            group_message_addressed(member, current)
+            for member in (buffer.container, *buffer.images)
+        )
+        gate_first = not addressed and current.group_participation == "judicious"
         async with chat_lock(event.session, chat_id):
             ctx = await context_for(event.session, chat_id, agent, settings)
             with chat_trace_attributes(chat_id):
@@ -776,10 +798,13 @@ def register_agent_handler(
                     images=downloaded,
                     settings=settings,
                     waha=waha,
-                    bot_name=config_reloader.current_config().bot_name,
-                    bot_mention_regex=config_reloader.current_config().bot_mention_regex,
+                    bot_name=current.bot_name,
+                    bot_mention_regex=current.bot_mention_regex,
+                    addressed=addressed,
+                    gate_first=gate_first,
                 )
             await persist_memory(settings, event.session, chat_id, ctx)
+            await agent.merge_learned()
             if target.sent or target.reacted:
                 await finish_agent_reply(
                     waha,
@@ -920,7 +945,7 @@ def register_agent_handler(
         One ``handle_message`` call over a merged turn whose text joins
         every message's body — each part annotated with its original
         message id so quoting, audit and evidence links survive the
-        merge (roadmap "Multi-Message Turns", requirement 5). Media
+        merge. Media
         rides as image blocks; quote/reply targets the LAST buffered
         message (the natural anchor for a reply to a burst).
         """
@@ -967,11 +992,15 @@ def register_agent_handler(
         async with chat_lock(merged.session, chat_id):
             ctx = await context_for(merged.session, chat_id, agent, settings)
             with chat_trace_attributes(chat_id):
-                # The burst's LAST member's mention decides the
-                # addressed marker: it is the reply anchor, and a
-                # mention in an earlier member already rode its own
-                # gate pass to reach the buffer.
+                # A mention anywhere in the burst already passed the
+                # wake gate, so the gate bypass is per burst. The
+                # agent's own addressed marker still follows the merged
+                # event's last member (the reply anchor).
                 current = config_reloader.current_config()
+                addressed = any(
+                    group_message_addressed(member, current) for member in buffer.messages
+                )
+                gate_first = not addressed and current.group_participation == "judicious"
                 reply, target = await handle_message(
                     merged,
                     agent,
@@ -985,8 +1014,11 @@ def register_agent_handler(
                     # notes were stamped; a second scrub would break
                     # those code-written ids.
                     body_scrubbed=True,
+                    addressed=addressed,
+                    gate_first=gate_first,
                 )
             await persist_memory(settings, merged.session, chat_id, ctx)
+            await agent.merge_learned()
             delivered = bool(target.sent or target.reacted)
         # The provider answered: flip the LLM health flag back up
         # (once-per-transition notify) outside the chat lock — the
@@ -1033,11 +1065,44 @@ def register_agent_handler(
     # is read from status.state at call time, so a session recovery
     # needs no re-capture wiring here).
     escalation_channel = EscalationChannel()
+    triage = (
+        TriageGate(settings, waha, channel=escalation_channel)
+        if settings.triage_gate and settings.gate_api_base
+        else None
+    )
+
+    def group_message_addressed(event: WahaEvent, current: SessionConfig) -> bool:
+        """True for DMs and for group messages that mention/reply to the bot."""
+        if not str(event.payload.get("from", "")).endswith("@g.us"):
+            return True
+        return replies_to_bot(event, current.bot_name, current.bot_mention_regex)
+
+    def render_session_rules() -> str:
+        """The session rules that gate behaviour, as one current line.
+
+        Hot-reloaded like the prompt: the participation mode comes
+        from the live config, so a config edit changes the next run's
+        pinned state block without a restart. Support hours and reply
+        windows are the v1.2.0 support product's settings; the engine
+        states what it actually enforces today.
+        """
+        current = config_reloader.current_config()
+        participation = {
+            "never": "In groups, never reply.",
+            "mentioned": "In groups, reply only when addressed or replied to.",
+            "judicious": "In groups, judge each message for whether to reply.",
+        }.get(current.group_participation, "")
+        return " ".join(
+            part for part in (f"Timezone: {settings.timezone}.", participation) if part
+        )
+
     agent = build_agent(
         settings,
         tools=build_default_tools(waha, settings, escalation_channel=escalation_channel),
         system_prompt=config.system_prompt,
         prompt_renderer=render_prompt,
+        rules_renderer=render_session_rules,
+        triage=triage,
     )
     logger.info(
         "Agent ready: {tools}",
@@ -1192,6 +1257,14 @@ def register_agent_handler(
             jid_aliases=jid_alias_lookup(event),
         ):
             return
+        if settings.send_seen and not operator_wakes and not is_operator_event(event):
+            # The read receipt answers *their* message, not the bot's
+            # reply. It goes out before any participation decision and
+            # before burst/album buffering, so holding or ignoring a
+            # message never withholds it.
+            await asyncio.to_thread(
+                mark_seen, waha, event.session, str(event.payload["from"])
+            )
         if is_operator_event(event) and not operator_wakes:
             chat = str(event.payload.get("from", ""))
             async with chat_lock(event.session, chat):
@@ -1206,7 +1279,7 @@ def register_agent_handler(
     async def skip_or_buffer_message(
         event: WahaEvent, config: SessionConfig, operator_wakes: bool
     ) -> bool:
-        """Apply group addressing, send read receipts and queue eligible bursts."""
+        """Apply group addressing and queue eligible bursts."""
         if not operator_wakes and not is_group_addressed(
             event,
             bot_name=config.bot_name,
@@ -1217,15 +1290,6 @@ def register_agent_handler(
                 "Ignoring unaddressed group message {id}", id=event.payload.get("id")
             )
             return True
-        if settings.send_seen and not operator_wakes:
-            # The read receipt answers *their* message, not the bot's
-            # reply — it goes out even when the run later stays silent.
-            # Runs before the media prep so long downloads can't delay
-            # it into meaninglessness. Also before burst buffering:
-            # holding the message must never hold the read receipt.
-            await asyncio.to_thread(
-                mark_seen, waha, event.session, str(event.payload["from"])
-            )
         if settings.burst_enabled and not operator_wakes and bursts.is_bufferable(event):
             # Burst assembly: hold this message for its sender's window
             # instead of running the agent now. Only messages that
@@ -1251,6 +1315,8 @@ def register_agent_handler(
         # the operator fold's device-stripped chat id, or one DM splits
         # in two.
         chat_id = jid_string(event.payload["from"])
+        addressed = group_message_addressed(event, config)
+        gate_first = not addressed and config.group_participation == "judicious"
         try:
             image = await download_captioned_image(image, message_id)
             async with chat_lock(event.session, chat_id):
@@ -1269,8 +1335,11 @@ def register_agent_handler(
                         waha=waha,
                         bot_name=config.bot_name,
                         bot_mention_regex=config.bot_mention_regex,
+                        addressed=addressed,
+                        gate_first=gate_first,
                     )
                 await persist_memory(settings, event.session, chat_id, ctx)
+                await agent.merge_learned()
                 delivered = bool(target.sent or target.reacted)
             # The provider answered: flip the LLM health flag back up
             # (once-per-transition notify) outside the chat lock, so

@@ -52,7 +52,7 @@ async def chat_lock(session: str, chat_id: str) -> AsyncIterator[None]:
 
     Eviction keeps the table bounded, idle entries going oldest-first;
     a held or waited-on lock is never evicted (the waiter-window
-    invariant, see docs/agent-workflow.md). When every entry is busy
+    invariant). When every entry is busy
     the table may temporarily exceed its cap rather than spin — the
     cap is a memory bound, not an invariant.
     """

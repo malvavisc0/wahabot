@@ -94,7 +94,7 @@ def validate_tool_kwargs(tool: BaseTool, tool_kwargs: dict[str, Any]) -> str | N
     uses, with the valid argument names listed so the model can retry
     with corrected arguments — the raw ``TypeError`` it replaced named
     no alternatives and cost a full recovery round in the send_image
-    incident (docs/bug-report-2c665d8.md, bug 2).
+    incident.
     """
     valid = tool_argument_names(tool)
     try:
@@ -156,8 +156,8 @@ def mark_active_span_error(tool_call: ToolSelection, exc: Exception) -> None:
     (``run_tool_call`` catches it), so the OTel span ends ``UNSET`` —
     and worse, the LlamaIndex dispatcher's drop path never *ends* the
     span at all, so it leaks unexported and the Langfuse trace showed a
-    0.0s gap where the send_image TypeError happened
-    (docs/bug-report-2c665d8.md, bug 4). This must run in the worker
+    0.0s gap where the send_image TypeError happened. This must run in
+    the worker
     thread while the tool span's context is still attached: there it
     sets ERROR plus ``tool.name``/``tool.error`` attributes and ends
     the span, which both records and exports the failure. Fail-soft:
@@ -211,8 +211,8 @@ async def run_tool_call(
     Arguments are validated against the tool's signature and schema
     *before* the call: a mismatch returns the error envelope with the
     valid argument names instead of letting a raw ``TypeError`` through
-    (bug 2 of docs/bug-report-2c665d8.md — the model got "unexpected
-    keyword argument 'path'" with no hint of what was valid, and burned
+    (the model got "unexpected keyword argument 'path'" with no hint of
+    what was valid, and burned
     a whole round improvising a workaround).
 
     Each call is logged: one INFO line with its outcome (completed,
@@ -269,6 +269,23 @@ async def run_tool_call(
             outcome=outcome,
         )
     return ChatMessage(role="tool", content=content, additional_kwargs=kwargs)
+
+
+def denied_tool_message(tool_call: ToolSelection, reason: str) -> ChatMessage:
+    """A valid tool response for a call the hardened policy refused.
+
+    Every advertised call needs a matching tool message; refusing to
+    execute must not break the model's next round. The envelope is the
+    same failure shape every tool returns.
+    """
+    return ChatMessage(
+        role="tool",
+        content=error(reason),
+        additional_kwargs={
+            "tool_call_id": tool_call.tool_id,
+            "name": tool_call.tool_name,
+        },
+    )
 
 
 def tool_outcome(content: str) -> str:

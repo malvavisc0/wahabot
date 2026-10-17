@@ -191,7 +191,7 @@ def serve(
     register_reaction_handler(waha, agent, settings)
     register_command_handler(settings, waha, agent)
     register_session_status_handler(waha, settings.session)
-    register_forget_handler(settings)
+    register_forget_handler(settings, agent)
     (settings.journal_dir / settings.session).mkdir(parents=True, exist_ok=True)
     uvicorn.run(
         "wahabot.webhook:app",

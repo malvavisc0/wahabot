@@ -135,6 +135,7 @@ def unit_settings(tmp_path: Path) -> Settings:
         llm_api_base="http://llm.invalid",
         llm_api_key="k",
         data_dir=tmp_path,
+        triage_gate=False,
         langfuse_public_key="",
         langfuse_secret_key="",
         _env_file=None,
@@ -764,7 +765,7 @@ def test_burst_flush_logs_hold_metrics(tmp_path: Path) -> None:
         asyncio.run(scenario())
     finally:
         _logger.remove(handler_id)
-    # The roadmap's tuning data: the operator grepping logs after a
+    # Tuning data: the operator grepping logs after a
     # week must find size and hold per burst — both in one line.
     burst_lines = [line for line in logged if "Burst complete" in line]
     assert len(burst_lines) == 1, f"expected exactly one flush line, got {burst_lines}"
@@ -868,7 +869,7 @@ def test_tool_audit_preserves_outcome_fields(
 def test_run_tool_call_returns_envelope_for_bad_arguments() -> None:
     """Bad tool arguments get a model-facing envelope, not a raw TypeError.
 
-    The send_image incident (docs/bug-report-2c665d8.md, bug 2): the
+    The send_image incident: the
     model passed ``path`` to a URL-only tool and got
     "unexpected keyword argument 'path'" — no valid-arguments hint, no
     ``ok: false`` envelope for the chat template's error detector, and a
@@ -1006,8 +1007,7 @@ def test_run_tool_call_wraps_runtime_exceptions_in_envelope() -> None:
 def test_tool_tracing_marks_errors_and_dedupes() -> None:
     """Tool tracing: failures export an ERROR span, successes one span.
 
-    Two trace bugs from the meme incident
-    (docs/bug-report-2c665d8.md):
+    Two trace bugs from the meme incident:
 
     - Bug 4: the LlamaIndex dispatcher's drop path never ends the span
       on exception, so failed calls leaked unexported — the Langfuse
@@ -1128,7 +1128,7 @@ def test_token_count_is_honest_not_char_equivalent() -> None:
 def test_degrade_old_history_squeezes_old_keeps_fresh() -> None:
     """Old turns lose thinking and tool payloads; fresh turns stay verbatim.
 
-    The meme incident (docs/bug-report-2c665d8.md, bug 7): replayed
+    The meme incident: replayed
     history was dominated by old reasoning blocks and raw ``stdout``
     — ~12.4k tokens per run. Degradation keeps the social content
     (who said what, what was delivered) and the tool verdicts, drops
@@ -1279,7 +1279,7 @@ def test_squeeze_tool_result_keeps_verdict_only() -> None:
 def test_degrade_message_squeezes_old_tool_call_kwargs() -> None:
     """Old assistant tool calls keep every argument key, values trimmed.
 
-    The meme-script incident (docs/bug-report-2c665d8.md, bug 7): a
+    The meme-script incident: a
     3k-char ``run_shell_command`` body rode every later prompt. Keeping
     only ``reason`` fixed the bulk but taught the model to send
     ``{"reason": …}`` alone; now each long value is cut to a preview
@@ -3239,7 +3239,7 @@ def test_send_sticker_payloads() -> None:
 def test_squared_sticker_payload_pads_nonsquare() -> None:
     """Non-square local stickers are letterboxed to square, not squashed.
 
-    The meme incident (docs/bug-report-2c665d8.md, bug 3): a 1080x1360
+    The meme incident: a 1080x1360
     meme sent via the sticker workaround arrived distorted because
     WhatsApp renders stickers on a square canvas and nothing padded or
     refused the image. The payload helper must center the image on a
@@ -4223,17 +4223,14 @@ def test_remember_strips_thinking_separator(unit_settings: Settings) -> None:
     assert asyncio.run(stored_texts()) == ["jaj real reply"]
 
 
-def test_post_delivery_wrap_up_note_stored_not_sent(
+def test_post_delivery_wrap_up_note_becomes_a_notebook_fact(
     unit_settings: Settings,
 ) -> None:
-    """Post-delivery final text becomes a tagged wrap-up note in memory.
+    """Post-delivery final text is a notebook fact, never an assistant turn.
 
-    The meme incident (docs/bug-report-2c665d8.md, bug 6): after the
-    sticker delivery the model's final 📦 was dropped by the latch and
-    the 3.8s round produced nothing. The wrap-up design keeps the
-    latch (the note never goes to the chat) but stores the text as a
-    ``wrap_up_note``-tagged assistant message and journals it — the
-    next run reads what happened instead of a bare delivery record.
+    Storing the note in history taught the model to append notes to its
+    replies; the durable record is the
+    notebook copy, so memory keeps only the delivered turn.
     """
     from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
     from llama_index.core.memory import ChatMemoryBuffer
@@ -4241,9 +4238,12 @@ def test_post_delivery_wrap_up_note_stored_not_sent(
 
     from wahabot.ai.messages import WRAP_UP_NOTE_KWARG
     from wahabot.ai.workflow import FunctionCallingAgentWorkflow, load_llm
+    from wahabot.core.notebook import Notebook
 
     async def scenario() -> tuple[list[ChatMessage], str, str]:
-        wf = FunctionCallingAgentWorkflow(llm=load_llm(unit_settings))
+        wf = FunctionCallingAgentWorkflow(
+            llm=load_llm(unit_settings), notebook=Notebook(unit_settings.data_dir)
+        )
         ctx = Context(wf)
         await ctx.store.set(
             "memory",
@@ -4267,7 +4267,7 @@ def test_post_delivery_wrap_up_note_stored_not_sent(
             delivered = wf.any_delivery()
             await wf.remember(ctx, response, [], skip_text=delivered)
             if delivered:
-                await wf.store_wrap_up_note(ctx, str(message.content))
+                await wf.store_wrap_up_note(str(message.content))
             memory = await ctx.store.get("memory")
             stored = await memory.aget_all()
             final = wf.drop_post_delivery_text(response)
@@ -4276,21 +4276,22 @@ def test_post_delivery_wrap_up_note_stored_not_sent(
         return stored, str(final.message.content or ""), str(message.content or "")
 
     stored, final_content, note = asyncio.run(scenario())
-    # The note is in memory, tagged as a wrap-up note.
-    notes = [m for m in stored if WRAP_UP_NOTE_KWARG in m.additional_kwargs]
-    assert len(notes) == 1
-    assert notes[0].content == note
-    assert "sticker" in str(notes[0].content)
+    # The note never becomes an assistant turn in memory.
+    assert all(WRAP_UP_NOTE_KWARG not in m.additional_kwargs for m in stored)
+    assert all(note not in str(m.content) for m in stored)
+    # The durable record is the notebook copy.
+    notes = Notebook(unit_settings.data_dir).read(SESSION, CHAT_ID)
+    assert [n.text for n in notes] == [note]
     # The reply to the chat stays empty: the latch holds.
     assert final_content == ""
 
 
 def test_wrap_up_prompt_used_after_delivery(unit_settings: Settings) -> None:
-    """After a delivery, wrap-up calls ask for the self-record note.
+    """After a delivery, wrap-up calls ask for the self-record lesson.
 
     ``wrap_up_response`` must pick ``_POST_DELIVERY_WRAP_UP_PROMPT``
-    over the round-limit prompt when the delivery latch fired, and
-    store the produced sentence as the tagged note.
+    over the round-limit prompt when the delivery latch fired, and write
+    the produced lesson to the notebook — never to memory.
     """
     from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
     from llama_index.core.memory import ChatMemoryBuffer
@@ -4302,8 +4303,9 @@ def test_wrap_up_prompt_used_after_delivery(unit_settings: Settings) -> None:
         FunctionCallingAgentWorkflow,
         load_llm,
     )
+    from wahabot.core.notebook import Notebook
 
-    async def scenario() -> tuple[str, str, list[ChatMessage]]:
+    async def scenario() -> tuple[str, list[ChatMessage]]:
         seen: dict[str, str] = {}
 
         async def fake_achat(self_llm: Any, messages: Any, **kwargs: Any) -> Any:
@@ -4320,7 +4322,10 @@ def test_wrap_up_prompt_used_after_delivery(unit_settings: Settings) -> None:
         original = ObservableOpenAILike.achat
         ObservableOpenAILike.achat = fake_achat  # pyright: ignore[reportAttributeAccessIssue]
         try:
-            wf = FunctionCallingAgentWorkflow(llm=load_llm(unit_settings))
+            wf = FunctionCallingAgentWorkflow(
+                llm=load_llm(unit_settings),
+                notebook=Notebook(unit_settings.data_dir),
+            )
             ctx = Context(wf)
             await ctx.store.set(
                 "memory",
@@ -4335,22 +4340,19 @@ def test_wrap_up_prompt_used_after_delivery(unit_settings: Settings) -> None:
                 await wf.wrap_up_response(
                     ctx, "non-delivery round after completed delivery"
                 )
-                # The note is staged until collapse_delivery folds the group.
-                staged = await ctx.store.get("pending_wrap_up_note", default="")
-                await wf.flush_pending_wrap_up_note(ctx)
                 memory = await ctx.store.get("memory")
-                return seen["prompt"], staged, await memory.aget_all()
+                return seen["prompt"], await memory.aget_all()
             finally:
                 reset_target(token)
         finally:
             ObservableOpenAILike.achat = original
 
-    prompt, staged, stored = asyncio.run(scenario())
+    prompt, stored = asyncio.run(scenario())
     assert _POST_DELIVERY_WRAP_UP_PROMPT[:30] in prompt
-    assert "sticker" in staged
-    notes = [m for m in stored if WRAP_UP_NOTE_KWARG in m.additional_kwargs]
+    assert all(WRAP_UP_NOTE_KWARG not in m.additional_kwargs for m in stored)
+    notes = Notebook(unit_settings.data_dir).read(SESSION, CHAT_ID)
     assert len(notes) == 1
-    assert "sticker" in str(notes[0].content)
+    assert "sticker" in notes[0].text
 
 
 def test_remember_drops_lone_emoji_reply(unit_settings: Settings) -> None:
@@ -5180,7 +5182,8 @@ def test_silence_cancels_other_tools_in_the_same_batch() -> None:
         remember.assert_not_called()
         event = stop.call_args.args[1]
         assert isinstance(event, StopEvent)
-        assert stop.call_args.kwargs == {"note": False}
+        # Nothing is staged for storage: the wrap-up note is notebook-only.
+        assert stop.call_args.kwargs == {}
 
 
 def test_tool_call_log_extra() -> None:
@@ -5626,6 +5629,150 @@ def test_chat_visible_text_filters_leaked_tokens() -> None:
     assert chat_visible_text("") == ""
 
 
+def test_chat_visible_text_strips_an_appended_self_report() -> None:
+    """A private note appended to a real reply is dropped, the reply kept.
+
+    The observed leak shape: the reply, a
+    newline, then the model's own third-person action report, often in a
+    different language from the chat.
+    """
+    reply = (
+        "Klar, ich schweige ab jetzt zu dir.\n"
+        "Sent a final confirmation that I will no longer reply, as requested."
+    )
+    assert chat_visible_text(reply) == "Klar, ich schweige ab jetzt zu dir."
+    # A normal multi-sentence reply is untouched.
+    normal = "Yes, that works. I will send it tomorrow."
+    assert chat_visible_text(normal) == normal
+    # A single line is never stripped: it may be the reply itself.
+    assert chat_visible_text("Sent it yesterday.") == "Sent it yesterday."
+
+
+def test_chat_visible_text_self_report_grammar() -> None:
+    """Only third-person run reports strip; customer answers survive.
+
+    The filter is defence in depth behind the structural fix (notes are
+    never stored as turns), so it must be precision-first: a false
+    positive deletes a real reply line, a false negative leaks a
+    cosmetic self-report. First-person answers ("I sent you the PDF")
+    and the German/Spanish reply forms are legitimate customer-facing
+    lines; the wrap-up prompt elicits third-person reports ("Sent
+    <name> a final confirmation that …"), which carry a run cue.
+    """
+    # Legitimate reply lines survive even in second position.
+    for answer in (
+        "I've sent the confirmation.",
+        "I have already sent the confirmation.",
+        "I sent you the PDF.",
+        "Ich habe geantwortet.",
+        "Auf deine Frage habe ich geantwortet.",
+        "Respondí a tu mensaje de ayer.",
+        "Sent the invoice and the receipt.",
+    ):
+        assert chat_visible_text(f"Hola.\n{answer}") == f"Hola.\n{answer}"
+    # The observed leak shapes strip.
+    for note in (
+        "Sent Tobias a final confirmation that I will no longer reply, as requested.",
+        "Sent a text-based Spanish mini-lesson after the voice synthesis failed.",
+        "Sent him the files instead of messaging again.",
+        "Auf Tobias' Scherz über KI-Stimmen mit trockenem Selbstkommentar geantwortet.",
+    ):
+        assert chat_visible_text(f"Hola.\n{note}") == "Hola."
+
+
+def test_final_reply_strips_an_appended_self_report() -> None:
+    from llama_index.core.base.llms.types import ChatResponse
+
+    from wahabot.ai.context import final_reply
+
+    result = ChatResponse(
+        message=ChatMessage(
+            role=MessageRole.ASSISTANT,
+            content=(
+                "Understood, I will stay out of it.\n"
+                "Sent a confirmation that the request to stop was honored."
+            ),
+        )
+    )
+    assert final_reply(result) == "Understood, I will stay out of it."
+
+
+def test_deduplicate_refuses_to_merge_a_wrap_up_note_into_a_reply() -> None:
+    """A private note is never folded into the assistant's sent turn.
+
+    The merge is what taught the model to append notes to its replies
+    The reply and the note stay separate
+    turns, in both orders, while ordinary same-role turns still merge.
+    """
+    from wahabot.ai.history import deduplicate_messages, merge_pair
+    from wahabot.ai.messages import WRAP_UP_NOTE_KWARG
+
+    reply = ChatMessage(role=MessageRole.ASSISTANT, content="Delivered the form.")
+    note = ChatMessage(
+        role=MessageRole.ASSISTANT,
+        content="Sent the form and confirmed receipt.",
+        additional_kwargs={WRAP_UP_NOTE_KWARG: True},
+    )
+
+    forward = deduplicate_messages([reply, note])
+    assert [m.content for m in forward] == ["Delivered the form.", note.content]
+    assert WRAP_UP_NOTE_KWARG not in forward[0].additional_kwargs
+    assert forward[1].additional_kwargs.get(WRAP_UP_NOTE_KWARG) is True
+
+    backward = deduplicate_messages([note, reply])
+    assert [m.content for m in backward] == [note.content, "Delivered the form."]
+    assert backward[0].additional_kwargs.get(WRAP_UP_NOTE_KWARG) is True
+
+    # Two notes may still fold: the boundary is private-vs-public, not
+    # note-vs-note.
+    both = deduplicate_messages([note, note])
+    assert len(both) == 1 and both[0].content == f"{note.content}\n{note.content}"
+
+    # Ordinary same-role turns still merge.
+    other = ChatMessage(role=MessageRole.ASSISTANT, content="Second line.")
+    merged = deduplicate_messages([reply, other])
+    assert [m.content for m in merged] == ["Delivered the form.\nSecond line."]
+
+    # The merge helper refuses the crossing itself (invariant).
+    with pytest.raises(ValueError, match="wrap-up note"):
+        merge_pair(reply, note)
+
+
+def test_remember_drops_an_appended_self_report(unit_settings: Settings) -> None:
+    """``remember`` stores the reply, never the appended private note.
+
+    Memory mirrors the chat: the note was never sent, so storing it would
+    put it back in front of the model and re-teach the pattern.
+    """
+    from llama_index.core.base.llms.types import ChatResponse
+    from llama_index.core.memory import ChatMemoryBuffer
+    from llama_index.core.workflow import Context
+
+    from wahabot.ai.workflow import FunctionCallingAgentWorkflow, load_llm
+
+    async def stored() -> list[str]:
+        wf = FunctionCallingAgentWorkflow(llm=load_llm(unit_settings))
+        ctx = Context(wf)
+        await ctx.store.set(
+            "memory",
+            ChatMemoryBuffer.from_defaults(),  # pyright: ignore[reportUnknownMemberType]
+        )
+        message = ChatMessage(
+            role=MessageRole.ASSISTANT,
+            content=(
+                "Sounds good, I will hold the reply until tomorrow.\n"
+                "Sent a confirmation that the reply is held until tomorrow."
+            ),
+        )
+        await FunctionCallingAgentWorkflow.remember(
+            wf, ctx, ChatResponse(message=message), []
+        )
+        memory = await ctx.store.get("memory")
+        return [str(m.content) for m in await memory.aget_all()]
+
+    assert asyncio.run(stored()) == ["Sounds good, I will hold the reply until tomorrow."]
+
+
 def test_remember_filters_undelivered_leak(unit_settings: Settings) -> None:
     """``remember`` stores nothing when the final text is a leaked token."""
 
@@ -5952,7 +6099,7 @@ def test_run_timeout_cap_and_context_reuse(unit_settings: Settings) -> None:
     """The run cap is a per-run wall clock, and a cancelled run leaves
     the shared per-chat Context usable.
 
-    The incident (docs/incident-2026-10-06-run-timeout.md): the library
+    The incident: the library
     enforces ``timeout=`` as a cumulative alive-time budget over the
     whole Context, so on the reused per-chat Context a busy chat's
     budget hit zero and every later message died within seconds. The

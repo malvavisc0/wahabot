@@ -73,6 +73,7 @@ __all__ = [
     "fenced_chat",
     "fenced_message_id",
     "fit_messages",
+    "forward_escalation",
     "forward_message",
     "image_file",
     "infer_mimetype",
@@ -437,7 +438,7 @@ def fenced_chat(
     operator-command runs pass through :func:`chat_jid` unchanged.
     The error half keeps the tools honest: a misdirected call fails
     loudly as an envelope, never silently falls back to the current
-    chat (the fence invariant, see docs/agent-workflow.md).
+    chat (the fence invariant).
     """
     if operator_run(target):
         resolved = chat_jid(chat, target)
@@ -682,6 +683,69 @@ class EscalationChannel:
         self._last[chat_id] = time.monotonic()
 
 
+def forward_escalation(
+    waha: WahaClient,
+    channel: EscalationChannel,
+    settings: Settings,
+    session: str,
+    chat_id: str,
+    report: str,
+) -> str:
+    """Forward a code- or model-written report from *chat_id* to the operator.
+
+    Shared by the ``escalate`` tool and the triage gate. The cooldown is
+    per chat, so a gate ping and an agent escalation in the same run can
+    never both reach the operator. The report text is passed through;
+    callers that do not have member text (the gate) write their own.
+    """
+    if not report.strip():
+        return error("empty report text")
+    operator_jid = channel.operator_jid
+    if not operator_jid:
+        return error("operator contact unknown; escalation unavailable")
+    refusal = channel.cooldown_refusal(chat_id)
+    if refusal is not None:
+        return error(refusal)
+    try:
+        sent_id = waha.send_text(
+            session,
+            operator_jid,
+            f"🆘 wahabot escalation from {chat_id}:\n{report.strip()}",
+        )
+    except Exception as exc:
+        # No confirmed acknowledgment: leave the cooldown unstamped
+        # and never claim the operator was notified.
+        logger.warning(
+            "Escalation from {chat_id} failed to send: {exc}",
+            chat_id=chat_id,
+            exc=exc,
+        )
+        return error(
+            f"could not confirm forwarding to the operator: {exc}"
+            + " — delivery was not confirmed; do not claim it went through "
+            + "or repeat the report automatically"
+        )
+    track_self_echo(sent_id, "Escalation")
+    channel.stamp(chat_id)
+    # Durable record after the confirmed send — the audit journal's
+    # fail-soft write never breaks the escalation.
+    save_action(
+        settings.data_dir,
+        session,
+        "escalation",
+        chat_id=chat_id,
+        report=report,
+        sent_id=sent_id,
+        status="open",
+    )
+    logger.info(
+        "Escalated from {chat_id} to operator: {report}",
+        chat_id=chat_id,
+        report=report.strip()[:200],
+    )
+    return ok(chat=chat_id, escalated=True, sent_id=sent_id)
+
+
 def escalate(
     waha: WahaClient, channel: EscalationChannel, settings: Settings
 ) -> BaseTool:
@@ -715,55 +779,14 @@ def escalate(
         chat_id = target.chat_id
         if not chat_id or not target.session:
             return error("no active conversation context")
-        operator_jid = channel.operator_jid
-        if not operator_jid:
-            return error("operator contact unknown; escalation unavailable")
         if operator_run(target):
             # An operator command already talks to the operator; the tool
             # would only loop the report back to its author.
             refusal = "this run is already an operator command"
             return error(f"{refusal} — report directly in the instruction instead")
-        refusal = channel.cooldown_refusal(chat_id)
-        if refusal is not None:
-            return error(refusal)
-        try:
-            sent_id = waha.send_text(
-                target.session,
-                operator_jid,
-                f"🆘 wahabot escalation from {chat_id}:\n{report.strip()}",
-            )
-        except Exception as exc:
-            # No confirmed acknowledgment: leave the cooldown unstamped
-            # and never claim the operator was notified.
-            logger.warning(
-                "Escalation from {chat_id} failed to send: {exc}",
-                chat_id=chat_id,
-                exc=exc,
-            )
-            return error(
-                f"could not confirm forwarding to the operator: {exc}"
-                + " — delivery was not confirmed; do not claim it went through "
-                + "or repeat the report automatically"
-            )
-        track_self_echo(sent_id, "Escalation")
-        channel.stamp(chat_id)
-        # Durable record after the confirmed send — the audit journal's
-        # fail-soft write never breaks the escalation.
-        save_action(
-            settings.data_dir,
-            target.session,
-            "escalation",
-            chat_id=chat_id,
-            report=report,
-            sent_id=sent_id,
-            status="open",
+        return forward_escalation(
+            waha, channel, settings, target.session, chat_id, report
         )
-        logger.info(
-            "Escalated from {chat_id} to operator: {report}",
-            chat_id=chat_id,
-            report=report.strip()[:200],
-        )
-        return ok(chat=chat_id, escalated=True, sent_id=sent_id)
 
     return FunctionTool.from_defaults(
         fn=escalate_fn,
@@ -826,8 +849,8 @@ def react_to_message(waha: WahaClient) -> BaseTool:
 def send_media(waha: WahaClient, settings: Settings) -> BaseTool:
     """Build the media delivery tool: image, video, file, voice, sticker.
 
-    One tool replaces the five old senders (docs/bug-report-2c665d8.md,
-    bug 7b): a single ``kind`` argument plus one source per call —
+    One tool replaces the five old senders: a single ``kind`` argument
+    plus one source per call —
     ``url`` XOR ``path`` XOR (for ``kind=voice``) ``text`` — no more
     odd-one-out schema drift (bug 1). Byte caps apply to local files and
     synthesized audio; remote downloads are delegated to WAHA. Local
@@ -1298,7 +1321,7 @@ def squared_sticker_payload(path: str, max_sticker_bytes: int) -> dict[str, Any]
 
     WhatsApp renders stickers on a square canvas: a 1080x1360 meme
     sent as-is arrives squashed, and the model had no way to know
-    (docs/bug-report-2c665d8.md, bug 3). A non-square image is
+    A non-square image is
     letterboxed onto a square canvas (white bars where the image does
     not reach) and re-encoded as WebP; a square one rides the wire
     unchanged. Unreadable/corrupt images surface PIL's error as the

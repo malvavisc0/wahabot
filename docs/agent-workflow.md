@@ -32,6 +32,10 @@ The AI code is split into focused modules under `src/wahabot/ai/`:
 | `albums.py` | Album reassembly: container + images buffered into one agent turn |
 | `video.py` / `vision.py` | Video frame extraction + turn anchor; image captions |
 | `observability.py` | Opt-in Langfuse trace export (see below) |
+| `triage.py` | The d1-3B gate client, verdict parser, bounded gate context and hardened policy |
+| `core/learned.py` | Per-chat Tier 1 recap merger (trim hook, post-reply drain) |
+| `core/thread_index.py` | Per-chat FTS5 + dense thread index and lead-only recall slices |
+| `core/embeddings.py` | OpenAI-compatible embeddings client for thread recall |
 
 ## How the workflow works
 
@@ -58,6 +62,32 @@ StartEvent ──► prepare_chat_history ──► InputEvent
 Whenever a step produces an `InputEvent`, the workflow routes it back
 to the LLM step — that is the loop that powers tool use. It keeps going
 until the model returns an answer without asking for a tool.
+
+### Step 0 — Triage gate
+
+A small classifier (`wahabot/ai/triage.py`) labels each inbound message
+for adversarial intent, escalation, and whether an unaddressed group
+message should participate. The runtime builds a bounded gate context —
+the enriched message, the last five visible turns, the chat's mute note
+and the current session rules — and never the full transcript.
+
+- **DMs and addressed turns** start the agent immediately and run the
+  gate concurrently. The tool layer awaits its verdict once, bounded by
+  `WAHABOT_GATE_TIMEOUT`, before the first tool. An adversarial verdict
+  switches the run to the hardened allowlist; a timeout, gate outage or
+  parse failure leaves the run normal. The gate can tighten tools here;
+  it can never suppress the reply.
+- **Unaddressed `judicious` group messages** are gated before the agent.
+  A `participate=false` verdict (or a gate failure) keeps the group
+  silent and the expensive model never runs; the message is still stored
+  in memory and the read receipt was already sent. A burst or album is
+  gated once, after it is assembled.
+- **Escalation** forwards a code-written operator ping in parallel; it
+  never waits for the answer.
+- **Operator commands** never call the gate.
+
+The gate is code, not a tool: no prompt path can invoke it, and the
+hardened policy is enforced at `handle_tool_calls`, never in prompt text.
 
 ### Step 1 — Prepare the conversation
 
@@ -150,8 +180,8 @@ Each load/save runs under the chat's run lock; a restore on a context miss
 after a restart, and an LRU-evicted chat reloads instead of starting
 blank. The load/save/restore implementation lives in
 `wahabot.core.persistence`; `wahabot forget` wipes one chat's live
-context, disk file and durable notebook together, under that chat's run
-lock so no in-flight run can resurrect it.
+context, disk file, durable notebook, recap and thread index together,
+under that chat's run lock so no in-flight run can resurrect it.
 
 ### Backlog filter
 
@@ -182,20 +212,37 @@ Before each run reaches the LLM, the buffered history passes through
    rebuild the same oversized turn on redelivery, forever). Operator
    commands journal it as their own audit kind
    (`operator_budget_error`) and return a failure text to the operator.
-3. **Notebook injection** — durable notes are loaded next, bounded to a
-   quarter of the memory budget and to the space the reserved minimum
-   turn left free: the chat's `# Notebook Notes` and the operator's
-   `# Operator Notebook` policies ride the system prompt (never the
-   rolling buffer), so the trim can never evict them and they survive
-   history resets and restarts (`data/notebook.sqlite3`).
-4. **Trim** (`trim_to_budget`) — the newest tail that fits the
+3. **Pinned state block** (`wahabot/ai/pinned_state.py`) — one
+   code-assembled plain-text `# Pinned State` block is appended to the
+   system message next, never the rolling buffer, so the trim can never
+   evict it and it survives history resets and restarts. It carries the
+   chat's notebook facts and the operator's session policies, the
+   session rules (timezone, group participation), and — from an optional
+   support-state provider, none wired until the support store exists —
+   contact, open tickets and latest events. Notebook facts are bounded to
+   a quarter of the memory budget (`PINNED_STATE_TOKEN_LIMIT` = 1024)
+   and to the space the reserved minimum turn left free, selected whole
+   with the notebook's newest-first order; policies and other
+   authoritative sections render in full and raise `ContextBudgetError`
+   when they cannot fit. Gate-requested `fact:<key>` notes are merged
+   first. Every source read is fail-soft: a store that is down renders
+   the block without that section, never a blocked run.
+4. **Recall** (`core/thread_index.py`) — trimmed user/assistant turns
+   live in a per-chat index: FTS5/BM25 for exact tokens and a dense
+   vector store for paraphrase and cross-lingual matches, fused with
+   reciprocal-rank fusion. Each hit expands to a ±2-turn slice and
+   renders as flat, lead-only bullets under `## Recalled from earlier in
+   this thread`. The section is dropped first under budget pressure,
+   then the recap; it never raises. A gate `history:<topic>` hint
+   enriches the query.
+5. **Trim** (`trim_to_budget`) — the newest tail that fits the
    remaining budget, with tool groups (assistant call + its `tool`
    replies) atomic so a trim never splits them. The result always
    starts with a `user` message; the reserved minimum turn keeps it
    non-empty by construction. This is the **single** trim — the library
    buffer's own eviction is bypassed, so no second trim can orphan a
    tool reply.
-5. **Bounded at the source** — every tool caps its own payload before
+6. **Bounded at the source** — every tool caps its own payload before
    enveloping (see "Tool inventory" below), so no workflow-level
    cutoff is needed. A single oversized tool group cannot defeat the
    budget: the minimum-turn reservation raises `ContextBudgetError`
@@ -474,8 +521,8 @@ tracing), and an `atexit` flush covers the server's shutdown.
 > **Group participation.** `handle_message` is only reached for a group
 > message when the participation mode decides to wake the agent —
 > `mention` (addressed to the bot by JID/@-mention or `bot_mention_regex`)
-> or `judicious` (agent decides). In `judicious` mode an empty reply
-> means "stay silent" and nothing is sent. See
+> or `judicious` (the triage gate decides first for unaddressed messages).
+> Once admitted, an empty reply means "stay silent" and nothing is sent. See
 > [`docs/session-config.md`](./session-config.md).
 
 ## The built-in tools
@@ -555,7 +602,7 @@ reason logs a WARNING), and the workflow's per-call line
 arguments — a missing reason shows as `reason: (model gave none)`.
 The reason is not chat dialogue; it may remain in internal history and tracing.
 It is an observability and self-restraint knob: naming *why* forces
-the model to articulate its judgment in `judicious` group mode, and
+the model to articulate its judgment in gated group mode, and
 gives every call an audit trail for prompt tuning.
 
 All tool implementations live under `src/wahabot/ai/tools/` (WhatsApp

@@ -76,13 +76,26 @@ Before the agent ever wakes up, the message passes through, in order:
      it).
    
    The config's `group_participation` mode loosens or tightens this:
-   `mentioned` (default) requires one of the three above;
-   `judicious` also runs the agent on plain group messages — any group
-   that already passed the whitelist/blacklist gate — and lets it
-   decide for itself whether to speak (see §3, staying silent).
+   `mentioned` (default) requires one of the three above; `judicious`
+   sends plain group messages to the triage gate first. The gate sees
+   the message, the last five visible turns, the chat's mute list and
+   the session rules; only a participation verdict wakes the agent.
+   Addressed messages always run. If the gate service is unavailable,
+   unaddressed groups stay silent.
 
    Direct messages skip the address check entirely — the person chose
    to talk to the bot, so it answers.
+6. **Triage gate.** DMs and addressed messages start the agent
+   immediately and race a small classifier. Before the first tool, the
+   run waits up to `WAHABOT_GATE_TIMEOUT` for its verdict. An
+   adversarial verdict restricts the toolset to reads, web research,
+   escalation, the final reply and silence; it never silences a DM or
+   an addressed turn. An escalated verdict pings the operator in
+   parallel. Unaddressed `judicious` group messages are gated before
+   the agent: no participation, no expensive run; one participation
+   verdict, one run on the assembled burst or album. The read receipt
+   is sent before any participation decision. Operator commands never
+   call the gate.
 
 ### What the agent sees
 
@@ -220,6 +233,15 @@ Per chat, the bot keeps a rolling conversation in memory:
   delivered content (sent text, reaction emoji, or a media/forward
   marker) — the retained history reads like the chat, not like the
   API scaffolding that produced it.
+- **Old turns are not lost when the window fills.** Three layers sit
+  outside the buffer: the **pinned state block** (contact, tickets,
+  events, operator policies and session rules, code-assembled into the
+  system message and never evicted), the **Tier 1 recap** (a per-chat
+  summary of turns as they leave the window), and the **thread index**
+  (per-chat FTS5 + dense vectors over trimmed user/assistant turns,
+  retrieved as a lead-only `## Recalled from earlier in this thread`
+  section). `wahabot forget <chat-id>` wipes the buffer, recap and
+  index together.
 - The **system prompt is never in the buffer** — it is re-rendered
   from the session config at the start of every run (goal, role,
   style, current date/time), so trimming can never evict the bot's
@@ -235,10 +257,10 @@ Per chat, the bot keeps a rolling conversation in memory:
   LRU-evicted chat (past 1000 live contexts) reloads from disk instead of
   starting blank. The load/save/restore implementation lives in
   `wahabot.core.persistence`; this section summarizes its behavior.
-- The rolling buffer is **continuity, not learning**: everything older
-  than the token budget is trimmed and forgotten — corrections, tone
-  norms and facts included. Learning lives one layer up, in the
-  **durable notebook** (`data/notebook.sqlite3`): the model saves
+- The rolling buffer is **continuity, not learning**: turns older than
+  the token budget leave the window, though the recap and thread index
+  can still recall them (as a summary and lead-only slices). Durable
+  learning lives one layer up, in the **durable notebook** (`data/notebook.sqlite3`): the model saves
   verified facts, preferences and lessons per chat with the `notebook`
   tool, and every delivered run leaves a short self-extracted lesson
   (the post-delivery wrap-up note). Notes ride the system prompt each
@@ -292,9 +314,9 @@ a loop of LLM calls in which the model can use tools, ending in one of:
   run is done (no follow-up monologues, no second thoughts).
 - **`stay_silent`** — the model decides the message does not deserve
   an answer (banter, chatter it has nothing to add to, a question for
-  someone else). The run ends, nothing is sent. In `judicious` mode
-  this is the *primary* outcome: most messages end in silence, and
-  that is the feature working.
+  someone else). The run ends, nothing is sent. For unaddressed group messages that
+  the triage gate admits, this is the *primary* outcome: most messages
+  end in silence, and that is the feature working.
 - **`react_to_message`** — a low-effort emoji reaction instead of a
   reply; the polite wave for greetings and jokes landing. A final
   reply that is *just* one emoji (👋) gets the same treatment as a
@@ -309,7 +331,7 @@ concluding, the run is cut and the model is nudged to decide.
 Every tool (sends, reaction, forward, silence, and the research tools
 alike) takes a `reason`: one short sentence justifying the call,
 written to the operator's log and never delivered to the chat. In
-`judicious` mode these lines are the audit trail of the model's
+gated group mode these lines are the audit trail of the model's
 restraint — greppable per chat, and a missing reason shows up as a
 WARNING (or `reason: (model gave none)` on the workflow's per-call
 line).
@@ -442,10 +464,13 @@ the model saw, message for message.
 | `goal` | session config | The one-line purpose prepended to every system prompt. |
 | `system_prompt` | session config | The bot's personality, style and speaking-bar rules (`{{bot_name}}`, date/time placeholders). |
 | `bot_name` / `bot_mention_regex` | session config | What the group must type to address the bot. |
-| `group_participation` | session config | `mentioned` (address-gated) or `judicious` (reads everything, self-decides). |
+| `group_participation` | session config | `mentioned` (address-gated) or `judicious` (the triage gate decides whether unaddressed groups wake the agent). |
 | `whitelist` / `blacklist` | session config | Which chats the bot lives in. |
 | `WAHABOT_MEMORY_TOKEN_LIMIT` | env | How much of the conversation the model sees per run. |
 | `WAHABOT_MEMORY_PERSIST` | env | Whether per-chat memory is written to disk (survives restarts/LRU evictions); `wahabot forget <chat-id>` wipes one chat. |
+| `WAHABOT_LEARNED_MEMORY` | env | Merge trimmed turns into a per-chat recap. |
+| `WAHABOT_THREAD_RECALL` | env | Index trimmed turns and recall older slices (requires memory persistence). |
+| `WAHABOT_TRIAGE_GATE` | env | Enable the triage gate; DMs race it, unaddressed groups are blocked by it. |
 | `WAHABOT_VISION` | env | Whether image messages are shown to the model. |
 | `WAHABOT_LLM_*` | env | Provider, model and sampling (temperature/top_p/top_k…). |
 

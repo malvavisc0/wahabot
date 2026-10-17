@@ -23,8 +23,7 @@ from wahabot.ai.history import tool_calls, wire_call
 #: The tools that deliver content to a chat; each latches the shared
 #: holder at most once per run. The five media kinds live behind the
 #: single ``send_media`` tool (its ``kind`` argument), so the set keys
-#: on that name and the one-delivery latch holds across all five kinds
-#: (docs/bug-report-2c665d8.md, bug 7b).
+#: on that name and the one-delivery latch holds across all five kinds.
 DELIVERY_TOOLS = frozenset(
     {
         "send_message",

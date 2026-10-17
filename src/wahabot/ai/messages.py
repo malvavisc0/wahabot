@@ -90,7 +90,7 @@ def sent_by_bot_api(event: WahaEvent) -> bool:
     """True for the echo of a message the bot itself sent through WAHA.
 
     WAHA's ``source`` field (webhook events only, ``fromMe`` messages
-    only — docs/openapi.json) is ``api`` for a send through the API,
+    only) is ``api`` for a send through the API,
     i.e. the bot, and ``app`` for the human typing on a phone or
     WhatsApp Web. The bot's own output is already in memory, so its
     echo must never be folded again or treated as an operator message.

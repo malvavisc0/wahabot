@@ -1,9 +1,8 @@
 """Audit journal of bot actions: every tool call, reply and decision.
 
-The roadmap's "journal everything" clause (docs/plans/
-commercial-roadmap.md, Commercial Foundation) makes every bot action
-auditable end to end. The raw event journal (``core/journal``) already
-preserves what came *in* verbatim; this journal records what the bot
+Every bot action is auditable end to end. The raw event journal
+(``core/journal``) already preserves what came *in* verbatim; this
+journal records what the bot
 *did* — one JSON object per line, appended under
 ``<data_dir>/audit/<session>/<YYYY-MM-DD>.jsonl``.
 

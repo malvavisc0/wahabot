@@ -1,7 +1,7 @@
 """Deterministic chat resolution for operator commands naming a chat.
 
-The misdelivered-reply incident (docs/bug-report-wrong-message-voice-note.md):
-asked to "reply to the last message in <chat>", the model answered the
+The misdelivered-reply incident: asked to "reply to the last message in
+<chat>", the model answered the
 most recent turn of its shared operator history — a different chat's
 message — because a flat, channel-agnostic memory has no per-chat
 "last message" to find. This module removes the guesswork *before* the

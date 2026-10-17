@@ -1,6 +1,6 @@
 # CI: the repo's quality gate, run on every push and PR to master.
 #
-# Mirrors docs/coding-standard.md's "run after every change" list:
+# The run-after-every-change list:
 # lint, format check, type check, the full test suite, plus radon's
 # complexity budget and vulture's dead-code suspects. A failure on
 # any step fails the build — nothing publishes or merges on red.

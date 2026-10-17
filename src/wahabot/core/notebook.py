@@ -18,6 +18,10 @@ MAX_NOTE_LENGTH = 2000
 MAX_READ_NOTES = 20
 SESSION_NOTEBOOK_CHAT = "@session"
 SESSION_POLICY_TOKEN_LIMIT = 1024
+#: The snapshot budget for notebook content riding a run's prompt —
+#: shared by the notebook tool's reads and the pinned state block so
+#: the two surfaces can never drift apart.
+NOTEBOOK_SNAPSHOT_TOKEN_LIMIT = 1024
 
 #: Marker attribute set on tools whose calls must finish their SQLite
 #: work before a canceled run releases its chat lock (see

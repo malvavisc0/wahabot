@@ -20,7 +20,7 @@ Incoming message -> context and memory -> model
 
 The bundled tools cover text and media delivery, quoting and numeric mentions, reactions, native forwarding, chat context, web search, page and video-metadata retrieval, human escalation, and an optional host shell. Python builder docstrings are for developers; explicit tool descriptions and parameter schemas are the instructions sent to the model.
 
-The loop has brakes: `stay_silent` ends a run and cancels other tools in that batch, repeated calls are blocked, and round and run-time limits stop runaway work. Text, media, and forwarding share one successful-send allowance per run; reactions have a separate allowance. After successful delivery, further research or actions are blocked. In groups, mentioned mode responds when addressed, while judicious mode lets the model decide whether it has something worth adding.
+The loop has brakes: `stay_silent` ends a run and cancels other tools in that batch, repeated calls are blocked, and round and run-time limits stop runaway work. Text, media, and forwarding share one successful-send allowance per run; reactions have a separate allowance. After successful delivery, further research or actions are blocked. In groups, mentioned mode responds when addressed, while judicious mode asks the triage gate whether an unaddressed message is worth a run; once admitted, the model still decides whether to speak.
 
 ## Know What Was Retrieved
 
@@ -38,6 +38,7 @@ Nobody sends one clean, complete request. The leak arrives as "there's water com
 - Photos are analyzed by the vision model. Videos use sampled frames and, when transcription is configured, the audio track; this is not exhaustive frame-by-frame viewing. Albums arrive as one turn with their images attached.
 - Supported reel, TikTok, and X links can be resolved through yt-dlp and passed through the video pipeline within configured limits. YouTube links use available metadata and captions rather than the video-download path; retrieval can fail or be incomplete.
 - Every chat has its own rolling memory. With persistence configured, the bot can pick up the conversation after a restart.
+- The window is not the memory. A pinned state block keeps exact facts and rules in front of the model, a per-chat recap summarizes turns that leave the window, and a per-chat thread index recalls older slices as lead-only context. A small triage gate decides whether an unaddressed group message is worth waking the main model for; DMs and addressed messages always run. If the gate service is down, DMs still answer and unaddressed groups stay silent.
 
 ## You stay the boss
 
@@ -60,7 +61,7 @@ The fences you want in a business bot:
 - WhatsApp tools fence ordinary participants to the current chat; cross-chat delivery and contact-book access belong to trusted operator commands. `escalate` is the fixed-destination human-handoff exception. These checks do not sandbox an enabled shell, so run it unprivileged with an appropriate external sandbox.
 - When someone needs a human, reports a bot problem, or complains, `escalate` can forward a report to your self-chat. The model is instructed to summarize without pasted messages or secrets; the tool does not sanitize arbitrary report text. Successful forwards have an in-memory per-chat hourly cooldown. Feedback distinguishes success, cooldown, and unconfirmed delivery.
 - Actions and outcomes are recorded in the audit journal on a best-effort basis (`data/audit/`). `wahabot escalations` lists recorded handoffs; a logging failure does not undo an already completed action.
-- `wahabot forget <chat-id>` wipes one chat's memory — live context, disk file, and durable notes — in one shot.
+- `wahabot forget <chat-id>` wipes one chat's memory — live context, disk file, durable notes, recap, and thread index — in one shot.
 - The bot keeps a private durable notebook per chat (`data/notebook.sqlite3`): verified facts, preferences and lessons the model itself records with the `notebook` tool, injected into every later run's prompt. Notes survive restarts and history resets; after each delivered reply the bot also files a short self-extracted lesson. Chat notes are never authority to override your policies — only operator commands can write bot-wide ones.
 
 ## Straight talk about the channel
@@ -95,7 +96,7 @@ Set `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` to export agent traces to [Lan
 
 ## Under the hood
 
-The agent is a LlamaIndex workflow with per-chat memory repaired and trimmed before model calls and persisted to `data/memory/` when configured. Tools return JSON envelopes, and the workflow converts unexpected tool exceptions into error feedback. Argument types are validated strictly; compact schemas retain explicit `null` support. Old history keeps command exit codes and capture errors so execution failures do not become apparent successes.
+The agent is a LlamaIndex workflow with per-chat memory repaired and trimmed before model calls and persisted to `data/memory/` when configured. The trim hooks feed a per-chat recap and thread index; the pinned state block rides the system message, so eviction never removes it. Tools return JSON envelopes, and the workflow converts unexpected tool exceptions into error feedback. Argument types are validated strictly; compact schemas retain explicit `null` support. Old history keeps command exit codes and capture errors so execution failures do not become apparent successes.
 
 The module map, engine semantics and every safeguard explained: [Agent workflow](docs/agent-workflow.md).
 

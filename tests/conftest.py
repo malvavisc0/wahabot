@@ -115,7 +115,7 @@ class Stack:
         agent, _reloader = register_agent_handler(settings, waha=waha)
         register_command_handler(settings, waha, agent)
         register_reaction_handler(waha, agent, settings)
-        register_forget_handler(settings)
+        register_forget_handler(settings, agent)
         seed_health(waha, SESSION)
         register_session_status_handler(waha, SESSION)
         return Bot(self, settings, waha, agent)

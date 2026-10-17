@@ -574,6 +574,7 @@ def smoke_settings(data_dir: Path, llm_base: str) -> Settings:
         data_dir=data_dir,
         transcribe_url="http://whisper.invalid",
         burst_enabled=False,
+        triage_gate=False,
         langfuse_public_key="",
         langfuse_secret_key="",
         langfuse_tracing_environment="test",

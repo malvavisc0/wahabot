@@ -6,8 +6,7 @@ line) recreates the human's confusion. This module holds messages that
 already passed every gate in a per-(chat, sender) buffer and flushes
 them as ONE agent turn when the sender goes quiet.
 
-Two deadlines, per docs/plans/commercial-roadmap.md "Multi-Message
-Turns":
+Two deadlines govern the flush:
 
 - **Inactivity window** (``burst_inactivity_s``): reset by every
   same-sender message, so gap-y bursts still hold together.
@@ -135,8 +134,8 @@ def add_message(event: WahaEvent) -> bool:
     Opens the buffer on first sight and (re)arms the flush timer on
     every arrival. The deadline is ``min(inactivity, remaining cap)``
     so a long burst hits the hold cap even while the sender keeps
-    typing; the cap fires the flush mid-burst by design — the roadmap
-    prefers an early reply over a silent wait.
+    typing; the cap fires the flush mid-burst by design — an early
+    reply is preferred over a silent wait.
 
     Refuses events whose sender cannot be resolved (a group message
     with neither ``participant`` nor ``_data.author``): an empty
@@ -198,7 +197,7 @@ def _complete(buffer: BurstBuffer) -> None:
     """Hand a finished buffer to the completion handler, if any."""
     if _on_complete is None or not buffer.messages:
         return
-    # The roadmap's tuning data: log every burst's size and total hold
+    # Tuning data: log every burst's size and total hold
     # duration so the pilot's live measurements — not the 8s/30s
     # guesses — set the inactivity window and the hold cap. The hold
     # includes the trailing inactivity window (the flush fires after

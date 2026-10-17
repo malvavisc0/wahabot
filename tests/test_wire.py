@@ -135,6 +135,75 @@ def test_agent_replies_via_send_message(bot: Bot) -> None:
     assert body.get("parallel_tool_calls") is True
 
 
+def test_wrap_up_note_never_rides_the_next_prompt(bot: Bot) -> None:
+    """A delivered run's private note is a notebook fact, not a chat turn.
+
+    Before the fix the note was stored as an assistant turn and merged
+    into the delivered reply, so the next run read ``reply + note`` as
+    its own style. The note may reach the
+    next prompt only inside the notebook (the system message), never as
+    a user or assistant message.
+    """
+    llm = bot.stack.llm
+    chat = "5551112222-5551112222@g.us"
+    bot.post(chat_event(body="kai, please help with the form", mid="WN1", chat=chat))
+    # A delivered run: the tool round, then the wrap-up round whose final
+    # text is the private note.
+    assert _wait(lambda: len(llm.requests) >= 2)
+    note = "smoke final answer"
+    llm.requests.clear()
+    bot.waha.sent.clear()
+
+    bot.post(chat_event(body="kai, any update?", mid="WN2", chat=chat))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    messages = llm.requests[0]["messages"]
+    assert not any(
+        note in str(m.get("content", ""))
+        for m in messages
+        if m.get("role") in ("user", "assistant")
+    )
+    # The delivered reply is still the model's own turn.
+    assert any(
+        "smoke reply one" in str(m.get("content", ""))
+        for m in messages
+        if m.get("role") == "assistant"
+    )
+
+
+def test_pinned_state_block_rides_the_system_message(bot: Bot) -> None:
+    """Notebook facts, policies, and rules ride the system turn, never a chat turn.
+
+    The pinned block is assembled by code at the start of the run and
+    injected system-side, so history trimming can never evict it and no
+    user or assistant turn ever carries it.
+    """
+    llm = bot.stack.llm
+    notebook = Notebook(bot.settings.data_dir)
+    notebook.write(SESSION, CHAT_ID, "customer-email", "ana@example.com")
+    notebook.write(SESSION, SESSION_NOTEBOOK_CHAT, "reply-style", "Use concise replies.")
+    bot.post(waha_event("PIN1"))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    messages = llm.requests[0]["messages"]
+    system = [str(m.get("content", "")) for m in messages if m.get("role") == "system"]
+    assert system, "no system message in the first request"
+    content = system[0]
+    assert "# Pinned State" in content
+    assert "## Notebook facts\n\n- customer-email: ana@example.com" in content
+    assert "## Operator policies\n\n- reply-style: Use concise replies." in content
+    assert "## Session rules" in content
+    assert "Timezone: UTC" in content
+    assert not any(
+        "# Pinned State" in str(m.get("content", ""))
+        for m in messages
+        if m.get("role") in ("user", "assistant")
+    )
+    assert not any(
+        "ana@example.com" in str(m.get("content", ""))
+        for m in messages
+        if m.get("role") in ("user", "assistant")
+    )
+
+
 def test_final_text_reply_carries_resolved_mentions(bot: Bot) -> None:
     """A final-text reply (no tool call) still tags roster members.
 
@@ -298,6 +367,7 @@ def test_voice_note_in_mentioned_group_skipped(bot: Bot) -> None:
     with unittest.mock.patch("wahabot.handlers.transcribe_voice_note", transcriber):
         bot.post(group_voice)
     transcriber.assert_not_called()
+    assert (SESSION, CHAT_ID) in bot.waha.seen_chats
 
 
 def test_silent_run_message_stays_in_context(bot: Bot) -> None:
@@ -733,12 +803,12 @@ def test_album_reply_types_before_sending(bot: Bot) -> None:
 def test_burst_assembles_one_turn(bot: Bot) -> None:
     """A same-sender burst becomes ONE agent turn, not one run per line.
 
-    Three rapid messages from one DM sender — the roadmap's leak
-    example — must produce a single agent run whose user turn carries
+    Three rapid messages from one DM sender must produce a single agent
+    run whose user turn carries
     all three bodies joined, not three premature runs. The read
     receipt still fires per message at arrival. Every original message
-    id is preserved exactly once (roadmap requirement 5: quoting,
-    audit and evidence links survive the merge).
+    id is preserved exactly once, so quoting, audit and evidence links
+    survive the merge.
     """
     llm = bot.stack.llm
     # Short windows so the test doesn't wait the production 8s; the
@@ -2440,8 +2510,8 @@ def test_escalate_cooldown(bot: Bot) -> None:
 def test_journal_covers_every_path(bot: Bot) -> None:
     """Album, silence and command decisions all reach the audit journal.
 
-    The roadmap's "journal everything": an album reply (previously
-    inline, unjournaled), a tool-delivered run, and an operator
+    Every decision path: an album reply (previously inline,
+    unjournaled), a tool-delivered run, and an operator
     command's reply each leave their audit row.
     """
     # Album reply via the shared finish path: SecondResponse makes the
@@ -2649,7 +2719,7 @@ def test_same_chat_runs_serialize(bot: Bot) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Semantic identity (docs/plans/semantic-identity.md)
+# Semantic identity
 # ---------------------------------------------------------------------------
 
 
@@ -2866,7 +2936,7 @@ def test_model_written_note_survives_fresh_history(bot: Bot) -> None:
     llm.clear()
     fresh.post(waha_event("NOTE_RECALL"))
     system = str(llm.requests[0]["messages"][0]["content"])
-    assert "# Notebook Notes" in system and text in system
+    assert "## Notebook facts" in system and text in system
     assert "NOTE_WRITE" not in str(llm.requests[0]["messages"][1:])
 
 
@@ -2905,7 +2975,7 @@ def test_operator_policy_applies_to_chat_and_rejects_participant_override(
     )
     bot.post(waha_event("POLICY_CHAT"))
     system = str(llm.requests[0]["messages"][0]["content"])
-    assert "# Operator Notebook" in system and policy in system
+    assert "## Operator policies" in system and policy in system
     assert "require an operator command" in str(llm.requests[1]["messages"])
     assert store.read(SESSION, SESSION_NOTEBOOK_CHAT)[0].text == policy
     assert store.read(SESSION, CHAT_ID, key="equipment-policy") == []

@@ -19,6 +19,7 @@ from wahabot.ai.tools.whatsapp import (
 from wahabot.core.notebook import (
     HOLDS_CHAT_LOCK,
     MAX_READ_NOTES,
+    NOTEBOOK_SNAPSHOT_TOKEN_LIMIT,
     SESSION_NOTEBOOK_CHAT,
     SESSION_POLICY_TOKEN_LIMIT,
     Note,
@@ -28,10 +29,8 @@ from wahabot.core.notebook import (
 from wahabot.core.tokens import text_tokens
 from wahabot.settings import Settings
 
-NOTEBOOK_TOKEN_LIMIT = 1024
+NOTEBOOK_TOKEN_LIMIT = NOTEBOOK_SNAPSHOT_TOKEN_LIMIT
 MAX_NOTE_TOKENS = 512
-NOTEBOOK_HEADING = "# Notebook Notes\n\n"
-OPERATOR_NOTEBOOK_HEADING = "# Operator Notebook\n\n"
 NOTEBOOK_INSTRUCTIONS = (
     "Keep a private durable notebook using `notebook`. Before replying, save "
     "stable facts, preferences, decisions, and verified workarounds worth "
@@ -69,27 +68,6 @@ def bounded_notes(
         if text_tokens(candidate, tokenizer) <= token_budget:
             selected.append(note)
     return selected
-
-
-def notebook_prompt(
-    notes: list[Note],
-    token_budget: int,
-    tokenizer: Callable[[str], Sequence[Any]],
-    *,
-    prompt_prefix: str = "",
-    prompt_budget: int | None = None,
-) -> str:
-    """Render a bounded snapshot with note contents encoded as JSON data."""
-    selected = bounded_notes(notes, token_budget, tokenizer, NOTEBOOK_HEADING)
-    if prompt_budget is not None:
-        selected = bounded_notes(
-            selected, prompt_budget, tokenizer, prompt_prefix + NOTEBOOK_HEADING
-        )
-    if not selected:
-        return ""
-    return NOTEBOOK_HEADING + json.dumps(
-        [asdict(note) for note in selected], ensure_ascii=False
-    )
 
 
 def notebook_chat(chat: str | None, target: RunTarget) -> tuple[str | None, str | None]:

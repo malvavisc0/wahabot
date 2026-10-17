@@ -5,7 +5,7 @@ import datetime
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from llama_index.core.base.llms.types import ChatMessage, ImageBlock
+from llama_index.core.base.llms.types import ChatMessage, ImageBlock, MessageRole
 from llama_index.core.workflow import Context
 from loguru import logger
 
@@ -465,6 +465,8 @@ async def handle_message(
     bot_name: str | None = None,
     bot_mention_regex: str | None = None,
     body_scrubbed: bool = False,
+    addressed: bool = True,
+    gate_first: bool = False,
 ) -> tuple[str, RunTarget]:
     """Run the agent workflow over an incoming message event.
 
@@ -533,17 +535,34 @@ async def handle_message(
     target = RunTarget(session=event.session, chat_id=chat_id, armed=armed, typing=typing)
     token = bind_target(target)
     try:
+        if ctx is not None:
+            await ctx.store.set("triage_result", None)
+            await ctx.store.set("triage_context", None)
+            await ctx.store.set("triage_task", None)
+            if not await agent.start_triage(ctx, target, user_msg, addressed, gate_first):
+                memory = await ctx.store.get("memory", default=None)
+                if memory is not None:
+                    await memory.aput(
+                        ChatMessage(role=MessageRole.USER, content=user_msg)
+                    )
+                    await ctx.store.set("memory", memory)
+                return "", target
         # WAHABOT_RUN_TIMEOUT as a true per-run wall-clock cap. The
         # library's own timeout= must stay None: on the reused per-chat
         # Context it would act as a cumulative alive-time budget that
         # sums every run's latency and permanently kills busy chats at
-        # the cap (docs/incident-2026-10-06-run-timeout.md). wait_for
+        # the cap. wait_for
         # raises TimeoutError, classified by run_timed_out.
         result = await asyncio.wait_for(
             agent.run(input=user_msg, image_blocks=image_blocks, ctx=ctx),
             timeout=(settings.run_timeout or None) if settings is not None else None,
         )
     finally:
+        if ctx is not None:
+            task = await ctx.store.get("triage_task", default=None)
+            if task is not None and not task.done():
+                task.cancel()
+            await ctx.store.set("triage_task", None)
         reset_target(token)
     return final_reply(result), target
 
@@ -643,14 +662,19 @@ def final_reply(result: Any) -> str:
 
     Delivery filters by :func:`chat_visible_text` — the one definition
     storage (``remember``) also applies, so the two ends cannot drift
-    apart. This wrapper only adds the delivery-side log lines, which
-    carry the narration *kind*: a recurring failure mode is only
-    visible in the audit trail if the log says which one fired.
+    apart. The returned text is that visible text: a genuine reply keeps
+    its words and loses any private trailing note the model appended.
+    This wrapper only adds the delivery-side log lines, which carry the
+    narration *kind*: a recurring failure mode is only visible in the
+    audit trail if the log says which one fired.
     """
     message = cast(ChatMessage, result.message)
     content = message.content
     reply = content.strip() if isinstance(content, str) else ""
-    if not reply or chat_visible_text(reply):
+    visible = chat_visible_text(reply)
+    if visible:
+        return visible
+    if not reply:
         return reply
     kind = narration_kind(reply)
     if kind == "silence":

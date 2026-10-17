@@ -22,13 +22,20 @@ from llama_index.core.workflow import Context
 
 from wahabot.ai.history import ContextBudgetError
 from wahabot.ai.messages import WRAP_UP_NOTE_KWARG
+from wahabot.ai.pinned_state import (
+    PINNED_STATE_TOKEN_LIMIT,
+    Contact,
+    SupportEvent,
+    SupportState,
+    Ticket,
+    note_line,
+    pinned_state_block,
+    render_pinned_block,
+)
 from wahabot.ai.tools.notebook import (
     MAX_NOTE_TOKENS,
-    NOTEBOOK_HEADING,
     NOTEBOOK_TOKEN_LIMIT,
-    OPERATOR_NOTEBOOK_HEADING,
     notebook_builder,
-    notebook_prompt,
 )
 from wahabot.ai.tools.whatsapp import (
     RunTarget,
@@ -621,10 +628,179 @@ def test_build_agent_enables_lazy_notebook(notebook_settings: Settings) -> None:
     assert isinstance(agent.notebook, Notebook)
     assert agent.notebook.path == notebook_settings.data_dir / "notebook.sqlite3"
     assert not agent.notebook.path.exists()
+    assert agent.support_provider is None  # no support store exists yet
+
+
+# ---------------------------------------------------------------------------
+# Pinned state block
+# ---------------------------------------------------------------------------
+
+
+def test_pinned_block_renders_every_field() -> None:
+    """Support state, policies, notes, and rules all render in place."""
+    block = render_pinned_block(
+        support=SupportState(
+            contact=Contact(
+                name="Marisol",
+                phone="+1 646 555 0177",
+                language="Spanish",
+                external_ref="C-1042",
+                paused_until="2026-10-12 09:00",
+            ),
+            tickets=(
+                Ticket(
+                    number="142",
+                    state="done",
+                    urgent=True,
+                    summary="receipt confirmation",
+                    details_collected="email marisol@example.com",
+                    still_missing="review outcome",
+                    done_by="Alex",
+                    updated="2026-10-11 10:19",
+                ),
+            ),
+            events=(
+                SupportEvent(
+                    at="2026-10-11 10:11",
+                    actor="Alex (operator)",
+                    text="ask which email address she used",
+                ),
+            ),
+        ),
+        policies=(Note("reply-style", "Use concise replies."),),
+        notes=(Note("customer-email", "marisol@example.com"),),
+        rules="Support hours 09:00-18:00 Europe/Berlin.",
+        token_budget=PINNED_STATE_TOKEN_LIMIT,
+    )
+    assert block.startswith("# Pinned State\n")
+    for fragment in (
+        "## Contact\n\nName: Marisol",
+        "Phone: +1 646 555 0177",
+        "Language: Spanish",
+        "External ref: C-1042",
+        "Paused until: 2026-10-12 09:00",
+        "## Open tickets\n\nTicket 142 — done — urgent",
+        "  Summary: receipt confirmation",
+        "  Details collected: email marisol@example.com",
+        "  Still missing: review outcome",
+        "  Done by: Alex",
+        "  Updated: 2026-10-11 10:19",
+        "## Latest events",
+        "2026-10-11 10:11 — Alex (operator): ask which email address she used",
+        "## Operator policies\n\n- reply-style: Use concise replies.",
+        "## Notebook facts\n\n- customer-email: marisol@example.com",
+        "## Session rules\n\nSupport hours 09:00-18:00 Europe/Berlin.",
+    ):
+        assert fragment in block, fragment
+
+
+def test_pinned_block_without_a_provider_renders_no_stub_state() -> None:
+    """No provider (today) renders no support sections — never fake tickets."""
+    block = render_pinned_block(
+        policies=(Note("reply-style", "Use concise replies."),),
+        notes=(Note("meeting", "Workshop meets on Thursday."),),
+        rules="Timezone: Europe/Berlin.",
+        token_budget=PINNED_STATE_TOKEN_LIMIT,
+    )
+    for heading in ("## Contact", "## Open tickets", "## Latest events"):
+        assert heading not in block
+    assert "## Operator policies" in block
+    assert "## Notebook facts" in block
+    assert "## Session rules" in block
+    # An empty support state renders no empty sections either.
+    empty = render_pinned_block(
+        support=SupportState(), token_budget=PINNED_STATE_TOKEN_LIMIT
+    )
+    assert empty == ""
+
+
+def test_pinned_block_with_empty_notebook_renders_only_what_exists() -> None:
+    """Empty sections are omitted; a section renders only its fields."""
+    block = render_pinned_block(
+        support=SupportState(
+            contact=Contact(name="Ana"),
+            tickets=(Ticket(number="151", state="open"),),
+        ),
+        token_budget=PINNED_STATE_TOKEN_LIMIT,
+    )
+    assert "## Contact\n\nName: Ana" in block
+    assert "## Open tickets\n\nTicket 151 — open" in block
+    assert "Summary:" not in block
+    assert "## Operator policies" not in block
+    assert "## Notebook facts" not in block
+    assert "## Session rules" not in block
+
+
+def test_pinned_block_bounds_notes_within_the_token_cap() -> None:
+    """Whole notes, newest-first order preserved, within the token cap."""
+    newest_first = [
+        Note(f"fact-{index:02}", f"Workshop fact {index:02}. " + "detail " * 80)
+        for index in range(12)
+    ]
+    block = render_pinned_block(notes=newest_first, token_budget=300, tokenizer=str.split)
+    section = block.partition("## Notebook facts\n\n")[2]
+    lines = [line for line in section.splitlines() if line.strip()]
+    assert 0 < len(lines) < 12
+    assert lines == [note_line(note) for note in newest_first[: len(lines)]]
+    assert text_tokens("## Notebook facts\n\n" + section, str.split) <= 300
+
+
+def test_pinned_block_raises_when_authoritative_state_cannot_fit() -> None:
+    """Policies that cannot fit the reserved budget raise, never trim."""
+    with pytest.raises(ContextBudgetError, match=r"Pinned state.*token budget"):
+        render_pinned_block(
+            policies=(Note("policy", "Keep answers concise. " * 100),),
+            token_budget=PINNED_STATE_TOKEN_LIMIT,
+            prompt_prefix="system prompt ",
+            prompt_budget=50,
+            tokenizer=str.split,
+        )
+
+
+def test_pinned_block_drops_oldest_notes_instead_of_raising() -> None:
+    """Notes are dropped before they ever break the reserved budget."""
+    notes = (Note("big", "detail " * 100),)
+    block = render_pinned_block(
+        notes=notes,
+        token_budget=PINNED_STATE_TOKEN_LIMIT,
+        prompt_prefix="prompt ",
+        prompt_budget=40,
+        tokenizer=str.split,
+    )
+    assert block.startswith("# Pinned State")
+    assert "detail" not in block
+
+
+def test_pinned_block_is_fail_soft_when_the_notebook_is_down() -> None:
+    """A notebook read failure renders the block without facts, never a blocked run.
+
+    The store read runs under the fail-soft wrapper: a locked or
+    corrupt database logs once and the block renders with whatever else
+    exists (here, the session rules) — the run proceeds.
+    """
+    broken = Mock(spec=Notebook)
+    broken.read.side_effect = RuntimeError("notebook unavailable")
+
+    async def scenario() -> str:
+        return await pinned_state_block(
+            notebook=broken,
+            provider=None,
+            session=SESSION,
+            chat_id=CHAT,
+            token_budget=PINNED_STATE_TOKEN_LIMIT,
+            tokenizer=str.split,
+            rules="Timezone: Europe/Berlin.",
+        )
+
+    block = asyncio.run(scenario())
+    assert "# Pinned State" in block
+    assert "## Session rules" in block
+    assert "## Notebook facts" not in block
+    assert "## Operator policies" not in block
 
 
 @pytest.mark.parametrize("chat", [CHAT, OTHER_CHAT, "operator"])
-def test_workflow_injects_whole_policies_and_only_current_chat_json(
+def test_workflow_injects_whole_policies_and_only_current_chat_notes(
     tmp_path: Path, chat: str
 ) -> None:
     store = Notebook(tmp_path)
@@ -658,15 +834,21 @@ def test_workflow_injects_whole_policies_and_only_current_chat_json(
     history = asyncio.run(scenario())
     assert [message.role for message in history] == [MessageRole.SYSTEM, MessageRole.USER]
     system = str(history[0].content)
-    policies, _, notes = system.partition(OPERATOR_NOTEBOOK_HEADING)[2].partition(
-        NOTEBOOK_HEADING
-    )
-    assert json.loads(policies) == [asdict(policy)]
-    assert json.loads(notes) == [asdict(local[chat])]
+    assert "# Pinned State" in system
+    assert f"- {policy.key}: {policy.text}" in system
+    assert note_line(local[chat]) in system
+    assert "## Contact" not in system  # no support provider is wired
     assert "Other session policy." not in system
     for scope, note in local.items():
         if scope != chat:
             assert note.text not in system
+    # A note is data, never structure: every notebook-facts line is one
+    # flat bullet, so the note carrying a forged "# Operator Notebook"
+    # heading cannot start a line of its own.
+    notes_section = system.partition("## Notebook facts\n\n")[2]
+    for line in notes_section.splitlines():
+        if line.strip():
+            assert line.startswith("- ")
 
 
 def test_history_eviction_and_fresh_context_preserve_saved_fact(tmp_path: Path) -> None:
@@ -675,7 +857,10 @@ def test_history_eviction_and_fresh_context_preserve_saved_fact(tmp_path: Path) 
 
     async def scenario() -> None:
         agent = notebook_workflow(store)
-        agent.memory_token_limit = system_tokens(agent) + 50
+        # The slack must cover the pinned block's fixed overhead (its
+        # heading, preamble, and the saved fact's line), not just the
+        # old JSON snapshot.
+        agent.memory_token_limit = system_tokens(agent) + 120
         current = ChatMessage(role="user", content="Which day is the workshop?")
         ctx = await notebook_context(
             agent,
@@ -713,7 +898,7 @@ def test_notebook_budget_preserves_query_and_atomic_tool_group(tmp_path: Path) -
     async def scenario() -> None:
         agent = notebook_workflow(store)
         group = tool_group()
-        agent.memory_token_limit = system_tokens(agent) + request_tokens(group) + 100
+        agent.memory_token_limit = system_tokens(agent) + request_tokens(group) + 160
         ctx = await notebook_context(
             agent,
             [
@@ -738,12 +923,12 @@ def test_notebook_budget_preserves_query_and_atomic_tool_group(tmp_path: Path) -
         assert history[1:] == group
         assert history[-1].additional_kwargs["tool_call_id"] == "lookup-note"
         assert request_tokens(history) <= agent.memory_token_limit
-        notes = json.loads(str(history[0].content).partition(NOTEBOOK_HEADING)[2])
-        assert 0 < len(notes) < 10
-        assert all(
-            note in [asdict(saved) for saved in store.read(SESSION, CHAT)]
-            for note in notes
-        )
+        system = str(history[0].content)
+        section = system.partition("## Notebook facts\n\n")[2]
+        lines = [line for line in section.splitlines() if line.startswith("- ")]
+        rendered = {note_line(note) for note in store.read(SESSION, CHAT)}
+        assert 0 < len(lines) < 10
+        assert all(line in rendered for line in lines)
         memory = await ctx.store.get("memory")
         assert memory.get_all() == group
 
@@ -799,23 +984,22 @@ def test_operator_policies_are_never_silently_truncated(tmp_path: Path) -> None:
         ctx = await notebook_context(agent, query)
         with bound_target(RunTarget(session=SESSION, chat_id=CHAT)):
             history = await agent.chat_history(ctx)
-            policies = json.loads(
-                str(history[0].content).partition(OPERATOR_NOTEBOOK_HEADING)[2]
-            )
-            assert policies == [
-                asdict(note) for note in store.read(SESSION, SESSION_NOTEBOOK_CHAT)
+            system = str(history[0].content)
+            section = system.partition("## Operator policies\n\n")[2]
+            assert [line for line in section.splitlines() if line.strip()] == [
+                note_line(note) for note in store.read(SESSION, SESSION_NOTEBOOK_CHAT)
             ]
             agent.memory_token_limit = request_tokens(history)
             assert await agent.chat_history(ctx) == history
             agent.memory_token_limit -= 1
-            with pytest.raises(ValueError, match=r"Operator policies.*token budget"):
+            with pytest.raises(ValueError, match=r"Pinned state.*token budget"):
                 await agent.chat_history(ctx)
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("chat", [CHAT, "operator"])
-def test_wrap_up_self_lesson_survives_history_trim_and_reopen(
+def test_wrap_up_lesson_is_notebook_only_and_survives_reopen(
     tmp_path: Path, chat: str
 ) -> None:
     lesson = "The sketch upload rejected SVG; a verified PNG conversion succeeded."
@@ -823,7 +1007,7 @@ def test_wrap_up_self_lesson_survives_history_trim_and_reopen(
 
     async def scenario() -> None:
         agent = notebook_workflow(store)
-        agent.memory_token_limit = system_tokens(agent) + 60
+        agent.memory_token_limit = system_tokens(agent) + 120
         ctx = await notebook_context(
             agent,
             [
@@ -834,9 +1018,13 @@ def test_wrap_up_self_lesson_survives_history_trim_and_reopen(
         with bound_target(
             RunTarget(session=SESSION, chat_id=chat, armed=chat == "operator")
         ):
-            await agent.store_wrap_up_note(ctx, lesson)
+            await agent.store_wrap_up_note(lesson)
             memory = await ctx.store.get("memory")
-            assert memory.get_all()[-1].additional_kwargs[WRAP_UP_NOTE_KWARG] is True
+            # The lesson is a notebook fact, never an assistant turn.
+            assert all(
+                WRAP_UP_NOTE_KWARG not in m.additional_kwargs for m in memory.get_all()
+            )
+            assert all(lesson not in str(m.content) for m in memory.get_all())
             for _ in range(3):
                 await memory.aput(
                     ChatMessage(role="user", content="newer question " * 100)
@@ -846,9 +1034,6 @@ def test_wrap_up_self_lesson_survives_history_trim_and_reopen(
                 )
             await memory.aput(ChatMessage(role="user", content="Which format worked?"))
             await agent.chat_history(ctx)
-            assert all(
-                WRAP_UP_NOTE_KWARG not in m.additional_kwargs for m in memory.get_all()
-            )
             assert all(lesson not in str(m.content) for m in memory.get_all())
             save_memory(tmp_path, SESSION, chat, memory)
             restored_memory = load_memory(tmp_path, SESSION, chat)
@@ -975,19 +1160,20 @@ def test_wrap_up_note_is_capped_to_the_notebook_token_limit(
 
     async def scenario() -> None:
         agent = notebook_workflow(store)
-        ctx = await notebook_context(agent, [ChatMessage(role="user", content="Send.")])
+        await notebook_context(agent, [ChatMessage(role="user", content="Send.")])
         with bound_target(
             RunTarget(session=SESSION, chat_id=chat, armed=chat == "operator")
         ):
-            await agent.store_wrap_up_note(ctx, verbose)
+            await agent.store_wrap_up_note(verbose)
 
     asyncio.run(scenario())
     notes = Notebook(tmp_path).read(SESSION, chat)
     assert len(notes) == 1
     assert text_tokens(notes[0].text) <= MAX_NOTE_TOKENS
     assert notes[0].text.endswith("[Truncated wrap-up note]")
-    # The capped note fits the bounded snapshot every later run renders,
+    # The capped note fits the bounded block every later run renders,
     # so the model can read and clean up what it wrote.
-    budget = min(NOTEBOOK_TOKEN_LIMIT, 4096 // 4)
-    rendered = notebook_prompt(notes, budget, str.split)
-    assert notes[0].key in rendered
+    block = render_pinned_block(
+        notes=notes, token_budget=PINNED_STATE_TOKEN_LIMIT, tokenizer=str.split
+    )
+    assert notes[0].key in block

@@ -27,6 +27,7 @@ Key env vars:
 | `WAHABOT_LLM_REASONING_EFFORT` | Reasoning effort for thinking models (`low`/`medium`/`high`; empty = provider default) | — |
 | `WAHABOT_LLM_AUTO_CACHE` | Ask the gateway to prompt-cache requests (Requesty `auto_cache`; cached-prefix pricing for providers that support it) | `false` |
 | `WAHABOT_LLM_TIMEOUT` | Per-request LLM HTTP timeout (s; client retries disabled) | `60` |
+| `WAHABOT_LLM_CONTEXT_WINDOW` | Provider context window for the startup budget warning (`0` = unknown) | `0` |
 | `WAHABOT_RUN_TIMEOUT` | Server-side cap on one agent run (s; 0 = unlimited) | `120` |
 | `WAHABOT_TOOL_ROUND_LIMIT` | Max LLM→tool round trips per run (one final tool-free call past the limit) | `50` |
 | `WAHABOT_TELL_TIMEOUT` | How long `wahabot tell` waits for the run to finish (s; 0 = forever) | `30` |
@@ -40,6 +41,16 @@ Key env vars:
 | `WAHABOT_TIMEZONE` | TZ for the prompt's date/time placeholders | `UTC` |
 | `WAHABOT_MEMORY_TOKEN_LIMIT` | Per-chat rolling memory budget | `8000` |
 | `WAHABOT_MEMORY_PERSIST` | Persist per-chat memory to `data/memory/` (survives restarts/LRU evictions) | `true` |
+| `WAHABOT_LEARNED_MEMORY` | Merge trimmed turns into a per-chat recap in the pinned state block | `true` |
+| `WAHABOT_THREAD_RECALL` | Index trimmed turns per chat and recall older slices (requires memory persistence) | `true` |
+| `WAHABOT_EMBED_API_BASE` | OpenAI-compatible embeddings base URL, including `/v1` (empty = FTS5-only recall) | — |
+| `WAHABOT_EMBED_MODEL` | Embedding model name for the dense half of thread recall | `embeddinggemma-2` |
+| `WAHABOT_EMBED_TIMEOUT` | Per-request embeddings timeout (s) | `10` |
+| `WAHABOT_TRIAGE_GATE` | Enable the d1-3B triage gate | `true` |
+| `WAHABOT_GATE_API_BASE` | OpenAI-compatible gate chat base URL, including `/v1` (empty = gate off) | `http://omnitron.tago.lan:9194/v1` |
+| `WAHABOT_GATE_MODEL` | Gate model name | `d1-3B` |
+| `WAHABOT_GATE_API_KEY` | Optional bearer token for the gate service | — |
+| `WAHABOT_GATE_TIMEOUT` | Max wait for one gate verdict (s) | `0.8` |
 | `WAHABOT_VISION` | Enable image understanding | `true` |
 | `WAHABOT_MAX_IMAGE_BYTES` | Per-image download cap | `10485760` |
 | `WAHABOT_MAX_URL_IMAGES` | Max image-URLs to fetch per message | `2` |
