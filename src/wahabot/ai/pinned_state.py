@@ -4,39 +4,34 @@ The prompt's memory splits into two kinds of information with opposite
 rules: *pinned state* — authoritative, assembled by code, never
 retrieved — and *recall* — best-effort, a lead, never evidence. This
 module renders the pinned side: a plain-text block the runtime
-assembles at the start of every turn, in the ticket-shaped field
-layout — contact, open tickets (state, summary, details collected,
-what is still missing), latest events, session rules — restructured
-from what the notebook already injected (notebook facts, operator
-policies).
+assembles at the start of every turn, restructured from what the
+notebook already injected (notebook facts, operator policies) plus the
+session rules.
 
 The block is code-injected into the system message by
 ``FunctionCallingAgentWorkflow.chat_history``, so history trimming can
 never evict it — the same guarantee a priority-0 static memory block
 gives, without churning the ``ChatMemoryBuffer`` flow.
 
-The support-store fields (contact, tickets, events) come from an
-optional :class:`SupportStateProvider`: ``None`` until the support
-store exists, and never stub data. Every source is fail-soft — a
-notebook or provider that is down renders the block without that
-section, never a blocked run. Notebook facts are the bounded part:
-whole notes, relevance order (the notebook's newest-first read order)
-preserved, selected within a token cap the way ``bounded_notes``
-selects for the notebook tool. Policies, support fields, and rules are
-authoritative and render in full — bounded at their sources — with
-today's budget split intact: an authoritative part that cannot fit the
-run's reserved budget raises :class:`ContextBudgetError`, notebook
-facts are dropped oldest-first instead.
+Every source is fail-soft — a notebook that is down renders the block
+without that section, never a blocked run. Notebook facts are the
+bounded part: whole notes, relevance order (the notebook's
+newest-first read order) preserved, selected within a token cap the
+way ``bounded_notes`` selects for the notebook tool. Policies and
+rules are authoritative and render in full — bounded at their sources
+— with today's budget split intact: an authoritative part that cannot
+fit the run's reserved budget raises :class:`ContextBudgetError`,
+notebook facts are dropped oldest-first instead.
 """
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 from loguru import logger
 
 from wahabot.ai.history import ContextBudgetError
 from wahabot.core.notebook import (
+    KIND_RULE,
     NOTEBOOK_SNAPSHOT_TOKEN_LIMIT,
     SESSION_NOTEBOOK_CHAT,
     Note,
@@ -52,15 +47,13 @@ PINNED_STATE_TOKEN_LIMIT = NOTEBOOK_SNAPSHOT_TOKEN_LIMIT
 
 PINNED_STATE_HEADING = "# Pinned State"
 PINNED_PREAMBLE = (
-    "Runtime-assembled facts for this conversation, exact as of this "
-    "turn. A reply's facts (names, numbers, states, promises, "
-    "deadlines) come from this block, never from guesswork, and "
-    "nothing listed here may be asked for again."
+    "Runtime-assembled for this turn; treat it as fact, not memory. "
+    "`Session rules` and `Chat rules` are exact and obeyed; "
+    "`Operator policies` and `Notebook facts` are the operator's and your "
+    "own notes; the recap and recalled slices are leads, never evidence."
 )
-CONTACT_HEADING = "## Contact\n\n"
-TICKETS_HEADING = "## Open tickets\n\n"
-EVENTS_HEADING = "## Latest events\n\n"
 POLICIES_HEADING = "## Operator policies\n\n"
+CHAT_RULES_HEADING = "## Chat rules\n\n"
 RECAP_HEADING = "## Conversation recap\n\n"
 NOTES_HEADING = "## Notebook facts\n\n"
 RULES_HEADING = "## Session rules\n\n"
@@ -71,75 +64,10 @@ RECALL_PREAMBLE = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class Contact:
-    """The customer record: the customer details."""
-
-    name: str = ""
-    phone: str = ""
-    language: str = ""
-    external_ref: str = ""
-    paused_until: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class Ticket:
-    """One open or recent ticket in the ticket field shape."""
-
-    number: str
-    state: str
-    urgent: bool = False
-    summary: str = ""
-    details_collected: str = ""
-    still_missing: str = ""
-    done_by: str = ""
-    updated: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class SupportEvent:
-    """One internal event: what happened, by whom, when.
-
-    The provider lists events chronologically (newest last), so the
-    latest decision — the operator's
-    last instruction — sits closest to the sections that follow.
-    """
-
-    at: str
-    actor: str
-    text: str
-
-
-@dataclass(frozen=True, slots=True)
-class SupportState:
-    """The support store's view of one chat: contact, tickets, events."""
-
-    contact: Contact | None = None
-    tickets: tuple[Ticket, ...] = ()
-    events: tuple[SupportEvent, ...] = ()
-
-
-class SupportStateProvider(Protocol):
-    """Reads ticket-shaped support state for one chat from its store.
-
-    The support store implements this when it exists; until then no
-    provider is wired and the block
-    renders without the support sections. An implementation bounds what
-    it returns (a handful of open tickets and latest events) and
-    finishes its SQLite work before returning — the assembler runs it
-    under ``notebook_operation`` so a canceled run waits for it
-    instead of dropping it mid-read.
-    """
-
-    def support_state(self, session: str, chat_id: str) -> SupportState:
-        """The ticket-shaped state for one chat."""
-        ...
-
-
 def render_pinned_block(
     *,
-    support: SupportState | None = None,
     policies: Sequence[Note] = (),
+    chat_rules: Sequence[Note] = (),
     notes: Sequence[Note] = (),
     required_notes: Sequence[Note] = (),
     rules: str = "",
@@ -153,16 +81,16 @@ def render_pinned_block(
     """Render the pinned state block: plain text, deterministic, bounded.
 
     *token_budget* caps the notebook facts (whole notes, order
-    preserved); the authoritative sections (support fields, policies,
-    rules) render in full. When *prompt_budget* is given, the block
-    must leave the run's reserved room — the exact split the old
-    notebook injection had: an authoritative part that cannot fit
-    raises :class:`ContextBudgetError` (permanent for the triggering
-    message), while notebook facts are dropped oldest-first instead of
-    ever raising. The *recap* (Tier 1, ``core/learned.py``) sits in
-    between: it renders whole and is *dropped* when it cannot fit —
-    a summary that crowds the reserved room is worth less than the
-    room, and its content is also the newest thing in the FIFO.
+    preserved); the authoritative sections (policies, chat rules, rules)
+    render in full. When *prompt_budget* is given, the block must leave the run's
+    reserved room — the exact split the old notebook injection had: an
+    authoritative part that cannot fit raises
+    :class:`ContextBudgetError` (permanent for the triggering message),
+    while notebook facts are dropped oldest-first instead of ever
+    raising. The *recap* (Tier 1, ``core/learned.py``) sits in between:
+    it renders whole and is *dropped* when it cannot fit — a summary
+    that crowds the reserved room is worth less than the room, and its
+    content is also the newest thing in the FIFO.
 
     *recall* renders last as flattened lead bullets under
     ``## Recalled from earlier in this thread``. It is never authoritative
@@ -174,8 +102,8 @@ def render_pinned_block(
     rides the prompt.
     """
     notes = merge_notes(required_notes, notes)
-    sections = authoritative_sections(support, policies, rules, recap)
-    base = authoritative_sections(support, policies, rules, "")
+    sections = authoritative_sections(policies, chat_rules, rules, recap)
+    base = authoritative_sections(policies, chat_rules, rules, "")
     recall_block = recall_section(recall)
     if is_empty(sections, notes, recall_block):
         return ""
@@ -319,7 +247,6 @@ def over_budget(
 async def pinned_state_block(
     *,
     notebook: Notebook | None,
-    provider: SupportStateProvider | None,
     session: str,
     chat_id: str,
     token_budget: int,
@@ -335,15 +262,13 @@ async def pinned_state_block(
 
     Reads the same scopes the old notebook injection read — operator
     policies from the session notebook, chat facts from the current
-    chat — plus the optional support provider. Every read is
-    fail-soft: a store that is down logs once and renders the block
-    without that section, never a blocked run. Cancellation still
-    propagates: reads run under ``notebook_operation``.
+    chat. Every read is fail-soft: a store that is down logs once and
+    renders the block without that section, never a blocked run.
+    Cancellation still propagates: reads run under
+    ``notebook_operation``.
     """
-    support: SupportState | None = None
-    if provider is not None:
-        support = await _read(provider.support_state, "support state", session, chat_id)
     policies: list[Note] = []
+    chat_rules: list[Note] = []
     notes: list[Note] = []
     if notebook is not None:
         policies = (
@@ -352,10 +277,18 @@ async def pinned_state_block(
             )
             or []
         )
-        notes = await _read(notebook.read, "notebook facts", session, chat_id) or []
+        stored = await _read(notebook.read, "notebook facts", session, chat_id) or []
+        # A chat's `rule` notes are authoritative for that chat; facts and
+        # lessons are leads. Rules are read under their own window so a
+        # burst of facts can never push a rule out of the block.
+        chat_rules = (
+            await _read(notebook.read, "chat rules", session, chat_id, kind=KIND_RULE)
+            or []
+        )
+        notes = [note for note in stored if note.kind != KIND_RULE]
     return render_pinned_block(
-        support=support,
         policies=policies,
+        chat_rules=chat_rules,
         notes=notes,
         rules=rules,
         recap=recap,
@@ -368,14 +301,16 @@ async def pinned_state_block(
     )
 
 
-async def _read[T](operation: Callable[..., T], what: str, *args: Any) -> T | None:
+async def _read[T](
+    operation: Callable[..., T], what: str, *args: Any, **kwargs: Any
+) -> T | None:
     """One fail-soft store read; None when the store is unavailable.
 
     ``CancelledError`` is not an ``Exception`` and still propagates, so
     a canceled run is never misread as an outage.
     """
     try:
-        return await notebook_operation(operation, *args)
+        return await notebook_operation(operation, *args, **kwargs)
     except Exception:
         logger.warning(
             "Pinned state: {what} unavailable; continuing without it", what=what
@@ -384,35 +319,34 @@ async def _read[T](operation: Callable[..., T], what: str, *args: Any) -> T | No
 
 
 def authoritative_sections(
-    support: SupportState | None, policies: Sequence[Note], rules: str, recap: str
+    policies: Sequence[Note], chat_rules: Sequence[Note], rules: str, recap: str
 ) -> list[str]:
     """The block's authoritative sections, empty ones omitted.
 
-    The recap (Tier 1) renders between the policies and the rules: the
-    conversation's flow after the durable policies, before the session
-    rules that gate behavior. Its lines are flattened to bullets so a
-    summary line can never forge the block's section headings.
+    Precedence the prompt states: session rules > operator policies >
+    chat rules > facts. Policies and the chat's rules render beside
+    each other, before the recap (the conversation's flow) and the
+    session rules that gate behavior. Every line is flattened to a
+    bullet so a note or summary line can never forge a section heading.
     """
-    sections: list[str] = []
-    if support is not None:
-        sections.extend(
-            section
-            for section in (
-                contact_section(support.contact),
-                tickets_section(support.tickets),
-                events_section(support.events),
-            )
-            if section
-        )
-    if policies:
-        sections.append(
-            POLICIES_HEADING + "\n".join(note_line(note) for note in policies)
-        )
+    sections = authority_notes(policies, chat_rules)
     recap_block = recap_section(recap)
     if recap_block:
         sections.append(recap_block)
     if rules.strip():
         sections.append(RULES_HEADING + rules.strip())
+    return sections
+
+
+def authority_notes(policies: Sequence[Note], chat_rules: Sequence[Note]) -> list[str]:
+    """The operator-policy and chat-rule sections, empty ones omitted."""
+    sections: list[str] = []
+    for heading, notes in (
+        (POLICIES_HEADING, policies),
+        (CHAT_RULES_HEADING, chat_rules),
+    ):
+        if notes:
+            sections.append(heading + "\n".join(note_line(note) for note in notes))
     return sections
 
 
@@ -434,65 +368,6 @@ def recall_section(slices: Sequence[str]) -> str:
     if not lines:
         return ""
     return RECALL_HEADING + RECALL_PREAMBLE + "\n".join(lines)
-
-
-def contact_section(contact: Contact | None) -> str:
-    """The contact fields as a section, or "" when empty."""
-    if contact is None:
-        return ""
-    lines = [
-        f"{label}: {value.strip()}"
-        for label, value in (
-            ("Name", contact.name),
-            ("Phone", contact.phone),
-            ("Language", contact.language),
-            ("External ref", contact.external_ref),
-            ("Paused until", contact.paused_until),
-        )
-        if value.strip()
-    ]
-    if not lines:
-        return ""
-    return CONTACT_HEADING + "\n".join(lines)
-
-
-def tickets_section(tickets: Sequence[Ticket]) -> str:
-    """Open and recent tickets as a section, or "" when empty."""
-    if not tickets:
-        return ""
-    return TICKETS_HEADING + "\n\n".join(ticket_block(ticket) for ticket in tickets)
-
-
-def ticket_block(ticket: Ticket) -> str:
-    """One ticket as a bullet block."""
-    head = f"Ticket {ticket.number.strip()} — {ticket.state.strip()}"
-    if ticket.urgent:
-        head += " — urgent"
-    lines = [head]
-    for label, value in (
-        ("Summary", ticket.summary),
-        ("Details collected", ticket.details_collected),
-        ("Still missing", ticket.still_missing),
-        ("Done by", ticket.done_by),
-        ("Updated", ticket.updated),
-    ):
-        if value.strip():
-            lines.append(f"  {label}: {value.strip()}")
-    return "\n".join(lines)
-
-
-def events_section(events: Sequence[SupportEvent]) -> str:
-    """Latest support events as a section, or "" when empty."""
-    if not events:
-        return ""
-    lines = [
-        f"{event.at} — {event.actor}: {event.text.strip()}"
-        for event in events
-        if event.text.strip()
-    ]
-    if not lines:
-        return ""
-    return EVENTS_HEADING + "\n".join(lines)
 
 
 def note_line(note: Note) -> str:

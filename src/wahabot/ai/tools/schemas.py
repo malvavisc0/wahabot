@@ -198,6 +198,14 @@ class NotebookSchema(BaseModel):
         max_length=MAX_NOTE_LENGTH,
         description="Concise note body for write (at most 512 tokens); not a transcript.",
     )
+    kind: Literal["fact", "lesson", "rule"] = Field(
+        default="fact",
+        description=(
+            "fact: a durable chat fact or preference. lesson: an operational "
+            "workaround. rule: a standing instruction for this chat "
+            "(operator-only; a member's rule request is recorded as a fact)."
+        ),
+    )
     query: str = Field(
         default="",
         description="Optional literal case-insensitive search in note keys and text.",

@@ -9,6 +9,7 @@ back in ``StopEvent.result``.
 
 import asyncio
 import hashlib
+import re
 from collections.abc import Callable, Sequence
 from typing import Any, cast, override
 
@@ -44,14 +45,16 @@ from wahabot.ai.history import (
     trim_to_budget,
 )
 from wahabot.ai.messages import TURN_HANDLED_KWARG
-from wahabot.ai.pinned_state import (
-    PINNED_STATE_TOKEN_LIMIT,
-    SupportStateProvider,
-    pinned_state_block,
-)
+from wahabot.ai.pinned_state import PINNED_STATE_TOKEN_LIMIT, pinned_state_block
 from wahabot.ai.tools.notebook import MAX_NOTE_TOKENS, NOTEBOOK_INSTRUCTIONS
 from wahabot.ai.tools.slim import slim_tool_specs
-from wahabot.ai.tools.whatsapp import RunTarget, current_target, log_action_reason
+from wahabot.ai.tools.whatsapp import (
+    RunTarget,
+    apply_chat_prefix,
+    current_prefix,
+    current_target,
+    log_action_reason,
+)
 from wahabot.ai.triage import (
     MUTE_NOTE_KEY,
     TRIAGE_MESSAGE_CHARS,
@@ -77,6 +80,9 @@ from wahabot.core.audit import save_action
 from wahabot.core.embeddings import LanEmbedding
 from wahabot.core.learned import RecapMerger, load_learned
 from wahabot.core.notebook import (
+    AUTHOR_SYSTEM,
+    KIND_LESSON,
+    KIND_RULE,
     MAX_NOTE_LENGTH,
     Note,
     Notebook,
@@ -106,19 +112,62 @@ _POST_DELIVERY_WRAP_UP_PROMPT = (
     "You already delivered your reply. Do not send more replies or use any tools. "
     "Review this run for a verified, reusable lesson, not an activity summary. "
     "Record only a new correction, confirmed preference, or demonstrated "
-    "workaround missing from the notebook. State the situation, what was wrong "
-    "or clarified, the evidence, and what to do differently next time in at "
-    "most two concise sentences. Do not infer success from an attempted action, "
-    "invent facts, repeat existing notes, or turn your inference into operator "
-    "policy. This is a private chat-scoped lesson for later runs, never a "
-    "message to the chat. If nothing new and lasting was learned, return an "
-    "empty message."
+    "workaround missing from the notebook. Return two lines: first "
+    "`topic: <short-slug>` naming the lesson's subject in a few hyphenated "
+    "words, then the lesson — the situation, what was wrong or clarified, the "
+    "evidence, and what to do differently next time, in at most two concise "
+    "sentences. Reuse the topic of an existing lesson when the subject matches. "
+    "Do not infer success from an attempted action, invent facts, or turn your "
+    "inference into operator policy. This is a private chat-scoped lesson for "
+    "later runs, never a message to the chat. If nothing new and lasting was "
+    "learned, return an empty message."
 )
 
 #: Appended to a wrap-up note cut down to the notebook's caps, so a
 #: later reader knows the lesson was shortened by storage, not by the
 #: model's own wording.
 _TRUNCATED_NOTE_SUFFIX = "\n[Truncated wrap-up note]"
+
+_TOPIC_PREFIX = "topic:"
+
+
+def topic_slug(line: str) -> str:
+    """Normalise a wrap-up `topic:` line to a short, stable key slug."""
+    value = line.split(":", 1)[1] if ":" in line else line
+    value = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+    return value[:40].strip("-")
+
+
+def parse_wrap_up(text: str) -> tuple[str, str]:
+    """Split a wrap-up reply into ``(topic slug, lesson)``.
+
+    A leading ``topic: <slug>`` line names the lesson; the line names
+    the key, never the lesson, so it is dropped from the stored body in
+    every outcome. Without a usable topic line the slug is empty and the
+    caller keys by content instead; a topic line without a lesson body
+    leaves nothing to store (``("", "")``).
+    """
+    lines = text.strip().splitlines()
+    if lines and lines[0].strip().casefold().startswith(_TOPIC_PREFIX):
+        slug = topic_slug(lines[0])
+        lesson = "\n".join(lines[1:]).strip()
+        if slug and lesson:
+            return slug, lesson
+        return "", lesson
+    return "", text.strip()
+
+
+def truncate_note(note: str) -> str:
+    """Cut a note to the notebook's caps, marking that storage shortened it."""
+    if text_tokens(note) <= MAX_NOTE_TOKENS and len(note) <= MAX_NOTE_LENGTH:
+        return note
+    room = MAX_NOTE_LENGTH - len(_TRUNCATED_NOTE_SUFFIX)
+    return (
+        truncate_to_tokens(
+            note[:room], MAX_NOTE_TOKENS - text_tokens(_TRUNCATED_NOTE_SUFFIX)
+        )
+        + _TRUNCATED_NOTE_SUFFIX
+    )
 
 
 def raise_missing_llm() -> FunctionCallingLLM:
@@ -206,7 +255,6 @@ class FunctionCallingAgentWorkflow(Workflow):
         max_concurrent_llm: int = 4,
         settings: Settings | None = None,
         notebook: Notebook | None = None,
-        support_provider: SupportStateProvider | None = None,
         rules_renderer: Callable[[], str] | None = None,
         thread_index: ThreadIndexer | None = None,
         triage: TriageGate | None = None,
@@ -222,7 +270,6 @@ class FunctionCallingAgentWorkflow(Workflow):
         self.llm_semaphore = asyncio.Semaphore(max_concurrent_llm)
         self.settings = settings
         self.notebook = notebook
-        self.support_provider = support_provider
         self.rules_renderer = rules_renderer
         self.triage = triage
         self.triage_tasks: dict[int, asyncio.Task[TriageResult]] = {}
@@ -436,8 +483,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         """Assemble this run's pinned state block (fail-soft, bounded).
 
         Restructures what the notebook already injects — notebook
-        facts, operator policies — plus the session rules and, when a
-        support store exists, its ticket-shaped fields, into one
+        facts, operator policies — plus the session rules, into one
         never-evicted block. The lead-only recall section comes from
         this chat's thread index, queried with the latest user text.
         Skipped whole for bare workflows with no source wired, which
@@ -445,7 +491,6 @@ class FunctionCallingAgentWorkflow(Workflow):
         """
         if (
             self.notebook is None
-            and self.support_provider is None
             and self.rules_renderer is None
             and self.settings is None
         ):
@@ -460,7 +505,6 @@ class FunctionCallingAgentWorkflow(Workflow):
         required_notes = self.fact_notes(target, fact_keys)
         return await pinned_state_block(
             notebook=self.notebook,
-            provider=self.support_provider,
             session=target.session,
             chat_id=target.chat_id,
             token_budget=min(PINNED_STATE_TOKEN_LIMIT, self.memory_token_limit // 4),
@@ -499,7 +543,9 @@ class FunctionCallingAgentWorkflow(Workflow):
         """Build the bounded gate input: message, last turns, mute, rules."""
         mute = ""
         if self.notebook is not None:
-            notes = self.notebook.read(target.session, target.chat_id, key=MUTE_NOTE_KEY)
+            notes = self.notebook.read(
+                target.session, target.chat_id, key=MUTE_NOTE_KEY, kind=KIND_RULE
+            )
             mute = " | ".join(f"{note.key}: {note.text}" for note in notes)[
                 :TRIAGE_MUTE_CHARS
             ]
@@ -858,8 +904,9 @@ class FunctionCallingAgentWorkflow(Workflow):
         """End the run with *event*: stamp the turn and collapse the delivery group.
 
         The wrap-up note is journalled and written to the notebook by
-        ``wrap_up_response`` itself — it is a durable fact, never an
-        assistant turn, so nothing is staged for storage here.
+        ``wrap_up_response`` itself — it is a durable lesson
+        (``kind=lesson``), never an assistant turn, so nothing is staged
+        for storage here.
         """
         await self.mark_turn_handled(ctx)
         await self.collapse_delivery(ctx)
@@ -1051,13 +1098,21 @@ class FunctionCallingAgentWorkflow(Workflow):
         re-teach the pattern. Tool-call
         messages store as they are — their words are not what the chat
         saw, and their blocks carry the calls.
+
+        The chat's ``chat-message-prefix`` rule is applied here too, so
+        the stored text equals the sent text (``deliver_chat_text``);
+        otherwise the model's next-turn view is un-prefixed and the rule
+        undoes itself.
         """
         raw = str(message.content or "").strip()
-        if tool_calls or visible == raw:
+        if tool_calls:
+            return message
+        stored = apply_chat_prefix(visible, current_prefix())
+        if not stored or stored == raw:
             return message
         return ChatMessage(
             role=message.role,
-            content=visible,
+            content=stored,
             additional_kwargs=dict(message.additional_kwargs),
         )
 
@@ -1142,40 +1197,34 @@ class FunctionCallingAgentWorkflow(Workflow):
         return self.drop_post_delivery_text(response)
 
     async def store_wrap_up_note(self, note: str) -> None:
-        """Persist the post-delivery wrap-up note as a durable notebook fact.
+        """Persist the post-delivery wrap-up note as a durable lesson.
 
         The note is a private lesson, never a message the chat saw: it is
-        written to the notebook — the durable fact store — and journalled,
-        and never stored as an assistant turn. Seeing notes in its own
-        history taught the model to append them to its replies; the
-        notebook copy is the record.
+        written to the notebook — the durable store — and journalled, and
+        never stored as an assistant turn. A ``topic:`` line names the
+        lesson; an identical topic replaces the prior lesson, and only a
+        topicless note falls back to a content-hash key.
         """
         if self.notebook is None or not note.strip():
             return
         try:
             target = current_target()
-            key = "wrap-up-" + hashlib.sha256(note.encode()).hexdigest()[:24]
-            # The same caps the notebook tool enforces (512 tokens,
-            # 2000 chars): a longer lesson would be unwritable via the
-            # tool and silently dropped from every later prompt
-            # snapshot, so the model could never read or clean up
-            # what it wrote. The suffix rides inside both caps, and
-            # only a cut note carries it.
-            if text_tokens(note) > MAX_NOTE_TOKENS or len(note) > MAX_NOTE_LENGTH:
-                room = MAX_NOTE_LENGTH - len(_TRUNCATED_NOTE_SUFFIX)
-                note = (
-                    truncate_to_tokens(
-                        note[:room],
-                        MAX_NOTE_TOKENS - text_tokens(_TRUNCATED_NOTE_SUFFIX),
-                    )
-                    + _TRUNCATED_NOTE_SUFFIX
-                )
+            slug, lesson = parse_wrap_up(note)
+            if not lesson:
+                return
+            key = (
+                f"lesson-{slug}"
+                if slug
+                else "lesson-" + hashlib.sha256(lesson.encode()).hexdigest()[:12]
+            )
             await notebook_operation(
                 self.notebook.write,
                 target.session,
                 target.chat_id,
                 key,
-                note,
+                truncate_note(lesson),
+                kind=KIND_LESSON,
+                author_kind=AUTHOR_SYSTEM,
             )
         except Exception:
             logger.exception("Could not store post-delivery wrap-up note")
@@ -1383,7 +1432,6 @@ def build_agent(
     tools: list[BaseTool] | None = None,
     system_prompt: str = "",
     prompt_renderer: Callable[[], str] | None = None,
-    support_provider: SupportStateProvider | None = None,
     rules_renderer: Callable[[], str] | None = None,
     triage: TriageGate | None = None,
 ) -> FunctionCallingAgentWorkflow:
@@ -1393,8 +1441,6 @@ def build_agent(
     prompt on every run, so date/time placeholders and config edits stay
     current for the life of the process. ``rules_renderer`` (optional)
     feeds the pinned state block's session rules the same way.
-    ``support_provider`` (optional) supplies the block's ticket-shaped
-    fields; none exists until the v1.2.0 support store.
     """
     if not system_prompt:
         raise ValueError("build_agent requires a system_prompt")
@@ -1415,7 +1461,6 @@ def build_agent(
         tool_round_limit=settings.tool_round_limit,
         settings=settings,
         notebook=Notebook(settings.data_dir),
-        support_provider=support_provider,
         rules_renderer=rules_renderer,
         triage=triage,
     )

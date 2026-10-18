@@ -218,6 +218,7 @@ async def finish_agent_reply(
     reply: str,
     delivered: bool,
     settings: Settings,
+    prefix: str = "",
     emoji_reaction: bool = False,
 ) -> None:
     """Deliver a finished run's reply text, or record why not.
@@ -296,6 +297,7 @@ async def finish_agent_reply(
                 settings.typing_presence_min_s,
                 settings.typing_presence_max_s,
             ),
+            prefix=prefix,
         )
     except Exception as exc:
         journal_send_failure(settings, session, chat_id, "send_text", message_id, exc)
@@ -866,6 +868,7 @@ def register_agent_handler(
             reply,
             delivered,
             settings,
+            prefix=target.prefix,
             emoji_reaction=not delivered,
         )
         # Post-reply memory jobs outside the chat lock: the recap merge
@@ -1095,6 +1098,7 @@ def register_agent_handler(
             reply,
             bool(target.sent or target.reacted),
             settings,
+            prefix=target.prefix,
             emoji_reaction=True,
         )
         # Post-reply memory jobs outside the chat lock: the recap merge
@@ -1400,6 +1404,7 @@ def register_agent_handler(
                 reply,
                 delivered,
                 settings,
+                prefix=target.prefix,
                 emoji_reaction=True,
             )
             # Post-reply memory jobs outside the chat lock: the recap

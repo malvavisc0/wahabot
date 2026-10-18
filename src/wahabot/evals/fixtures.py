@@ -1,16 +1,11 @@
 """Production-shaped evaluation fixtures and exported-trace loading.
 
-The DM support threads mirror the pinned state block
-(``wahabot.ai.pinned_state``): each ``pinned_state`` fact's value is a
-fragment the block's renderer actually emits — the ticket-shaped field
-layout (contact, open tickets with state/summary/details/missing,
-latest events, session rules) plus the notebook facts the block
-carries — and the threads carry three support assertions: the
-pinned state is used exactly, a promise made 30 turns back is honored,
-and information already given is not asked for again. Debate-group
-canaries carry the leak/injection markers a reply must not contain,
-and the adversarial DM cases carry the triage labels the gate is
-calibrated against.
+The DM support threads carry the notebook facts and session rules the
+pinned state block renders, and three assertions: the pinned state is
+used exactly, a promise made 30 turns back is honored, and information
+already given is not asked for again. Debate-group canaries carry the
+leak/injection markers a reply must not contain, and the adversarial
+DM cases carry the triage labels the gate is calibrated against.
 
 Identities are fictional (reserved 555 numbers, example.com addresses); no
 real chat data is committed.
@@ -21,7 +16,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from wahabot.ai.pinned_state import Contact, SupportEvent, SupportState, Ticket
 from wahabot.core.notebook import Note
 
 
@@ -48,17 +42,16 @@ class SupportThread:
     ``reply`` is the recorded reply under test. The built-in fixtures carry
     the naive baseline reply — the gap phases 2-5 close — so the default run
     reports the baseline; tests inject a corrected reply to prove the checks
-    accept it. ``state``, ``notes``, and ``rules`` are the renderable pinned
-    state: the eval tests render them through ``render_pinned_block`` and
-    assert every declared ``pinned_state`` fact appears, so the fixtures can
-    never drift from the engine's block.
+    accept it. ``notes`` and ``rules`` are the renderable pinned state: the
+    eval tests render them through ``render_pinned_block`` and assert every
+    declared ``pinned_state`` fact appears, so the fixtures can never drift
+    from the engine's block.
     """
 
     fixture_id: str
     title: str
     reply: str
     turns: tuple[Turn, ...] = ()
-    state: SupportState | None = None
     notes: tuple[Note, ...] = ()
     rules: str = ""
     pinned_state: tuple[PinnedFact, ...] = ()
@@ -132,51 +125,18 @@ def _promise_thread() -> SupportThread:
     tail = (Turn("user", "¿me enviaste ya el PDF de la solicitud?"),)
     turns = (*head, *_filler_turns(12), *tail)
     assert len(turns) == 30
-    state = SupportState(
-        contact=Contact(name="Ana", phone="+1 555 0100", language="Spanish"),
-        tickets=(
-            Ticket(
-                number="142",
-                state="open",
-                summary="no confirmation for a request sent yesterday",
-                details_collected="sent around 18:00; email ana@example.com",
-                still_missing="review outcome",
-            ),
-        ),
-        events=(
-            SupportEvent(
-                at="2026-10-16 18:02",
-                actor="kai",
-                text="promised the PDF tomorrow; operator review pending",
-            ),
-        ),
-    )
     return SupportThread(
         fixture_id="support_promise_30_turns",
         title="A promise made 30 turns back is honored on the last turn",
         reply="¿Puedes confirmarme otra vez tu correo electrónico? Quiero revisar.",
         turns=turns,
-        state=state,
         notes=(Note("customer-email", "ana@example.com"),),
         rules="Support hours 09:00-18:00 Europe/Berlin",
         pinned_state=(
-            PinnedFact("contact", "Name: Ana\nPhone: +1 555 0100\nLanguage: Spanish"),
-            PinnedFact(
-                "ticket",
-                "\n".join(
-                    (
-                        "Ticket 142 — open",
-                        "  Summary: no confirmation for a request sent yesterday",
-                        "  Details collected: sent around 18:00; email ana@example.com",
-                        "  Still missing: review outcome",
-                    )
-                ),
-            ),
-            PinnedFact("event", "promised the PDF tomorrow; operator review pending"),
             PinnedFact("note", "customer-email: ana@example.com"),
             PinnedFact("rules", "Support hours 09:00-18:00 Europe/Berlin"),
         ),
-        pinned_state_used=("ana@example.com", "Ticket 142"),
+        pinned_state_used=("ana@example.com",),
         promise_honored=("PDF",),
         must_not_reask=("correo", "email"),
         forbidden=("Ticket 999",),
@@ -185,17 +145,6 @@ def _promise_thread() -> SupportThread:
 
 def _waiting_thread() -> SupportThread:
     """Information already given must not be asked for again."""
-    state = SupportState(
-        contact=Contact(name="Luis", phone="+1 555 0199"),
-        tickets=(
-            Ticket(
-                number="155",
-                state="waiting_customer",
-                summary="review of an earlier request pending",
-                details_collected="reference REF-7781; email luis@example.com",
-            ),
-        ),
-    )
     return SupportThread(
         fixture_id="support_no_reask_reference",
         title="A reference already supplied is not requested again",
@@ -207,23 +156,9 @@ def _waiting_thread() -> SupportThread:
             Turn("user", "y mi correo es luis@example.com"),
             Turn("user", "¿cómo va?"),
         ),
-        state=state,
         notes=(Note("customer-reference", "REF-7781"),),
-        pinned_state=(
-            PinnedFact("contact", "Name: Luis\nPhone: +1 555 0199"),
-            PinnedFact(
-                "ticket",
-                "\n".join(
-                    (
-                        "Ticket 155 — waiting_customer",
-                        "  Summary: review of an earlier request pending",
-                        "  Details collected: reference REF-7781; email luis@example.com",
-                    )
-                ),
-            ),
-            PinnedFact("note", "customer-reference: REF-7781"),
-        ),
-        pinned_state_used=("REF-7781", "Ticket 155"),
+        pinned_state=(PinnedFact("note", "customer-reference: REF-7781"),),
+        pinned_state_used=("REF-7781",),
         must_not_reask=("referencia", "reference"),
         forbidden=("REF-0000",),
     )

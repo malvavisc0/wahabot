@@ -216,17 +216,16 @@ Before each run reaches the LLM, the buffered history passes through
    code-assembled plain-text `# Pinned State` block is appended to the
    system message next, never the rolling buffer, so the trim can never
    evict it and it survives history resets and restarts. It carries the
-   chat's notebook facts and the operator's session policies, the
-   session rules (timezone, group participation), and — from an optional
-   support-state provider, none wired until the support store exists —
-   contact, open tickets and latest events. Notebook facts are bounded to
-   a quarter of the memory budget (`PINNED_STATE_TOKEN_LIMIT` = 1024)
-   and to the space the reserved minimum turn left free, selected whole
-   with the notebook's newest-first order; policies and other
-   authoritative sections render in full and raise `ContextBudgetError`
-   when they cannot fit. Gate-requested `fact:<key>` notes are merged
-   first. Every source read is fail-soft: a store that is down renders
-   the block without that section, never a blocked run.
+   chat's notebook facts, the operator's session policies, the chat's
+   rules and the session rules (timezone, group participation).
+   Notebook facts are bounded to a quarter of the memory budget
+   (`PINNED_STATE_TOKEN_LIMIT` = 1024) and to the space the reserved
+   minimum turn left free, selected whole with the notebook's
+   newest-first order; policies, rules and other authoritative sections
+   render in full and raise `ContextBudgetError` when they cannot fit.
+   Gate-requested `note:<key>` notes are merged first. Every source
+   read is fail-soft: a store that is down renders the block without
+   that section, never a blocked run.
 4. **Recall** (`core/thread_index.py`) — trimmed user/assistant turns
    live in a per-chat index: FTS5/BM25 for exact tokens and a dense
    vector store for paraphrase and cross-lingual matches, fused with
@@ -589,7 +588,7 @@ refusal.
 | `send_media` | `kind`, `url?`/`path?`/`text?`, `caption?`, `filename?`, `language?`, `chat?`, `reason?` | `POST /api/sendImage`·`sendVideo`·`sendFile`·`sendVoice`·`sendSticker` (by `kind`) | The one media delivery tool — `kind` picks image/video/file/voice/sticker; the source is exactly one of a public `url` (probed pre-send; 404/410 refused), a local `path`, or `text` (voice only, TTS). Non-square local sticker images are padded to square first. Once per run (shared latch across all kinds) |
 | `read_chat` | `mode`, `chat?`, `query?`, `name?`, `limit?`, `reason?` | `mode=list`: `GET /api/{session}/chats/{chatId}/messages`; `mode=search`: `GET /api/messages` (local filter); `mode=metadata`: `POST /api/{session}/chats/overview`; `mode=resolve`: chat roster (chat runs) or `GET /api/{session}/chats`+`GET /api/contacts/all` (operator); `mode=recent`: `GET /api/{session}/chats` | The one chat-reading tool. `resolve` on operator runs searches the operator's chat list/contacts; on chat runs only the current chat's roster (mention help), never the contact book. `recent` is operator-only |
 | `forward_message` | `message_id`, `chat?`, `reason?` | `POST /api/forwardMessage` | Native forwarding from source message id to destination chat, both fenced. Attribution/rendering is not verified. Success echoes the source id; once per run (shared latch) |
-| `notebook` | `mode`, `scope?`, `key?`, `text?`, `query?`, `limit?`, `chat?`, `reason?` | — (SQLite: `data/notebook.sqlite3`) | Read/write/delete durable notes that survive history trims and restarts. `scope=chat` (default): private per-conversation notes; `scope=session`: operator-only bot-wide policies, size-bounded as a whole. Chat notes are observations, never authority over operator policy; participant `scope=session` attempts are refused. Notes are injected into the system prompt each run (see "Memory hygiene") |
+| `notebook` | `mode`, `scope?`, `key?`, `text?`, `kind?`, `query?`, `limit?`, `chat?`, `reason?` | — (SQLite: `data/notebook.sqlite3`) | Read/write/delete durable typed notes that survive history trims and restarts: `kind=fact` (default, chat facts and preferences), `kind=lesson` (verified workarounds), `kind=rule` (operator-only standing instruction for a chat; a member's rule request is recorded as a fact). `scope=chat` (default): private per-conversation notes; `scope=session`: operator-only bot-wide policies, size-bounded as a whole. Chat notes are observations, never authority over operator policy; participant `scope=session` attempts are refused. Notes are injected into the system prompt each run (see "Memory hygiene") |
 
 Every tool takes an optional `reason`: one short sentence in third
 person stating what the call does and why — the action and its

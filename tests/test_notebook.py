@@ -24,10 +24,6 @@ from wahabot.ai.history import ContextBudgetError
 from wahabot.ai.messages import WRAP_UP_NOTE_KWARG
 from wahabot.ai.pinned_state import (
     PINNED_STATE_TOKEN_LIMIT,
-    Contact,
-    SupportEvent,
-    SupportState,
-    Ticket,
     note_line,
     pinned_state_block,
     render_pinned_block,
@@ -57,6 +53,15 @@ from wahabot.core.notebook import (
 from wahabot.core.persistence import load_memory, save_memory
 from wahabot.core.tokens import text_tokens, truncate_to_tokens
 from wahabot.settings import Settings
+
+
+def _note_pairs(payload: str) -> list[dict[str, str]]:
+    """The key/text pairs of a notebook read envelope."""
+    return [
+        {"key": note["key"], "text": note["text"]}
+        for note in json.loads(payload)["notes"]
+    ]
+
 
 SESSION = "notebook-test"
 OTHER_SESSION = "other-notebook-test"
@@ -356,7 +361,7 @@ def test_participant_can_correct_and_delete_own_fact(
                 mode="write", key="meeting", text="Verified correction: Thursday."
             )
         )["saved"]
-        assert json.loads(notebook_tool.fn(mode="read", query="CORRECTION"))["notes"] == [
+        assert _note_pairs(notebook_tool.fn(mode="read", query="CORRECTION")) == [
             {"key": "meeting", "text": "Verified correction: Thursday."}
         ]
         assert json.loads(notebook_tool.fn(mode="delete", key="meeting"))["deleted"]
@@ -430,10 +435,10 @@ def test_operator_default_is_private_and_explicit_chat_can_be_managed(
                 mode="write", chat=OTHER_CHAT, key="meeting", text="Workshop: Thursday."
             )
         )["ok"]
-        assert json.loads(notebook_tool.fn(mode="read"))["notes"] == [
+        assert _note_pairs(notebook_tool.fn(mode="read")) == [
             {"key": "private", "text": "Private draft plan."}
         ]
-        assert json.loads(notebook_tool.fn(mode="read", chat=OTHER_CHAT))["notes"] == [
+        assert _note_pairs(notebook_tool.fn(mode="read", chat=OTHER_CHAT)) == [
             {"key": "meeting", "text": "Workshop: Thursday."}
         ]
         assert json.loads(
@@ -460,7 +465,7 @@ def test_operator_can_correct_and_delete_shared_policy(
                 mode="write", scope="session", key="policy", text="Ask before acting."
             )
         )["ok"]
-        assert json.loads(notebook_tool.fn(mode="read", scope="session"))["notes"] == [
+        assert _note_pairs(notebook_tool.fn(mode="read", scope="session")) == [
             {"key": "policy", "text": "Ask before acting."}
         ]
         assert json.loads(notebook_tool.fn(mode="delete", scope="session", key="policy"))[
@@ -628,7 +633,6 @@ def test_build_agent_enables_lazy_notebook(notebook_settings: Settings) -> None:
     assert isinstance(agent.notebook, Notebook)
     assert agent.notebook.path == notebook_settings.data_dir / "notebook.sqlite3"
     assert not agent.notebook.path.exists()
-    assert agent.support_provider is None  # no support store exists yet
 
 
 # ---------------------------------------------------------------------------
@@ -637,36 +641,8 @@ def test_build_agent_enables_lazy_notebook(notebook_settings: Settings) -> None:
 
 
 def test_pinned_block_renders_every_field() -> None:
-    """Support state, policies, notes, and rules all render in place."""
+    """Policies, notes, and rules all render in place."""
     block = render_pinned_block(
-        support=SupportState(
-            contact=Contact(
-                name="Marisol",
-                phone="+1 646 555 0177",
-                language="Spanish",
-                external_ref="C-1042",
-                paused_until="2026-10-12 09:00",
-            ),
-            tickets=(
-                Ticket(
-                    number="142",
-                    state="done",
-                    urgent=True,
-                    summary="receipt confirmation",
-                    details_collected="email marisol@example.com",
-                    still_missing="review outcome",
-                    done_by="Alex",
-                    updated="2026-10-11 10:19",
-                ),
-            ),
-            events=(
-                SupportEvent(
-                    at="2026-10-11 10:11",
-                    actor="Alex (operator)",
-                    text="ask which email address she used",
-                ),
-            ),
-        ),
         policies=(Note("reply-style", "Use concise replies."),),
         notes=(Note("customer-email", "marisol@example.com"),),
         rules="Support hours 09:00-18:00 Europe/Berlin.",
@@ -674,28 +650,17 @@ def test_pinned_block_renders_every_field() -> None:
     )
     assert block.startswith("# Pinned State\n")
     for fragment in (
-        "## Contact\n\nName: Marisol",
-        "Phone: +1 646 555 0177",
-        "Language: Spanish",
-        "External ref: C-1042",
-        "Paused until: 2026-10-12 09:00",
-        "## Open tickets\n\nTicket 142 — done — urgent",
-        "  Summary: receipt confirmation",
-        "  Details collected: email marisol@example.com",
-        "  Still missing: review outcome",
-        "  Done by: Alex",
-        "  Updated: 2026-10-11 10:19",
-        "## Latest events",
-        "2026-10-11 10:11 — Alex (operator): ask which email address she used",
         "## Operator policies\n\n- reply-style: Use concise replies.",
         "## Notebook facts\n\n- customer-email: marisol@example.com",
         "## Session rules\n\nSupport hours 09:00-18:00 Europe/Berlin.",
     ):
         assert fragment in block, fragment
+    for heading in ("## Contact", "## Open tickets", "## Latest events"):
+        assert heading not in block
 
 
-def test_pinned_block_without_a_provider_renders_no_stub_state() -> None:
-    """No provider (today) renders no support sections — never fake tickets."""
+def test_pinned_block_never_renders_support_sections() -> None:
+    """Support state is not a pinned section; the block omits it entirely."""
     block = render_pinned_block(
         policies=(Note("reply-style", "Use concise replies."),),
         notes=(Note("meeting", "Workshop meets on Thursday."),),
@@ -707,28 +672,21 @@ def test_pinned_block_without_a_provider_renders_no_stub_state() -> None:
     assert "## Operator policies" in block
     assert "## Notebook facts" in block
     assert "## Session rules" in block
-    # An empty support state renders no empty sections either.
-    empty = render_pinned_block(
-        support=SupportState(), token_budget=PINNED_STATE_TOKEN_LIMIT
-    )
-    assert empty == ""
+    # An entirely empty block is "" — no headings for absent sources.
+    assert render_pinned_block(token_budget=PINNED_STATE_TOKEN_LIMIT) == ""
 
 
 def test_pinned_block_with_empty_notebook_renders_only_what_exists() -> None:
     """Empty sections are omitted; a section renders only its fields."""
     block = render_pinned_block(
-        support=SupportState(
-            contact=Contact(name="Ana"),
-            tickets=(Ticket(number="151", state="open"),),
-        ),
+        notes=(Note("customer-email", "ana@example.com"),),
         token_budget=PINNED_STATE_TOKEN_LIMIT,
     )
-    assert "## Contact\n\nName: Ana" in block
-    assert "## Open tickets\n\nTicket 151 — open" in block
-    assert "Summary:" not in block
+    assert "## Notebook facts\n\n- customer-email: ana@example.com" in block
     assert "## Operator policies" not in block
-    assert "## Notebook facts" not in block
     assert "## Session rules" not in block
+    for heading in ("## Contact", "## Open tickets", "## Latest events"):
+        assert heading not in block
 
 
 def test_pinned_block_bounds_notes_within_the_token_cap() -> None:
@@ -764,7 +722,7 @@ def test_pinned_block_drops_oldest_notes_instead_of_raising() -> None:
         notes=notes,
         token_budget=PINNED_STATE_TOKEN_LIMIT,
         prompt_prefix="prompt ",
-        prompt_budget=40,
+        prompt_budget=100,
         tokenizer=str.split,
     )
     assert block.startswith("# Pinned State")
@@ -784,7 +742,6 @@ def test_pinned_block_is_fail_soft_when_the_notebook_is_down() -> None:
     async def scenario() -> str:
         return await pinned_state_block(
             notebook=broken,
-            provider=None,
             session=SESSION,
             chat_id=CHAT,
             token_budget=PINNED_STATE_TOKEN_LIMIT,
@@ -837,7 +794,7 @@ def test_workflow_injects_whole_policies_and_only_current_chat_notes(
     assert "# Pinned State" in system
     assert f"- {policy.key}: {policy.text}" in system
     assert note_line(local[chat]) in system
-    assert "## Contact" not in system  # no support provider is wired
+    assert "## Contact" not in system  # support state is a tool, never pinned
     assert "Other session policy." not in system
     for scope, note in local.items():
         if scope != chat:
@@ -1048,9 +1005,9 @@ def test_wrap_up_lesson_is_notebook_only_and_survives_reopen(
     notes = Notebook(tmp_path).read(SESSION, chat)
     assert len(notes) == 1
     assert notes[0].text == lesson
-    assert notes[0].key.startswith("wrap-up-")
-    digest = notes[0].key.removeprefix("wrap-up-")
-    assert len(digest) >= 8
+    assert notes[0].key.startswith("lesson-")
+    digest = notes[0].key.removeprefix("lesson-")
+    assert len(digest) == 12
     assert hashlib.sha256(lesson.encode()).hexdigest().startswith(digest)
     assert store.read(SESSION, SESSION_NOTEBOOK_CHAT) == []
     assert store.read(SESSION, OTHER_CHAT) == []
@@ -1078,6 +1035,8 @@ def test_cancelled_notebook_call_holds_lock_until_database_thread_finishes(
         key: str,
         text: str,
         *,
+        kind: str = "fact",
+        author_kind: str = "member",
         max_total_tokens: int | None = None,
     ) -> None:
         assert current_target().chat_id == chat_id
@@ -1085,7 +1044,14 @@ def test_cancelled_notebook_call_holds_lock_until_database_thread_finishes(
         try:
             assert release.wait(timeout=10), "database thread was not released"
             original_write(
-                store, session, chat_id, key, text, max_total_tokens=max_total_tokens
+                store,
+                session,
+                chat_id,
+                key,
+                text,
+                kind=kind,
+                author_kind=author_kind,
+                max_total_tokens=max_total_tokens,
             )
         finally:
             finished.set()
@@ -1177,3 +1143,178 @@ def test_wrap_up_note_is_capped_to_the_notebook_token_limit(
         notes=notes, token_budget=PINNED_STATE_TOKEN_LIMIT, tokenizer=str.split
     )
     assert notes[0].key in block
+
+
+def test_chat_message_prefix_is_applied_once() -> None:
+    """The text prefix is prepended once, and never doubled."""
+    from wahabot.ai.tools.whatsapp import apply_chat_prefix
+
+    assert apply_chat_prefix("hola", "kAI: ") == "kAI: hola"
+    assert apply_chat_prefix("kAI: hola", "kAI: ") == "kAI: hola"
+    # A model that copied the prefix without its trailing space is not
+    # doubled either; a whitespace-only prefix applies nothing.
+    assert apply_chat_prefix("kAI:hola", "kAI: ") == "kAI:hola"
+    assert apply_chat_prefix("hola", " ") == "hola"
+    assert apply_chat_prefix("hola", "") == "hola"
+    assert apply_chat_prefix("", "kAI: ") == ""
+    assert apply_chat_prefix("  hola", "kAI: ") == "kAI:   hola"
+
+
+def test_pinned_block_renders_chat_rules_authoritatively() -> None:
+    """A chat's rule notes render under `## Chat rules`, not as facts."""
+    block = render_pinned_block(
+        chat_rules=(Note("chat-message-prefix", "kAI: ", kind="rule"),),
+        notes=(Note("meeting", "Thursdays."),),
+        token_budget=PINNED_STATE_TOKEN_LIMIT,
+    )
+    assert "## Chat rules\n\n- chat-message-prefix: kAI:" in block
+    assert "## Notebook facts\n\n- meeting: Thursdays." in block
+    facts_section = block.partition("## Notebook facts\n\n")[2]
+    assert "chat-message-prefix" not in facts_section
+
+
+def test_wrap_up_topic_names_the_lesson() -> None:
+    """A `topic:` line slugs the lesson key; without one the slug is empty."""
+    from wahabot.ai.workflow.agent import parse_wrap_up, topic_slug
+
+    assert topic_slug("topic: SVG Upload!!") == "svg-upload"
+    assert topic_slug("topic: " + "x" * 80) == "x" * 40
+    assert parse_wrap_up("topic: svg-upload\nThe PNG conversion worked.") == (
+        "svg-upload",
+        "The PNG conversion worked.",
+    )
+    assert parse_wrap_up("No topic line here.") == ("", "No topic line here.")
+    # The topic line names the key, never the lesson: it never leaks
+    # into the stored body, and a topic without a body stores nothing.
+    assert parse_wrap_up("topic: !!!\nThe PNG conversion worked.") == (
+        "",
+        "The PNG conversion worked.",
+    )
+    assert parse_wrap_up("topic: svg-upload") == ("", "")
+
+
+def test_participant_cannot_change_operator_rules(
+    notebook_tool: FunctionTool, tmp_path: Path
+) -> None:
+    """A member run may not overwrite or delete an operator's rule note."""
+    store = Notebook(tmp_path)
+    store.write(
+        SESSION,
+        CHAT,
+        "chat-message-prefix",
+        "kAI: ",
+        kind="rule",
+        author_kind="operator",
+    )
+    with bound_target(RunTarget(session=SESSION, chat_id=CHAT)):
+        write = json.loads(
+            notebook_tool.fn(
+                mode="write", key="chat-message-prefix", text="x", kind="fact"
+            )
+        )
+        delete = json.loads(notebook_tool.fn(mode="delete", key="chat-message-prefix"))
+    assert write["ok"] is False
+    assert delete["ok"] is False
+    assert store.read(SESSION, CHAT, key="chat-message-prefix")[0].kind == "rule"
+    # An armed operator run may change it.
+    with bound_target(RunTarget(session=SESSION, chat_id="operator", armed=True)):
+        allowed = json.loads(
+            notebook_tool.fn(
+                mode="write",
+                chat=CHAT,
+                key="chat-message-prefix",
+                text="kAI:",
+                kind="rule",
+            )
+        )
+    assert allowed["ok"]
+    assert store.read(SESSION, CHAT, key="chat-message-prefix")[0].text == "kAI:"
+
+
+def test_operator_reserved_key_is_always_stored_as_a_rule(
+    notebook_tool: FunctionTool, tmp_path: Path
+) -> None:
+    """A reserved rule key is stored as a rule whatever kind was written.
+
+    The deterministic seams (`chat_rules`, the triage mute) read
+    ``kind=rule``; an operator writing the key as a plain fact would
+    silently never apply it, so the tool coerces the kind.
+    """
+    store = Notebook(tmp_path)
+    with bound_target(RunTarget(session=SESSION, chat_id="operator", armed=True)):
+        written = json.loads(
+            notebook_tool.fn(
+                mode="write",
+                chat=CHAT,
+                key="chat-hard-mute",
+                text="muted until the dust settles",
+                kind="fact",
+            )
+        )
+    assert written["ok"]
+    note = store.read(SESSION, CHAT, key="chat-hard-mute")[0]
+    assert (note.kind, note.author_kind) == ("rule", "operator")
+
+
+def test_chat_rules_are_capped_at_the_rule_token_budget(tmp_path: Path) -> None:
+    """A write that pushes a chat's rules past the cap is refused, atomically."""
+    from wahabot.core.notebook import CHAT_RULE_TOKEN_LIMIT
+
+    store = Notebook(tmp_path)
+    unit = "always answer in formal Spanish without emojis or slang "
+    # The store writes the stripped text, so count the stripped tokens.
+    per_rule = text_tokens(unit.strip())
+    count = CHAT_RULE_TOKEN_LIMIT // per_rule + 1
+    for index in range(count):
+        if index == count - 1:
+            with pytest.raises(ValueError, match="chat rules exceed"):
+                store.write(
+                    SESSION,
+                    CHAT,
+                    f"rule-{index}",
+                    unit,
+                    kind="rule",
+                    author_kind="operator",
+                )
+        else:
+            store.write(
+                SESSION,
+                CHAT,
+                f"rule-{index}",
+                unit,
+                kind="rule",
+                author_kind="operator",
+            )
+    # The refused write rolled back: the overflowing rule is not stored.
+    assert store.read(SESSION, CHAT, key=f"rule-{count - 1}") == []
+    # Facts are not rules: the same text as a fact writes fine.
+    store.write(SESSION, CHAT, "big-fact", unit)
+    assert store.read(SESSION, CHAT, key="big-fact")
+
+
+def test_read_filters_notes_by_kind(tmp_path: Path) -> None:
+    """`kind=` selects one kind; without it every kind reads."""
+    store = Notebook(tmp_path)
+    store.write(SESSION, CHAT, "tone", "formal", kind="rule", author_kind="operator")
+    store.write(SESSION, CHAT, "meeting", "Thursdays.")
+    store.write(
+        SESSION, CHAT, "svg", "convert first", kind="lesson", author_kind="system"
+    )
+    assert [note.key for note in store.read(SESSION, CHAT, kind="rule")] == ["tone"]
+    assert [note.key for note in store.read(SESSION, CHAT, kind="lesson")] == ["svg"]
+    assert {note.key for note in store.read(SESSION, CHAT)} == {
+        "tone",
+        "meeting",
+        "svg",
+    }
+    with pytest.raises(ValueError, match="kind"):
+        store.read(SESSION, CHAT, kind="nope")
+
+
+def test_topic_only_wrap_up_note_stores_nothing(tmp_path: Path) -> None:
+    """A wrap-up reply that is only a `topic:` line stores no lesson."""
+    store = Notebook(tmp_path)
+    agent = notebook_workflow(store)
+    with bound_target(RunTarget(session=SESSION, chat_id=CHAT)):
+        asyncio.run(agent.store_wrap_up_note("topic: svg-upload"))
+    assert store.read(SESSION, CHAT) == []

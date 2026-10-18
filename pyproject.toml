@@ -105,4 +105,6 @@ ignore_names = [
     "_get_query_embedding", "_aget_query_embedding", "_get_text_embedding",
     "_aget_text_embedding", "_get_text_embeddings", "_aget_text_embeddings",
     "has_pending",
+    # Note dataclass fields read via asdict() and the notebook views.
+    "created_at", "updated_at",
 ]

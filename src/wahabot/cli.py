@@ -18,6 +18,7 @@ from wahabot.commands import build_command_event, register_command_handler
 from wahabot.core import cli as cli_helpers
 from wahabot.core.access import load_session_config
 from wahabot.core.audit import audit_dir
+from wahabot.core.notebook import Notebook
 from wahabot.core.waha import WahaClient
 from wahabot.handlers import register_agent_handler, register_forget_handler
 from wahabot.reactions import register_reaction_handler
@@ -308,6 +309,19 @@ def escalations(
     console.print(cli_helpers.escalation_rows(entries))
 
 
+def note_age(updated_at_ns: int) -> str:
+    """A short relative age for a note's last update."""
+    if not updated_at_ns:
+        return "unknown"
+    now = datetime.datetime.now().timestamp()
+    seconds = max(0, int(now - updated_at_ns / 1_000_000_000))
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
 @app.command()
 def notebook(
     chat: str = typer.Option(
@@ -319,6 +333,9 @@ def notebook(
         "-s",
         help="WAHA session name. [default: all sessions; with --chat, WAHABOT_SESSION]",
     ),
+    rules: bool = typer.Option(
+        False, "--rules", help="With --chat, show only the chat's standing rules."
+    ),
 ) -> None:
     """List the bot's durable notebook notes.
 
@@ -329,43 +346,53 @@ def notebook(
     scopes with note counts; with ``--session``, that bot's scopes;
     with ``--chat``, that scope's notes in full, newest first.
     """
-    from wahabot.core.notebook import Notebook
-
     settings = get_settings()
     store = Notebook(settings.data_dir)
     if not store.path.exists():
         console.print(f"[dim]No notebook yet at {store.path}[/]")
         return
-    if not chat:
-        # No --chat: a scope listing. --session filters to one bot;
-        # without it every session's scopes are listed (the default
-        # WAHABOT_SESSION would hide the other bots on this server).
-        scopes = store.scopes(session)
-        if not scopes:
-            scope_of = f"session {session}" if session else "any session"
-            console.print(f"[dim]No notes in any scope for {scope_of}[/]")
-            return
-        table = Table(box=None, show_header=True, pad_edge=False)
-        table.add_column("session", overflow="fold")
-        table.add_column("chat", overflow="fold")
-        table.add_column("notes", justify="right")
-        for session_name, chat_id, count in scopes:
-            table.add_row(session_name, chat_id, str(count))
-        console.print(table)
+    if rules and not chat:
+        console.print("[yellow]--rules needs --chat[/]")
         return
-    # --chat reads one scope's notes; scopes are session-scoped, so the
-    # chat JID alone identifies nothing. Default to WAHABOT_SESSION like
-    # every other read-only command instead of guessing.
-    session_name = session or settings.session
-    notes = store.read(session_name, chat)
+    if not chat:
+        show_notebook_scopes(store, session)
+        return
+    show_chat_notes(store, session or settings.session, chat, rules)
+
+
+def show_notebook_scopes(store: Notebook, session: str | None) -> None:
+    """List the notebook's scopes and note counts."""
+    scopes = store.scopes(session)
+    if not scopes:
+        scope_of = f"session {session}" if session else "any session"
+        console.print(f"[dim]No notes in any scope for {scope_of}[/]")
+        return
+    table = Table(box=None, show_header=True, pad_edge=False)
+    table.add_column("session", overflow="fold")
+    table.add_column("chat", overflow="fold")
+    table.add_column("notes", justify="right")
+    for session_name, chat_id, count in scopes:
+        table.add_row(session_name, chat_id, str(count))
+    console.print(table)
+
+
+def show_chat_notes(
+    store: Notebook, session_name: str, chat: str, rules: bool = False
+) -> None:
+    """Print one scope's notes, newest first; *rules* shows only rules."""
+    notes = store.read(session_name, chat, kind="rule" if rules else "")
     if not notes:
-        console.print(f"[dim]No notes for {chat} in session {session_name}[/]")
+        label = "rules" if rules else "notes"
+        console.print(f"[dim]No {label} for {chat} in session {session_name}[/]")
         return
     for note in notes:
         console.print(
             Panel(
                 note.text,
-                title=f"{session_name} · {note.key}",
+                title=(
+                    f"{session_name} · {note.key}\n"
+                    f"{note.kind} · {note.author_kind} · {note_age(note.updated_at)}"
+                ),
                 border_style="dim",
                 expand=False,
             )

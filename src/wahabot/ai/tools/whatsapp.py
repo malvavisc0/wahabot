@@ -262,6 +262,10 @@ class RunTarget:
     #: Typing-presence window (``(min_s, max_s)``) from settings; None
     #: or min<=0 disables the indicator for this run's text sends.
     typing: tuple[float, float] | None = None
+    #: The chat's `chat-message-prefix` rule text, set by the caller
+    #: from the chat's rule notes. Applied to sent and stored chat text
+    #: alike so the model's next-turn view matches what the chat saw.
+    prefix: str = ""
 
     @classmethod
     def from_dict(cls, holder: dict[str, str]) -> RunTarget:
@@ -333,6 +337,12 @@ def current_target() -> RunTarget:
     if target is None:
         raise RuntimeError("tool called without a bound run target")
     return target
+
+
+def current_prefix() -> str:
+    """This run's chat-reply prefix, or "" when no run is bound."""
+    target = _run_target.get()
+    return target.prefix if target is not None else ""
 
 
 def track_self_echo(sent_id: str, what: str) -> None:
@@ -565,12 +575,15 @@ def send_message(waha: WahaClient) -> BaseTool:
                 reply_to=reply_to,
                 mentions=mentions,
                 typing=target.typing,
+                prefix=target.prefix,
             )
         except Exception as exc:
             return send_failed_envelope("send_message", chat_id, exc)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
-        return sent_message_envelope(chat_id, text, merged, dangling)
+        return sent_message_envelope(
+            chat_id, apply_chat_prefix(text, target.prefix), merged, dangling
+        )
 
     return FunctionTool.from_defaults(
         fn=send_message_fn,
@@ -2061,6 +2074,22 @@ def ordered_merge(explicit: list[str], resolved: list[str]) -> list[str]:
     return list(dict.fromkeys([*explicit, *resolved]))
 
 
+def apply_chat_prefix(text: str, prefix: str) -> str:
+    """Prepend a chat's text prefix, once, to non-empty chat text.
+
+    Idempotent: text already starting with the prefix — exactly, or
+    with the prefix's trailing whitespace dropped, as a model copying
+    the prefix from its own prefixed history may write it — is left
+    alone, so the prefix is never doubled.
+    """
+    if not prefix.strip() or not text.strip():
+        return text
+    lead = text.lstrip()
+    if lead.startswith(prefix) or lead.startswith(prefix.rstrip()):
+        return text
+    return f"{prefix}{text}"
+
+
 def deliver_chat_text(
     waha: WahaClient,
     session: str,
@@ -2069,6 +2098,7 @@ def deliver_chat_text(
     reply_to: str | None = None,
     mentions: list[str] | None = None,
     typing: tuple[float, float] | None = None,
+    prefix: str = "",
 ) -> tuple[str, list[str], list[str]]:
     """Send text with the full delivery treatment.
 
@@ -2079,6 +2109,10 @@ def deliver_chat_text(
     Unresolved tokens remain literal text; explicit *mentions* JIDs
     merge in ahead of resolved ones. The send response does not confirm
     mention notification or rendering.
+
+    *prefix* is the chat's ``chat-message-prefix`` rule: applied to the
+    outgoing text before mention resolution, so the sent text and the
+    stored turn (``visible_message``) carry the same prefix.
 
     *typing* — a ``(min_s, max_s)`` window from settings — adds the
     human-presence prelude: show "typing…", wait a length-scaled
@@ -2092,6 +2126,7 @@ def deliver_chat_text(
     caller with a use for any of them (the tool's envelope, the echo
     guard's id) gets them without a second API call.
     """
+    text = apply_chat_prefix(text, prefix)
     indicator = (
         typing_pause(waha, session, chat_id, text, typing[0], typing[1])
         if typing is not None

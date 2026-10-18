@@ -42,6 +42,13 @@ from wahabot.core.host import host_context
 from wahabot.core.identity import AUTHOR_BOT, AUTHOR_OPERATOR, authors, display_name
 from wahabot.core.jid import roster_entries
 from wahabot.core.models import WahaEvent
+from wahabot.core.notebook import (
+    KIND_RULE,
+    RULE_HARD_MUTE,
+    RULE_MESSAGE_PREFIX,
+    Notebook,
+    notebook_operation,
+)
 from wahabot.core.tokens import text_tokens
 from wahabot.core.waha import WahaClient
 from wahabot.settings import Settings
@@ -453,6 +460,95 @@ def roster_entry(entry: Any) -> tuple[str, str]:
     return jid, name
 
 
+async def chat_rules(
+    notebook: Notebook | None, session: str, chat_id: str
+) -> dict[str, str]:
+    """The chat's `rule` notes keyed by key; fail-soft to ``{}``.
+
+    Rules are the deterministic seams the code applies — the text
+    prefix and the hard mute. An unreadable store yields no rules,
+    never a blocked run.
+    """
+    if notebook is None:
+        return {}
+    try:
+        notes = await notebook_operation(notebook.read, session, chat_id, kind=KIND_RULE)
+    except Exception:
+        logger.warning("Chat rules unreadable; continuing without them")
+        return {}
+    return {note.key: note.text for note in notes}
+
+
+async def record_handled_turn(
+    agent: FunctionCallingAgentWorkflow, ctx: Context, user_msg: str
+) -> None:
+    """Store the turn stamped handled so ``repair_memory`` never drops it.
+
+    Without the stamp the next run would treat the trailing user message
+    as run scaffolding and drop it, vanishing it from the buffer, recap,
+    and thread index alike.
+    """
+    memory = await agent.ensure_memory(ctx)
+    await memory.aput(
+        ChatMessage(
+            role=MessageRole.USER,
+            content=user_msg,
+            additional_kwargs={TURN_HANDLED_KWARG: True},
+        )
+    )
+
+
+async def bind_run_rules(
+    agent: FunctionCallingAgentWorkflow,
+    ctx: Context | None,
+    user_msg: str,
+    target: RunTarget,
+    addressed: bool,
+    gate_first: bool,
+) -> bool:
+    """Apply the chat's code-read rules to *target*; False when hard-muted.
+
+    Read before the triage gate so a hard mute holds even when the gate
+    is down. A muted chat still runs the gate (so an adversarial read or
+    a human request can escalate) but never answers; its turn is
+    recorded stamped handled. The prefix applies to everything the run
+    delivers.
+    """
+    rules = await chat_rules(agent.notebook, target.session, target.chat_id)
+    if RULE_HARD_MUTE in rules:
+        logger.info("Chat is hard-muted; not answering {chat_id}", chat_id=target.chat_id)
+        if ctx is not None and await run_gate(
+            agent, ctx, target, user_msg, addressed, gate_first
+        ):
+            await record_handled_turn(agent, ctx, user_msg)
+        return False
+    target.prefix = rules.get(RULE_MESSAGE_PREFIX, "")
+    return True
+
+
+async def run_gate(
+    agent: FunctionCallingAgentWorkflow,
+    ctx: Context,
+    target: RunTarget,
+    user_msg: str,
+    addressed: bool,
+    gate_first: bool,
+) -> bool:
+    """Reset triage state and consult the gate; False when it ends the turn.
+
+    A silent gate still records the turn, stamped handled (the same
+    stamp a silent run gets): without it the next run's ``repair_memory``
+    would drop the trailing user message as scaffolding, vanishing it
+    from the buffer, recap, and thread index alike.
+    """
+    await ctx.store.set("triage_result", None)
+    await ctx.store.set("triage_audit", None)
+    if await agent.start_triage(ctx, target, user_msg, addressed, gate_first):
+        return True
+    await record_handled_turn(agent, ctx, user_msg)
+    return False
+
+
 async def handle_message(
     event: WahaEvent,
     agent: FunctionCallingAgentWorkflow,
@@ -538,41 +634,47 @@ async def handle_message(
     target = RunTarget(session=event.session, chat_id=chat_id, armed=armed, typing=typing)
     token = bind_target(target)
     try:
-        if ctx is not None:
-            await ctx.store.set("triage_result", None)
-            await ctx.store.set("triage_audit", None)
-            if not await agent.start_triage(ctx, target, user_msg, addressed, gate_first):
-                memory = await agent.ensure_memory(ctx)
-                # Stamped handled: the gate's decision concluded this
-                # turn, exactly like a run-end stamp for a silent run.
-                # Without it the next run's ``repair_memory`` would
-                # drop the unstamped trailing user message as run
-                # scaffolding — the gate-silenced message would
-                # vanish from the buffer, the recap and the thread
-                # index alike, punching holes in the group's flow.
-                await memory.aput(
-                    ChatMessage(
-                        role=MessageRole.USER,
-                        content=user_msg,
-                        additional_kwargs={TURN_HANDLED_KWARG: True},
-                    )
-                )
-                return "", target
-        # WAHABOT_RUN_TIMEOUT as a true per-run wall-clock cap. The
-        # library's own timeout= must stay None: on the reused per-chat
-        # Context it would act as a cumulative alive-time budget that
-        # sums every run's latency and permanently kills busy chats at
-        # the cap. wait_for
-        # raises TimeoutError, classified by run_timed_out.
-        result = await asyncio.wait_for(
-            agent.run(input=user_msg, image_blocks=image_blocks, ctx=ctx),
-            timeout=(settings.run_timeout or None) if settings is not None else None,
-        )
+        if not await bind_run_rules(agent, ctx, user_msg, target, addressed, gate_first):
+            return "", target
+        if ctx is not None and not await run_gate(
+            agent, ctx, target, user_msg, addressed, gate_first
+        ):
+            return "", target
+        result = await run_agent_once(agent, ctx, user_msg, image_blocks, settings)
     finally:
-        if ctx is not None:
-            await agent.cancel_triage(ctx)
-        reset_target(token)
+        await release_run(agent, ctx, token)
     return final_reply(result), target
+
+
+async def run_agent_once(
+    agent: FunctionCallingAgentWorkflow,
+    ctx: Context | None,
+    user_msg: str,
+    image_blocks: list[Any],
+    settings: Settings | None,
+) -> Any:
+    """Run the agent under the per-run wall-clock cap.
+
+    The library's own ``timeout=`` must stay None: on the reused
+    per-chat Context it acts as a cumulative alive-time budget that
+    would sum every run's latency and permanently kill busy chats, so
+    the cap is enforced here instead; ``wait_for`` raises ``TimeoutError``,
+    classified by ``run_timed_out``.
+    """
+    timeout = settings.run_timeout if settings is not None else None
+    return await asyncio.wait_for(
+        agent.run(input=user_msg, image_blocks=image_blocks, ctx=ctx),
+        timeout=timeout or None,
+    )
+
+
+async def release_run(
+    agent: FunctionCallingAgentWorkflow, ctx: Context | None, token: Any
+) -> None:
+    """Cancel any pending gate and unbind this run's delivery target."""
+    if ctx is not None:
+        await agent.cancel_triage(ctx)
+    reset_target(token)
 
 
 async def turn_user_message(

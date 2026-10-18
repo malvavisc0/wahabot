@@ -234,14 +234,14 @@ Per chat, the bot keeps a rolling conversation in memory:
   marker) — the retained history reads like the chat, not like the
   API scaffolding that produced it.
 - **Old turns are not lost when the window fills.** Three layers sit
-  outside the buffer: the **pinned state block** (contact, tickets,
-  events, operator policies and session rules, code-assembled into the
-  system message and never evicted), the **Tier 1 recap** (a per-chat
-  summary of turns as they leave the window), and the **thread index**
-  (per-chat FTS5 + dense vectors over trimmed user/assistant turns,
-  retrieved as a lead-only `## Recalled from earlier in this thread`
-  section). `wahabot forget <chat-id>` wipes the buffer, recap and
-  index together.
+  outside the buffer: the **pinned state block** (operator policies,
+  the chat's rules, notebook facts and session rules, code-assembled
+  into the system message and never evicted), the **Tier 1 recap** (a
+  per-chat summary of turns as they leave the window), and the
+  **thread index** (per-chat FTS5 + dense vectors over trimmed
+  user/assistant turns, retrieved as a lead-only `## Recalled from
+  earlier in this thread` section). `wahabot forget <chat-id>` wipes
+  the buffer, recap and index together.
 - The **system prompt is never in the buffer** — it is re-rendered
   from the session config at the start of every run (goal, role,
   style, current date/time), so trimming can never evict the bot's
@@ -266,6 +266,22 @@ Per chat, the bot keeps a rolling conversation in memory:
   (the post-delivery wrap-up note). Notes ride the system prompt each
   run — the trim can never evict them — and survive restarts, history
   resets and the buffer's token budget. Design: `docs/plans/learned-memory.md`.
+- **Notes are typed, and rules are enforced where behavior is
+  deterministic.** A note is a `fact` (chat-local fact or preference),
+  a `lesson` (verified workaround) or a `rule` (a standing instruction
+  for its chat). Only an operator can set a rule — from the operator
+  chat, with `notebook(mode=write, key=…, text=…, kind=rule)`; a
+  member's rule-shaped request is recorded as a plain fact, and
+  existing rules cannot be overwritten or deleted by a chat
+  participant. Reserved rule keys are applied by code, not prose:
+  `chat-message-prefix` (every text the run delivers and stores is
+  prefixed, once, so the model's self-history matches what the chat
+  saw), `chat-hard-mute` (the chat never gets replies; the triage
+  gate still runs so an escalation can reach the operator) and
+  `chat-reply-mute-preferences` (fed to the gate as mute guidance). A
+  chat's rules together are capped at 512 tokens and render under
+  `## Chat rules` in the pinned state block; `wahabot notebook --chat
+  <jid> --rules` lists them.
 - Memory **mirrors the chat**: what the model's self-history records as
   its own words is exactly what the chat saw. A reply that was never
   delivered — a leaked `stay_silent` token written as text instead of

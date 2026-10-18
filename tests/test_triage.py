@@ -20,6 +20,7 @@ from tests.harness import SESSION as HARNESS_SESSION
 from tests.test_wire import _wait
 from wahabot.ai.context import handle_message
 from wahabot.ai.events import ToolCallEvent
+from wahabot.ai.messages import TURN_HANDLED_KWARG
 from wahabot.ai.triage import (
     TriageContext,
     TriageGate,
@@ -38,6 +39,7 @@ from wahabot.ai.triage import (
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.ai.workflow.toolkit import denied_tool_message
 from wahabot.core.models import WahaEvent
+from wahabot.core.notebook import Notebook
 from wahabot.core.persistence import load_memory
 from wahabot.evals.fixtures import GateLabel, load_gate_labels
 from wahabot.settings import Settings
@@ -136,7 +138,7 @@ def test_parse_verdict_reads_labels_and_needs() -> None:
             "escalate": False,
             "participate": False,
             "why": "asks for a human",
-            "needs": ["fact:refund", "history:upload", "web"],
+            "needs": ["note:refund", "history:upload", "web"],
         }
     )
     verdict = parse_verdict(f"prose {payload} trailing")
@@ -191,7 +193,7 @@ def test_render_context_contains_the_bounded_sources() -> None:
 
 
 def test_enrich_recall_query_adds_history_topics() -> None:
-    assert enrich_recall_query("PDF", ("history:upload", "fact:x", "web")) == "PDF upload"
+    assert enrich_recall_query("PDF", ("history:upload", "note:x", "web")) == "PDF upload"
 
 
 def test_angry_support_request_is_not_adversarial() -> None:
@@ -234,7 +236,7 @@ def test_triage_result_roundtrips_through_json() -> None:
             escalate=False,
             participate=False,
             why="data probe",
-            needs=("fact:refund", "history:upload"),
+            needs=("note:refund", "history:upload"),
         ),
         latency_ms=42,
         timed_out=False,
@@ -505,6 +507,59 @@ def test_hardened_run_denies_media_and_allows_reads() -> None:
 
     assert called.get("read") is True
     assert "media" not in called
+
+
+def test_hard_muted_chat_never_answers_but_still_runs_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `chat-hard-mute` rule mutes the chat even when the gate would answer.
+
+    The gate still runs (an adversarial read or a human request can
+    still escalate), the turn is recorded stamped handled, and the
+    agent is never started.
+    """
+    store = Notebook(tmp_path)
+    store.write(
+        SESSION,
+        CHAT,
+        "chat-hard-mute",
+        "muted until the dust settles",
+        kind="rule",
+        author_kind="operator",
+    )
+    gate = FakeGate(result=TriageResult(TriageVerdict(participate=True)))
+    agent = FunctionCallingAgentWorkflow(
+        llm=Mock(spec=FunctionCallingLLM),
+        system_prompt="x",
+        notebook=store,
+        triage=cast(Any, gate),
+    )
+    run = AsyncMock(side_effect=AssertionError("agent must not run"))
+    monkeypatch.setattr(agent, "run", run)
+
+    async def scenario() -> tuple[str, Any, list[ChatMessage]]:
+        ctx = Context(agent)
+        memory = ChatMemoryBuffer(token_limit=100, tokenizer_fn=str.split)
+        await ctx.store.set("memory", memory)
+        reply, target = await handle_message(
+            message_event(CHAT, "hello?"),
+            agent,
+            ctx=ctx,
+            gate_first=True,
+        )
+        return reply, target, await memory.aget_all()
+
+    reply, target, stored = asyncio.run(scenario())
+
+    assert reply == ""
+    assert target.chat_id == CHAT
+    assert gate.calls == 1
+    run.assert_not_awaited()
+    assert any(
+        "hello?" in str(message.content)
+        and message.additional_kwargs.get(TURN_HANDLED_KWARG)
+        for message in stored
+    )
 
 
 def test_blocked_group_does_not_start_the_agent(monkeypatch: pytest.MonkeyPatch) -> None:

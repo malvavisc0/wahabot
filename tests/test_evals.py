@@ -11,15 +11,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
-from wahabot.ai.pinned_state import (
-    PINNED_STATE_TOKEN_LIMIT,
-    Contact,
-    SupportEvent,
-    SupportState,
-    Ticket,
-    render_pinned_block,
-)
-from wahabot.core.notebook import Note
+from wahabot.ai.pinned_state import PINNED_STATE_TOKEN_LIMIT, render_pinned_block
 from wahabot.evals import (
     Check,
     GateLabel,
@@ -54,7 +46,7 @@ def _kinds(checks: Sequence[Check], *, passed: bool | None = None) -> set[str]:
 def test_default_fixtures_build_in_production_shape() -> None:
     promise = _thread(PROMISE_FIXTURE)
     assert len(promise.turns) == 30
-    assert promise.pinned_state  # contact, ticket, event, note, rules
+    assert promise.pinned_state  # note, rules
     roles = {turn.role for turn in promise.turns}
     assert roles == {"user", "assistant"}
     # The promise sits at turn 5, the question at turn 30.
@@ -90,48 +82,12 @@ def test_support_facts_map_onto_the_rendered_pinned_block() -> None:
     a fragment the renderer actually emits, so a renderer change that
     drops one breaks here before the eval silently stops testing it.
     """
-    promise = _thread(PROMISE_FIXTURE)
-    reask = _thread(REASK_FIXTURE)
-    promise_block = render_pinned_block(
-        support=SupportState(
-            contact=Contact(name="Ana", phone="+1 555 0100", language="Spanish"),
-            tickets=(
-                Ticket(
-                    number="142",
-                    state="open",
-                    summary="no confirmation for a request sent yesterday",
-                    details_collected="sent around 18:00; email ana@example.com",
-                    still_missing="review outcome",
-                ),
-            ),
-            events=(
-                SupportEvent(
-                    at="2026-10-16 09:12",
-                    actor="assistant",
-                    text="promised the PDF tomorrow; operator review pending",
-                ),
-            ),
-        ),
-        notes=(Note("customer-email", "ana@example.com"),),
-        rules="Support hours 09:00-18:00 Europe/Berlin",
-        token_budget=PINNED_STATE_TOKEN_LIMIT,
-    )
-    reask_block = render_pinned_block(
-        support=SupportState(
-            contact=Contact(name="Luis", phone="+1 555 0199"),
-            tickets=(
-                Ticket(
-                    number="155",
-                    state="waiting_customer",
-                    summary="review of an earlier request pending",
-                    details_collected="reference REF-7781; email luis@example.com",
-                ),
-            ),
-        ),
-        notes=(Note("customer-reference", "REF-7781"),),
-        token_budget=PINNED_STATE_TOKEN_LIMIT,
-    )
-    for thread, block in ((promise, promise_block), (reask, reask_block)):
+    for thread in support_threads():
+        block = render_pinned_block(
+            notes=thread.notes,
+            rules=thread.rules,
+            token_budget=PINNED_STATE_TOKEN_LIMIT,
+        )
         assert block
         for fact in thread.pinned_state:
             assert fact.value in block, (thread.fixture_id, fact.label)
@@ -211,7 +167,7 @@ def test_gate_counts_an_angry_customer_mislabelled_adversarial() -> None:
 def test_fixture_pinned_state_is_renderable_by_the_engine_block() -> None:
     """Every declared pinned fact is what the engine's block actually renders.
 
-    The fixtures' declared facts are backed by ``state``/``notes``/``rules``
+    The fixtures' declared facts are backed by ``notes``/``rules``
     rendered through the real ``render_pinned_block``: if the engine's
     block format changes, this fails instead of the fixtures silently
     drifting.
@@ -223,7 +179,6 @@ def test_fixture_pinned_state_is_renderable_by_the_engine_block() -> None:
 
     for thread in support_threads():
         block = render_pinned_block(
-            support=thread.state,
             notes=thread.notes,
             rules=thread.rules,
             token_budget=PINNED_STATE_TOKEN_LIMIT,
