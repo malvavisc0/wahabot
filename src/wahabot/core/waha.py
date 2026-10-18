@@ -181,6 +181,34 @@ class WahaClient:
         response.raise_for_status()
         return response_json(response)
 
+    def get_profile_picture(self, session: str, jid: str) -> str:
+        """The profile picture URL for *jid*, or "" when unavailable.
+
+        Tries the contact endpoint first (people), then the chat
+        endpoint (groups). WhatsApp hides pictures for non-contacts and
+        WAHA answers 404/empty there, so that is a normal empty result,
+        not an error; other transport failures also degrade to "".
+        """
+        for path, params, key in (
+            (
+                "/api/contacts/profile-picture",
+                {"contactId": jid, "session": session, "refresh": "false"},
+                "profilePictureURL",
+            ),
+            (f"/api/{session}/chats/{jid}/picture", {"refresh": "false"}, "url"),
+        ):
+            try:
+                response = self._client.get(path, params=params)
+                if response.status_code != 200:
+                    continue
+                payload = cast(dict[str, Any], response.json())
+                url = str(payload.get(key) or "")
+            except httpx.HTTPError, ValueError:
+                continue
+            if url:
+                return url
+        return ""
+
     def get_message(self, session: str, chat_id: str, message_id: str) -> dict[str, Any]:
         """Fetch a single message by its serialized id, raising for HTTP errors."""
         segment = quote(chat_id, safe="")

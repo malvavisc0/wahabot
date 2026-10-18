@@ -292,3 +292,15 @@ class EditImageSchema(BaseModel):
         description="How much to repaint, 0-1; empty uses the service default (0.9).",
     )
     reason: str = Field(default=REASON_DESCRIPTION)
+
+
+class ProfilePictureSchema(BaseModel):
+    """Fetch a chat's or contact's profile picture URL."""
+
+    chat: str | None = Field(
+        default=None,
+        description=(
+            "Exact JID of the person or group; omit for the current conversation."
+        ),
+    )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)

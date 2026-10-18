@@ -233,8 +233,10 @@ def self_command_instruction(
     behavior. The ``to`` check matters on LID-linked accounts: WAHA
     reports the self-chat as ``from=<phone>@c.us, to=<lid>@lid`` —
     two different strings for one conversation. The mention must
-    *begin* the message: a trigger word appearing mid-text (the
-    operator quoting or discussing something) is not a command.
+    *begin* the message in other chats (a trigger word appearing
+    mid-text is usually a quote or discussion). The self-chat is the
+    console: there the operator is always addressing the bot, so a
+    mention anywhere is an instruction and the whole body is used.
     """
     payload = event.payload
     if not payload.get("fromMe"):
@@ -250,10 +252,10 @@ def self_command_instruction(
     # the mention follows the modality marker.
     body = body.removeprefix("[voice note]").strip()
     match = bot_mention_pattern(bot_name, bot_mention_regex).match(body)
-    if match is None:
-        return None
-    instruction = body[match.end() :].lstrip(" \t:,-")
-    return instruction or None
+    if match is not None:
+        instruction = body[match.end() :].lstrip(" \t:,-")
+        return instruction or None
+    return body if name_mentioned(event, bot_name, bot_mention_regex) else None
 
 
 def bot_jids(event: WahaEvent) -> set[str]:

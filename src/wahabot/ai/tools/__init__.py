@@ -23,6 +23,7 @@ from wahabot.ai.tools.whatsapp import (
     EscalationChannel,
     escalate,
     forward_message,
+    profile_picture_builder,
     react_to_message,
     read_chat,
     send_media,
@@ -68,6 +69,7 @@ def build_default_tools(
     ]
     if settings.shell_tool:
         tools.append(shell_builder(settings))
+    tools.append(profile_picture_builder(waha))
     if settings.image_api_base:
         tools.extend(image_builder(settings))
     return tools

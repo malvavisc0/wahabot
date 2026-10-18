@@ -57,6 +57,7 @@ from wahabot.ai.tools.runcontext import (
 from wahabot.ai.tools.schemas import (
     EscalateSchema,
     ForwardMessageSchema,
+    ProfilePictureSchema,
     ReactToMessageSchema,
     ReadChatSchema,
     SendMediaSchema,
@@ -248,6 +249,41 @@ def probe_media_url(url: str) -> str | None:
             exc=exc,
         )
     return None
+
+
+def profile_picture_builder(waha: WahaClient) -> BaseTool:
+    """Build a tool that fetches a chat's or contact's profile picture URL."""
+
+    def get_profile_picture_fn(chat: str | None = None, reason: str = "") -> str:
+        """Fetch the profile picture URL for a chat (current by default)."""
+        target = current_target()
+        chat_id, fence_error = fenced_chat(chat, target)
+        if fence_error:
+            return error(fence_error)
+        if not chat_id or not target.session:
+            return error("no active conversation context")
+        log_action_reason("get_profile_picture", reason, chat=chat_id)
+        url = waha.get_profile_picture(target.session, chat_id)
+        if not url:
+            return ok(chat=chat_id, url="", available=False)
+        return ok(
+            chat=chat_id,
+            url=url,
+            available=True,
+            hint="send it with send_media kind=image url=<url>",
+        )
+
+    return FunctionTool.from_defaults(
+        fn=get_profile_picture_fn,
+        fn_schema=ProfilePictureSchema,
+        name="get_profile_picture",
+        description=(
+            "Fetch the profile picture URL for the current conversation or an "
+            "exact `chat` JID (operator commands). Returns the URL, or "
+            "available=false when WhatsApp hides it. Send it with send_media "
+            "kind=image url=…."
+        ),
+    )
 
 
 def send_message(waha: WahaClient) -> BaseTool:

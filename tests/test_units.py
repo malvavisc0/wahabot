@@ -4025,7 +4025,8 @@ def test_self_chat_command_classification() -> None:
         me=self_cmd.me,
         payload={"from": ME_JID, "fromMe": True, "body": "note: kai do the thing"},
     )
-    assert self_command_instruction(mid_text, bot_name="kai") is None
+    # The console: a mention anywhere is an instruction, not a quote.
+    assert self_command_instruction(mid_text, bot_name="kai") == "note: kai do the thing"
     lid_linked = WahaEvent(
         id="sc8",
         timestamp=1,
@@ -6737,3 +6738,66 @@ def test_one_letter_chat_name_does_not_resolve_from_prose() -> None:
         )
         is None
     )
+
+
+def test_profile_picture_prefers_contact_then_chat() -> None:
+    """Contact endpoint first, chat endpoint as fallback, "" when hidden."""
+    import httpx
+
+    from wahabot.core.waha import WahaClient
+
+    def contact(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/contacts/profile-picture":
+            return httpx.Response(
+                200, json={"profilePictureURL": "https://pic.invalid/a.png"}
+            )
+        return httpx.Response(404)
+
+    client = WahaClient(
+        "http://waha.invalid", "k", transport=httpx.MockTransport(contact)
+    )
+    assert client.get_profile_picture(SESSION, CHAT_ID) == "https://pic.invalid/a.png"
+
+    def chat(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/picture"):
+            return httpx.Response(200, json={"url": "https://pic.invalid/b.png"})
+        return httpx.Response(404)
+
+    client = WahaClient("http://waha.invalid", "k", transport=httpx.MockTransport(chat))
+    assert client.get_profile_picture(SESSION, CHAT_ID) == "https://pic.invalid/b.png"
+
+    client = WahaClient(
+        "http://waha.invalid",
+        "k",
+        transport=httpx.MockTransport(lambda _: httpx.Response(404)),
+    )
+    assert client.get_profile_picture(SESSION, CHAT_ID) == ""
+
+
+def test_profile_picture_tool_envelope() -> None:
+    """The tool returns the URL, or available=false when there is none."""
+    from wahabot.ai.tools.whatsapp import (
+        RunTarget,
+        bind_target,
+        profile_picture_builder,
+        reset_target,
+    )
+
+    waha = unittest.mock.Mock()
+    waha.get_profile_picture.return_value = "https://pic.invalid/a.png"
+    target = RunTarget(session=SESSION, chat_id=CHAT_ID)
+    token = bind_target(target)
+    try:
+        payload = json.loads(profile_picture_builder(cast(Any, waha)).fn(reason="check"))
+    finally:
+        reset_target(token)
+    assert payload["ok"] is True and payload["url"] == "https://pic.invalid/a.png"
+    waha.get_profile_picture.assert_called_once_with(SESSION, CHAT_ID)
+
+    waha.get_profile_picture.return_value = ""
+    token = bind_target(target)
+    try:
+        hidden = json.loads(profile_picture_builder(cast(Any, waha)).fn())
+    finally:
+        reset_target(token)
+    assert hidden["ok"] is True and hidden["available"] is False
