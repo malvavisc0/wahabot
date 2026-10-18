@@ -1178,7 +1178,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         chatter that could only be discarded).
         """
         limit = self.tool_round_limit
-        logger.warning("Generating wrap-up response ({reason})", reason=reason)
+        logger.info("Generating wrap-up response ({reason})", reason=reason)
         delivered = self.any_delivery()
         prompt = (
             _POST_DELIVERY_WRAP_UP_PROMPT
