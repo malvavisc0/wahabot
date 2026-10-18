@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
-from llama_index.core.base.llms.types import ChatMessage, MessageRole
+from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
 from llama_index.core.llms.function_calling import FunctionCallingLLM
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.tools import FunctionTool, ToolSelection
@@ -17,6 +17,7 @@ from workflows.context.serializers import JsonSerializer
 
 from tests.harness import CHAT_ID, chat_event
 from tests.harness import SESSION as HARNESS_SESSION
+from tests.test_wire import _wait
 from wahabot.ai.context import handle_message
 from wahabot.ai.events import ToolCallEvent
 from wahabot.ai.triage import (
@@ -296,13 +297,73 @@ def test_gate_classifies_and_escalates(tmp_path: Path) -> None:
         turns=("user: hello",),
     )
 
-    result = asyncio.run(gate.classify_bounded(context))
+    async def scenario() -> TriageResult:
+        result = await gate.classify_bounded(context)
+        # The send is dispatched off the verdict's path; await the held
+        # tasks before the loop closes so the test observes the
+        # delivered escalation.
+        await asyncio.gather(*tuple(gate.escalations))
+        return result
+
+    result = asyncio.run(scenario())
 
     assert result.verdict.escalate is True
     assert result.failed is False
     assert result.latency_ms >= 0
     assert waha.sent
     assert "triage flagged this chat" in waha.sent[0][2]
+    assert channel.stamped == [CHAT]
+
+
+def test_gate_escalation_send_is_off_the_verdicts_latency_path(
+    tmp_path: Path,
+) -> None:
+    """A slow escalation send must not eat the verdict's timeout budget.
+
+    The send is dispatched, not awaited: with the old awaited send, a
+    WAHA send slower than ``gate_timeout`` timed the whole verdict out
+    (block-mode groups went silent despite ``participate``). Now the
+    verdict returns promptly and the send completes in its own task.
+    """
+    waha = FakeWaha()
+    channel = FakeChannel()
+    gate = TriageGate(
+        gate_settings(tmp_path),
+        cast(Any, waha),
+        cast(Any, channel),
+        transport=gate_transport(
+            json.dumps(
+                {
+                    "adversarial": False,
+                    "escalate": True,
+                    "participate": True,
+                    "why": "wants a human",
+                    "needs": [],
+                }
+            )
+        ),
+    )
+    gate.timeout = 0.2
+
+    async def slow_send(context: TriageContext, verdict: TriageVerdict) -> None:
+        await asyncio.sleep(0.5)  # far beyond the verdict's budget
+        await TriageGate.escalate(gate, context, verdict)
+
+    gate.escalate = slow_send  # type: ignore[method-assign]
+
+    async def scenario() -> TriageResult:
+        result = await gate.classify_bounded(
+            TriageContext(session=SESSION, chat_id=CHAT, message="I need a human")
+        )
+        await asyncio.gather(*tuple(gate.escalations))
+        return result
+
+    result = asyncio.run(scenario())
+
+    assert result.timed_out is False
+    assert result.failed is False
+    assert result.verdict.escalate is True
+    assert waha.sent
     assert channel.stamped == [CHAT]
 
 
@@ -481,34 +542,48 @@ def test_blocked_group_does_not_start_the_agent(monkeypatch: pytest.MonkeyPatch)
     run.assert_not_awaited()
 
 
-def test_failed_gate_keeps_an_unaddressed_group_silent(
+def test_failed_gate_wakes_the_agent_in_an_unaddressed_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A gate outage degrades to today's behaviour: the agent runs.
+
+    The plan's degradation rule — every layer falls back to the
+    pre-gate behaviour, so a down gate must never mute a chat. A
+    failed verdict in block mode starts the run; the stored verdict
+    keeps the run unhardened and the journal shows the failure.
+    """
     gate = FakeGate(result=TriageResult.fallback(failed=True))
     agent = FunctionCallingAgentWorkflow(
         llm=Mock(spec=FunctionCallingLLM),
         system_prompt="x",
         triage=cast(Any, gate),
     )
-    run = AsyncMock(side_effect=AssertionError("agent must not run"))
+    run = AsyncMock(
+        return_value=ChatResponse(
+            message=ChatMessage(role=MessageRole.ASSISTANT, content="saw it")
+        )
+    )
     monkeypatch.setattr(agent, "run", run)
 
-    async def scenario() -> tuple[str, Any]:
+    async def scenario() -> tuple[str, Any, Any]:
         ctx = Context(agent)
-        return await handle_message(
+        reply, target = await handle_message(
             message_event(GROUP, "did you see that"),
             agent,
             ctx=ctx,
             addressed=False,
             gate_first=True,
         )
+        stored = await ctx.store.get("triage_result", default=None)
+        return reply, target, stored
 
-    reply, target = asyncio.run(scenario())
+    reply, target, stored = asyncio.run(scenario())
 
-    assert reply == ""
+    assert reply == "saw it"
     assert target.chat_id == GROUP
     assert gate.calls == 1
-    run.assert_not_awaited()
+    run.assert_awaited_once()
+    assert isinstance(stored, dict) and stored["failed"] is True
 
 
 def test_dm_starts_the_gate_before_the_agent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -604,6 +679,48 @@ def test_gate_blocks_an_unaddressed_group_on_the_wire(bot: Any) -> None:
     assert memory is not None
     assert any(
         "lol did you see that" in str(message.content) for message in memory.get_all()
+    )
+
+
+def test_gate_silenced_turn_survives_into_the_next_run(bot: Any) -> None:
+    """A gate-silenced group message rides the next run's history.
+
+    The gated turn is stored stamped ``turn_handled`` (the gate's
+    decision concluded it, exactly like a silent run's stamp). Without
+    the stamp the next run's ``repair_memory`` dropped the unstamped
+    trailing user message as run scaffolding: the silenced message
+    vanished from the buffer, the recap and the thread index alike,
+    and replies came out "factually correct but out of context".
+    """
+    config_path = bot.settings.access_config
+    config = json.loads(config_path.read_text())
+    config["group_participation"] = "judicious"
+    config_path.write_text(json.dumps(config))
+    gate = FakeGate(result=TriageResult(TriageVerdict(participate=False)))
+    bot.agent.triage = cast(Any, gate)
+
+    # Message 1: unaddressed banter; the gate keeps the bot silent.
+    bot.post(chat_event(body="lol did you see that", mid="GATE-BLOCK"))
+    assert gate.calls == 1
+    assert bot.waha.sent == []
+
+    # Message 2: addressed to the bot, so the agent runs and must see
+    # message 1 in its history.
+    gate.result = TriageResult(TriageVerdict(participate=True))
+    llm = bot.stack.llm
+    llm.clear()
+    bot.post(chat_event(body="kai what did you think of it?", mid="FOLLOW-UP"))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    turns = [
+        str(m.get("content", ""))
+        for m in llm.requests[0]["messages"]
+        if m.get("role") == "user"
+    ]
+    assert any("lol did you see that" in turn for turn in turns), (
+        "the gate-silenced message must ride the next run's history"
+    )
+    assert any("viste" in turn or "did you think" in turn for turn in turns), (
+        "the new message itself must ride its own run"
     )
 
 

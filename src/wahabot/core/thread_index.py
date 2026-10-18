@@ -7,8 +7,10 @@ file per chat, both under ``data/memory/<session>/``. Retrieval never
 crosses chats — the chat id is part of every path and every query.
 
 Indexing rides the same trim hook as the Tier 1 recap. ``schedule`` only
-records the dropped user/assistant turns in memory; ``drain`` runs at the
-persist points, after the reply is out, and never inside the agent run.
+records the dropped user/assistant turns in memory; ``drain`` runs at
+the persist points, after the reply is out, and outside the chat lock —
+never inside the agent run, and never holding the chat's run lock
+(embedding must not extend the serialized section).
 Content-hash node ids make redeliveries, ``fromMe`` folds and repeated
 batches idempotent. Tool results, narration payloads and operator
 commands are never indexed. Every failure is logged once and swallowed:

@@ -19,7 +19,12 @@ The merge is one LLM call, never on the hot path:
 :meth:`RecapMerger.schedule` only *records* the dropped text (pure
 state, no task, no loop), and the merge runs when
 :meth:`RecapMerger.merge_pending` is awaited — the handlers do that
-at the persist points, after the reply has been sent. A failed merge
+at the persist points, after the reply has been sent and outside the
+chat lock. Merges serialize on an internal lock: with the job off the
+chat lock, overlapping runs can call ``merge_pending`` concurrently,
+and without the lock two merges of the same chat could read the same
+existing recap and the later save would silently drop the other
+batch's content. A failed merge
 drops that batch (the turns are already out of the buffer; the loss
 is the recap's coverage, never the run).
 """
@@ -197,7 +202,8 @@ class RecapMerger:
     ``schedule`` never calls the LLM — it only records, so bare test and
     library runs that trim but never merge leave nothing running. The
     merge runs when :meth:`merge_pending` is awaited (the handlers, at
-    the persist points, after the reply has been sent), one bounded LLM
+    the persist points, after the reply has been sent and outside the
+    chat lock), one bounded LLM
     call per chat with pending text, under the caller's semaphore when
     one is given. A failed merge logs and drops that batch.
     """
@@ -212,6 +218,10 @@ class RecapMerger:
         self._data_dir = data_dir
         self._semaphore = semaphore
         self._pending: dict[tuple[str, str], str] = {}
+        #: One lock per chat, so only merges of the same chat serialize
+        #: (the read-modify-write of that chat's recap) while different
+        #: chats still merge concurrently.
+        self._merge_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     def schedule(self, session: str, chat_id: str, dropped_text: str) -> None:
         """Record *dropped_text* for a later merge; a no-op when empty."""
@@ -227,17 +237,34 @@ class RecapMerger:
         return bool(self._pending)
 
     async def merge_pending(self) -> None:
-        """Merge every pending chat; each failure only drops its batch."""
+        """Merge every pending chat; each failure only drops its batch.
+
+        Serialized per chat: the job runs outside the chat lock, so a
+        merge still in flight must never race the next run's merge of
+        the same chat — without the lock both would read the same
+        existing recap and the later save would drop the other batch's
+        content. Different chats take different locks and still merge
+        concurrently.
+        """
         while self._pending:
             (session, chat_id), text = self._pending.popitem()
-            try:
-                await self._merge(session, chat_id, text)
-            except Exception as exc:
-                logger.warning(
-                    "Recap merge failed for {chat_id}; batch dropped: {exc}",
-                    chat_id=chat_id,
-                    exc=exc,
-                )
+            async with self._lock_for((session, chat_id)):
+                try:
+                    await self._merge(session, chat_id, text)
+                except Exception as exc:
+                    logger.warning(
+                        "Recap merge failed for {chat_id}; batch dropped: {exc}",
+                        chat_id=chat_id,
+                        exc=exc,
+                    )
+
+    def _lock_for(self, key: tuple[str, str]) -> asyncio.Lock:
+        """The per-chat merge lock, created on first use."""
+        lock = self._merge_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._merge_locks[key] = lock
+        return lock
 
     async def _merge(self, session: str, chat_id: str, dropped_text: str) -> None:
         existing = load_learned(self._data_dir, session, chat_id)

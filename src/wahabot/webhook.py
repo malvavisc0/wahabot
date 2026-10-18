@@ -1,6 +1,7 @@
 """FastAPI app exposing the WAHA webhook endpoint and agent dispatch."""
 
-from collections.abc import Awaitable, Callable
+import contextlib
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from loguru import logger
@@ -9,7 +10,34 @@ from wahabot.core.hmac import verify_hmac
 from wahabot.core.journal import save_event
 from wahabot.core.models import WahaEvent
 
-app = FastAPI(title="wahabot webhook server")
+#: Coroutines awaited once as the app shuts down. Bounded background
+#: work (e.g. detached escalation sends) drains here instead of being
+#: dropped when the process exits.
+_shutdown_hooks: list[Callable[[], Awaitable[None]]] = []
+
+
+def on_shutdown(hook: Callable[[], Awaitable[None]]) -> None:
+    """Register *hook* to be awaited once when the app shuts down."""
+    _shutdown_hooks.append(hook)
+
+
+async def run_shutdown_hooks() -> None:
+    """Await every shutdown hook; one failure never blocks the rest."""
+    for hook in tuple(_shutdown_hooks):
+        try:
+            await hook()
+        except Exception as exc:
+            logger.warning("Shutdown hook failed: {exc}", exc=exc)
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Drain bounded background work as the app shuts down."""
+    yield
+    await run_shutdown_hooks()
+
+
+app = FastAPI(title="wahabot webhook server", lifespan=_lifespan)
 
 Handler = Callable[[WahaEvent], Awaitable[None]]
 

@@ -86,7 +86,7 @@ from wahabot.status import (
     session_healthy,
 )
 from wahabot.status import state as status_state
-from wahabot.webhook import on_forget, on_message
+from wahabot.webhook import on_forget, on_message, on_shutdown
 
 #: Messages older than this many seconds are stale backlog, not live turns.
 _MAX_MESSAGE_AGE_S = 300
@@ -791,12 +791,21 @@ def register_agent_handler(
                 chat_id=str(buffer.container.payload.get("from", "")),
             )
 
-    async def deliver_album_reply(buffer: AlbumBuffer) -> None:
-        """Download an album's images, run the agent once, send its reply."""
-        event = buffer.container
-        chat_id = str(event.payload.get("from", ""))
+    async def download_album_images(buffer: AlbumBuffer) -> list[dict[str, Any]]:
+        """An album's images, downloaded and capped for the vision model.
+
+        The vision cap applies at collection time: images past
+        ``vision_max_images`` can never ride the prompt (handle_message
+        trims to the same cap), so downloading them would be pure
+        waste.
+        """
         downloaded: list[dict[str, Any]] = []
         for image_event in buffer.images:
+            if (
+                settings.vision_max_images > 0
+                and len(downloaded) >= settings.vision_max_images
+            ):
+                break
             media = image_media(image_event)
             if media is None:
                 continue
@@ -809,6 +818,13 @@ def register_agent_handler(
             )
             if image is not None:
                 downloaded.append(image)
+        return downloaded
+
+    async def deliver_album_reply(buffer: AlbumBuffer) -> None:
+        """Download an album's images, run the agent once, send its reply."""
+        event = buffer.container
+        chat_id = str(event.payload.get("from", ""))
+        downloaded = await download_album_images(buffer)
         if not downloaded:
             logger.debug("Album in {chat_id} yielded no usable images", chat_id=chat_id)
             return
@@ -841,28 +857,20 @@ def register_agent_handler(
                     gate_first=gate_first,
                 )
             await persist_memory(settings, event.session, chat_id, ctx)
-            await agent.merge_learned()
-            if target.sent or target.reacted:
-                await finish_agent_reply(
-                    waha,
-                    event.session,
-                    chat_id,
-                    album_message_id(event),
-                    reply,
-                    True,
-                    settings,
-                )
-                return
+        delivered = bool(target.sent or target.reacted)
         await finish_agent_reply(
             waha,
             event.session,
             chat_id,
             album_message_id(event),
             reply,
-            False,
+            delivered,
             settings,
-            emoji_reaction=True,
+            emoji_reaction=not delivered,
         )
+        # Post-reply memory jobs outside the chat lock: the recap merge
+        # and the embedding drain must never hold the chat's next run.
+        await agent.merge_learned()
 
     set_completion_handler(run_album)
 
@@ -962,7 +970,18 @@ def register_agent_handler(
         """Prepare one buffered turn's text and append its captioned media."""
         await transcribe_message(burst_event, None)
         body = extract_text(burst_event)
-        if message_kind(burst_event) in ("image", "sticker") and settings.vision:
+        # The vision cap applies at collection time: once the shared
+        # list holds ``vision_max_images`` entries, a further image can
+        # never ride the prompt (the run trims to the same cap), so
+        # downloading and captioning it would be pure waste.
+        capped = (
+            settings.vision_max_images > 0 and len(images) >= settings.vision_max_images
+        )
+        if (
+            message_kind(burst_event) in ("image", "sticker")
+            and settings.vision
+            and not capped
+        ):
             image = await download_captioned_image(
                 image_media(burst_event), str(burst_event.payload.get("id", ""))
             )
@@ -1048,7 +1067,6 @@ def register_agent_handler(
                     gate_first=gate_first,
                 )
             await persist_memory(settings, merged.session, chat_id, ctx)
-            await agent.merge_learned()
         return reply, target
 
     async def deliver_burst_reply(buffer: bursts.BurstBuffer) -> None:
@@ -1079,6 +1097,9 @@ def register_agent_handler(
             settings,
             emoji_reaction=True,
         )
+        # Post-reply memory jobs outside the chat lock: the recap merge
+        # and the embedding drain must never hold the chat's next run.
+        await agent.merge_learned()
 
     if settings.burst_enabled:
         bursts.set_completion_handler(run_burst)
@@ -1115,6 +1136,10 @@ def register_agent_handler(
         if settings.triage_gate and settings.gate_api_base
         else None
     )
+    if triage is not None:
+        # Detached escalation sends outlive the run: drain them at app
+        # shutdown so a clean exit never drops a flagged escalation.
+        on_shutdown(triage.close)
 
     def group_message_addressed(event: WahaEvent, current: SessionConfig) -> bool:
         """True for DMs and for group messages that mention/reply to the bot."""
@@ -1362,7 +1387,6 @@ def register_agent_handler(
                         gate_first=gate_first,
                     )
                 await persist_memory(settings, event.session, chat_id, ctx)
-                await agent.merge_learned()
                 delivered = bool(target.sent or target.reacted)
             # The provider answered: flip the LLM health flag back up
             # (once-per-transition notify) outside the chat lock, so
@@ -1378,6 +1402,10 @@ def register_agent_handler(
                 settings,
                 emoji_reaction=True,
             )
+            # Post-reply memory jobs outside the chat lock: the recap
+            # merge and the embedding drain must never hold this
+            # chat's next run.
+            await agent.merge_learned()
         except Exception as exc:
             # Clean failure classes first: a timeout gets one concise
             # line (the chained httpx/openai traceback is noise for a

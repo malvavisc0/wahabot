@@ -132,11 +132,14 @@ def recap_line(message: ChatMessage) -> str:
     The recap must never carry tool-call arguments or narration: a
     model's tool payload is not conversation, and a private self-report
     was never sent to the chat. ``message_text`` is the token counter's
-    view (content plus tool args), not this one.
+    view (content plus tool args), not this one. The inbound
+    ``[message id: …]`` note is metadata this code stamped on the
+    turn, not conversation — it is stripped so the recap carries words
+    only.
     """
     if message.role not in (MessageRole.USER, MessageRole.ASSISTANT):
         return ""
-    text = str(message.content or "").strip()
+    text = INBOUND_ID_RE.sub("", str(message.content or "")).strip()
     if message.role == MessageRole.ASSISTANT:
         text = chat_visible_text(text)
     return f"[{message.role.value}] {text}" if text else ""
@@ -384,11 +387,14 @@ class FunctionCallingAgentWorkflow(Workflow):
     async def merge_learned(self) -> None:
         """Run the post-reply memory jobs: recap merge and index drain.
 
-        Called at the persist points, after the reply has been sent —
-        the extraction LLM call and the embedding batch never delay a
-        customer-facing turn. The two jobs are independent and run
-        concurrently; each is single-flight and fail-soft, so one
-        service being down never blocks the other.
+        Called at the persist points after the reply has been sent —
+        and outside the chat lock, so the extraction LLM call and the
+        embedding batch never delay this chat's next run (the aria-ai
+        lesson: embedding must never run inside the agent lock). The
+        two jobs are independent and run concurrently; each is
+        single-flight and fail-soft, so one service being down never
+        blocks the other. The recap merger serializes internally, so
+        overlapping calls from concurrent runs cannot lose a batch.
         """
         tasks: list[Any] = []
         if self.recap_merger is not None:
@@ -520,9 +526,10 @@ class FunctionCallingAgentWorkflow(Workflow):
 
         Race mode (DMs, addressed turns) always returns True: the gate
         can only tighten tools there. Block mode (unaddressed groups)
-        runs only on an explicit participate verdict; a failed or
-        timed-out gate keeps the group silent rather than waking the
-        expensive agent.
+        runs only on an explicit participate verdict — but a failed or
+        timed-out gate degrades to today's behaviour (the agent runs),
+        per the plan's rule that a down layer never mutes a chat: the
+        gate is a filter, not an authority, and its outage is audited.
         """
         if self.triage is None or target.chat_id == OPERATOR_CHAT_ID:
             return True
@@ -541,7 +548,10 @@ class FunctionCallingAgentWorkflow(Workflow):
             result = await self.triage.classify_bounded(context)
             await ctx.store.set("triage_result", result_to_dict(result))
             if result.failed or result.timed_out:
-                return False
+                # Gate down: degrade to today's behaviour — wake the
+                # agent. The failed verdict is already stored (so the
+                # run's tool layer stays unhardened) and audited.
+                return True
             return result.verdict.participate
         except Exception as exc:
             logger.warning(
@@ -550,7 +560,9 @@ class FunctionCallingAgentWorkflow(Workflow):
                 error=exc,
             )
             logger.opt(exception=exc).debug("Triage gate failure detail")
-            return not gate_first
+            # Gate unavailable: degrade to today's behaviour in both
+            # modes — the agent runs, unhardened.
+            return True
 
     async def stored_triage_result(self, ctx: Context) -> TriageResult | None:
         """The verdict already in this context, if any, as an object."""
@@ -576,11 +588,34 @@ class FunctionCallingAgentWorkflow(Workflow):
         """Take the run's gate task, if one was started."""
         return self.triage_tasks.pop(id(ctx), None)
 
-    def cancel_triage(self, ctx: Context) -> None:
-        """Cancel any gate task the run left behind."""
+    async def cancel_triage(self, ctx: Context) -> None:
+        """Cancel any gate task the run left behind.
+
+        A live task is cancelled and its never-produced verdict is
+        audited as a timeout fallback — a run that ends before the
+        gate answers must not leave a verdict-shaped hole in the
+        journal. The escalation a partial verdict already dispatched
+        is a separate task and is not touched.
+        """
         task = self.pop_triage_task(ctx)
-        if task is not None and not task.done():
-            task.cancel()
+        if task is None or task.done():
+            return
+        task.cancel()
+        if self.triage is None:
+            return
+        try:
+            audit = await ctx.store.get("triage_audit", default=None)
+        except Exception as exc:
+            logger.warning("Triage audit state unavailable: {error}", error=exc)
+            return
+        if not isinstance(audit, dict):
+            return
+        values = cast(dict[str, Any], audit)
+        self.triage.audit(
+            str(values.get("session", "")),
+            str(values.get("chat_id", "")),
+            TriageResult.fallback(timed_out=True),
+        )
 
     async def triage_result(self, ctx: Context) -> TriageResult | None:
         """Await the run's gate verdict once; fallback results are audited."""

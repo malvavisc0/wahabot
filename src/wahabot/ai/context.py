@@ -19,6 +19,7 @@ from wahabot.ai.history import (
 )
 from wahabot.ai.messages import (
     OPERATOR_NOTE_PREFIX,
+    TURN_HANDLED_KWARG,
     addressed_note,
     bot_jids,
     is_operator_event,
@@ -542,7 +543,20 @@ async def handle_message(
             await ctx.store.set("triage_audit", None)
             if not await agent.start_triage(ctx, target, user_msg, addressed, gate_first):
                 memory = await agent.ensure_memory(ctx)
-                await memory.aput(ChatMessage(role=MessageRole.USER, content=user_msg))
+                # Stamped handled: the gate's decision concluded this
+                # turn, exactly like a run-end stamp for a silent run.
+                # Without it the next run's ``repair_memory`` would
+                # drop the unstamped trailing user message as run
+                # scaffolding — the gate-silenced message would
+                # vanish from the buffer, the recap and the thread
+                # index alike, punching holes in the group's flow.
+                await memory.aput(
+                    ChatMessage(
+                        role=MessageRole.USER,
+                        content=user_msg,
+                        additional_kwargs={TURN_HANDLED_KWARG: True},
+                    )
+                )
                 return "", target
         # WAHABOT_RUN_TIMEOUT as a true per-run wall-clock cap. The
         # library's own timeout= must stay None: on the reused per-chat
@@ -556,7 +570,7 @@ async def handle_message(
         )
     finally:
         if ctx is not None:
-            agent.cancel_triage(ctx)
+            await agent.cancel_triage(ctx)
         reset_target(token)
     return final_reply(result), target
 

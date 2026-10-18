@@ -4,8 +4,11 @@ The gate is a small classifier that runs outside the agent's context. It
 labels hostile input, messages that need a human, and whether an
 unaddressed group message should get a reply at all. It is a filter, not
 an authority: a timeout, parse failure, or unavailable service never
-blocks a DM, and an unaddressed group stays silent rather than waking
-the expensive agent on a guess.
+blocks a DM, and never mutes a group either — every layer degrades to
+today's behaviour, so a gate outage wakes the agent exactly as the
+pre-gate bot did. The escalation a verdict asks for is sent off the
+verdict's latency path, so a slow send can neither time the verdict
+out nor be cancelled by a run that ends first.
 """
 
 from __future__ import annotations
@@ -50,6 +53,11 @@ TRIAGE_RECALL_QUERY_CHARS = 200
 #: After a gate failure, skip the service for this long so a down
 #: endpoint cannot add its timeout to every message.
 GATE_RETRY_S = 60.0
+
+#: Escalation sends allowed to run at once. Detached from the verdict's
+#: latency path, so a burst of escalate verdicts (or a slow WAHA send)
+#: must not fan out into unbounded concurrent network/thread work.
+ESCALATION_CONCURRENCY = 4
 
 #: Hardened mode is an allowlist: unknown tools stay paused.
 HARDENED_ALLOWED_TOOLS = frozenset(
@@ -238,6 +246,11 @@ class TriageGate:
         self.timeout = settings.gate_timeout
         self.down_until = 0.0
         self.warned: set[str] = set()
+        #: In-flight escalation sends, held so they are neither garbage
+        #: collected nor cancelled with the verdict's task.
+        self.escalations: set[asyncio.Task[None]] = set()
+        #: Bounds concurrent escalation sends; see ESCALATION_CONCURRENCY.
+        self._escalation_sem = asyncio.Semaphore(ESCALATION_CONCURRENCY)
 
     @property
     def url(self) -> str:
@@ -265,9 +278,22 @@ class TriageGate:
         return time.monotonic() < self.down_until
 
     async def classify_bounded(self, context: TriageContext) -> TriageResult:
-        """Classify with a hard timeout; always returns a result and audits it."""
+        """Classify with a hard timeout; always returns a result and audits it.
+
+        The cooldown path audits too: a verdict suppressed by a gate
+        outage is a decision the journal must show, not a silent one.
+        A successful verdict clears the warned set so the next outage
+        episode logs its failures fresh instead of staying muted for
+        the process lifetime.
+        """
         if self.is_down():
-            return TriageResult.fallback(failed=True)
+            result = TriageResult.fallback(failed=True)
+            # The cooldown path is awaited before the agent starts, so
+            # the journal append runs off the event loop: a synchronous
+            # write per group message while the gate is down would block
+            # the run path for the whole cooldown window.
+            await asyncio.to_thread(self.audit, context.session, context.chat_id, result)
+            return result
         started = time.monotonic()
         try:
             result = await asyncio.wait_for(self.classify(context), timeout=self.timeout)
@@ -297,6 +323,7 @@ class TriageGate:
             self.down_until = time.monotonic() + GATE_RETRY_S
         else:
             self.down_until = 0.0
+            self.warned.clear()
         self.audit(context.session, context.chat_id, result)
         return result
 
@@ -320,15 +347,10 @@ class TriageGate:
         if not context.group or context.addressed:
             verdict = replace(verdict, participate=True)
         if verdict.escalate:
-            try:
-                await self.escalate(context, verdict)
-            except Exception as exc:
-                self.warn_once(
-                    "escalate",
-                    "Triage escalation failed for {chat_id}: {exc}",
-                    chat_id=context.chat_id,
-                    exc=exc,
-                )
+            # The send is dispatched, not awaited: a slow WAHA send must
+            # neither eat the verdict's latency budget nor be cancelled
+            # by a run that ends before the gate task completes.
+            self.dispatch_escalation(context, verdict)
         return TriageResult(verdict)
 
     async def complete(self, context: TriageContext) -> str:
@@ -363,6 +385,46 @@ class TriageGate:
             f"triage flagged this chat: {reason}",
         )
 
+    def dispatch_escalation(self, context: TriageContext, verdict: TriageVerdict) -> None:
+        """Send the gate's escalation off the verdict's latency path.
+
+        The send runs as its own task, held on the gate so it is never
+        garbage collected mid-send and never cancelled with the verdict's
+        task — a run that finishes early cannot kill an escalation the
+        verdict already asked for.
+        """
+        task = asyncio.create_task(self.escalate_safely(context, verdict))
+        self.escalations.add(task)
+        task.add_done_callback(self.escalations.discard)
+
+    async def escalate_safely(
+        self, context: TriageContext, verdict: TriageVerdict
+    ) -> None:
+        """One escalation send; any failure is logged, never raised.
+
+        Bounded by ESCALATION_CONCURRENCY so a burst of escalate
+        verdicts queues rather than fanning out into unbounded sends.
+        """
+        async with self._escalation_sem:
+            try:
+                await self.escalate(context, verdict)
+            except Exception as exc:
+                self.warn_once(
+                    "escalate",
+                    "Triage escalation failed for {chat_id}: {exc}",
+                    chat_id=context.chat_id,
+                    exc=exc,
+                )
+
+    async def close(self) -> None:
+        """Await in-flight escalation sends so shutdown never drops one.
+
+        Registered as an app shutdown hook. A failure inside a send is
+        already swallowed by ``escalate_safely``; ``gather`` only waits.
+        """
+        if self.escalations:
+            await asyncio.gather(*tuple(self.escalations), return_exceptions=True)
+
     def audit(self, session: str, chat_id: str, result: TriageResult) -> None:
         """Journal one verdict, including timeouts and parse failures."""
         save_action(
@@ -381,7 +443,7 @@ class TriageGate:
         )
 
     def warn_once(self, kind: str, message: str, **fields: Any) -> None:
-        """Log one failure kind per process; every verdict is still audited."""
+        """Log one failure kind per outage episode; every verdict is audited."""
         if kind in self.warned:
             return
         self.warned.add(kind)

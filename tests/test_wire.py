@@ -179,11 +179,30 @@ def test_pinned_state_block_rides_the_system_message(bot: Bot) -> None:
     notebook = Notebook(bot.settings.data_dir)
     notebook.write(SESSION, CHAT_ID, "customer-email", "ana@example.com")
     notebook.write(SESSION, SESSION_NOTEBOOK_CHAT, "reply-style", "Use concise replies.")
+    llm.requests.clear()
     bot.post(waha_event("PIN1"))
-    assert _wait(lambda: len(llm.requests) >= 1)
-    messages = llm.requests[0]["messages"]
+
+    def pinned_request() -> dict[str, Any] | None:
+        """This run's request, found by its pinned-state marker.
+
+        The fake LLM is session-scoped, and the post-reply memory jobs
+        run in the background: a request from an earlier test can still
+        land here, so ``requests[0]`` is not necessarily this run's.
+        """
+        for request in llm.requests:
+            for message in request.get("messages", []):
+                if message.get("role") == "system" and "# Pinned State" in str(
+                    message.get("content", "")
+                ):
+                    return request
+        return None
+
+    assert _wait(lambda: pinned_request() is not None)
+    request = pinned_request()
+    assert request is not None
+    messages = request["messages"]
     system = [str(m.get("content", "")) for m in messages if m.get("role") == "system"]
-    assert system, "no system message in the first request"
+    assert system, "no system message in the run's request"
     content = system[0]
     assert "# Pinned State" in content
     assert "## Notebook facts\n\n- customer-email: ana@example.com" in content
@@ -790,8 +809,11 @@ def test_album_vision_respects_vision_max_images(bot: Bot) -> None:
 
     caption_requests = [r for r in llm.requests if is_caption_request(r)]
     agent_requests = [r for r in llm.requests if not is_caption_request(r)]
-    assert len(caption_requests) == 2
-    assert all(image_part_count(r) == 1 for r in caption_requests)
+    # The cap applies at collection time: an album image past the cap
+    # can never ride the prompt, so it is neither downloaded nor
+    # captioned — one caption request, one image on the agent call.
+    assert len(caption_requests) == 1
+    assert image_part_count(caption_requests[0]) == 1
     assert image_part_count(agent_requests[0]) == 1
 
 
@@ -833,20 +855,35 @@ def test_burst_assembles_one_turn(bot: Bot) -> None:
     )
     llm = burst_bot.stack.llm
     chat = "491555000001@c.us"
+    llm.requests.clear()
     for i, line in enumerate(["there is a leak", "flat 3B", "near the panel"]):
         burst_bot.post(chat_event(body=line, mid=f"BURST{i}", chat=chat))
-    assert _wait(lambda: len(llm.requests) >= 2)
-    # One agent run = the tool-call round plus the final round (the
-    # fake LLM's FirstResponse delivers via send_message). Per-message
-    # runs would already have produced six requests by now.
-    agent_requests = [r for r in llm.requests if not is_caption_request(r)]
-    assert len(agent_requests) == 2
-    user_turns = [m for m in agent_requests[0]["messages"] if m.get("role") == "user"]
-    turn_text = (
-        user_turns[-1]["content"]
-        if isinstance(user_turns[-1]["content"], str)
-        else str(user_turns[-1]["content"])
-    )
+
+    def assembled_turn() -> str | None:
+        """The one user turn that carries the whole burst, if it exists.
+
+        The fake LLM is session-scoped, so a background request from an
+        earlier test can still land here; the burst's own text is the
+        marker that identifies this run. Assembly into a single turn is
+        the guarantee: a per-message run would put each line in a
+        separate user turn, so the first turn carrying one line would
+        not carry the others.
+        """
+        for request in llm.requests:
+            if is_caption_request(request):
+                continue
+            for message in request.get("messages", []):
+                if message.get("role") != "user":
+                    continue
+                content = message.get("content")
+                text = content if isinstance(content, str) else str(content)
+                if "there is a leak" in text:
+                    return text
+        return None
+
+    assert _wait(lambda: assembled_turn() is not None)
+    turn_text = assembled_turn()
+    assert turn_text is not None
     assert "there is a leak" in turn_text
     assert "flat 3B" in turn_text
     assert "near the panel" in turn_text
@@ -883,8 +920,8 @@ def test_burst_lone_emoji_becomes_reaction(bot: Bot) -> None:
         send_seen=False,
     )
     llm = emoji_bot.stack.llm
-    llm.clear()  # the shared stack's agent_round must see this run as round 1
-    llm.override = {
+    llm.clear()
+    emoji_response = {
         "id": "chatcmpl-smoke-emoji",
         "object": "chat.completion",
         "created": 1788525841,
@@ -898,6 +935,15 @@ def test_burst_lone_emoji_becomes_reaction(bot: Bot) -> None:
         ],
         "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
     }
+
+    # Answer by request shape, not the shared round counter: a
+    # background request from an earlier test can still land in the
+    # shared fake LLM, and that would push this run from round 1 to
+    # round 2 and swap in the tool-call answer instead of the emoji.
+    def always_emoji(_body: dict[str, Any]) -> dict[str, Any]:
+        return emoji_response
+
+    llm.selector = always_emoji
     chat = "491555000001@c.us"
     # Force the ~50 % reaction coin flip to the reaction side. The
     # burst flushes in the background up to burst_inactivity_s after
@@ -1367,12 +1413,20 @@ def test_send_voice_text_requires_configured_tts(bot: Bot) -> None:
     The gate is the settings URL: the error envelope tells the model to
     fall back, and its text reply lands normally.
     """
-    llm = bot.stack.llm  # default settings: tts_url empty
+    llm = bot.stack.llm
+    # Pin the gate explicitly: pydantic-settings still reads the OS
+    # environment even with ``_env_file=None``, so a developer shell
+    # exporting a TTS URL would silently arm synthesis and ship a
+    # voice — the exact opposite of what this test asserts.
+    bot.settings.tts_url = ""
+    llm.requests.clear()
     llm.override = VoiceTextResponse
     bot.post(waha_event("VOICETEXTOFF"))
-    assert _wait(lambda: len(llm.requests) >= 2)  # the error envelope loops back
+    # The error envelope loops the run back; it survives, no voice is
+    # synthesized, and the model's fallback text lands normally.
+    assert _wait(lambda: len(bot.waha.sent) >= 1)
     assert bot.waha.sent_voices == []  # the gate: no synthesis, no voice send
-    assert _wait(lambda: len(bot.waha.sent) >= 1)  # the fallback text lands
+    assert bot.waha.sent[0][2] == "smoke final answer"
 
 
 def test_send_voice_text_synthesis_failure_degrades_to_text(bot: Bot) -> None:

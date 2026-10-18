@@ -266,6 +266,16 @@ def test_recap_line_never_carries_tool_arguments_or_narration() -> None:
     assert recap_line(ChatMessage(role=MessageRole.TOOL, content="{}")) == ""
 
 
+def test_recap_line_strips_the_inbound_message_id_note() -> None:
+    """The recap carries words, not the code-stamped id metadata."""
+    inbound = ChatMessage(
+        role=MessageRole.USER,
+        content="yes please\n[message id: false_123_456]",
+    )
+
+    assert recap_line(inbound) == "[user] yes please"
+
+
 def test_trim_schedules_and_merge_renders_in_the_next_prompt(
     learned_settings: Settings,
 ) -> None:

@@ -557,7 +557,10 @@ def smoke_settings(data_dir: Path, llm_base: str) -> Settings:
     still reads process env vars even with `_env_file=None` — a
     developer shell with real LANGFUSE_* keys would otherwise arm the
     OTel exporter and every test run would ship fake-LLM traces to the
-    real Langfuse instance.
+    real Langfuse instance. ``timezone`` and ``tts_url`` are pinned for
+    the same reason: they change wire-visible output (the pinned-state
+    block, and whether a voice note ships), so a leaked env var must
+    not reach the run under test.
 
     Burst assembly is pinned OFF so single-message wire tests keep the
     immediate-run semantics they assert; the burst tests opt in via
@@ -575,6 +578,8 @@ def smoke_settings(data_dir: Path, llm_base: str) -> Settings:
         transcribe_url="http://whisper.invalid",
         burst_enabled=False,
         triage_gate=False,
+        timezone="UTC",
+        tts_url="",
         langfuse_public_key="",
         langfuse_secret_key="",
         langfuse_tracing_environment="test",
@@ -784,6 +789,7 @@ def reset_handlers() -> None:
     """Drop handlers from any previous register_* call in this process."""
     for registry in webhook_module._registries.values():  # pyright: ignore[reportPrivateUsage]
         registry.clear()
+    webhook_module._shutdown_hooks.clear()  # pyright: ignore[reportPrivateUsage]
 
 
 def image_part_count(body: dict[str, Any]) -> int:
