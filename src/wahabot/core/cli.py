@@ -70,6 +70,7 @@ def feature_flags(settings: Settings) -> list[str]:
         on_off(settings.shell_tool, "shell"),
         transcribe_flag(settings),
         on_off(bool(settings.tts_url), "tts"),
+        on_off(bool(settings.image_api_base), "image"),
         on_off(settings.learned_memory, "recap"),
         recall_flag(settings),
         gate_flag(settings),

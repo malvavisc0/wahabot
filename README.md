@@ -2,7 +2,7 @@
 
 wahabot is a self-hosted AI agent for WhatsApp, connected through the [WAHA](https://waha.devlike.pro) HTTP API. It brings conversation memory, media understanding, web research, and operator-controlled actions to direct messages and groups. Use an OpenAI-compatible model endpoint and keep the bot's configuration and conversation records on your own machine.
 
-The agent reads the context, decides whether a response is useful, gathers the information it needs, and replies. It can transcribe voice notes, analyze images and sampled video frames, send real files, and ask for missing information. Its language and personality come from your session prompt. For natural replies, prioritize complete sentences and enough context to be understood, rather than imposing a fixed message-length limit.
+The agent reads the context, decides whether a response is useful, gathers the information it needs, and replies. It can transcribe voice notes, analyze images and sampled video frames, send real files, generate or edit images when an image service is configured, and ask for missing information. Its language and personality come from your session prompt. For natural replies, prioritize complete sentences and enough context to be understood, rather than imposing a fixed message-length limit.
 
 The goal is useful participation, not a bot that answers every group message or pretends to be a person.
 
@@ -18,7 +18,7 @@ Incoming message -> context and memory -> model
                               final reply, reaction, or silence
 ```
 
-The bundled tools cover text and media delivery, quoting and numeric mentions, reactions, native forwarding, chat context, web search, page and video-metadata retrieval, human escalation, and an optional host shell. Python builder docstrings are for developers; explicit tool descriptions and parameter schemas are the instructions sent to the model.
+The bundled tools cover text and media delivery, quoting and numeric mentions, reactions, native forwarding, chat context, web search, page and video-metadata retrieval, human escalation, an optional host shell, and optional image generation/editing. Python builder docstrings are for developers; explicit tool descriptions and parameter schemas are the instructions sent to the model.
 
 The loop has brakes: `stay_silent` ends a run and cancels other tools in that batch, repeated calls are blocked, and round and run-time limits stop runaway work. Text, media, and forwarding share one successful-send allowance per run; reactions have a separate allowance. After successful delivery, further research or actions are blocked. In groups, mentioned mode responds when addressed, while judicious mode asks the triage gate whether an unaddressed message is worth a run; once admitted, the model still decides whether to speak.
 
@@ -35,6 +35,7 @@ The loop has brakes: `stay_silent` ends a run and cancels other tools in that ba
 Nobody sends one clean, complete request. The leak arrives as "there's water coming through the ceiling", then "flat 3B", then a video. wahabot holds the burst, waits for the sender to finish, and answers once instead of asking "which flat?" three times.
 
 - Voice notes are transcribed (a WhisperX service) and heard without anyone asking. It can talk back in its own voice too, if you point it at a TTS service: the model writes the line, the configured voice speaks it.
+- If you point it at an image service, it can draw a picture from a caption or repaint one you send; without that service the tools are simply absent.
 - Photos are analyzed by the vision model. Videos use sampled frames and, when transcription is configured, the audio track; this is not exhaustive frame-by-frame viewing. Albums arrive as one turn with their images attached.
 - Supported reel, TikTok, and X links can be resolved through yt-dlp and passed through the video pipeline within configured limits. YouTube links use available metadata and captions rather than the video-download path; retrieval can fail or be incomplete.
 - Every chat has its own rolling memory. With persistence configured, the bot can pick up the conversation after a restart.
@@ -71,7 +72,7 @@ Two things you should know before you put this on a business number:
 - The connection is unofficial. WAHA drives a WhatsApp Web session, and unofficial automation can violate WhatsApp's terms and lead to a ban. Use a separate number, not one your business depends on.
 - Ordinary runs respond to incoming messages. Trusted operator commands can initiate a message to another chat, so permissions and responsible use still matter. The project is not an outreach scheduler, and no reply policy eliminates the risk of a number being banned.
 
-Memory, event journals, and audit records live on your machine. Conversation content is still sent to the model endpoint and any configured transcription, TTS, or tracing service. JID masking in tracing does not anonymize all message content. Configure access, retention, and service providers accordingly; tool spill files also depend on host temporary-file cleanup.
+Memory, event journals, and audit records live on your machine. Conversation content is still sent to the model endpoint and any configured transcription, TTS, image, or tracing service. JID masking in tracing does not anonymize all message content. Configure access, retention, and service providers accordingly; tool spill files also depend on host temporary-file cleanup.
 
 ## Where this is heading
 

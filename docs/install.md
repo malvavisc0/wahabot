@@ -69,6 +69,9 @@ Key env vars:
 | `WAHABOT_TTS_VOICES` | JSON map of language code → voice id | `{"en":"vd_british_male_casual","de":"vd_german_male_casual","es":"vd_spanish_male"}` |
 | `WAHABOT_TTS_INSTRUCT` | JSON map of language code → frozen delivery instruct (empty = omit) | `{"en":"","de":"","es":"spoken casually, like teasing a friend in a group chat"}` |
 | `WAHABOT_TTS_DEFAULT_LANGUAGE` | Language fallback when the reply's has no voice-map entry | `en` |
+| `WAHABOT_IMAGE_API_BASE` | OpenAI-compatible image service base URL behind `generate_image`/`edit_image` (empty = tools off) | — |
+| `WAHABOT_IMAGE_TIMEOUT` | Per-request generation/edit timeout (s) | `240` |
+| `WAHABOT_IMAGE_SIZE` | Default render size (`WxH`) | `1024x1024` |
 | `WAHABOT_WEB_SEARCH_MAX_RESULTS` | Default total valid search results across engines | `5` |
 | `WAHABOT_WEB_SEARCH_TIMEOUT` | webserp subprocess and `visit_url` fetch timeout (s) | `30` |
 | `WAHABOT_WEB_SEARCH_PROXY` | Optional proxy for search, pages, metadata, and caption requests | — |
