@@ -65,10 +65,10 @@ from wahabot.ai.tools.whatsapp import (
     _DOC_MIME_BY_EXT as DOC_MIME_BY_EXT,  # pyright: ignore[reportPrivateUsage]
 )
 from wahabot.ai.tools.whatsapp import (
-    _FENCE_ERROR as FENCE_ERROR_TEXT,  # pyright: ignore[reportPrivateUsage]
+    _VIDEO_MIME_BY_EXT as VIDEO_MIME_BY_EXT,  # pyright: ignore[reportPrivateUsage]
 )
 from wahabot.ai.tools.whatsapp import (
-    _VIDEO_MIME_BY_EXT as VIDEO_MIME_BY_EXT,  # pyright: ignore[reportPrivateUsage]
+    FENCE_ERROR as FENCE_ERROR_TEXT,
 )
 from wahabot.ai.tools.whatsapp import (
     OPERATOR_ARMED,
