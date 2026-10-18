@@ -781,6 +781,20 @@ def test_album_vision(bot: Bot) -> None:
     )
 
 
+def test_album_vision_respects_vision_max_images(bot: Bot) -> None:
+    capped = bot.rebuild(vision_max_images=1)
+    llm = capped.stack.llm
+    for album_event in album_events():
+        capped.post(album_event)
+    assert _wait(lambda: sum(1 for r in llm.requests if not is_caption_request(r)) >= 1)
+
+    caption_requests = [r for r in llm.requests if is_caption_request(r)]
+    agent_requests = [r for r in llm.requests if not is_caption_request(r)]
+    assert len(caption_requests) == 2
+    assert all(image_part_count(r) == 1 for r in caption_requests)
+    assert image_part_count(agent_requests[0]) == 1
+
+
 def test_album_reply_types_before_sending(bot: Bot) -> None:
     """An album's text reply rides the typing pause like every path.
 
@@ -943,6 +957,25 @@ def test_video_understanding(bot: Bot) -> None:
             for m in video_turns
         )
         assert image_part_count(video_agent_reqs[0]) == bot.settings.video_frames
+
+
+@requires_ffmpeg
+def test_video_understanding_respects_vision_max_images(bot: Bot) -> None:
+    capped = bot.rebuild(vision_max_images=1)
+    llm = capped.stack.llm
+    capped.waha.video_bytes = smoke_video_bytes()
+    llm.requests.clear()
+    with unittest.mock.patch(
+        "wahabot.handlers.fetch_transcript", return_value="spoken words here"
+    ):
+        capped.post(video_event(mid="VIDCAP"))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    caption_requests = [r for r in llm.requests if is_caption_request(r)]
+    agent_requests = [r for r in llm.requests if not is_caption_request(r)]
+    assert len(caption_requests) == 1
+    assert image_part_count(caption_requests[0]) == 1
+    assert len(agent_requests) >= 1
+    assert image_part_count(agent_requests[0]) == 1
 
 
 def test_video_disabled(bot: Bot) -> None:

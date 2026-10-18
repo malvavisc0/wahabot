@@ -648,6 +648,8 @@ async def build_video(
     part and still return a (possibly bare) result.
     """
     frames = await asyncio.to_thread(extract_frames, data, settings.video_frames)
+    if settings.vision_max_images > 0:
+        frames = frames[: settings.vision_max_images]
     caption = await caption_video(llm, frames, semaphore=semaphore) if frames else ""
     transcript = await video_transcript(settings, data, filename)
     return {

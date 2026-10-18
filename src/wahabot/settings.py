@@ -140,6 +140,10 @@ class Settings(BaseSettings):
     #: frames read on-screen text more faithfully at ~192 image
     #: tokens each.
     video_frames: int = Field(default=6, ge=1, le=12)
+    #: Cap images attached to one vision prompt (0 = no cap). The LAN
+    #: model accepts at most one image per prompt; multi-image albums
+    #: and video frames are reduced to the first N.
+    vision_max_images: int = Field(default=0, ge=0, le=12)
     #: How many video URLs sniffed from a message's text to resolve and
     #: download via yt-dlp (see ``wahabot.ai.tools.url_videos``). The
     #: pipeline shares ``video``/``vision`` gating and the video prep

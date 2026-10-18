@@ -510,6 +510,8 @@ async def handle_message(
     """
     chat_id = str(event.payload.get("from", ""))
     logger.info("Agent handling message from {chat_id}", chat_id=chat_id)
+    if settings is not None and settings.vision_max_images > 0 and images:
+        images = images[: settings.vision_max_images]
     user_msg, image_blocks = await turn_user_message(
         event,
         image=image,

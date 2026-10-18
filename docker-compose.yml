@@ -25,6 +25,7 @@ services:
       WAHABOT_VIDEO: ${WAHABOT_VIDEO:-true}
       WAHABOT_MAX_VIDEO_BYTES: ${WAHABOT_MAX_VIDEO_BYTES:-67108864}
       WAHABOT_VIDEO_FRAMES: ${WAHABOT_VIDEO_FRAMES:-6}
+      WAHABOT_VISION_MAX_IMAGES: ${WAHABOT_VISION_MAX_IMAGES:-0}
       # Multi-message burst assembly — one agent turn per same-sender
       # burst (off keeps the pre-burst per-message behavior).
       WAHABOT_BURST_ENABLED: ${WAHABOT_BURST_ENABLED:-false}
