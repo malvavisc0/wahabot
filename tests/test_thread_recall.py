@@ -36,6 +36,7 @@ from wahabot.core.notebook import Note
 from wahabot.core.persistence import load_memory, save_memory
 from wahabot.core.thread_index import (
     EMBED_TEXT_CHARS,
+    EMBED_TEXT_CHARS_RETRY,
     ThreadIndexer,
     forget_thread_index,
     index_file,
@@ -380,6 +381,43 @@ def test_dense_embedding_caps_long_turns(recall_settings: Settings) -> None:
     assert index_rows(recall_settings.data_dir) == [("user", long_text)]
 
 
+class FlakyEmbedding(FakeEmbedding):
+    """A model that rejects the first batch and accepts the shorter retry."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    async def aget_text_embedding_batch(
+        self, texts: list[str], **kwargs: Any
+    ) -> list[list[float]]:
+        if not self.failed:
+            self.failed = True
+            self.batch_calls += 1
+            raise RuntimeError("input is too large")
+        return await super().aget_text_embedding_batch(texts, **kwargs)
+
+
+def test_long_embedding_batches_retry_shorter(recall_settings: Settings) -> None:
+    fake = FlakyEmbedding()
+    indexer = ThreadIndexer(recall_settings.data_dir, fake)
+    turn = ChatMessage(role=MessageRole.USER, content="y" * 5000)
+
+    async def scenario() -> None:
+        indexer.schedule(SESSION, CHAT, [turn])
+        await indexer.drain()
+
+    asyncio.run(scenario())
+
+    assert fake.failed is True
+    assert fake.batch_calls == 2
+    assert fake.texts
+    assert max(len(text) for text in fake.texts) <= (
+        EMBED_TEXT_CHARS_RETRY + len("[user] ")
+    )
+    assert embedded_count(recall_settings.data_dir) == 1
+
+
 def test_embeddings_down_falls_back_to_fts(recall_settings: Settings) -> None:
     fake = FakeEmbedding(down=True)
     indexer = ThreadIndexer(recall_settings.data_dir, fake)
@@ -397,7 +435,9 @@ def test_embeddings_down_falls_back_to_fts(recall_settings: Settings) -> None:
 
     assert any("PDF" in item for item in slices)
     assert not vector_file(recall_settings.data_dir, SESSION, CHAT).exists()
-    assert fake.batch_calls == 1
+    # The batch and its shorter retry both fail, then the breaker skips
+    # the down service entirely.
+    assert fake.batch_calls == 2
     assert fake.query_calls == 0
 
 

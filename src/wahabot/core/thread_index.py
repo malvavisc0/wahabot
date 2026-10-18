@@ -55,9 +55,11 @@ THREAD_WINDOW = 2
 EMBED_BATCH = 64
 
 #: The LAN embedding model's physical batch is 512 tokens, so one input
-#: must stay well under it; Latin text is ~4 chars/token. The full turn
-#: stays in SQLite for FTS/slices; only the dense vector is truncated.
-EMBED_TEXT_CHARS = 1500
+#: must stay well under it. 1000 characters is ~370 tokens for Latin
+#: text; the 500-character retry covers denser scripts and punctuation.
+#: The full turn stays in SQLite for FTS/slices; only the vector is cut.
+EMBED_TEXT_CHARS = 1000
+EMBED_TEXT_CHARS_RETRY = 500
 
 #: A failed embeddings service leaves turns unembedded; retry them at the
 #: next persist point, not in a tight loop inside one drain.
@@ -339,9 +341,17 @@ class ThreadIndexer:
                 return
             self._unembedded.add(key)
             assert self.embed_model is not None
-            embeddings = await self.embed_model.aget_text_embedding_batch(
-                [f"[{role}] {text[:EMBED_TEXT_CHARS]}" for _, role, text in rows]
-            )
+            texts = [f"[{role}] {text[:EMBED_TEXT_CHARS]}" for _, role, text in rows]
+            try:
+                embeddings = await self.embed_model.aget_text_embedding_batch(texts)
+            except Exception:
+                # A single long or dense input can exceed the LAN model's
+                # 512-token physical batch; retry the whole batch shorter
+                # before giving up and leaving FTS-only rows.
+                texts = [
+                    f"[{role}] {text[:EMBED_TEXT_CHARS_RETRY]}" for _, role, text in rows
+                ]
+                embeddings = await self.embed_model.aget_text_embedding_batch(texts)
             path = vector_file(self.data_dir, session, chat_id)
             store = self.load_store(key, path)
             store_vectors(self.data_dir, session, chat_id, rows, embeddings, store)

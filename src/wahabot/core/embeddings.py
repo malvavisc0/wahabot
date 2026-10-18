@@ -41,7 +41,7 @@ class LanEmbedding(BaseEmbedding):
             response = client.post(
                 self.url(), json=self.body(texts), headers=self.headers()
             )
-            response.raise_for_status()
+            raise_for_status(response)
         return vectors(response.json())
 
     async def apost(self, texts: list[str]) -> list[list[float]]:
@@ -50,7 +50,7 @@ class LanEmbedding(BaseEmbedding):
             response = await client.post(
                 self.url(), json=self.body(texts), headers=self.headers()
             )
-            response.raise_for_status()
+            raise_for_status(response)
         return vectors(response.json())
 
     @override
@@ -76,6 +76,14 @@ class LanEmbedding(BaseEmbedding):
     @override
     async def _aget_text_embeddings(self, texts: list[str]) -> list[list[float]]:
         return await self.apost(texts)
+
+
+def raise_for_status(response: httpx.Response) -> None:
+    """Raise a clean error carrying the service's status and short detail."""
+    if response.is_success:
+        return
+    detail = response.text.strip()[:300]
+    raise ValueError(f"embeddings service {response.status_code}: {detail}")
 
 
 def vectors(payload: Any) -> list[list[float]]:
