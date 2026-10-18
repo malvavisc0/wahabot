@@ -2411,12 +2411,8 @@ def test_self_chat_command(bot: Bot) -> None:
     assert _wait(lambda: len(bot.waha.sent) >= 2)
     assert (SESSION, CHAT_ID, "smoke reply one", None) in bot.waha.sent
     notice = [s for s in bot.waha.sent if s[1] == ME_JID]
-    assert (
-        len(notice) == 1
-        and "delivered to" in notice[0][2]
-        and CHAT_ID in notice[0][2]
-        and "smoke group" in notice[0][2]  # the name, not the bare JID alone
-    )
+    assert len(notice) == 1
+    assert notice[0][2] == "Delivered to smoke group."  # the name, not the JID
 
 
 def test_self_chat_command_over_budget_reports_once_without_retry(
@@ -2456,7 +2452,7 @@ def test_self_chat_command_over_budget_reports_once_without_retry(
     # The failure reply lands in the self-chat, quote-replying nothing.
     assert _wait(lambda: bot.waha.sent != [])
     assert all(chat == ME_JID for _, chat, _, _ in bot.waha.sent)
-    assert "command rejected" in bot.waha.sent[0][2]
+    assert "Command rejected" in bot.waha.sent[0][2]
     # Its own audit kind — the durable record, not operator_silence.
     assert _wait(lambda: _audit_entries(bot, "operator_budget_error", "operator"))
     assert _audit_entries(bot, "operator_silence", "operator") == []

@@ -2815,7 +2815,7 @@ def test_chat_display_name_resolves_and_fails_soft() -> None:
     """The delivered-notice renders names; WAHA down falls back to the JID."""
     waha = unittest.mock.Mock()
     waha.get_chat_overview.return_value = {"id": CHAT_ID, "name": "Book Circle"}
-    assert chat_display_name(waha, SESSION, CHAT_ID) == f"Book Circle ({CHAT_ID})"
+    assert chat_display_name(waha, SESSION, CHAT_ID) == "Book Circle"
     waha.get_chat_overview.return_value = {"id": CHAT_ID}
     assert chat_display_name(waha, SESSION, CHAT_ID) == CHAT_ID
     waha.get_chat_overview.side_effect = httpx.ConnectError("waha gone")

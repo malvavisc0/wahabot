@@ -57,14 +57,16 @@ OPERATOR_CHAT_ID = "operator"
 def chat_display_name(waha: WahaClient, session: str, chat_id: str) -> str:
     """A chat's display name for operator notices; the bare JID if unknown.
 
-    The delivered-notice is a convenience, not a feature — a WAHA
-    hiccup or a nameless chat must never turn it into an error, so the
-    overview lookup is best-effort with the JID as the floor.
+    The name alone is the notice: the raw JID is a LID-shaped opaque
+    string that reads as noise, so it is only the floor for a chat the
+    overview cannot name. The delivered-notice is a convenience, not a
+    feature — a WAHA hiccup or a nameless chat must never turn it into
+    an error, so the overview lookup is best-effort.
     """
     try:
         overview = waha.get_chat_overview(session, chat_id)
         name = str(overview.get("name", "")).strip() if overview else ""
-        return f"{name} ({chat_id})" if name else chat_id
+        return name or chat_id
     except Exception:
         return chat_id
 
@@ -208,12 +210,12 @@ def command_reply(
             error=str(budget_error),
         )
         return (
-            f"⚠️ command rejected: {budget_error}."
+            f"Command rejected: {budget_error}."
             " Shorten it, lower the pinned context, or raise WAHABOT_MEMORY_TOKEN_LIMIT."
         )
     if not reply and target.sent and target.sent != OPERATOR_CHAT_ID:
         name = chat_display_name(waha, event.session, target.sent)
-        reply = f"✅ done — delivered to {name}"
+        reply = f"Delivered to {name}."
     # The audit row names the chat the command acted on — the tool's
     # delivery target when one fired, else the operator context the
     # command ran over.

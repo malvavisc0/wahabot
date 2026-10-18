@@ -710,7 +710,7 @@ def forward_escalation(
         sent_id = waha.send_text(
             session,
             operator_jid,
-            f"🆘 wahabot escalation from {chat_id}:\n{report.strip()}",
+            f"wahabot escalation from {chat_id}:\n{report.strip()}",
         )
     except Exception as exc:
         # No confirmed acknowledgment: leave the cooldown unstamped

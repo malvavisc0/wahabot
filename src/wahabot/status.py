@@ -73,7 +73,7 @@ class SessionState:
     #: session flag — an outage must not spam the operator per message.
     llm_healthy: bool = True
     #: Timeout notify latch: True while the operator has already been
-    #: told about LLM timeouts (one 🟠 per slow-stretch; the first
+    #: told about LLM timeouts (one alert per slow-stretch; the first
     #: successful run resets it). Separate from ``llm_healthy`` — a
     #: timeout does not mean the endpoint is unreachable, so it must
     #: never flip the outage flag or its "replies paused" narrative.
@@ -203,9 +203,7 @@ def register_session_status_handler(waha: WahaClient, session: str) -> None:
         set_session_health(status)
         if was:
             logger.warning("WAHA session status: {status}", status=status)
-            await notify_operator(
-                waha, session, session_down_message(status), kind="down"
-            )
+            await notify_operator(waha, session, session_down_message(status))
             arm_recovery_poller(waha, session)
 
 
@@ -244,7 +242,7 @@ async def session_recovered(waha: WahaClient, session: str) -> None:
 
     The event path, the poller and the message-triggered probe can all
     race to be the first to see recovery; each goes through here so the
-    flag flip, the operator-target re-capture and the retried 🔵 notify
+    flag flip, the operator-target re-capture and the retried recovery notify
     happen exactly once no matter who wins.
     """
     async with _probe_lock:
@@ -340,7 +338,7 @@ async def probe_session_recovery(waha: WahaClient, session: str) -> bool:
 
 
 async def notify_recovery(waha: WahaClient, session: str) -> None:
-    """The 🔵 recovery notify, retried — a racing send must not lose it.
+    """The recovery notify, retried — a racing send must not lose it.
 
     The session just went ``WORKING``; WhatsApp's own reconnect can
     still fail the first send attempt. A failed notify backs off
@@ -372,16 +370,14 @@ async def _try_send_recovery_notify(waha: WahaClient, session: str) -> bool:
         " messages were retried on WAHA redelivery."
     )
     try:
-        await send_operator_notify(waha, session, message, kind="up")
+        await send_operator_notify(waha, session, message)
         return True
     except Exception as exc:
         logger.warning("Recovery notify send failed: {exc}", exc=exc)
         return False
 
 
-async def notify_operator(
-    waha: WahaClient, session: str, message: str, kind: str = "down"
-) -> None:
+async def notify_operator(waha: WahaClient, session: str, message: str) -> None:
     """Best-effort WhatsApp message to the bot's own account.
 
     The operator reads it in the "Message yourself" chat. Fails soft:
@@ -389,20 +385,18 @@ async def notify_operator(
     failed send is logged and swallowed; the loud log line is the floor.
     """
     try:
-        await send_operator_notify(waha, session, message, kind)
+        await send_operator_notify(waha, session, message)
     except Exception as exc:
         logger.warning("Operator notification failed: {exc}", exc=exc)
 
 
-async def send_operator_notify(
-    waha: WahaClient, session: str, message: str, kind: str
-) -> str:
+async def send_operator_notify(waha: WahaClient, session: str, message: str) -> str:
     """Send one operator notification; raises on failure (the retry loop).
 
     Split from :func:`notify_operator` so the recovery path can
-    *retry* a failed 🔵 — the single-shot swallow is right for the 🟠
-    (the session is down, retrying is futile) but loses the recovery
-    message when the send races WhatsApp's own reconnect.
+    *retry* a failed recovery notice — the single-shot swallow is right
+    for the alert (the session is down, retrying is futile) but loses
+    the recovery message when the send races WhatsApp's own reconnect.
 
     The prefix stays ``wahabot:`` alone — the old
     ``WAHA session '{session}' {message}`` prefix sat in front of
@@ -413,8 +407,7 @@ async def send_operator_notify(
     me = state.operator_jid
     if not me:
         return ""
-    icon = "🔵" if kind == "up" else "🟠"
-    text = f"{icon} wahabot: {message}"
+    text = f"wahabot: {message}"
     sent_id = await asyncio.to_thread(waha.send_text, session, me, text)
     # The notification lands in the self-chat; mark it so its echo
     # event is never parsed as an operator command.
@@ -490,7 +483,7 @@ async def mark_llm_unreachable(waha: WahaClient, session: str, exc: Exception) -
 
     Called from the failure handlers of the chat and command paths on
     an outage-class exception: the first failure of an outage
-    transitions the flag and sends the 🟠 notification; later failures
+    transitions the flag and sends the alert notification; later failures
     (every message that arrives while the provider is down) only log —
     the operator already knows, and the chat path's dropped seen
     markers let WAHA's redelivery retry once the provider is back.
@@ -506,7 +499,7 @@ async def mark_llm_unreachable(waha: WahaClient, session: str, exc: Exception) -
             " responds again. Incoming messages are held and retried"
             " automatically."
         )
-        await notify_operator(waha, session, message, kind="down")
+        await notify_operator(waha, session, message)
 
 
 async def classify_llm_failure(
@@ -547,7 +540,7 @@ async def mark_llm_timed_out(
     A timeout is not an outage (:func:`llm_endpoint_down`): the outage
     health flag stays untouched — the very next run may succeed against
     the same healthy-but-slow endpoint, and "replies paused" would be
-    the wrong message. The operator gets one 🟠 naming the actual
+    the wrong message. The operator gets one alert naming the actual
     budget and the knob (``WAHABOT_LLM_TIMEOUT``) on the first timeout
     of a stretch; repeats stay quiet until a successful run resets the
     latch (alongside :func:`mark_llm_recovered`). Callers drop seen
@@ -566,7 +559,7 @@ async def mark_llm_timed_out(
             f" needs longer, raise WAHABOT_LLM_TIMEOUT; replies continue on"
             f" the next message."
         )
-        await notify_operator(waha, session, message, kind="down")
+        await notify_operator(waha, session, message)
 
 
 async def mark_run_timed_out(
@@ -578,7 +571,7 @@ async def mark_run_timed_out(
     (:func:`mark_llm_timed_out`): the endpoint may be healthy and still
     generating — the *run* outlived its total budget, not one request
     its own — so the health flag stays up and the shared latch keeps it
-    to one 🟠 per slow stretch, re-armed by the next successful run.
+    to one alert per slow stretch, re-armed by the next successful run.
     The message names the run's knob (``WAHABOT_RUN_TIMEOUT``): the
     per-call budget may be blameless here, and the run cap must leave
     room above it for several rounds.
@@ -596,18 +589,18 @@ async def mark_run_timed_out(
             f" normal for your provider, raise WAHABOT_RUN_TIMEOUT (it must"
             f" stay above WAHABOT_LLM_TIMEOUT, with room for several rounds)."
         )
-        await notify_operator(waha, session, message, kind="down")
+        await notify_operator(waha, session, message)
 
 
 async def mark_llm_recovered(waha: WahaClient, session: str) -> None:
     """Flip the LLM health flag back up and notify the operator once.
 
     Called after any run completes against the provider: the first
-    success after an outage transitions the flag and sends the 🔵
+    success after an outage transitions the flag and sends the recovery
     notification; the steady state stays silent. A success also
     re-arms the timeout notify latch (:func:`mark_llm_timed_out`) —
     the endpoint answering again means the next slow call is a fresh
-    slow-stretch worth one new 🟠.
+    slow-stretch worth one new alert.
     """
     if not state.llm_healthy:
         state.llm_healthy = True
@@ -615,6 +608,5 @@ async def mark_llm_recovered(waha: WahaClient, session: str) -> None:
             waha,
             session,
             "LLM provider is back — replies resumed.",
-            kind="up",
         )
     state.llm_timeout_notified = False

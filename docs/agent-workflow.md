@@ -455,7 +455,7 @@ Three event flows sit outside the plain message → reply pipeline:
   a background poller asks `GET /api/sessions/{session}` every 15 s,
   and every muted incoming message or command gets a one-off probe of
   the same endpoint — webhooks being delivered at all is itself
-  evidence the session is back. The 🔵 recovery notification is
+  evidence the session is back. The recovery notification is
   retried (3 attempts, 2 s backoff) because the send races WhatsApp's
   own reconnection.
 - **LLM failure classes**: run paths distinguish three failure
@@ -463,9 +463,9 @@ Three event flows sit outside the plain message → reply pipeline:
   proxy in front of the provider) flips the LLM health flag and
   notifies the operator once per transition ("LLM provider is
   unreachable — replies paused"); the first successful run flips it
-  back with a 🔵. A **timeout** is *not* an outage — the endpoint may
+  back with a recovery notice. A **timeout** is *not* an outage — the endpoint may
   be healthy and still generating — so the flag stays up and the
-  operator gets one 🟠 per slow stretch naming the budget and the
+  operator gets one alert per slow stretch naming the budget and the
   knob; a success re-arms the latch. Two budgets share that class:
   the per-request `WAHABOT_LLM_TIMEOUT` (60 s default;
   `APITimeoutError`) and the run-level cap `WAHABOT_RUN_TIMEOUT`
