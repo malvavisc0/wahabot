@@ -31,6 +31,7 @@ from wahabot.ai.tools.url_images import fetch_url_images, image_urls
 from wahabot.ai.tools.whatsapp import (
     RunTarget,
     bind_target,
+    jids_in_text,
     reset_target,
     sender_names,
 )
@@ -174,8 +175,12 @@ def operator_tools_pass() -> str:
         "refused. `escalate` is the fixed-destination operator exception. "
         "`read_chat(mode=recent)` and contact-book resolution require "
         "operator commands; ordinary `mode=resolve` matches current "
-        "participants. Operator commands have no default chat: always "
-        "pass `chat` as an exact JID there. Never promise refused "
+        "participants. An operator command's answer returns to the console "
+        "by itself: never use `send_message` to answer the operator, and "
+        "never message a chat the command did not ask you to send to. "
+        "Pass `chat` only when the operator explicitly asks you to "
+        "deliver something to that chat, and only with a JID you "
+        "resolved this run. Never promise refused "
         "deliveries. `chat` is a "
         "bare JID, not a name or message id: groups use `<id>@g.us`; "
         "people use returned `@lid`/`@c.us` ids or `<digits>@c.us` from "
@@ -531,6 +536,8 @@ async def bind_run_rules(
     recorded stamped handled. The prefix applies to everything the run
     delivers.
     """
+    if target.armed:
+        target.allowed_chats.update(jids_in_text(user_msg))
     rules = await chat_rules(agent.notebook, target.session, target.chat_id)
     if RULE_HARD_MUTE in rules:
         logger.info("Chat is hard-muted; not answering {chat_id}", chat_id=target.chat_id)

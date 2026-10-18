@@ -1114,7 +1114,7 @@ def test_operator_command(bot: Bot) -> None:
         response_id="chatcmpl-smoke-cmd",
         created=1788525834,
     )
-    command = build_command_event(SESSION, "send the plan to Family")
+    command = build_command_event(SESSION, f"send the plan to Family {CHAT_ID}")
     bot.post(command)
     assert _wait(lambda: len(llm.requests) >= 1)
     command_turns = [m for m in llm.requests[0]["messages"] if m.get("role") == "user"]
@@ -1230,7 +1230,7 @@ def test_operator_run_reaches_foreign_chat(bot: Bot) -> None:
         response_id="chatcmpl-smoke-fence-ok",
         created=1788525833,
     )
-    command = build_command_event(SESSION, "send a message to that guy")
+    command = build_command_event(SESSION, f"send a message to that guy {FOREIGN_JID}")
     bot.post(command)
     assert _wait(lambda: len(bot.waha.sent) >= 1)
     assert bot.waha.sent == [(SESSION, FOREIGN_JID, "operator says hi", None)]
@@ -2407,7 +2407,7 @@ def test_self_chat_command(bot: Bot) -> None:
         response_id="chatcmpl-smoke-cmd-self5",
         created=1788525841,
     )
-    bot.post(self_event("kai send the plan to the group", "SELF5"))
+    bot.post(self_event(f"kai send the plan to the group {CHAT_ID}", "SELF5"))
     assert _wait(lambda: len(bot.waha.sent) >= 2)
     assert (SESSION, CHAT_ID, "smoke reply one", None) in bot.waha.sent
     notice = [s for s in bot.waha.sent if s[1] == ME_JID]

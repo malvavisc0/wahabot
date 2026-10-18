@@ -8,7 +8,8 @@ fenced: only operator commands may select other chats.
 """
 
 import contextvars
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from loguru import logger
@@ -60,6 +61,9 @@ class RunTarget:
     #: Local path of this turn's inbound image, when the image service
     #: is configured (the source for an edit); "" otherwise.
     image_path: str = ""
+    #: Chats an operator run may deliver to: those named in the command
+    #: or resolved with read_chat this run. Anything else is refused.
+    allowed_chats: set[str] = field(default_factory=set)
 
     @classmethod
     def from_dict(cls, holder: dict[str, str]) -> RunTarget:
@@ -235,6 +239,50 @@ FENCE_ERROR = (
     "cross-chat reach is reserved for operator commands; this run may "
     "only act on the current conversation"
 )
+
+
+#: A WhatsApp JID as it appears in text (a group id may carry two numbers).
+_JID_RE = re.compile(r"\b\d+(?:-\d+)?@[a-z.]+", re.IGNORECASE)
+
+
+def jids_in_text(text: str) -> set[str]:
+    """The JIDs literally present in *text*."""
+    return set(_JID_RE.findall(text))
+
+
+def delivery_chat_error(chat_id: str, target: RunTarget) -> str | None:
+    """Refuse an operator delivery to a chat this run never resolved.
+
+    Operator commands may reach other chats, but only ones the operator
+    named in the command or the run resolved with read_chat — never a
+    chat the model remembered or invented.
+    """
+    if not target.armed:
+        return None
+    if chat_id in target.allowed_chats:
+        return None
+    return (
+        "that chat was not named in the command or resolved this run; "
+        "resolve it with read_chat (or name its JID in the command) first, "
+        "or just answer in the console"
+    )
+
+
+def delivery_target_error(
+    chat_id: str, reply_to: str | None, target: RunTarget
+) -> str | None:
+    """Refusal for a chat delivery, including a quoted message's chat."""
+    refusal = delivery_chat_error(chat_id, target)
+    if refusal or not reply_to:
+        return refusal
+    embedded = chat_jid(reply_to, RunTarget())
+    return delivery_chat_error(embedded, target) if "@" in embedded else None
+
+
+def delivery_message_error(message_id: str, target: RunTarget) -> str | None:
+    """Refusal for a delivery keyed by a message id from another chat."""
+    embedded = chat_jid(message_id, RunTarget())
+    return delivery_chat_error(embedded, target) if "@" in embedded else None
 
 
 def fenced_chat(

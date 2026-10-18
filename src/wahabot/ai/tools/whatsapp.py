@@ -43,8 +43,11 @@ from wahabot.ai.tools.runcontext import (
     current_prefix,
     current_target,
     delivered_to_self,
+    delivery_message_error,
+    delivery_target_error,
     fenced_chat,
     fenced_message_id,
+    jids_in_text,
     log_action_reason,
     operator_run,
     reset_target,
@@ -95,6 +98,7 @@ __all__ = [
     "forward_message",
     "image_file",
     "infer_mimetype",
+    "jids_in_text",
     "journal_author",
     "local_file",
     "log_action_reason",
@@ -285,6 +289,9 @@ def send_message(waha: WahaClient) -> BaseTool:
         session = target.session
         if not session or not chat_id:
             return error("no active conversation context")
+        delivery_error = delivery_target_error(chat_id, reply_to, target)
+        if delivery_error:
+            return error(delivery_error)
         if reply_to:
             _, id_error = fenced_message_id(reply_to, target)
             if id_error:
@@ -563,6 +570,9 @@ def react_to_message(waha: WahaClient) -> BaseTool:
         _, id_error = fenced_message_id(message_id, target)
         if id_error:
             return error(id_error)
+        delivery_error = delivery_message_error(message_id, target)
+        if delivery_error:
+            return error(delivery_error)
         log_action_reason("react_to_message", reason, message_id=message_id)
         try:
             waha.send_reaction(session, message_id, reaction)
@@ -631,6 +641,9 @@ def send_media(waha: WahaClient, settings: Settings) -> BaseTool:
         session = target.session
         if not session or not chat_id:
             return error("no active conversation context")
+        delivery_error = delivery_target_error(chat_id, None, target)
+        if delivery_error:
+            return error(delivery_error)
         if url:
             probe_error = probe_media_url(url)
             if probe_error:
@@ -1311,6 +1324,7 @@ def dispatch_export(
         return error("no active conversation context")
     if limit is not None and limit <= 0:
         return error("limit must be positive")
+    target.allowed_chats.add(chat_id)
     return read_export_journal(settings, target.session, chat_id, limit)
 
 
@@ -1353,6 +1367,7 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
             return error(fence_error)
         if not chat_id:
             return error("no active conversation context")
+        target.allowed_chats.add(chat_id)
         return handler(waha, target.session, chat_id, query, name, limit)
 
     return FunctionTool.from_defaults(
@@ -1413,6 +1428,7 @@ def read_recent_chats(
         for c in chats
         if c.get("id")
     ]
+    target.allowed_chats.update(entry["id"] for entry in entries)
     return ok(chats=entries)
 
 
@@ -1445,6 +1461,7 @@ def read_resolve_chat(
         return error(
             f"no match for {name!r} in the checked chats/contacts; not exhaustive"
         )
+    target.allowed_chats.update(match["id"] for match in matches)
     return ok(name=name, matches=matches)
 
 
@@ -1971,9 +1988,15 @@ def forward_message(waha: WahaClient) -> BaseTool:
         session = target.session
         if not session or not chat_id:
             return error("no active conversation context")
+        delivery_error = delivery_target_error(chat_id, None, target)
+        if delivery_error:
+            return error(delivery_error)
         _, id_error = fenced_message_id(message_id, target)
         if id_error:
             return error(id_error)
+        delivery_error = delivery_message_error(message_id, target)
+        if delivery_error:
+            return error(delivery_error)
         log_action_reason("forward_message", reason, chat=chat_id)
         try:
             sent_id = waha.forward_message(session, chat_id, message_id)

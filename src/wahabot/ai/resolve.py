@@ -19,6 +19,7 @@ names a chat gets that chat pinned, whatever wording it used. Empty
 outcome when nothing matches: the command then runs exactly as before.
 """
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -117,12 +118,23 @@ def named_chats(waha: WahaClient, session: str, instruction: str) -> list[dict[s
 
 
 def _entries_named(entries: list[dict[str, Any]], text: str) -> list[dict[str, Any]]:
-    """The subset of *entries* whose name appears in the lowercased *text*."""
-    return [
-        {"id": jid_string(e.get("id", "")), "name": str(e.get("name", ""))}
-        for e in entries
-        if jid_string(e.get("id")) and str(e.get("name", "")).casefold() in text
-    ]
+    """Entries whose name appears in *text* as a whole word or phrase.
+
+    Substring matching was a misroute: a chat named with a single letter
+    matched every instruction containing that letter, pinning that chat
+    and telling the model to reply there. Names match only on word
+    boundaries, and one-letter names — indistinguishable from prose —
+    are ignored.
+    """
+    matches: list[dict[str, Any]] = []
+    for entry in entries:
+        name = str(entry.get("name", "")).strip()
+        if len(name) < 2:
+            continue
+        pattern = rf"(?<!\w){re.escape(name.casefold())}(?!\w)"
+        if re.search(pattern, text):
+            matches.append({"id": jid_string(entry.get("id", "")), "name": name})
+    return matches
 
 
 def chat_context_note(outcome: ResolvedChat) -> str:
@@ -155,8 +167,10 @@ def chat_context_note(outcome: ResolvedChat) -> str:
         )
         lines.append(last_line)
         reply_rule = (
-            "Reply to that message (pass its id as `reply_to`) unless the "
-            "instruction says otherwise — do not infer the target from "
+            "If the instruction asks you to say, send, or post something to "
+            "that chat, reply to that message and pass its id as `reply_to`. "
+            "If it only asks ABOUT the chat, answer the operator in the "
+            "console and do not post there. Never infer the target from "
             "conversation history."
         )
         lines.append(reply_rule)

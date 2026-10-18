@@ -3108,7 +3108,8 @@ def test_chat_context_note_shape() -> None:
     assert "Bridge Club" in note and CHAT_ID in note
     assert f"false_{CHAT_ID}_LAST" in note
     assert "reply_to" in note
-    assert "do not infer the target from conversation history" in note
+    assert "Never infer the target from conversation history" in note
+    assert "only asks ABOUT the chat" in note
 
 
 def test_own_message_id_detection() -> None:
@@ -4869,7 +4870,12 @@ def test_forwarding_documents_and_fences_source_and_destination(
     source = f"false_{source_chat}_SOURCE"
     waha = unittest.mock.Mock()
     waha.forward_message.return_value = f"true_{destination}_FORWARDED"
-    target = RunTarget(session=SESSION, chat_id=CHAT_ID, armed=operator)
+    target = RunTarget(
+        session=SESSION,
+        chat_id=CHAT_ID,
+        armed=operator,
+        allowed_chats={destination} if operator else set(),
+    )
     token = bind_target(target)
     try:
         outcome = cast(Any, forward_message(waha))(message_id=source, chat=destination)
@@ -6717,4 +6723,17 @@ def test_load_source_sniffs_content_not_the_png_name(tmp_path: Path) -> None:
     assert mimetype == "image/jpeg"
     assert images.load_source(str(tmp_path / "missing.png")) != images.load_source(
         str(mislabeled)
+    )
+
+
+def test_one_letter_chat_name_does_not_resolve_from_prose() -> None:
+    """A one-letter chat name must not match every sentence's letters."""
+    waha = unittest.mock.Mock()
+    waha.list_chats.return_value = [{"id": CHAT_ID, "name": "M"}]
+    waha.list_contacts.return_value = []
+    assert (
+        resolve_last_message(
+            cast(Any, waha), SESSION, "reply to me: the smoke test works"
+        )
+        is None
     )
