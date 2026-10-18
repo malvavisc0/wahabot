@@ -54,6 +54,11 @@ THREAD_WINDOW = 2
 #: the next persist point (bounded work, never an unbounded burst).
 EMBED_BATCH = 64
 
+#: The LAN embedding model's physical batch is 512 tokens, so one input
+#: must stay well under it; Latin text is ~4 chars/token. The full turn
+#: stays in SQLite for FTS/slices; only the dense vector is truncated.
+EMBED_TEXT_CHARS = 1500
+
 #: A failed embeddings service leaves turns unembedded; retry them at the
 #: next persist point, not in a tight loop inside one drain.
 _DRAIN_ROUNDS = 5
@@ -335,7 +340,7 @@ class ThreadIndexer:
             self._unembedded.add(key)
             assert self.embed_model is not None
             embeddings = await self.embed_model.aget_text_embedding_batch(
-                [f"[{role}] {text}" for _, role, text in rows]
+                [f"[{role}] {text[:EMBED_TEXT_CHARS]}" for _, role, text in rows]
             )
             path = vector_file(self.data_dir, session, chat_id)
             store = self.load_store(key, path)

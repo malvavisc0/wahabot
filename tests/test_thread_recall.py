@@ -35,6 +35,7 @@ from wahabot.core import thread_index as thread_index_module
 from wahabot.core.notebook import Note
 from wahabot.core.persistence import load_memory, save_memory
 from wahabot.core.thread_index import (
+    EMBED_TEXT_CHARS,
     ThreadIndexer,
     forget_thread_index,
     index_file,
@@ -55,6 +56,7 @@ class FakeEmbedding:
         self.batch_calls = 0
         self.query_calls = 0
         self.queries: list[str] = []
+        self.texts: list[str] = []
 
     async def aget_text_embedding_batch(
         self, texts: list[str], **_: Any
@@ -62,6 +64,7 @@ class FakeEmbedding:
         self.batch_calls += 1
         if self.down:
             raise RuntimeError("embeddings service down")
+        self.texts.extend(texts)
         return [self.vector(text) for text in texts]
 
     async def aget_query_embedding(self, query: str) -> list[float]:
@@ -358,6 +361,23 @@ def test_memory_persist_off_disables_the_index(recall_settings: Settings) -> Non
     agent = FunctionCallingAgentWorkflow(llm=llm, settings=recall_settings)
 
     assert agent.thread_index is None
+
+
+def test_dense_embedding_caps_long_turns(recall_settings: Settings) -> None:
+    fake = FakeEmbedding()
+    indexer = ThreadIndexer(recall_settings.data_dir, fake)
+    long_text = "x" * 5000
+    turn = ChatMessage(role=MessageRole.USER, content=long_text)
+
+    async def scenario() -> None:
+        indexer.schedule(SESSION, CHAT, [turn])
+        await indexer.drain()
+
+    asyncio.run(scenario())
+
+    assert fake.texts
+    assert max(len(text) for text in fake.texts) <= EMBED_TEXT_CHARS + len("[user] ")
+    assert index_rows(recall_settings.data_dir) == [("user", long_text)]
 
 
 def test_embeddings_down_falls_back_to_fts(recall_settings: Settings) -> None:
