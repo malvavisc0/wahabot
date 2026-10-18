@@ -1,5 +1,6 @@
 """Snapshot of the machine the bot runs on, for the ``{{host}}`` placeholder."""
 
+import importlib.util
 import platform
 import shutil
 import subprocess
@@ -106,6 +107,22 @@ def available_binaries() -> str:
     return ", ".join(found)
 
 
+#: Python packages worth advertising next to the binaries: the Dockerfile
+#: installs this set, so `run_shell_command` may plan a script around it
+#: without probing first. Probed with ``find_spec`` (no import), cached.
+_ADVERTISED_MODULES: tuple[tuple[str, str], ...] = (("matplotlib", "plotting"),)
+
+
+@cache
+def available_modules() -> str:
+    """The advertised Python packages importable here, comma-separated (or "")."""
+    found: list[str] = []
+    for name, label in _ADVERTISED_MODULES:
+        if importlib.util.find_spec(name) is not None:
+            found.append(f"{name} ({label})" if label else name)
+    return ", ".join(found)
+
+
 @cache
 def host_context() -> str:
     """A short immutable snapshot of the machine the bot runs on.
@@ -131,4 +148,7 @@ def host_context() -> str:
         # The shell tool's menu: what the model may plan commands around
         # without probing first. Absent here means "do not assume".
         lines.append(f"- Extras: {binaries}")
+    modules = available_modules()
+    if modules:
+        lines.append(f"- Python packages: {modules}")
     return "\n".join(lines)

@@ -6517,3 +6517,204 @@ def test_sender_fields_name_and_author() -> None:
     assert sender_fields(account)["author"] == "unknown"
     authors.record("ACC", AUTHOR_BOT)
     assert sender_fields(account)["author"] == AUTHOR_BOT
+
+
+@pytest.mark.parametrize("api", ["", "http://img.invalid:9196"])
+def test_image_tool_registered_only_with_an_image_api(
+    unit_settings: Settings, api: str
+) -> None:
+    from wahabot.ai.tools import build_default_tools
+
+    settings = unit_settings.model_copy(update={"image_api_base": api})
+    tools = build_default_tools(unittest.mock.Mock(), settings)
+    names = {tool.metadata.name for tool in tools}
+    assert ("generate_image" in names) is bool(api)
+    assert ("edit_image" in names) is bool(api)
+
+
+def test_image_generate_decodes_the_openai_envelope(
+    unit_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import base64 as b64
+
+    from wahabot.core import images
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"data": [{"b64_json": b64.b64encode(b"PNG").decode()}]}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def post(self, url: str, json: dict[str, object]) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(images.httpx, "Client", FakeClient)
+    settings = unit_settings.model_copy(
+        update={"image_api_base": "http://img.invalid:9196"}
+    )
+    assert images.generate(settings, "a caption", "1024x1024") == b"PNG"
+    off = unit_settings.model_copy(update={"image_api_base": ""})
+    assert images.generate(off, "a caption", "") is None
+
+
+def test_image_metadata_and_temp_save() -> None:
+    """metadata reads PNG dimensions; save lands in the temp image dir."""
+    import struct
+
+    from wahabot.core import images
+
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + struct.pack(">II", 1024, 768)
+    png += b"\x00" * 8
+    assert images.metadata(png) == {
+        "bytes": len(png),
+        "format": "png",
+        "width": 1024,
+        "height": 768,
+    }
+    assert images.metadata(b"not an image")["format"] == "unknown"
+    path = images.save(b"PNG")
+    assert path.exists() and path.parent.name == "wahabot-images"
+    assert path.read_bytes() == b"PNG"
+
+
+def test_generate_image_tool_envelope_has_path_and_metadata(
+    unit_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import base64 as b64
+    import struct
+
+    from wahabot.ai.tools.image import image_builder
+    from wahabot.core import images
+
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + struct.pack(">II", 512, 512) + b"\x00" * 8
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"data": [{"b64_json": b64.b64encode(png).decode()}]}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def post(self, url: str, json: dict[str, object]) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(images.httpx, "Client", FakeClient)
+    settings = unit_settings.model_copy(
+        update={"image_api_base": "http://img.invalid:9196"}
+    )
+    tool = {t.metadata.name: t for t in image_builder(settings)}["generate_image"]
+    payload = json.loads(tool.fn(prompt="a red fox", size="512x512"))
+    assert payload["ok"] is True
+    assert payload["format"] == "png"
+    assert payload["width"] == 512 and payload["height"] == 512
+    assert Path(payload["path"]).read_bytes() == png
+
+
+def test_save_prunes_stale_images() -> None:
+    import os
+    import tempfile
+    import time
+
+    from wahabot.core import images
+
+    directory = Path(tempfile.gettempdir()) / "wahabot-images"
+    directory.mkdir(parents=True, exist_ok=True)
+    stale = directory / "gen-stale.png"
+    stale.write_bytes(b"old")
+    old = time.time() - images.IMAGE_TTL_S - 10
+    os.utime(stale, (old, old))
+    images.save(b"fresh")
+    assert not stale.exists()
+
+
+def test_edit_image_tool_uses_a_local_source(
+    unit_settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import base64 as b64
+    import struct
+
+    from wahabot.ai.tools.image import image_builder
+    from wahabot.core import images
+
+    out = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + struct.pack(">II", 256, 256) + b"\x00" * 8
+    seen: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"data": [{"b64_json": b64.b64encode(out).decode()}]}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def post(
+            self,
+            url: str,
+            data: dict[str, object] | None = None,
+            files: dict[str, object] | None = None,
+            json: dict[str, object] | None = None,
+        ) -> FakeResponse:
+            seen.update(url=url, data=data, files=files)
+            return FakeResponse()
+
+    monkeypatch.setattr(images.httpx, "Client", FakeClient)
+    source = tmp_path / "source.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+    settings = unit_settings.model_copy(
+        update={"image_api_base": "http://img.invalid:9196"}
+    )
+    tool = {t.metadata.name: t for t in image_builder(settings)}["edit_image"]
+    payload = json.loads(
+        tool.fn(prompt="make the mug bright blue", source=str(source), strength=0.6)
+    )
+    assert payload["ok"] is True
+    assert payload["width"] == 256 and payload["height"] == 256
+    assert str(seen["url"]).endswith("/v1/images/edits")
+    assert "strength" in str(seen["data"])
+    assert seen["files"]["image"][0] == "source.png"
+    assert Path(payload["path"]).read_bytes() == out
+
+
+def test_load_source_sniffs_content_not_the_png_name(tmp_path: Path) -> None:
+    """A mislabeled source is declared by its bytes, not its .png name."""
+    from wahabot.core import images
+
+    mislabeled = tmp_path / "gen-1.png"
+    mislabeled.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 16)
+    loaded = images.load_source(str(mislabeled))
+    assert isinstance(loaded, tuple)
+    _, _, mimetype = loaded
+    assert mimetype == "image/jpeg"
+    assert images.load_source(str(tmp_path / "missing.png")) != images.load_source(
+        str(mislabeled)
+    )

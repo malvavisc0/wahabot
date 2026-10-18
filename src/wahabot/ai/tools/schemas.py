@@ -253,3 +253,42 @@ class ShellCommandSchema(BaseModel):
         description="Bash command; stdin closed, must not wait for input."
     )
     reason: str = Field(default="", description=REASON_DESCRIPTION)
+
+
+class ImageSchema(BaseModel):
+    """Generate an image from a full scene caption."""
+
+    prompt: str = Field(
+        description=(
+            "A rich, full-scene caption — subject/action, setting, lighting, "
+            "composition, style, colours; the service does not expand prompts."
+        )
+    )
+    size: str = Field(
+        default="",
+        description="Output size WxH; empty uses the configured default (1024x1024).",
+    )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
+
+
+class EditImageSchema(BaseModel):
+    """Repaint an existing image to match a prompt."""
+
+    prompt: str = Field(
+        description=(
+            "A rich caption of the finished scene — what changes and what stays "
+            "the same; the service does not expand prompts."
+        )
+    )
+    source: str = Field(
+        default="",
+        description=(
+            "Local path or URL of the image to edit; empty uses the image the "
+            "sender just sent this turn."
+        ),
+    )
+    strength: float | None = Field(
+        default=None,
+        description="How much to repaint, 0-1; empty uses the service default (0.9).",
+    )
+    reason: str = Field(default=REASON_DESCRIPTION)

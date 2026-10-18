@@ -194,6 +194,17 @@ class Settings(BaseSettings):
     #: ceiling): a sender cannot defer the bot's response indefinitely.
     burst_hold_cap_s: float = 30.0
 
+    #: OpenAI-compatible image service (base URL, e.g. http://host:9196)
+    #: behind the ``generate_image`` tool. Empty disables image
+    #: generation entirely (the tool is not registered).
+    image_api_base: str = ""
+    #: Per-request HTTP timeout (s): a 1024x1024 render is ~12 s, a
+    #: hires pass ~36 s.
+    image_timeout: float = 240.0
+    #: Default render size; the service's native, sharpest size is
+    #: 1024x1024.
+    image_size: str = "1024x1024"
+
     #: WhisperX transcription service (base URL, e.g. http://host:9191).
     #: Empty disables voice-note transcription entirely (the feature is
     #: on only when the URL is set).

@@ -266,6 +266,9 @@ class RunTarget:
     #: from the chat's rule notes. Applied to sent and stored chat text
     #: alike so the model's next-turn view matches what the chat saw.
     prefix: str = ""
+    #: Local path of this turn's inbound image, when the image service
+    #: is configured (the source for an edit); "" otherwise.
+    image_path: str = ""
 
     @classmethod
     def from_dict(cls, holder: dict[str, str]) -> RunTarget:
@@ -343,6 +346,12 @@ def current_prefix() -> str:
     """This run's chat-reply prefix, or "" when no run is bound."""
     target = _run_target.get()
     return target.prefix if target is not None else ""
+
+
+def current_image_path() -> str:
+    """This run's inbound image path, or "" when there is none."""
+    target = _run_target.get()
+    return target.image_path if target is not None else ""
 
 
 def track_self_echo(sent_id: str, what: str) -> None:

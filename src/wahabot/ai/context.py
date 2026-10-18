@@ -36,6 +36,7 @@ from wahabot.ai.tools.whatsapp import (
 )
 from wahabot.ai.vision import image_caption, image_noun
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+from wahabot.core import images as image_store
 from wahabot.core.access import CONFIG_MEMORY_TOKEN_LIMIT
 from wahabot.core.cache import TtlCache
 from wahabot.core.host import host_context
@@ -498,6 +499,22 @@ async def record_handled_turn(
     )
 
 
+async def bind_inbound_image(
+    image: dict[str, Any] | None, settings: Settings | None, target: RunTarget
+) -> None:
+    """Persist this turn's inbound image so ``edit_image`` can repaint it.
+
+    Only when the image service is configured — otherwise nothing could
+    edit it and the temp file would be pure litter.
+    """
+    if image is None or settings is None or not settings.image_api_base:
+        return
+    data = image.get("data")
+    if not data:
+        return
+    target.image_path = str(await asyncio.to_thread(image_store.save, data))
+
+
 async def bind_run_rules(
     agent: FunctionCallingAgentWorkflow,
     ctx: Context | None,
@@ -634,6 +651,7 @@ async def handle_message(
     target = RunTarget(session=event.session, chat_id=chat_id, armed=armed, typing=typing)
     token = bind_target(target)
     try:
+        await bind_inbound_image(image, settings, target)
         if not await bind_run_rules(agent, ctx, user_msg, target, addressed, gate_first):
             return "", target
         if ctx is not None and not await run_gate(

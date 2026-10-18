@@ -17,6 +17,7 @@ from wahabot.ai.tools.external import (
     visit_url_builder,
     web_search_builder,
 )
+from wahabot.ai.tools.image import image_builder
 from wahabot.ai.tools.notebook import notebook_builder
 from wahabot.ai.tools.whatsapp import (
     EscalationChannel,
@@ -67,4 +68,6 @@ def build_default_tools(
     ]
     if settings.shell_tool:
         tools.append(shell_builder(settings))
+    if settings.image_api_base:
+        tools.extend(image_builder(settings))
     return tools

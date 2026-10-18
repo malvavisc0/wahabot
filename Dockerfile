@@ -110,5 +110,12 @@ RUN --mount=type=cache,target=/root/.cache/uv,uid=0,gid=0 \
     uv pip install --python /app/.venv/bin/python /tmp/wahabot-*.whl \
     && rm -f /tmp/wahabot-*.whl
 
+# Plotting toolchain for code-drawn images (charts, plots, diagrams via
+# run_shell_command): the model writes a script and renders a PNG. Image
+# only — not a wahabot dependency, so it stays out of the wheel and lock.
+# Advertised to the model by _ADVERTISED_MODULES in core/host.py.
+RUN --mount=type=cache,target=/root/.cache/uv,uid=0,gid=0 \
+    uv pip install --python /app/.venv/bin/python matplotlib numpy
+
 EXPOSE 8080
 CMD ["wahabot", "serve"]
