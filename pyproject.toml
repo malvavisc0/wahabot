@@ -1,6 +1,6 @@
 [project]
 name = "wahabot"
-version = "1.2.0"
+version = "1.1.9"
 description = "Self-hosted WhatsApp AI agent with chat memory, media understanding, web research, and operator controls via WAHA"
 readme = "README.md"
 authors = [
