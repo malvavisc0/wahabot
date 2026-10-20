@@ -699,23 +699,9 @@ def turn_header(
     message = messages[index]
     if message.role != MessageRole.USER:
         return messages
-    content = str(message.content or "")
-    serials = records.record_serials(content)
-    if serials:
-        skipped = message.additional_kwargs.get(SKIPPED_SERIALS_KWARG) or ()
-        content = records.apply_skipped(content, {int(serial) for serial in skipped})
-    count = len(serials) or len(INBOUND_ID_RE.findall(content)) or 1
-    newest = max(serials) if serials else count
-    backlog = bool(message.additional_kwargs.get(MERGED_TURNS_KWARG))
-    if not shows_turn_header(group=group, count=count, backlog=backlog):
+    content, header = turn_content_and_header(message, group=group, addressed=addressed)
+    if header is None:
         return messages
-    header = records.format_header(
-        count=count,
-        newest_serial=newest,
-        addressed=addressed,
-        backlog=backlog,
-        policy="" if addressed or not group else UNADDRESSED_POLICY,
-    )
     marked = ChatMessage(
         role=message.role,
         blocks=list(message.blocks),
@@ -723,6 +709,40 @@ def turn_header(
         additional_kwargs=dict(message.additional_kwargs),
     )
     return [*messages[:index], marked]
+
+
+def turn_content_and_header(
+    message: ChatMessage, *, group: bool, addressed: bool
+) -> tuple[str, str | None]:
+    """Apply the skipped overlay and build the header, or ``(content, None)``."""
+    content = apply_skipped_overlay(message, str(message.content or ""))
+    count, newest = turn_numbers(content)
+    backlog = bool(message.additional_kwargs.get(MERGED_TURNS_KWARG))
+    if not shows_turn_header(group=group, count=count, backlog=backlog):
+        return content, None
+    return content, records.format_header(
+        count=count,
+        newest_serial=newest,
+        addressed=addressed,
+        backlog=backlog,
+        policy="" if addressed or not group else UNADDRESSED_POLICY,
+    )
+
+
+def apply_skipped_overlay(message: ChatMessage, content: str) -> str:
+    """Apply ``skipped_serials`` to the stored records, prompt-time only."""
+    serials = records.record_serials(content)
+    if not serials:
+        return content
+    skipped = message.additional_kwargs.get(SKIPPED_SERIALS_KWARG) or ()
+    return records.apply_skipped(content, {int(serial) for serial in skipped})
+
+
+def turn_numbers(content: str) -> tuple[int, int]:
+    """The header's ``(count, newest serial)``; prose falls back to id notes."""
+    serials = records.record_serials(content)
+    count = len(serials) or len(INBOUND_ID_RE.findall(content)) or 1
+    return count, (max(serials) if serials else count)
 
 
 def shows_turn_header(*, group: bool, count: int, backlog: bool) -> bool:

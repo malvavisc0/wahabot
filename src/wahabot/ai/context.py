@@ -570,6 +570,26 @@ async def run_gate(
     return False
 
 
+async def prepare_turn_state(
+    ctx: Context | None,
+    event: WahaEvent,
+    addressed: bool,
+    images: list[dict[str, Any]] | None,
+    settings: Settings | None,
+) -> list[dict[str, Any]] | None:
+    """Record the header verdict and cap image blocks before the run."""
+    if ctx is not None:
+        # The prompt-time turn header (history.turn_header) reads these back:
+        # the wake gate's addressing verdict, and whether this is a group turn.
+        await ctx.store.set("turn_addressed", addressed)
+        await ctx.store.set(
+            "turn_group", str(event.payload.get("from", "")).endswith("@g.us")
+        )
+    if settings is not None and settings.vision_max_images > 0 and images:
+        return images[: settings.vision_max_images]
+    return images
+
+
 async def handle_message(
     event: WahaEvent,
     agent: FunctionCallingAgentWorkflow,
@@ -631,13 +651,7 @@ async def handle_message(
     """
     chat_id = str(event.payload.get("from", ""))
     logger.info("Agent handling message from {chat_id}", chat_id=chat_id)
-    if ctx is not None:
-        # The prompt-time turn header (history.turn_header) reads these back:
-        # the wake gate's addressing verdict, and whether this is a group turn.
-        await ctx.store.set("turn_addressed", addressed)
-        await ctx.store.set("turn_group", chat_id.endswith("@g.us"))
-    if settings is not None and settings.vision_max_images > 0 and images:
-        images = images[: settings.vision_max_images]
+    images = await prepare_turn_state(ctx, event, addressed, images, settings)
     user_msg, image_blocks, serials = await turn_user_message(
         event,
         image=image,
@@ -740,33 +754,85 @@ async def turn_user_message(
     names = await asyncio.to_thread(participant_names, waha, event.session, chat_id)
     records_on = settings is not None and event.event != "command" and not pinned_note
     if records_on and settings is not None:
-        entries = list(record_entries) if record_entries is not None else []
-        if not entries:
-            attached = await asyncio.to_thread(
-                collect_images,
-                [image] if image is not None else [],
-                settings,
-                str(event.payload.get("body", "")).strip(),
-            )
-            entries = [
-                single_record_entry(
-                    event,
-                    images=attached,
-                    video_frames=images,
-                    addressed=addressed,
-                )
-            ]
-        registry = serial_store(str(settings.data_dir)).for_chat(event.session, chat_id)
-        user_msg, serials, blocks = await asyncio.to_thread(
-            render_entries,
-            entries,
-            registry=registry,
+        return await records_user_message(
+            event,
+            image=image,
+            images=images,
+            settings=settings,
             names=names,
-            tz_name=settings.timezone,
+            chat_id=chat_id,
+            addressed=addressed,
+            record_entries=record_entries,
         )
-        image_blocks = await asyncio.to_thread(build_image_blocks, blocks)
-        logger.info("Attaching {n} image block(s) to agent run", n=len(image_blocks))
-        return user_msg, image_blocks, serials
+    return await prose_user_message(
+        event,
+        image=image,
+        images=images,
+        settings=settings,
+        names=names,
+        pinned_note=pinned_note,
+        bot_name=bot_name,
+        bot_mention_regex=bot_mention_regex,
+        body_scrubbed=body_scrubbed,
+        addressed=addressed,
+    )
+
+
+async def records_user_message(
+    event: WahaEvent,
+    *,
+    image: dict[str, Any] | None,
+    images: list[dict[str, Any]] | None,
+    settings: Settings,
+    names: dict[str, str],
+    chat_id: str,
+    addressed: bool,
+    record_entries: Sequence[RecordEntry] | None,
+) -> tuple[str, list[ImageBlock], list[int]]:
+    """Render the inbound turn as one record per message."""
+    entries = list(record_entries) if record_entries is not None else []
+    if not entries:
+        attached = await asyncio.to_thread(
+            collect_images,
+            [image] if image is not None else [],
+            settings,
+            str(event.payload.get("body", "")).strip(),
+        )
+        entries = [
+            single_record_entry(
+                event,
+                images=attached,
+                video_frames=images,
+                addressed=addressed,
+            )
+        ]
+    registry = serial_store(str(settings.data_dir)).for_chat(event.session, chat_id)
+    user_msg, serials, blocks = await asyncio.to_thread(
+        render_entries,
+        entries,
+        registry=registry,
+        names=names,
+        tz_name=settings.timezone,
+    )
+    image_blocks = await asyncio.to_thread(build_image_blocks, blocks)
+    logger.info("Attaching {n} image block(s) to agent run", n=len(image_blocks))
+    return user_msg, image_blocks, serials
+
+
+async def prose_user_message(
+    event: WahaEvent,
+    *,
+    image: dict[str, Any] | None,
+    images: list[dict[str, Any]] | None,
+    settings: Settings | None,
+    names: dict[str, str],
+    pinned_note: str,
+    bot_name: str | None,
+    bot_mention_regex: str | None,
+    body_scrubbed: bool,
+    addressed: bool,
+) -> tuple[str, list[ImageBlock], list[int]]:
+    """The legacy prose turn used by synthetic operator commands."""
     tag = sender_tag(event, names)
     body = turn_body(event, prescrubbed=body_scrubbed or event.event == "command")
     text = f"{tag} {body}".strip() if tag else body
@@ -799,23 +865,34 @@ def single_record_entry(
     addressed: bool,
 ) -> RecordEntry:
     """Build the one-record entry of a single inbound message."""
-    raw = str(event.payload.get("body", "")).strip()
-    marker = str(event.payload.get(VIDEO_MARKER_KEY) or "")
-    link_marker = str(event.payload.get(LINK_VIDEO_MARKER_KEY) or "")
-    frames = list(video_frames or [])
-    video = None
-    if frames and (marker or link_marker or message_kind(event) in ("video", "ptv")):
-        video = {"frames": frames, "marker": marker or link_marker or "(video)"}
-    body = raw
-    if str(event.payload.get(TRANSCRIPT_KEY) or "").strip():
-        body = body.removeprefix("[voice note]").strip()
     return RecordEntry(
         event=event,
-        body=body,
+        body=record_entry_body(event),
         images=images,
-        video=video,
+        video=record_entry_video(event, video_frames),
         addressed=addressed,
     )
+
+
+def record_entry_body(event: WahaEvent) -> str:
+    """The record body, with the code's voice-note prefix removed."""
+    body = str(event.payload.get("body", "")).strip()
+    if str(event.payload.get(TRANSCRIPT_KEY) or "").strip():
+        return body.removeprefix("[voice note]").strip()
+    return body
+
+
+def record_entry_video(
+    event: WahaEvent, frames: list[dict[str, Any]] | None
+) -> dict[str, Any] | None:
+    """The video attachment (frames + analysis) for a record, if any."""
+    if not frames:
+        return None
+    marker = str(event.payload.get(VIDEO_MARKER_KEY) or "")
+    link_marker = str(event.payload.get(LINK_VIDEO_MARKER_KEY) or "")
+    if not (marker or link_marker or message_kind(event) in ("video", "ptv")):
+        return None
+    return {"frames": list(frames), "marker": marker or link_marker or "(video)"}
 
 
 def build_image_blocks(images: list[dict[str, Any]] | None) -> list[ImageBlock]:

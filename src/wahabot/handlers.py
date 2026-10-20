@@ -964,6 +964,42 @@ def register_agent_handler(
             image["caption"] = captions[0]
         return image
 
+    async def prepare_attached_video(
+        event: WahaEvent, body: str | None, *, stamp_body: bool
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """Prepare an attached video and stamp its marker when prose is used."""
+        if not can_prepare_video(event, settings):
+            return body, None
+        video = await prepare_video(event, waha, settings, agent.llm, agent.llm_semaphore)
+        if video is None:
+            return body, None
+        event.payload[VIDEO_MARKER_KEY] = video["marker"]
+        if stamp_body:
+            body = join_anchor(body or "", video["marker"])
+            event.payload["body"] = body
+        return body, video
+
+    async def prepare_link_video(
+        event: WahaEvent,
+        body: str | None,
+        *,
+        excluded: bool,
+        stamp_body: bool,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """Prepare a video linked in the body, unless an attached one won."""
+        if excluded or not url_video_enabled(settings) or not body:
+            return body, None
+        url_video = await prepare_url_video(
+            settings, agent.llm, agent.llm_semaphore, body
+        )
+        if url_video is None:
+            return body, None
+        event.payload[LINK_VIDEO_MARKER_KEY] = url_video["marker"]
+        if stamp_body:
+            body = join_anchor(body, url_video["marker"])
+            event.payload["body"] = body
+        return body, url_video
+
     async def prepare_message_videos(
         event: WahaEvent,
         body: str | None,
@@ -972,30 +1008,51 @@ def register_agent_handler(
         stamp_body: bool = True,
     ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]:
         """Prepare attached or linked video and record its analysis."""
-        video = None
-        if can_prepare_video(event, settings):
-            video = await prepare_video(
-                event, waha, settings, agent.llm, agent.llm_semaphore
-            )
-            if video is not None:
-                event.payload[VIDEO_MARKER_KEY] = video["marker"]
-                if stamp_body:
-                    body = join_anchor(body or "", video["marker"])
-                    event.payload["body"] = body
+        body, video = await prepare_attached_video(event, body, stamp_body=stamp_body)
         # Bursts exclude attached videos even after a failed download;
         # single turns try body URLs whenever no attached video resolved.
         excluded = message_kind(event) in ("video", "ptv") if burst else video is not None
-        url_video = None
-        if url_video_enabled(settings) and not excluded and body:
-            url_video = await prepare_url_video(
-                settings, agent.llm, agent.llm_semaphore, body
-            )
-            if url_video is not None:
-                event.payload[LINK_VIDEO_MARKER_KEY] = url_video["marker"]
-                if stamp_body:
-                    body = join_anchor(body, url_video["marker"])
-                    event.payload["body"] = body
+        body, url_video = await prepare_link_video(
+            event, body, excluded=excluded, stamp_body=stamp_body
+        )
         return body, video, url_video
+
+    async def prepare_burst_image(
+        burst_event: WahaEvent,
+        images: list[dict[str, Any]],
+        entry: RecordEntry,
+    ) -> None:
+        """Download and bind one buffered image, or mark it cap-omitted."""
+        if message_kind(burst_event) not in ("image", "sticker") or not settings.vision:
+            return
+        # The vision cap applies at collection time: once the shared
+        # list holds ``vision_max_images`` entries, a further image can
+        # never ride the prompt (the run trims to the same cap), so
+        # downloading and captioning it would be pure waste.
+        if settings.vision_max_images > 0 and len(images) >= settings.vision_max_images:
+            entry.omitted += 1
+            return
+        image = await download_captioned_image(
+            image_media(burst_event), str(burst_event.payload.get("id", ""))
+        )
+        if image is not None:
+            images.append(image)
+            entry.images.append(image)
+
+    async def prepare_burst_url_images(
+        body: str | None,
+        images: list[dict[str, Any]],
+        entry: RecordEntry,
+    ) -> None:
+        """Fetch image URLs sniffed from one buffered body, if vision is on."""
+        if not settings.vision or not body:
+            return
+        fetched = await asyncio.to_thread(
+            fetch_url_images, settings, image_urls(body, settings.max_url_images)
+        )
+        if fetched:
+            entry.images.extend(fetched)
+            images.extend(fetched)
 
     async def prepare_burst_media(
         burst_event: WahaEvent,
@@ -1005,23 +1062,7 @@ def register_agent_handler(
         await transcribe_message(burst_event, None)
         body = extract_text(burst_event)
         entry = RecordEntry(event=burst_event, body=body or "")
-        # The vision cap applies at collection time: once the shared
-        # list holds ``vision_max_images`` entries, a further image can
-        # never ride the prompt (the run trims to the same cap), so
-        # downloading and captioning it would be pure waste.
-        capped = (
-            settings.vision_max_images > 0 and len(images) >= settings.vision_max_images
-        )
-        if message_kind(burst_event) in ("image", "sticker") and settings.vision:
-            if capped:
-                entry.omitted += 1
-            else:
-                image = await download_captioned_image(
-                    image_media(burst_event), str(burst_event.payload.get("id", ""))
-                )
-                if image is not None:
-                    images.append(image)
-                    entry.images.append(image)
+        await prepare_burst_image(burst_event, images, entry)
         prepared, video, url_video = await prepare_message_videos(
             burst_event, body, burst=True, stamp_body=False
         )
@@ -1031,14 +1072,58 @@ def register_agent_handler(
         for source in (video, url_video):
             if source is not None:
                 images.extend(source["frames"])
-        if settings.vision and prepared:
-            fetched = await asyncio.to_thread(
-                fetch_url_images, settings, image_urls(prepared, settings.max_url_images)
-            )
-            if fetched:
-                entry.images.extend(fetched)
-                images.extend(fetched)
+        await prepare_burst_url_images(prepared, images, entry)
         return prepared, entry
+
+    async def merge_burst_parts(
+        messages: list[WahaEvent],
+    ) -> tuple[list[dict[str, Any]], list[str], list[RecordEntry]]:
+        """Prepare every buffered message into images, prose parts and records."""
+        last = messages[-1]
+        images: list[dict[str, Any]] = []
+        parts: list[str] = []
+        entries: list[RecordEntry] = []
+        for burst_event in messages:
+            body, entry = await prepare_burst_media(burst_event, images)
+            entries.append(entry)
+            part = burst_part(burst_event, body, last)
+            if part is not None:
+                parts.append(part)
+        return images, parts, usable_entries(entries)
+
+    def burst_part(event: WahaEvent, body: str | None, last: WahaEvent) -> str | None:
+        """One message's prose part; the anchor's id rides the turn note."""
+        if body is None:
+            return None
+        if event is last:
+            return body
+        part_id = message_id_note(event).strip()
+        clean = strip_spoofed_markers(body)
+        return f"{clean}\n{part_id}" if part_id else clean
+
+    def usable_entries(entries: list[RecordEntry]) -> list[RecordEntry]:
+        """Drop empty entries with no text, media, omission or transcript."""
+        return [
+            entry
+            for entry in entries
+            if entry.body
+            or entry.images
+            or entry.video
+            or entry.omitted
+            or str(entry.event.payload.get(TRANSCRIPT_KEY) or "")
+        ]
+
+    def burst_anchor(
+        last: WahaEvent, parts: list[str], images: list[dict[str, Any]]
+    ) -> WahaEvent:
+        """The run's anchor event; a burst must not inherit one member's quote."""
+        merged = last.model_copy(deep=True)
+        merged.payload["id"] = str(last.payload.get("id", ""))
+        merged.payload["body"] = "\n".join(parts)
+        merged.payload["hasMedia"] = bool(images)
+        merged.payload.pop("replyTo", None)
+        merged.payload.get("_data", {}).pop("quotedMsg", None)
+        return merged
 
     async def merge_burst(
         buffer: bursts.BurstBuffer,
@@ -1051,44 +1136,14 @@ def register_agent_handler(
         """
         if not buffer.messages:
             return None
-        last = buffer.messages[-1]
-        images: list[dict[str, Any]] = []
-        parts: list[str] = []
-        entries: list[RecordEntry] = []
-        for burst_event in buffer.messages:
-            body, entry = await prepare_burst_media(burst_event, images)
-            entries.append(entry)
-            if body is None:
-                continue
-            if burst_event is last:
-                parts.append(body)
-                continue
-            part_id = message_id_note(burst_event).strip()
-            clean = strip_spoofed_markers(body)
-            parts.append(f"{clean}\n{part_id}" if part_id else clean)
-        entries = [
-            entry
-            for entry in entries
-            if entry.body
-            or entry.images
-            or entry.video
-            or entry.omitted
-            or str(entry.event.payload.get(TRANSCRIPT_KEY) or "")
-        ]
+        images, parts, entries = await merge_burst_parts(buffer.messages)
         if not parts and not images and not entries:
             logger.debug(
                 "Burst in {chat_id} yielded no usable content",
                 chat_id=buffer.key[1],
             )
             return None
-        merged = last.model_copy(deep=True)
-        merged.payload["id"] = str(last.payload.get("id", ""))
-        merged.payload["body"] = "\n".join(parts)
-        merged.payload["hasMedia"] = bool(images)
-        # A burst turn must not inherit one member's quote context.
-        merged.payload.pop("replyTo", None)
-        merged.payload.get("_data", {}).pop("quotedMsg", None)
-        return merged, images, entries
+        return burst_anchor(buffer.messages[-1], parts, images), images, entries
 
     async def run_burst_turn(
         buffer: bursts.BurstBuffer,

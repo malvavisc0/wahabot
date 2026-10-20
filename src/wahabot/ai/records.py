@@ -123,20 +123,40 @@ def cap_turn(
     if len(serials) <= 1:
         return text
     current = {int(serial) for serial in keep_serials}
+    kept = select_blocks(blocks, text, current, window)
+    kept = trim_blocks(kept, current, max_tokens, token_counter)
+    return "\n".join(block for _, block in kept)
+
+
+def select_blocks(
+    blocks: list[tuple[int, str]], text: str, current: set[int], window: int
+) -> list[tuple[int, str]]:
+    """Select the current burst, the newest *window* older records and quotes."""
+    serials = [serial for serial, _ in blocks if serial]
     selected: set[int] = set(current)
     older = [serial for serial in serials if serial not in current]
     selected.update(older[-max(window, 0) :])
     selected.update(referenced_serials(text) & set(serials))
     selected.add(serials[-1])
-    kept = [
+    return [
         (serial, block) for serial, block in blocks if not serial or serial in selected
     ]
+
+
+def trim_blocks(
+    blocks: list[tuple[int, str]],
+    current: set[int],
+    max_tokens: int,
+    token_counter: Callable[[str], int],
+) -> list[tuple[int, str]]:
+    """Drop the oldest selected records until the turn fits the token ceiling."""
+    kept = blocks
     while (
         token_counter("\n".join(block for _, block in kept)) > max_tokens
         and len([serial for serial, _ in kept if serial]) > 1
     ):
         kept = drop_oldest(kept, current)
-    return "\n".join(block for _, block in kept)
+    return kept
 
 
 def drop_oldest(

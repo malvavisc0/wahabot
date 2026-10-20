@@ -318,6 +318,38 @@ def resolve_message_token(
     return entry.message_id, None
 
 
+def prepare_send_target(
+    chat: str | None,
+    reply_to: str | None,
+    target: RunTarget,
+    settings: Settings | None,
+) -> tuple[str, str | None, str | None]:
+    """Validate a send's chat and quote; ``(chat_id, reply_id, error)``."""
+    chat_id, fence_error = fenced_chat(chat, target)
+    if fence_error:
+        return "", None, fence_error
+    if not target.session or not chat_id:
+        return "", None, "no active conversation context"
+    if reply_to:
+        reply_to, token_error = resolve_message_token(
+            reply_to,
+            session=target.session,
+            chat_id=chat_id,
+            settings=settings,
+            allow_search=operator_run(target),
+        )
+        if token_error:
+            return chat_id, None, token_error
+    delivery_error = delivery_target_error(chat_id, reply_to, target)
+    if delivery_error:
+        return chat_id, reply_to, delivery_error
+    if reply_to:
+        _, id_error = fenced_message_id(reply_to, target)
+        if id_error:
+            return chat_id, None, id_error
+    return chat_id, reply_to, None
+
+
 def send_message(waha: WahaClient, settings: Settings | None = None) -> BaseTool:
     """Build a tool that sends a WhatsApp text message.
 
@@ -351,29 +383,12 @@ def send_message(waha: WahaClient, settings: Settings | None = None) -> BaseTool
             return error(
                 f"message already sent this run (to {target.sent}); do not send again"
             )
-        chat_id, fence_error = fenced_chat(chat, target)
-        if fence_error:
-            return error(fence_error)
+        chat_id, reply_to, target_error = prepare_send_target(
+            chat, reply_to, target, settings
+        )
+        if target_error:
+            return error(target_error)
         session = target.session
-        if not session or not chat_id:
-            return error("no active conversation context")
-        if reply_to:
-            reply_to, token_error = resolve_message_token(
-                reply_to,
-                session=session,
-                chat_id=chat_id,
-                settings=settings,
-                allow_search=operator_run(target),
-            )
-            if token_error:
-                return error(token_error)
-        delivery_error = delivery_target_error(chat_id, reply_to, target)
-        if delivery_error:
-            return error(delivery_error)
-        if reply_to:
-            _, id_error = fenced_message_id(reply_to, target)
-            if id_error:
-                return error(id_error)
         log_action_reason("send_message", reason, chat=chat_id)
         try:
             sent_id, merged, dangling = deliver_chat_text(
@@ -1432,6 +1447,29 @@ def dispatch_export(
     return read_export_journal(settings, target.session, chat_id, limit)
 
 
+def resolve_read_chat(
+    chat: str | None, target: RunTarget, settings: Settings
+) -> tuple[str, str | None]:
+    """The fenced chat for a read, resolving a ``#m<n>`` chat argument."""
+    if chat and chat.strip().startswith("#m"):
+        raw, token_error = resolve_message_token(
+            chat,
+            session=target.session,
+            chat_id=target.chat_id,
+            settings=settings,
+            allow_search=operator_run(target),
+        )
+        if token_error:
+            return "", token_error
+        chat = chat_jid(raw, target)
+    chat_id, fence_error = fenced_chat(chat, target)
+    if fence_error:
+        return "", fence_error
+    if not chat_id:
+        return "", "no active conversation context"
+    return chat_id, None
+
+
 def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
     """Build the chat-reading tool: list/search/metadata/recent/resolve.
 
@@ -1466,22 +1504,9 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
             return error(f"unknown mode: {mode!r}")
         if mode in ("list", "search") and limit is not None and limit <= 0:
             return error("limit must be positive")
-        if chat and chat.strip().startswith("#m"):
-            raw, token_error = resolve_message_token(
-                chat,
-                session=target.session,
-                chat_id=target.chat_id,
-                settings=settings,
-                allow_search=operator_run(target),
-            )
-            if token_error:
-                return error(token_error)
-            chat = chat_jid(raw, target)
-        chat_id, fence_error = fenced_chat(chat, target)
-        if fence_error:
-            return error(fence_error)
-        if not chat_id:
-            return error("no active conversation context")
+        chat_id, chat_error = resolve_read_chat(chat, target, settings)
+        if chat_error:
+            return error(chat_error)
         target.allowed_chats.add(chat_id)
         return handler(waha, target.session, chat_id, query, name, limit, settings)
 
@@ -2043,20 +2068,24 @@ def resolve_explicit_mentions(
     resolved: list[str] = []
     unresolved: list[str] = []
     for mention in mentions:
-        value = mention.strip()
-        if not value:
-            continue
-        if "@" in value or value.isdigit():
-            resolved.append(value)
-            continue
-        hits = [
-            m for m in members if m["name"] and m["name"].casefold() == value.casefold()
-        ]
-        if len(hits) == 1:
-            resolved.append(hits[0]["id"])
-        else:
-            unresolved.append(value)
+        jid, missing = resolve_one_mention(mention, members)
+        if jid:
+            resolved.append(jid)
+        elif missing:
+            unresolved.append(missing)
     return resolved, unresolved
+
+
+def resolve_one_mention(mention: str, members: list[dict[str, str]]) -> tuple[str, str]:
+    """One explicit mention as ``(jid, unresolved_name)``; one side is empty."""
+    value = mention.strip()
+    if not value:
+        return "", ""
+    if "@" in value or value.isdigit():
+        return value, ""
+    needle = value.casefold()
+    hits = [m for m in members if m["name"] and m["name"].casefold() == needle]
+    return (hits[0]["id"], "") if len(hits) == 1 else ("", value)
 
 
 def resolve_in_current_chat(
