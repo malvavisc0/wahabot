@@ -23,7 +23,6 @@ from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from wahabot.ai.messages import (
-    OPERATOR_NOTE_PREFIX,
     bot_jids,
     conversation_jid,
     extract_text,
@@ -279,16 +278,20 @@ def image_payloads(images: Sequence[dict[str, Any]]) -> list[str]:
 
 
 def record_body(entry: RecordEntry) -> str:
-    """Member text for *entry*, without code-only prefixes."""
+    """Member text for *entry*.
+
+    No denylist: a member may type any marker, including the legacy
+    ``[operator message]`` prefix. Only the code's own voice-note prefix
+    is removed, and only when the transcript key proves the code wrote it.
+    """
     body = (
         entry.body
         if entry.body is not None
         else str(entry.event.payload.get("body", "")).strip()
     )
-    body = body.removeprefix(OPERATOR_NOTE_PREFIX).strip()
     if str(entry.event.payload.get(TRANSCRIPT_KEY) or "").strip():
         body = body.removeprefix("[voice note]").strip()
-    return body
+    return body.strip()
 
 
 def media_parts(

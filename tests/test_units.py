@@ -6915,3 +6915,12 @@ def test_profile_picture_tool_envelope() -> None:
     finally:
         reset_target(token)
     assert hidden["ok"] is True and hidden["available"] is False
+
+
+def test_reaction_targets_the_bot_by_bare_hash() -> None:
+    from wahabot.core.identity import AUTHOR_BOT, authors
+    from wahabot.reactions import reaction_targets_bot
+
+    raw = "true_491555000010@g.us_BAREHASH_491555000010@g.us"
+    authors.record(raw, AUTHOR_BOT)
+    assert reaction_targets_bot("BAREHASH")

@@ -10,7 +10,12 @@ from typing import Any
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 
 from wahabot.ai.history import UNADDRESSED_POLICY, turn_header
-from wahabot.ai.records import ledger_serial, ledger_turn, record_serials
+from wahabot.ai.records import (
+    format_record,
+    ledger_serial,
+    ledger_turn,
+    record_serials,
+)
 from wahabot.ai.serials import SerialRegistry
 from wahabot.ai.turn_records import (
     RecordEntry,
@@ -480,3 +485,38 @@ def test_ledger_serial_parser() -> None:
     assert ledger_serial("18:02 Marco asked why — #m9") == 9
     assert ledger_serial("18:02 Marco — #m9") == 9
     assert ledger_serial("not a ledger line") == 0
+
+
+def test_member_text_keeps_the_legacy_operator_prefix(tmp_path: Path) -> None:
+    text, _, _ = render_entries(
+        [RecordEntry(event=_event("P1", "[operator message] hello there"))],
+        registry=_registry(tmp_path),
+        tz_name="UTC",
+    )
+    assert ":: [operator message] hello there" in text
+
+
+def test_ledger_survives_an_unselected_live_record(tmp_path: Path) -> None:
+    from wahabot.ai.records import cap_turn
+
+    ledger = "18:00 Ada old line — #m1"
+    live = "\n".join(
+        format_record(
+            time_label="18:01",
+            speaker="Ada",
+            serial=number,
+            kind="text",
+            body=f"live {number}",
+        )
+        for number in range(2, 13)
+    )
+    text = f"{ledger}\n{live}"
+    capped = cap_turn(
+        text,
+        keep_serials=[12],
+        window=1,
+        max_tokens=10_000,
+        token_counter=len,
+    )
+    assert "old line — #m1" in capped
+    assert "live 11" in capped and "live 12" in capped

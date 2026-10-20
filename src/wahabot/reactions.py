@@ -27,14 +27,19 @@ from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from loguru import logger
 
 from wahabot.ai.context import participant_names
-from wahabot.ai.messages import REACTION_TARGET_KWARG, bot_jids, jid_string
+from wahabot.ai.messages import (
+    REACTION_TARGET_KWARG,
+    bot_jids,
+    conversation_jid,
+    jid_string,
+)
 from wahabot.ai.records import ledger_turn
 from wahabot.ai.scrub import strip_spoofed_markers
 from wahabot.ai.serials import serial_store
 from wahabot.ai.turn_records import RecordEntry, assign_event_serial, render_entries
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
-from wahabot.core.identity import display_name
-from wahabot.core.jid import chat_from_message_id, is_own_message_id
+from wahabot.core.identity import AUTHOR_BOT, authors, display_name
+from wahabot.core.jid import is_own_message_id
 from wahabot.core.models import WahaEvent
 from wahabot.core.runs import chat_lock, context_for, persist_memory
 from wahabot.core.waha import WahaClient
@@ -74,7 +79,7 @@ def register_reaction_handler(
                 sender=event.payload.get("from"),
             )
             return
-        if not is_own_message_id(str(target_id)):
+        if not reaction_targets_bot(str(target_id)):
             logger.debug(
                 "Ignoring reaction to someone else's message {target}",
                 target=target_id,
@@ -96,7 +101,10 @@ def register_reaction_handler(
                 reactor=reactor,
             )
             return
-        message = await asyncio.to_thread(fetch_target, waha, event.session, target_id)
+        chat_id = conversation_jid(event)
+        message = await asyncio.to_thread(
+            fetch_target, waha, event.session, chat_id, target_id
+        )
         if message is None or not message.get("fromMe"):
             return
         emoji = str(reaction.get("text", "")).strip() or "(removed)"
@@ -104,7 +112,6 @@ def register_reaction_handler(
         # The record reads `to: you "preview"`; the target is always one
         # of the account's own messages here (checked above).
         reaction["preview"] = preview[:60]
-        chat_id = chat_id_from_message_id(str(target_id))
         registry = serial_store(str(settings.data_dir)).for_chat(event.session, chat_id)
         record, _, _ = await asyncio.to_thread(
             render_entries,
@@ -208,7 +215,18 @@ async def forget_reaction_notes(
         await memory.aset(kept)
 
 
-def fetch_target(waha: WahaClient, session: str, target_id: str) -> dict[str, Any] | None:
+def reaction_targets_bot(target_id: str) -> bool:
+    """Whether a reaction's target is the account's own output.
+
+    WAHA may give the serialized id or the bare short hash
+    (``replyTo.id`` style); the author book is keyed by the short hash.
+    """
+    return is_own_message_id(target_id) or authors.author(target_id) == AUTHOR_BOT
+
+
+def fetch_target(
+    waha: WahaClient, session: str, chat_id: str, target_id: str
+) -> dict[str, Any] | None:
     """Fetch the reacted-to message, or None if it cannot be retrieved.
 
     Fail-soft on every error: reaction logging is best-effort, and an
@@ -216,7 +234,7 @@ def fetch_target(waha: WahaClient, session: str, target_id: str) -> dict[str, An
     the reaction event forever).
     """
     try:
-        return waha.get_message(session, chat_id_from_message_id(target_id), target_id)
+        return waha.get_message(session, chat_id, target_id)
     except Exception as exc:
         logger.warning(
             "Could not fetch message reacted to {target}: {exc}",
@@ -224,11 +242,6 @@ def fetch_target(waha: WahaClient, session: str, target_id: str) -> dict[str, An
             exc=exc,
         )
         return None
-
-
-def chat_id_from_message_id(message_id: str) -> str:
-    """Return the chat JID embedded in a serialized message id, else the input."""
-    return chat_from_message_id(message_id) or message_id
 
 
 def message_preview(payload: dict[str, Any]) -> str:

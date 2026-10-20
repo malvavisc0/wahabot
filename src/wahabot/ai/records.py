@@ -135,21 +135,20 @@ def select_blocks(
     selected.update(older[-max(window, 0) :])
     selected.update(referenced_serials(text) & set(live))
     selected.add(live[-1])
-    live_set = set(live)
-    return [
-        (serial, block)
-        for serial, block in blocks
-        if keep_block(serial, selected, live_set)
-    ]
+    return [(serial, block) for serial, block in blocks if keep_block(serial, selected)]
 
 
-def keep_block(serial: int, selected: set[int], live: set[int]) -> bool:
-    """Whether a block survives selection: unclassified, selected live, or ledger."""
+def keep_block(serial: int, selected: set[int]) -> bool:
+    """Whether a block survives selection.
+
+    A ledger line is dropped only when a *kept* live record supersedes it;
+    an unselected live record older than the window must not hide it.
+    """
     if serial == 0:
         return True
     if serial > 0:
         return serial in selected
-    return -serial not in live
+    return -serial not in selected
 
 
 def trim_blocks(
