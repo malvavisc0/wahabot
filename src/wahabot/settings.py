@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     llm_auto_cache: bool = False
     #: Per-request HTTP timeout (seconds) for LLM calls; must stay below
     #: the workflow timeout so a hung provider fails fast and clean.
-    llm_timeout: float = 60.0
+    llm_timeout: float = 900.0
     #: The served model's context window, in tokens. 0 (the default)
     #: means unknown — llama-index's metadata still reports its legacy
     #: default (3900), which says nothing about the model behind the
@@ -76,8 +76,8 @@ class Settings(BaseSettings):
     gate_api_key: str = ""
     #: Hard cap on one gate verdict, in seconds. A timeout falls back
     #: to a normal run.
-    gate_timeout: float = 0.8
-    memory_token_limit: int = 8000
+    gate_timeout: float = 4.0
+    memory_token_limit: int = 16000
     #: How many older records a merged live turn keeps before the current
     #: burst (newest-first); quoted/reacted-to records are kept beyond it.
     records_window: int = 8
@@ -146,7 +146,7 @@ class Settings(BaseSettings):
     #: Cap images attached to one vision prompt (0 = no cap). The LAN
     #: model accepts at most one image per prompt; multi-image albums
     #: and video frames are reduced to the first N.
-    vision_max_images: int = Field(default=0, ge=0, le=12)
+    vision_max_images: int = Field(default=4, ge=0, le=12)
     #: How many video URLs sniffed from a message's text to resolve and
     #: download via yt-dlp (see ``wahabot.ai.tools.url_videos``). The
     #: pipeline shares ``video``/``vision`` gating and the video prep
@@ -268,7 +268,7 @@ class Settings(BaseSettings):
     #: Server-side cap on a single agent run (s); must stay above the
     #: per-request LLM timeout, else a slow provider kills the run as
     #: the model is still generating. 0 disables the timeout.
-    run_timeout: int = 120
+    run_timeout: int = 1200
 
     #: Shell tool (off by default): lets the agent run arbitrary host
     #: commands. Best run unprivileged and sandboxed; caps guard output

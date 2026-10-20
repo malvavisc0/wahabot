@@ -588,10 +588,8 @@ async def prepare_turn_state(
     ctx: Context | None,
     event: WahaEvent,
     addressed: bool,
-    images: list[dict[str, Any]] | None,
-    settings: Settings | None,
-) -> list[dict[str, Any]] | None:
-    """Record the header verdict and cap image blocks before the run."""
+) -> None:
+    """Record the header verdict and chat shape before the run."""
     if ctx is not None:
         chat_id = conversation_jid(event)
         group = chat_id.endswith("@g.us")
@@ -601,9 +599,6 @@ async def prepare_turn_state(
         await ctx.store.set("turn_speak", addressed)
         await ctx.store.set("turn_group", group)
         await ctx.store.set("turn_direct", event.event != "command" and not group)
-    if settings is not None and settings.vision_max_images > 0 and images:
-        return images[: settings.vision_max_images]
-    return images
 
 
 async def handle_message(
@@ -667,7 +662,7 @@ async def handle_message(
     """
     chat_id = str(event.payload.get("from", ""))
     logger.info("Agent handling message from {chat_id}", chat_id=chat_id)
-    images = await prepare_turn_state(ctx, event, addressed, images, settings)
+    await prepare_turn_state(ctx, event, addressed)
     user_msg, image_blocks, serials = await turn_user_message(
         event,
         image=image,

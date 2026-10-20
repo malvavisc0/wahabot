@@ -1008,7 +1008,7 @@ def test_video_understanding(bot: Bot) -> None:
 
 
 @requires_ffmpeg
-def test_video_understanding_respects_vision_max_images(bot: Bot) -> None:
+def test_video_frames_are_bounded_by_video_frames_not_the_image_cap(bot: Bot) -> None:
     capped = bot.rebuild(vision_max_images=1)
     llm = capped.stack.llm
     capped.waha.video_bytes = smoke_video_bytes()
@@ -1021,9 +1021,9 @@ def test_video_understanding_respects_vision_max_images(bot: Bot) -> None:
     caption_requests = [r for r in llm.requests if is_caption_request(r)]
     agent_requests = [r for r in llm.requests if not is_caption_request(r)]
     assert len(caption_requests) == 1
-    assert image_part_count(caption_requests[0]) == 1
+    assert image_part_count(caption_requests[0]) == capped.settings.video_frames
     assert len(agent_requests) >= 1
-    assert image_part_count(agent_requests[0]) == 1
+    assert image_part_count(agent_requests[0]) == capped.settings.video_frames
 
 
 def test_video_disabled(bot: Bot) -> None:
