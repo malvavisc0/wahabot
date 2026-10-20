@@ -103,6 +103,8 @@ def record_kind(event: WahaEvent) -> str:
     ):
         return "reaction"
     kind = message_kind(event)
+    if kind == "ptv":
+        return "video"
     if kind != "text":
         return kind
     if is_reaction_only(event):

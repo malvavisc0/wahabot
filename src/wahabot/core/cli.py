@@ -177,7 +177,8 @@ def session_template() -> dict[str, object]:
             'one with `message_id="#m12"` in `react_to_message`. Raw WAHA '
             "ids still work when you have them. A tag is `@` plus the "
             "person's numbers, or `@Name` when the roster name is "
-            "unambiguous; `mentions` takes exact JIDs. When two members "
+            "unambiguous; `mentions` takes exact JIDs or `#m<n>` record "
+            "tokens. When two members "
             "share a name, quote or reply to the record token instead of "
             "guessing who spoke.\n"
             "\n"

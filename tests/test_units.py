@@ -4718,9 +4718,9 @@ def test_chat_reader_documents_available_spill_access(
     )
     assert ("run_shell_command" in names) is shell_enabled
     assert "not all history" in description
-    assert "body_truncated" in description
+    assert "#m<n>" in description
     assert "Never quote unseen content" in description
-    assert ("Only the inline preview is yours" in description) is not shell_enabled
+    assert ("Read the raw spill via run_shell_command" in description) is shell_enabled
 
 
 def test_chat_reader_mode_limits_and_name_caps(unit_settings: Settings) -> None:

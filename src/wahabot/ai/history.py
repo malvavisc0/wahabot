@@ -745,9 +745,15 @@ def apply_skipped_overlay(message: ChatMessage, content: str) -> str:
 
 
 def turn_numbers(content: str) -> tuple[int, int]:
-    """The header's ``(count, newest serial)``; prose falls back to id notes."""
+    """The header's ``(count, newest serial)`` for a records or mixed turn.
+
+    New records count by line; older prose turns fused into the same user
+    message while the buffer drains count by their own-line id notes. The
+    newest serial names the newest record when one exists.
+    """
     serials = records.record_serials(content)
-    count = len(serials) or len(INBOUND_ID_RE.findall(content)) or 1
+    prose = len(INBOUND_ID_RE.findall(content))
+    count = len(serials) + prose or 1
     return count, (max(serials) if serials else count)
 
 

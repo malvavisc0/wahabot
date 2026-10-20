@@ -30,7 +30,7 @@ from loguru import logger
 from PIL import Image
 
 from wahabot.ai.messages import jid_string
-from wahabot.ai.serials import serial_store
+from wahabot.ai.serials import SerialEntry, serial_store
 from wahabot.ai.tools.envelope import error, ok
 from wahabot.ai.tools.outfile import write_json_output
 from wahabot.ai.tools.runcontext import (
@@ -295,14 +295,16 @@ def resolve_message_token(
     chat_id: str,
     settings: Settings | None,
     allow_search: bool = False,
+    allowed_chats: set[str] | None = None,
 ) -> tuple[str, str | None]:
     """Resolve a ``#m<n>`` token to its raw id; raw ids pass through.
 
     Resolution is against the *target* chat's registry: an operator
     command that names a chat and then replies by token acts in that
-    chat, never in the console's synthetic context. Operator reactions
-    have no target chat, so they may search the session for a unique
-    match. Failure is a soft error string, never an exception.
+    chat, never in the console's synthetic context. With no single
+    target chat, the command's resolved chats are tried (a unique match
+    wins); operator reactions may finally search the session for a
+    unique match. Failure is a soft error string, never an exception.
     """
     value = token.strip()
     if not value.startswith("#m"):
@@ -310,12 +312,36 @@ def resolve_message_token(
     if settings is None:
         return "", f"unknown message token {value}"
     store = serial_store(str(settings.data_dir))
-    entry = store.resolve(session, chat_id, value) if chat_id else None
+    entry = lookup_token(store, session, chat_id, allowed_chats, value)
     if entry is None and allow_search:
         entry = store.find(session, value)
     if entry is None:
         return "", f"unknown message token {value} in this chat"
     return entry.message_id, None
+
+
+def lookup_token(
+    store: Any,
+    session: str,
+    chat_id: str,
+    allowed_chats: set[str] | None,
+    value: str,
+) -> SerialEntry | None:
+    """The token in the target chat, else a unique match across allowed chats."""
+    if chat_id:
+        entry = store.resolve(session, chat_id, value)
+        if entry is not None:
+            return entry
+    if not allowed_chats:
+        return None
+    hits = {
+        found
+        for chat in allowed_chats
+        if chat
+        for found in (store.resolve(session, chat, value),)
+        if found is not None
+    }
+    return next(iter(hits)) if len({found.message_id for found in hits}) == 1 else None
 
 
 def resolve_mention_tokens(
@@ -368,6 +394,7 @@ def prepare_send_target(
             chat_id=chat_id,
             settings=settings,
             allow_search=operator_run(target),
+            allowed_chats=target.allowed_chats,
         )
         if token_error:
             return chat_id, None, token_error
@@ -453,7 +480,7 @@ def send_message(waha: WahaClient, settings: Settings | None = None) -> BaseTool
         name="send_message",
         description=(
             "Send text to the current chat, or an explicit operator target. "
-            "reply_to quotes an exact message id from context or read_chat. "
+            "reply_to quotes an exact message by `#m<n>` token or raw id. "
             "Numeric @-tokens are auto-resolved against the roster; "
             "warnings identify unresolved tokens, not notification receipts. "
             "Shares one successful send per run with media and forwarding."
@@ -706,6 +733,7 @@ def react_to_message(waha: WahaClient, settings: Settings | None = None) -> Base
             chat_id="" if operator_run(target) else target.chat_id,
             settings=settings,
             allow_search=operator_run(target),
+            allowed_chats=target.allowed_chats,
         )
         if token_error:
             return error(token_error)
@@ -729,7 +757,7 @@ def react_to_message(waha: WahaClient, settings: Settings | None = None) -> Base
         fn_schema=ReactToMessageSchema,
         name="react_to_message",
         description=(
-            "Add or remove the bot's reaction on an exact message id. "
+            "Add or remove the bot's reaction on an exact `#m<n>` token or raw id. "
             "Use an emoji to add it or an empty reaction to remove it. "
             "One successful change per run, separate from the send allowance."
         ),
@@ -1497,6 +1525,7 @@ def resolve_read_chat(
             chat_id="" if operator_run(target) else target.chat_id,
             settings=settings,
             allow_search=operator_run(target),
+            allowed_chats=target.allowed_chats,
         )
         if token_error:
             return "", token_error
@@ -1518,9 +1547,9 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
     The shell setting controls whether the model can read raw spills.
     """
     deref = (
-        "Read full uncut bodies via run_shell_command and file.path."
+        "Read the raw spill via run_shell_command and file.path for full metadata."
         if settings.shell_tool
-        else "Only the inline preview is yours; the operator can open file.path."
+        else "The operator can open file.path for the raw window and metadata."
     )
 
     def read_chat_fn(
@@ -1554,12 +1583,12 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
         fn_schema=ReadChatSchema,
         name="read_chat",
         description=(
-            "Read available chat context. list/search return every fetched "
-            "message slimmed (bodies capped at 200 chars) and spill the "
-            "full raw window to a JSON file whose metadata comes back as "
-            "file. returned/message_count count fetched/matched messages, "
-            "not all history. body_truncated marks cut text whose full form "
-            "is in the file. Never quote unseen content. "
+            "Read available chat context. list/search return one prompt record "
+            "per fetched message (`[[hh:mm speaker #m<n>]] kind :: body`) and "
+            "spill the full raw window to a JSON file whose metadata comes "
+            "back as file. Rows the registry knows carry their `#m<n>`; older "
+            "rows may have none. returned/message_count count fetched/matched "
+            "messages, not all history. Never quote unseen content. "
             f"{deref} A search miss applies only to its recent window. "
             "Metadata returns available fields/counts; missing fields are "
             "unknown, names are display labels, and participant_list appears "

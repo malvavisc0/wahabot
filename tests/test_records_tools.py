@@ -171,7 +171,6 @@ def test_ambiguous_operator_token_refuses_to_guess(
     _serial(tmp_path, OTHER, "RAW7B", 7)
     waha = Waha()
     target = RunTarget(session=SESSION, chat_id=TOKEN_CHAT, armed=True)
-    target.allowed_chats.add(CHAT)
     token = bind_target(target)
     try:
         out = _json(
