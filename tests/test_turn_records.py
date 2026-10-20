@@ -442,3 +442,24 @@ def test_case_14b_quote_ids_are_bare_hashes(tmp_path: Path) -> None:
         [RecordEntry(event=quoted_bot)], registry=registry, tz_name="UTC"
     )
     assert "quote=you" in bot_text
+
+
+def test_skipped_overlay_preserves_body_whitespace(tmp_path: Path) -> None:
+    text, _, _ = render_entries(
+        [RecordEntry(event=_event("S1", "keep   these    spaces"))],
+        registry=_registry(tmp_path),
+        tz_name="UTC",
+    )
+    marked = turn_header(
+        [
+            ChatMessage(
+                role=MessageRole.USER,
+                content=text,
+                additional_kwargs={SKIPPED_SERIALS_KWARG: [1]},
+            )
+        ],
+        group=True,
+        addressed=False,
+    )[0]
+    assert "keep   these    spaces" in marked.content
+    assert "]] text skipped ::" in marked.content

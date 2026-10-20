@@ -60,19 +60,27 @@ def apply_skipped(text: str, skipped: set[int]) -> str:
         if match is None or int(match.group(2)) not in skipped:
             out.append(line)
             continue
-        head, kind, rest = match.group(1), match.group(3), match.group(4)
-        flags = rest.split()
-        if "skipped" not in flags:
-            index = 0
-            while index < len(flags) and (
-                flags[index] == "addressed"
-                or flags[index].startswith(("image#", "video#", "album#"))
-            ):
-                index += 1
-            flags.insert(index, "skipped")
-        tail = f" {kind}" + (f" {' '.join(flags)}" if flags else "")
-        out.append(f"{head}{tail}")
+        out.append(add_skipped_flag(match))
     return "\n".join(out)
+
+
+def add_skipped_flag(match: re.Match[str]) -> str:
+    """Return one record line with ``skipped`` inserted, body untouched."""
+    head, kind, rest = match.group(1), match.group(3), match.group(4)
+    flags_part, separator, body = rest.partition(" :: ")
+    flags = flags_part.split()
+    if "skipped" not in flags:
+        index = 0
+        while index < len(flags) and (
+            flags[index] == "addressed"
+            or flags[index].startswith(("image#", "video#", "album#"))
+        ):
+            index += 1
+        flags.insert(index, "skipped")
+    tail = f" {kind}" + (f" {' '.join(flags)}" if flags else "")
+    if separator:
+        tail += f" :: {body}"
+    return f"{head}{tail}"
 
 
 def record_blocks(text: str) -> list[tuple[int, str]]:
