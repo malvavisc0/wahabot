@@ -238,7 +238,7 @@ def mechanical_gist(body: str, kind: str, block: str = "") -> str:
         if len(text.split()) > GIST_WORDS:
             words = f"{words}…"
     else:
-        words = KIND_GISTS.get(kind, "sent a message")
+        words = dict(KIND_GISTS).get(kind, "sent a message")
     return words[:GIST_CHARS]
 
 
@@ -252,16 +252,18 @@ def reaction_target(block: str) -> str:
     return ""
 
 
-KIND_GISTS = {
-    "image": "sent an image",
-    "video": "sent a video",
-    "audio": "sent a voice note",
-    "sticker": "sent a sticker",
-    "document": "sent a document",
-    "album": "sent photos",
-    "link": "shared a link",
-    "reaction": "sent a reaction",
-}
+#: Immutable kind -> mechanical gist; a tuple keeps the module free of a
+#: mutable global.
+KIND_GISTS = (
+    ("image", "sent an image"),
+    ("video", "sent a video"),
+    ("audio", "sent a voice note"),
+    ("sticker", "sent a sticker"),
+    ("document", "sent a document"),
+    ("album", "sent photos"),
+    ("link", "shared a link"),
+    ("reaction", "sent a reaction"),
+)
 
 
 def ledger_turn(text: str, *, gist: str = "", newest_serial: int = 0) -> str:
