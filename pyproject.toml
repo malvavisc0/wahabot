@@ -114,4 +114,6 @@ ignore_names = [
     # Phase 1 serial registry (src/wahabot/ai/serials.py): same — built
     # and tested (tests/test_serials.py) ahead of the ingest wiring.
     "SerialRegistry", "resolve", "max_serial", "compact", "format_serial_token",
+    # Phase 1 WAHA-aware record builder (src/wahabot/ai/turn_records.py).
+    "build_record", "record_kind", "speaker_token",
 ]
