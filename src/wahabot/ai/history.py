@@ -551,6 +551,12 @@ def merge_pair(first: ChatMessage, second: ChatMessage) -> ChatMessage:
     kwargs: dict[str, Any] = {**first.additional_kwargs, **second.additional_kwargs}
     if is_inbound_chat_turn(first) and is_inbound_chat_turn(second):
         kwargs[MERGED_TURNS_KWARG] = True
+        skipped = [
+            *(first.additional_kwargs.get(SKIPPED_SERIALS_KWARG) or []),
+            *(second.additional_kwargs.get(SKIPPED_SERIALS_KWARG) or []),
+        ]
+        if skipped:
+            kwargs[SKIPPED_SERIALS_KWARG] = list(dict.fromkeys(skipped))
     return ChatMessage(
         role=first.role,
         content=f"{first.content or ''}\n{second.content or ''}",

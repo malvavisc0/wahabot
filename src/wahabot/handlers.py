@@ -23,7 +23,6 @@ from wahabot.ai.albums import (
 from wahabot.ai.context import (
     handle_message,
     is_single_emoji,
-    message_id_note,
     render_system_prompt,
 )
 from wahabot.ai.history import ContextBudgetError
@@ -46,7 +45,6 @@ from wahabot.ai.messages import (
     video_media,
 )
 from wahabot.ai.observability import chat_trace_attributes, enable_langfuse
-from wahabot.ai.scrub import strip_spoofed_markers
 from wahabot.ai.serials import serial_store
 from wahabot.ai.tools import build_default_tools
 from wahabot.ai.tools.url_images import fetch_url_images, image_urls
@@ -1077,29 +1075,14 @@ def register_agent_handler(
 
     async def merge_burst_parts(
         messages: list[WahaEvent],
-    ) -> tuple[list[dict[str, Any]], list[str], list[RecordEntry]]:
-        """Prepare every buffered message into images, prose parts and records."""
-        last = messages[-1]
+    ) -> tuple[list[dict[str, Any]], list[RecordEntry]]:
+        """Prepare every buffered message into images and record entries."""
         images: list[dict[str, Any]] = []
-        parts: list[str] = []
         entries: list[RecordEntry] = []
         for burst_event in messages:
-            body, entry = await prepare_burst_media(burst_event, images)
+            _, entry = await prepare_burst_media(burst_event, images)
             entries.append(entry)
-            part = burst_part(burst_event, body, last)
-            if part is not None:
-                parts.append(part)
-        return images, parts, usable_entries(entries)
-
-    def burst_part(event: WahaEvent, body: str | None, last: WahaEvent) -> str | None:
-        """One message's prose part; the anchor's id rides the turn note."""
-        if body is None:
-            return None
-        if event is last:
-            return body
-        part_id = message_id_note(event).strip()
-        clean = strip_spoofed_markers(body)
-        return f"{clean}\n{part_id}" if part_id else clean
+        return images, usable_entries(entries)
 
     def usable_entries(entries: list[RecordEntry]) -> list[RecordEntry]:
         """Drop empty entries with no text, media, omission or transcript."""
@@ -1113,42 +1096,55 @@ def register_agent_handler(
             or str(entry.event.payload.get(TRANSCRIPT_KEY) or "")
         ]
 
-    def burst_anchor(
-        last: WahaEvent, parts: list[str], images: list[dict[str, Any]]
-    ) -> WahaEvent:
+    def burst_anchor(last: WahaEvent) -> WahaEvent:
         """The run's anchor event; a burst must not inherit one member's quote."""
         merged = last.model_copy(deep=True)
         merged.payload["id"] = str(last.payload.get("id", ""))
-        merged.payload["body"] = "\n".join(parts)
-        merged.payload["hasMedia"] = bool(images)
+        merged.payload["body"] = ""
+        merged.payload["hasMedia"] = False
         merged.payload.pop("replyTo", None)
         merged.payload.get("_data", {}).pop("quotedMsg", None)
         return merged
 
     async def merge_burst(
         buffer: bursts.BurstBuffer,
-    ) -> tuple[WahaEvent, list[dict[str, Any]], list[RecordEntry]] | None:
+    ) -> tuple[WahaEvent, list[RecordEntry]] | None:
         """Merge a burst into one turn; None when it has no usable content.
 
-        The prose path joins every member's words (each part keeps its id
-        note), used by operator command events. Inbound chat turns are the
-        ordered list of record entries, one per buffered message.
+        The turn is the ordered list of record entries, one per buffered
+        message; the merged event is only the run's anchor, with no welded
+        text and no inherited quote.
         """
         if not buffer.messages:
             return None
-        images, parts, entries = await merge_burst_parts(buffer.messages)
-        if not parts and not images and not entries:
+        _, entries = await merge_burst_parts(buffer.messages)
+        if not entries:
             logger.debug(
                 "Burst in {chat_id} yielded no usable content",
                 chat_id=buffer.key[1],
             )
             return None
-        return burst_anchor(buffer.messages[-1], parts, images), images, entries
+        return burst_anchor(buffer.messages[-1]), entries
+
+    def mark_addressed_entry(entries: list[RecordEntry], current: SessionConfig) -> bool:
+        """Flag exactly the record that caused the turn's addressing verdict.
+
+        A DM addresses every message, but the grammar carries one verdict
+        per turn: the newest record wins. A group burst can carry more
+        than one mention; the newest addressed record is the reason the
+        turn woke the bot.
+        """
+        verdicts = [group_message_addressed(entry.event, current) for entry in entries]
+        if not any(verdicts):
+            return False
+        winner = len(verdicts) - 1 - verdicts[::-1].index(True)
+        for index, entry in enumerate(entries):
+            entry.addressed = index == winner
+        return True
 
     async def run_burst_turn(
         buffer: bursts.BurstBuffer,
         merged: WahaEvent,
-        images: list[dict[str, Any]],
         entries: list[RecordEntry],
     ) -> tuple[str, RunTarget]:
         """Run one merged burst turn under the chat lock."""
@@ -1157,20 +1153,16 @@ def register_agent_handler(
             ctx = await context_for(merged.session, chat_id, agent, settings)
             with chat_trace_attributes(chat_id):
                 current = config_reloader.current_config()
-                for entry in entries:
-                    entry.addressed = group_message_addressed(entry.event, current)
-                addressed = any(entry.addressed for entry in entries)
+                addressed = mark_addressed_entry(entries, current)
                 gate_first = not addressed and current.group_participation == "judicious"
                 reply, target = await handle_message(
                     merged,
                     agent,
                     ctx=ctx,
-                    images=images or None,
                     settings=settings,
                     waha=waha,
                     bot_name=current.bot_name,
                     bot_mention_regex=current.bot_mention_regex,
-                    body_scrubbed=True,
                     addressed=addressed,
                     gate_first=gate_first,
                     record_entries=entries,
@@ -1188,10 +1180,10 @@ def register_agent_handler(
         merged_burst = await merge_burst(buffer)
         if merged_burst is None:
             return
-        merged, images, entries = merged_burst
+        merged, entries = merged_burst
         chat_id = buffer.key[1]
         message_id = str(merged.payload.get("id", ""))
-        reply, target = await run_burst_turn(buffer, merged, images, entries)
+        reply, target = await run_burst_turn(buffer, merged, entries)
         # The provider answered: flip the LLM health flag back up
         # (once-per-transition notify) outside the chat lock — the
         # burst path shares the single-message path's contract.

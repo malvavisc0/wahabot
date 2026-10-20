@@ -310,12 +310,43 @@ def resolve_message_token(
     if settings is None:
         return "", f"unknown message token {value}"
     store = serial_store(str(settings.data_dir))
-    entry = store.resolve(session, chat_id, value)
+    entry = store.resolve(session, chat_id, value) if chat_id else None
     if entry is None and allow_search:
         entry = store.find(session, value)
     if entry is None:
         return "", f"unknown message token {value} in this chat"
     return entry.message_id, None
+
+
+def resolve_mention_tokens(
+    mentions: list[str] | None,
+    *,
+    session: str,
+    chat_id: str,
+    settings: Settings | None,
+    allow_search: bool,
+) -> list[str] | None:
+    """Resolve ``#m<n>`` mention entries to their sender JID; names pass through.
+
+    The prompt's mention handles are serials, not JIDs; the tool is where
+    the id boundary may be crossed. An unresolved serial is dropped (it
+    tags nobody) rather than sent to WAHA as a literal token.
+    """
+    if not mentions or settings is None:
+        return mentions
+    out: list[str] = []
+    for mention in mentions:
+        value = mention.strip()
+        if not value.startswith("#m"):
+            out.append(mention)
+            continue
+        store = serial_store(str(settings.data_dir))
+        entry = store.resolve(session, chat_id, value)
+        if entry is None and allow_search:
+            entry = store.find(session, value)
+        if entry is not None and entry.jid:
+            out.append(entry.jid)
+    return out
 
 
 def prepare_send_target(
@@ -390,6 +421,13 @@ def send_message(waha: WahaClient, settings: Settings | None = None) -> BaseTool
             return error(target_error)
         session = target.session
         log_action_reason("send_message", reason, chat=chat_id)
+        mentions = resolve_mention_tokens(
+            mentions,
+            session=session,
+            chat_id=chat_id,
+            settings=settings,
+            allow_search=operator_run(target),
+        )
         try:
             sent_id, merged, dangling = deliver_chat_text(
                 waha,
@@ -665,7 +703,7 @@ def react_to_message(waha: WahaClient, settings: Settings | None = None) -> Base
         message_id, token_error = resolve_message_token(
             message_id,
             session=session,
-            chat_id=target.chat_id,
+            chat_id="" if operator_run(target) else target.chat_id,
             settings=settings,
             allow_search=operator_run(target),
         )
@@ -674,9 +712,10 @@ def react_to_message(waha: WahaClient, settings: Settings | None = None) -> Base
         _, id_error = fenced_message_id(message_id, target)
         if id_error:
             return error(id_error)
-        delivery_error = delivery_message_error(message_id, target)
-        if delivery_error:
-            return error(delivery_error)
+        if not operator_run(target):
+            delivery_error = delivery_message_error(message_id, target)
+            if delivery_error:
+                return error(delivery_error)
         log_action_reason("react_to_message", reason, message_id=message_id)
         try:
             waha.send_reaction(session, message_id, reaction)
@@ -1455,7 +1494,7 @@ def resolve_read_chat(
         raw, token_error = resolve_message_token(
             chat,
             session=target.session,
-            chat_id=target.chat_id,
+            chat_id="" if operator_run(target) else target.chat_id,
             settings=settings,
             allow_search=operator_run(target),
         )

@@ -300,3 +300,45 @@ def test_resolve_message_token_is_soft(settings: Settings) -> None:
         "RAW", session=SESSION, chat_id=CHAT, settings=settings
     )
     assert raw == "RAW" and error is None
+
+
+def test_operator_reaction_accepts_a_raw_id(settings: Settings) -> None:
+    waha = Waha()
+    target = RunTarget(session=SESSION, chat_id=TOKEN_CHAT, armed=True)
+    token = bind_target(target)
+    try:
+        out = _json(
+            cast(Any, react_to_message(waha, settings))(
+                message_id="false_491555000010@g.us_RAW", reaction="👍"
+            )
+        )
+    finally:
+        reset_target(token)
+    assert out["ok"] is True
+    assert ("react", "false_491555000010@g.us_RAW", "👍") in waha.calls
+
+
+def test_mention_serial_resolves_to_the_sender_jid(
+    settings: Settings, tmp_path: Path
+) -> None:
+    _serial(tmp_path, CHAT, "RAW7", 7)
+    waha = Waha(
+        [
+            {
+                "id": "A",
+                "from": CHAT,
+                "participant": "491555000101@c.us",
+                "body": "hi",
+                "_data": {"type": "text", "notifyName": "Ada Sample"},
+            }
+        ]
+    )
+    token = bind_target(RunTarget(session=SESSION, chat_id=CHAT))
+    try:
+        out = _json(
+            cast(Any, send_message(waha, settings))(text="hola", mentions=["#m7"])
+        )
+    finally:
+        reset_target(token)
+    assert out["ok"] is True
+    assert ("send", CHAT, "hola", None, ["491555000101@c.us"]) in waha.calls

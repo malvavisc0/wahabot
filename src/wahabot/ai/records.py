@@ -207,9 +207,12 @@ def format_record(
     ``quote=…`` / ``to: …`` — joined in the order given. ``body`` is escaped;
     an empty body drops the `` :: `` tail entirely (a voice note or a bare
     media record). ``payloads`` are renderer-written machine lines, already
-    formatted, one per line under the record.
+    formatted, one per line under the record. ``serial=0`` omits the
+    ``#m<n>`` token: the account's own output has no arrival serial, so a
+    ``read_chat`` view of a bot message renders ``[[hh:mm <bot>]]``.
     """
-    head = f"[[{time_label} {speaker} #m{serial}]] {kind}"
+    token = f" #m{serial}" if serial else ""
+    head = f"[[{time_label} {speaker}{token}]] {kind}"
     if flags:
         head = f"{head} {' '.join(flags)}"
     line = f"{head} :: {escape_body(body)}" if body else head

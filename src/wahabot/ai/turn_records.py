@@ -150,10 +150,11 @@ def assign_event_serial(store: SerialStore, event: WahaEvent) -> SerialEntry:
     """
     chat_id = conversation_jid(event)
     sender = event_sender(event)
-    name = "" if is_operator_event(event) else event_display_name(event)
+    from_me = bool(event.payload.get("fromMe"))
+    name = "" if from_me or is_operator_event(event) else event_display_name(event)
     registry = store.for_chat(event.session, chat_id)
     ordinal = 0
-    if not name and not is_operator_event(event) and sender:
+    if not name and not from_me and not is_operator_event(event) and sender:
         ordinal = registry.ordinal_for(sender)
     return store.assign(
         event.session,
@@ -320,6 +321,63 @@ def media_parts(
     return flags, payloads, blocks
 
 
+def resolve_identity(
+    event: WahaEvent,
+    registry: SerialRegistry,
+    names: dict[str, str] | None,
+) -> tuple[str, int | None, int]:
+    """Resolve ``(name, ordinal, serial)`` for a record.
+
+    The registry's stored name is the fallback after the event and the
+    roster: a reaction or an operator fold may have learned a name at
+    ingest without the name book learning it. A stored ordinal wins over
+    a new allocation, so ``<member-n>`` survives every later render.
+    """
+    sender = event_sender(event)
+    message_id = str(event.payload.get("id", ""))
+    serial = registry.serial_for(message_id)
+    stored = registry.entries.get(serial) if serial else None
+    name = stream_name(event, sender, names, stored)
+    ordinal = stream_ordinal(event, sender, name, stored, registry)
+    if not serial:
+        serial = registry.next(
+            message_id=message_id,
+            jid=sender,
+            name=name,
+            ordinal=ordinal or 0,
+        )
+    return name, ordinal, serial
+
+
+def stream_name(
+    event: WahaEvent,
+    sender: str,
+    names: dict[str, str] | None,
+    stored: SerialEntry | None,
+) -> str:
+    """The event name, then the roster's, then the name stored at ingest."""
+    return (
+        event_display_name(event)
+        or (names or {}).get(sender, "")
+        or (stored.name if stored else "")
+    )
+
+
+def stream_ordinal(
+    event: WahaEvent,
+    sender: str,
+    name: str,
+    stored: SerialEntry | None,
+    registry: SerialRegistry,
+) -> int | None:
+    """The stored ``<member-n>`` ordinal, allocating only when none exists."""
+    if is_operator_event(event) or name:
+        return None
+    if stored is not None and stored.ordinal:
+        return stored.ordinal
+    return registry.ordinal_for(sender)
+
+
 def render_entry(
     entry: RecordEntry,
     *,
@@ -331,16 +389,7 @@ def render_entry(
 ) -> tuple[str, int, list[dict[str, Any]]]:
     """Render one record and return it with its serial and image blocks."""
     event = entry.event
-    sender = event_sender(event)
-    name = event_display_name(event) or (names or {}).get(sender, "")
-    ordinal = None if name or is_operator_event(event) else registry.ordinal_for(sender)
-    message_id = str(event.payload.get("id", ""))
-    serial = registry.serial_for(message_id) or registry.next(
-        message_id=message_id,
-        jid=sender,
-        name=name,
-        ordinal=ordinal or 0,
-    )
+    name, ordinal, serial = resolve_identity(event, registry, names)
     media_flags, media_payloads, blocks = media_parts(entry, slots)
     quote_flags, quote_payloads = quote_parts(event, registry)
     payloads = [
@@ -395,12 +444,13 @@ def read_record(
     registry: SerialRegistry,
     tz_name: str = "UTC",
 ) -> str:
-    """Render one fetched message as a read view record, assigning a serial.
+    """Render one fetched message as a read view record.
 
     ``read_chat`` and the prompt must agree on what a message looks like,
-    and the console needs the ``#m<n>`` to act on. A fetched message from
-    before the registry existed gets its serial here, so every row the
-    tool shows is addressable.
+    and the console needs the ``#m<n>`` to act on. The registry is written
+    at ingest only: a fetched message the bot never saw renders without a
+    serial (a raw id still addresses it), and the account's own output
+    never gets one — the sentinel ``quote=you`` / ``to: you`` carries it.
     """
     payload = dict(message)
     message_id = str(payload.get("id", ""))
@@ -408,19 +458,15 @@ def read_record(
         payload["from"] = chat_from_message_id(message_id)
     event = WahaEvent(event="message", session="", payload=payload)
     sender = event_sender(event)
+    serial = registry.serial_for(message_id)
     if payload.get("fromMe"):
         speaker = (
             "<operator>" if authors.author(message_id) == AUTHOR_OPERATOR else "<bot>"
         )
-        name = ""
-        ordinal = None
     else:
         name = display_name(sender)
         ordinal = None if name else registry.ordinal_for(sender)
         speaker = speaker_token(event, name=name, ordinal=ordinal)
-    serial = registry.serial_for(message_id) or registry.next(
-        message_id=message_id, jid=sender, name=name, ordinal=ordinal or 0
-    )
     return format_record(
         time_label=time_label(event, tz_name),
         speaker=speaker,
