@@ -137,7 +137,7 @@ def _entries_named(entries: list[dict[str, Any]], text: str) -> list[dict[str, A
     return matches
 
 
-def chat_context_note(outcome: ResolvedChat) -> str:
+def chat_context_note(outcome: ResolvedChat, serial: int = 0) -> str:
     """The pinned turn note for a resolved chat, rendered for the prompt.
 
     One bracketed block (the prompt's marker convention: guidance the
@@ -146,7 +146,8 @@ def chat_context_note(outcome: ResolvedChat) -> str:
     and, when several chats matched, the candidate list so the model
     can pick and say which. The block is the command's ground truth for
     "this chat": the model no longer infers the target from its mixed
-    history.
+    history. *serial* names the last message's ``#m<n>`` token when the
+    registry knows one, so the prompt's token rule and the note agree.
     """
     header = (
         f"[chat context] The command names the chat: {outcome.chat_name!r} "
@@ -161,8 +162,9 @@ def chat_context_note(outcome: ResolvedChat) -> str:
         sender = str(message.get("from", "")) or str(message.get("participant", ""))
         body = str(message.get("body", "")).strip()
         described = body or ("media message" if message.get("hasMedia") else "(no text)")
+        token = f"`#m{serial}` " if serial else ""
         last_line = (
-            f"Its last message is id `{message.get('id', '')}` "
+            f"Its last message is {token}id `{message.get('id', '')}` "
             f"from `{sender}`: {described}"
         )
         lines.append(last_line)

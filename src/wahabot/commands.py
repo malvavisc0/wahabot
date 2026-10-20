@@ -28,7 +28,8 @@ from loguru import logger
 from wahabot.ai.context import handle_message
 from wahabot.ai.history import ContextBudgetError
 from wahabot.ai.observability import chat_trace_attributes
-from wahabot.ai.resolve import chat_context_note, resolve_last_message
+from wahabot.ai.resolve import ResolvedChat, chat_context_note, resolve_last_message
+from wahabot.ai.serials import serial_store
 from wahabot.ai.tools.whatsapp import RunTarget
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.audit import save_action
@@ -52,6 +53,19 @@ COMMAND_PREFIX = "[operator command]"
 #: channel (``wahabot tell`` from the CLI, self-chat mentions), LRU'd
 #: and persisted under ``memory/<session>/operator.json`` like a chat.
 OPERATOR_CHAT_ID = "operator"
+
+
+def pin_serial(resolved: ResolvedChat | None, settings: Settings, session: str) -> int:
+    """The ``#m<n>`` of the pinned last message, or 0 when unknown.
+
+    The registry is written at ingest only: a chat the bot has never
+    run in has no serials, and the note then offers the raw id alone —
+    the one id shape the fence always accepts.
+    """
+    if resolved is None or resolved.last_message is None:
+        return 0
+    registry = serial_store(str(settings.data_dir)).for_chat(session, resolved.chat_id)
+    return registry.serial_for(str(resolved.last_message.get("id", "")))
 
 
 def chat_display_name(waha: WahaClient, session: str, chat_id: str) -> str:
@@ -125,7 +139,11 @@ async def run_command(
     resolved = await asyncio.to_thread(
         resolve_last_message, waha, event.session, instruction
     )
-    pinned_note = chat_context_note(resolved) if resolved else ""
+    pinned_note = (
+        chat_context_note(resolved, pin_serial(resolved, settings, event.session))
+        if resolved
+        else ""
+    )
     budget_error: ContextBudgetError | None = None
     async with chat_lock(event.session, OPERATOR_CHAT_ID):
         ctx = await context_for(event.session, OPERATOR_CHAT_ID, agent, settings)

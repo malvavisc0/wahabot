@@ -3226,6 +3226,21 @@ def test_chat_context_note_shape() -> None:
     assert "only asks ABOUT the chat" in note
 
 
+def test_chat_context_note_with_serial_names_the_token() -> None:
+    """A known serial rides the note so the prompt's token rule and the
+    pin agree; an unknown serial keeps the raw id alone."""
+    waha = _PinWaha(_PIN_MESSAGES)
+    outcome = resolve_last_message(
+        cast(Any, waha), SESSION, "responde el ultimo mensaje en Bridge Club"
+    )
+    assert outcome is not None
+    known = chat_context_note(outcome, serial=7)
+    assert "Its last message is `#m7` id" in known
+    unknown = chat_context_note(outcome, serial=0)
+    assert "Its last message is id" in unknown
+    assert "#m" not in unknown.split("Its last message is")[1].splitlines()[0]
+
+
 def test_own_message_id_detection() -> None:
     assert is_own_message_id(f"true_{CHAT_ID}_X")
     assert not is_own_message_id(f"false_{CHAT_ID}_X")
