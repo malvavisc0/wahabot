@@ -341,3 +341,39 @@ def test_mention_serial_resolves_to_the_sender_jid(
         reset_target(token)
     assert out["ok"] is True
     assert ("send", CHAT, "hola", None, ["491555000101@c.us"]) in waha.calls
+
+
+def test_reply_to_a_foreign_raw_id_is_refused(settings: Settings) -> None:
+    waha = Waha()
+    token = bind_target(RunTarget(session=SESSION, chat_id=CHAT))
+    try:
+        out = _json(
+            cast(Any, send_message(waha, settings))(
+                text="hola",
+                reply_to=f"false_{OTHER}_FORGED",
+            )
+        )
+    finally:
+        reset_target(token)
+    assert out["ok"] is False
+    assert waha.calls == []
+
+
+def test_operator_cannot_smuggle_a_token_from_another_chat(
+    settings: Settings, tmp_path: Path
+) -> None:
+    _serial(tmp_path, OTHER, f"false_{OTHER}_RAW", 7)
+    waha = Waha()
+    target = RunTarget(session=SESSION, chat_id=TOKEN_CHAT, armed=True)
+    target.allowed_chats.add(CHAT)
+    token = bind_target(target)
+    try:
+        out = _json(
+            cast(Any, send_message(waha, settings))(
+                text="hola", chat=CHAT, reply_to="#m7"
+            )
+        )
+    finally:
+        reset_target(token)
+    assert out["ok"] is False
+    assert waha.calls == []

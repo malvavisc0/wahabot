@@ -24,7 +24,7 @@ The loop has brakes: `stay_silent` ends a run and cancels other tools in that ba
 
 ## Know What Was Retrieved
 
-- `read_chat` searches a bounded recent-message window, not every message ever sent. Display names and metadata are best-effort; missing fields or search hits do not prove absence. Inline previews identify cut bodies separately from omitted messages.
+- `read_chat` searches a bounded recent-message window, not every message ever sent. List/search results are records in the same grammar the prompt uses, each carrying its `#m<n>` when known; the full raw window is spilled to a file. Display names and metadata are best-effort; missing fields or search hits do not prove absence.
 - `web_search` caps the total valid results across engines and reports partial engine failures. Snippets are leads; open relevant sources before treating their contents as verified.
 - `visit_url` fetches response text or available media metadata without browser rendering. A login wall is not the requested article. YouTube captions are best-effort, may be automatic, and do not establish what a video visually shows.
 - Large results attempt to spill to local files. The model can read them only when the shell tool is enabled; otherwise the operator can open them. A truncation flag does not guarantee that a file was successfully written.

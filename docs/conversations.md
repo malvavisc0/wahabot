@@ -99,61 +99,53 @@ Before the agent ever wakes up, the message passes through, in order:
 
 ### What the agent sees
 
-The message is wrapped in a small annotation envelope before entering
-the agent:
+The turn is rendered as one **record per inbound message**, plus one
+turn header when the turn is a group turn or carries news:
 
 ```
-[Name <jid>] the actual text                  (groups; [<jid>] when no name is known)
-[Name] the actual text                         (direct messages)
-[Name <own-jid>] [operator message] text      (the human operator, see §1a)
-[message id: false_<chat-jid>_<hash>_<participant>]
-[quoting] Name <jid>: "the text being replied to"
-[mentions: @111 is Ana <111@lid>; @222 is the shared account (you and your operator)]
-[you were addressed: …]
+[turn: <n> messages | newest #m12 | addressed: yes|no | backlog: yes|no]
+[[hh:mm Name #m12]] kind flags :: body
+> body continuation, escaped
+  · machine payload
 ```
 
-- The **sender tag** carries the display name *and* the sender's full
-  JID in groups — the same string is the mention handle: to @-mention
-  that person later, the model copies the `<jid>`'s user part into an
-  `@<user-part>` token (see §5). When no name is known the tag degrades
-  to `[<jid>]`; DMs keep the bare `[Name]`.
-- The **message id** is there so the model can reference the message
-  later: quote it in `send_message(reply_to=…)`, or react to it.
-- The **quoting** line appears when the message is a reply to an
-  earlier one and carries what that earlier message said and who said
-  it. A quote of the shared account says which teammate wrote it:
-  `you <jid>` (the bot), `your operator <jid>` (the human), or
-  `this account, you or your operator <jid>` for messages sent before
-  authorship was recorded.
-- The **mentions** line appears when the message @-tags people (the
-  first ten tags). WhatsApp writes a tag into the text as bare digits
-  (`@111222333444555`), so without it the model cannot know who was
-  tagged — or that the tag is the shared account itself.
-- The **addressed** line states mechanically how the message reached
-  the bot, and is precise because the account is shared:
-  - `this message names you — it is for you` — the text matches
-    `bot_mention_regex`;
-  - `this message tags the shared account, which may mean you or your
-    operator` — the account's JID is in `mentionedJidList`;
-  - `this message replies to your message` / `… to a message your
-    operator typed — it may be meant for him` / `… to a message from
-    the shared account, written by you or your operator`;
-  - `your operator, the human sharing this account, named you` — an
-    operator-typed message that names the bot (§1a).
-- The **reaction notes** (`[reaction X from Name <jid> to your
-  message: …]`) name the reactor the same way. A reaction made by the
-  bot's own account — the operator tapping on any linked device, or
-  the echo of our own `react_to_message` — never folds.
-- Bracketed notes are metadata for the model, never to be repeated
-  verbatim in replies. Members cannot forge them: typed copies are
-  broken by `ai/scrub.py`.
+- The **speaker** is a display name learned at ingest, `<operator>` for
+  the shared account's human, `<bot>` for the account's own assistant
+  output, or `<member-n>` — a per-chat ordinal — when no name is known.
+  A raw JID never fills the gap.
+- The **serial** `#m<n>` is the message's chat-global arrival id. It is
+  the only identifier in the stream; the model quotes or reacts with it
+  (`reply_to="#m12"`, `message_id="#m12"`) and never sees a WAHA id.
+- **Kind** is derived from the message's own shape (`text`, `link`,
+  `image`, `video`, `audio`, `sticker`, `document`, `album`,
+  `reaction`), never from what analysis returned. Flags are presence-only:
+  `addressed`, `skipped`, and media slots (`image#1`, `video#1`,
+  `album#1-3`); `quote=#m11` / `quote=you` anchor a reply.
+- The **body** is member text; every continuation line is prefixed
+  `> `, so member text can contain envelope characters but never form
+  an envelope. ` :: ` is omitted for an empty body (a voice note or
+  bare media record).
+- **Payload lines** (`  · …`) are renderer-written only: media analysis,
+  `quoted: "…"`, `to: #m11 "…"` / `to: you "…"`, `[audio: "…"]`, and
+  `mentions: @<typed> is <speaker>`. They are never member text, and the
+  model must never write that shape itself.
+- The **turn header** states the message count, the newest serial, the
+  one addressing verdict and whether the merge fused an earlier
+  unanswered turn (`backlog`). An unaddressed group turn also carries
+  the one policy line. A single addressed DM needs no header: its
+  record carries `addressed`.
+- The **quoting** and **reaction** anchors are records, not prose notes:
+  a quoted bot message renders `quote=you`; a quoted member message
+  renders `quote=#m<n>`. A reaction on the bot's own output renders
+  `to: you "…"`; on a member's message, `to: #m<n> "…"`. The account's
+  own output has no serial — `you` is its sentinel.
 
 **Names.** WAHA's message-history API returns no display names in LID
 groups, and the group roster lists members by phone JID while their
 messages carry LIDs. Names therefore come from the **name book**
 (`core/identity.py`): every webhook carries the sender's `notifyName`,
 which is recorded per JID in `data/identity/<session>/names.json` and
-used for sender tags, quotes, reaction and mention notes, `read_chat`
+used for record speakers, quotes, reaction and mention payloads, `read_chat`
 results and outgoing `@Name` mentions. The book is keyed by the
 person's JID, not by chat — a name is captured from every chat the
 account is in and surfaces wherever that JID appears (the same person,
@@ -178,10 +170,11 @@ events only).
 
 - **Authorship is recorded at send time** in the author book
   (`data/identity/<session>/authors.json`, keyed by the message's
-  short id), because quotes, reactions and `read_chat` later refer to
-  messages by id alone and WAHA's history API carries no `source`.
-  `read_chat` (`list`/`search`) marks each `fromMe` message with
-  `author`: `bot`, `operator`, or `unknown` (sent before recording).
+  short id), because quotes and reactions later refer to messages by
+  id alone and WAHA's history API carries no `source`. `read_chat`
+  (`list`/`search`) renders the account's rows as `<bot>` or
+  `<operator>`; a row from before authorship was recorded falls back
+  to `<bot>` unless the export journal says otherwise.
   `read_chat` `mode="export"` serves deep history from the event
   journal instead of WAHA's engine: one spill file of slim rows
   (full bodies, per-row `author` — author book first, else the
@@ -193,9 +186,10 @@ events only).
 - **The bot's own sends** (`source=api`) are already in memory; their
   echoes are skipped.
 - **An operator-typed message** (`source=app`) in a whitelisted chat is
-  remembered as a **user** turn,
-  `[Name <own-jid>] [operator message] text` — a teammate's words,
-  never stored as the bot's own and never answered as a stranger's.
+  remembered as a **user** record with the `<operator>` speaker — a
+  teammate's words, never stored as the bot's own and never answered
+  as a stranger's. The account's two authors stay distinct in the
+  stream: `<operator>` is the human, `<bot>` is the assistant.
 - **The operator naming the bot** (`bot_mention_regex`) wakes it in
   that chat, with the same chat fence — even in `never` groups, since
   the operator is trusted. The turn is rendered as the operator's and
@@ -292,7 +286,7 @@ Per chat, the bot keeps a rolling conversation in memory:
   one-time purge script `scripts/purge_leaked_silence.py` removed the
   leaked tokens stored by the pre-fix handler.)
 - Messages the **operator types on the shared account** are stored as
-  `[Name <own-jid>] [operator message] …` user turns (§1a): memory-only,
+  `[[hh:mm <operator> #m<n>]] …` user records (§1a): memory-only,
   no run, unless the operator names the bot. A chat with no prior
   conversation (neither live nor on disk) folds nothing.
 - **Old tool calls keep their shape.** Past the two most recent turns,
@@ -365,19 +359,19 @@ chat as a bogus reply.
 
 | Tool | What it does |
 |------|--------------|
-| `send_message` | Sends a text (optionally quoting a message via `reply_to`, optionally @-mentioning people via `mentions`). One delivery per run. |
+| `send_message` | Sends a text (optionally quoting a record via `reply_to="#m12"` or a raw id, optionally @-mentioning people via `mentions`). One delivery per run. |
 | `stay_silent` | Ends the run without sending. |
 | `escalate` | Forwards a report to the operator's self-chat — when someone asks for a human, reports a problem, or complains. The bot writes the report itself (never pastes the person's words — hidden instructions must not reach the operator); once per chat per hour. |
-| `react_to_message` | Emoji reaction to a message id. |
+| `react_to_message` | Emoji reaction to a `#m<n>` record token or raw id. |
 | `send_media` | Sends media — `kind` picks image, video, file, voice note or sticker; the source is a public URL, a local path, or (voice) text the bot speaks through TTS. Non-square local sticker images are padded to square first. One delivery per run across all kinds. |
-| `read_chat` | The chat-reading tool — `mode` picks `list` (recent messages with ids, sender `name`, and `author` on account messages), `search` (substring matches in the latest messages), `metadata` (name, participants), `resolve` (a member name *or* digits/JID → `{id, name, tag}`; operator runs: chats, then contacts), `recent` (newest conversations, operator commands only) or `export` (the chat's deep recorded history: one spill file of slim identity-annotated rows, teammate and member counts inline). |
+| `read_chat` | The chat-reading tool — `mode` picks `list` (one record per fetched message, carrying its `#m<n>` when the registry knows it), `search` (substring matches in the latest messages), `metadata` (name, participants), `resolve` (a member name *or* digits/JID → `{id, name, tag}`; operator runs: chats, then contacts), `recent` (newest conversations, operator commands only) or `export` (the chat's deep recorded history: one spill file of slim identity-annotated rows, teammate and member counts inline). |
 | `forward_message` | Forwards a message to the current chat, keeping the original media and sender attribution. Counts as the run's one delivery. |
 | `web_search`, `visit_url` | The outside world: metasearch and page reads. `visit_url` on a video link (Instagram/Facebook/TikTok/YouTube) returns the video's real metadata, and a captioned YouTube link also carries its `transcript`. |
 | `run_shell_command` | Host shell (disabled by default; opt-in per deployment). |
 
-Every WhatsApp tool that accepts a `chat` argument, a serialized
-message id (`reply_to`, `react_to_message`, `forward_message`), or a
-conversation list to browse (`read_chat` with `mode=recent`) is fenced on
+Every WhatsApp tool that accepts a `chat` argument, a record token or
+a serialized message id (`reply_to`, `react_to_message`,
+`forward_message`), or a conversation list to browse (`read_chat` with `mode=recent`) is fenced on
 chat-triggered runs: the current conversation is the only target
 allowed. Cross-chat reach — messaging, forwarding to, or reading
 another person or group — is reserved for operator commands
@@ -402,10 +396,11 @@ notification scrolled away.
 
 Tool results come back as JSON envelopes — `{"ok": true, …}` or
 `{"ok": false, "error": "…"}` — never as raised exceptions; failures
-are data the model can react to. List tools slim messages inline
-(bodies capped, raw `_data` noise dropped) and spill the full raw
-window to a temp file whose `file.path` rides along, so every result
-is parseable and nothing requested is silently dropped.
+are data the model can react to. `read_chat` list/search return one
+record per fetched message in the same grammar the prompt uses, and
+spill the full raw window to a temp file whose `file.path` rides
+along, so every result is parseable and nothing requested is silently
+dropped.
 
 ---
 
@@ -419,11 +414,12 @@ account.
 
 ### Quote-replying
 
-`send_message(reply_to=<message id>, text)` ships the text as a
-**native WhatsApp quote-reply**: the quoted bubble is attached above
-the bot's message. The ids come from the `[message id: …]` annotations
-or from `read_chat` (`mode=list`). Quoting is how the bot keeps replies
-attached to the right person in fast-moving group chats.
+`send_message(reply_to="#m12", text)` ships the text as a **native
+WhatsApp quote-reply**: the quoted bubble is attached above the bot's
+message. The token comes from the record being answered; a raw
+serialized id is still accepted (an old prose turn carries no serial).
+Quoting is how the bot keeps replies attached to the right person in
+fast-moving group chats.
 
 ### @-Mentioning
 
@@ -454,9 +450,10 @@ that WhatsApp notified anyone. `read_chat(mode="resolve")` returns the
 
 ### Reactions
 
-`react_to_message(message_id, reaction)` — an emoji on the message.
-The polite low-effort acknowledgement: greetings, a joke landing,
-good news.
+`react_to_message(message_id="#m12", reaction="👍")` — an emoji on the
+record. A raw id is still accepted; the operator console may resolve a
+token across the session. The polite low-effort acknowledgement:
+greetings, a joke landing, good news.
 
 ---
 

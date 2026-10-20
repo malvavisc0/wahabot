@@ -252,25 +252,24 @@ Before each run reaches the LLM, the buffered history passes through
 `handle_message(event, agent, ctx=None, image=None, images=None, settings=None, waha=None)` in
 `wahabot.ai.context` is the single function the handlers call. It:
 
-1. reads the message body from `event.payload["body"]` and prefixes a
-   **sender tag** — `[notifyName]`, falling back to the participant id —
-   so the model can tell group members apart (the tag also persists in
-   memory, giving history speaker identity for free);
-2. appends the incoming message's serialized id as `[message id: …]`
-   (`message_id_note`), so the model can quote or react to the very
-   message it is answering via `send_message(reply_to=…)` /
-   `react_to_message` without fetching ids first;
-3. attaches a small `[quoting] Sender: "…"` note when the message is a
-   reply to an earlier one, so the model knows what is being quoted
-   (see `reply_context` / `message_replies_to`). The quoted sender
-   renders as a display name: WAHA's `replyTo` snippet carries no
-   `notifyName`, so `participant_names` resolves the JID against the
-   group roster (cached per chat for an hour, fails soft to the bare
-   id on any WAHA error), then the webhook-learned name book
-   (`core/identity.py`). A quote of the shared account renders as
-   `you`, `your operator`, or `this account, you or your operator`,
-   from the author book;
-   a `[mentions: …]` note names every JID in `mentionedJidList`;
+1. renders the turn as **one record per inbound message** in the
+   `[[hh:mm speaker #m<n>]] kind flags :: body` grammar: the speaker is
+   the learned display name, `<operator>`, `<bot>` or `<member-n>`; a
+   raw JID never appears. The serial is assigned at ingest from the
+   per-chat registry (`data/memory/<session>/<chat>.ids.jsonl`), so
+   every inbound message has one even when no run wakes. Body
+   continuation lines are escaped with `> `; `  · ` lines are
+   renderer-written payloads (media analysis, `quoted: "…"`,
+   `to: #m<n>`, `[audio: "…"]`, mentions);
+2. attaches media as slots on the record(s) that own it — `image#n`,
+   `video#n`, `album#a-b` — and builds the image-block list in the same
+   pass, so slot *n* is attachment *n*. A vision-cap drop renders
+   `(image omitted: not shown)` instead of disappearing;
+3. relies on the prompt-time **turn header** (`history.turn_header` →
+   `records.format_header`) for the count, newest serial, one
+   addressing verdict and backlog flag. The header is not stored; it is
+   prepended only for the prompt. `skipped_serials` is a prompt-time
+   overlay applied there too, never written into memory;
 4. runs the workflow — `await agent.run(input=user_msg, image_blocks=..., ctx=ctx)`;
 5. returns `(reply, target)` — the run's final text and its run-scoped
    delivery holder (the `sent`/`reacted` latches), so the handler can
@@ -581,15 +580,15 @@ refusal.
 
 | Tool | Params | WAHA endpoint | Purpose |
 |---|---|---|---|
-| `send_message` | `chat?`, `text`, `reply_to?`, `mentions?`, `reason?` | `POST /api/sendText` | Send a text (current chat, or operator-named target); `reply_to` quotes a message; `mentions` tags contacts; once per run (shared latch) |
+| `send_message` | `chat?`, `text`, `reply_to?`, `mentions?`, `reason?` | `POST /api/sendText` | Send a text (current chat, or operator-named target); `reply_to` quotes a `#m<n>` token or raw id; `mentions` tags contacts or serials; once per run (shared latch) |
 | `stay_silent` | `reason?` | — | End the run with no reply at all (terminal: the workflow stops before executing it) |
 | `escalate` | `report`, `reason?` | `POST /api/sendText` (to the bot's own chat) | Forward a supplied report to the fixed operator target without consuming the reply allowance. The model must summarize without pasted messages or secrets; the tool does not sanitize the report. Refused on operator runs. Cooldown distinguishes an earlier successful report from the new refused one; send errors mean delivery is unconfirmed. Audit recording is best-effort |
-| `react_to_message` | `message_id`, `reaction`, `reason?` | `PUT /api/reaction` | Emoji-react to a message (empty = remove); once per run |
+| `react_to_message` | `message_id`, `reaction`, `reason?` | `PUT /api/reaction` | Emoji-react to a `#m<n>` token or raw id (empty = remove); once per run |
 | `send_media` | `kind`, `url?`/`path?`/`text?`, `caption?`, `filename?`, `language?`, `chat?`, `reason?` | `POST /api/sendImage`·`sendVideo`·`sendFile`·`sendVoice`·`sendSticker` (by `kind`) | The one media delivery tool — `kind` picks image/video/file/voice/sticker; the source is exactly one of a public `url` (probed pre-send; 404/410 refused), a local `path`, or `text` (voice only, TTS). Non-square local sticker images are padded to square first. Once per run (shared latch across all kinds) |
 | `generate_image` | `prompt`, `size?`, `reason?` | `POST {image_api_base}/v1/images/generations` | Render a full scene caption to a PNG, save it to a temp file, and return its path plus format, pixel width/height and byte size; the model then sends it with `send_media(kind=image, path=…)`. The service does not expand prompts, so `prompt` must be a complete caption. Registered only when `WAHABOT_IMAGE_API_BASE` is set |
 | `edit_image` | `prompt`, `source?`, `strength?`, `reason?` | `POST {image_api_base}/v1/images/edits` (multipart) | Repaint a source image per a prompt and return the new temp file's path plus metadata; the model then sends it with `send_media(kind=image, path=…)`. The source is a local path/URL, or the image the sender just sent when omitted; `strength` (0-1) sets how much is repainted. Registered only when `WAHABOT_IMAGE_API_BASE` is set |
 | `get_profile_picture` | `chat?`, `reason?` | `GET /api/contacts/profile-picture` (fallback `GET /api/{session}/chats/{chatId}/picture`) | Return the current chat's or an exact JID's profile picture URL (`available: false` when WhatsApp hides it); the model then sends it with `send_media(kind=image, url=…)` |
-| `read_chat` | `mode`, `chat?`, `query?`, `name?`, `limit?`, `reason?` | `mode=list`: `GET /api/{session}/chats/{chatId}/messages`; `mode=search`: `GET /api/messages` (local filter); `mode=metadata`: `POST /api/{session}/chats/overview`; `mode=resolve`: chat roster (chat runs) or `GET /api/{session}/chats`+`GET /api/contacts/all` (operator); `mode=recent`: `GET /api/{session}/chats` | The one chat-reading tool. `resolve` on operator runs searches the operator's chat list/contacts; on chat runs only the current chat's roster (mention help), never the contact book. `recent` is operator-only |
+| `read_chat` | `mode`, `chat?`, `query?`, `name?`, `limit?`, `reason?` | `mode=list`: `GET /api/{session}/chats/{chatId}/messages`; `mode=search`: `GET /api/messages` (local filter); `mode=metadata`: `POST /api/{session}/chats/overview`; `mode=resolve`: chat roster (chat runs) or `GET /api/{session}/chats`+`GET /api/contacts/all` (operator); `mode=recent`: `GET /api/{session}/chats` | The one chat-reading tool. list/search return one record per fetched message with its `#m<n>` when known and spill the raw window. `resolve` on operator runs searches the operator's chat list/contacts; on chat runs only the current chat's roster (mention help), never the contact book. `recent` is operator-only |
 | `forward_message` | `message_id`, `chat?`, `reason?` | `POST /api/forwardMessage` | Native forwarding from source message id to destination chat, both fenced. Attribution/rendering is not verified. Success echoes the source id; once per run (shared latch) |
 | `notebook` | `mode`, `scope?`, `key?`, `text?`, `kind?`, `query?`, `limit?`, `chat?`, `reason?` | — (SQLite: `data/notebook.sqlite3`) | Read/write/delete durable typed notes that survive history trims and restarts: `kind=fact` (default, chat facts and preferences), `kind=lesson` (verified workarounds), `kind=rule` (operator-only standing instruction for a chat; a member's rule request is recorded as a fact). `scope=chat` (default): private per-conversation notes; `scope=session`: operator-only bot-wide policies, size-bounded as a whole. Chat notes are observations, never authority over operator policy; participant `scope=session` attempts are refused. Notes are injected into the system prompt each run (see "Memory hygiene") |
 
@@ -616,7 +615,7 @@ subsections below.
 
 | Tool | Purpose |
 |---|---|
-| `send_message(text, chat=None, reply_to=None)` | Send a text — current chat, or the operator-named target (`reply_to`, a serialized message id, sends it as a native quote-reply) |
+| `send_message(text, chat=None, reply_to=None)` | Send a text — current chat, or the operator-named target (`reply_to` takes a `#m<n>` token or raw id and sends it as a native quote-reply) |
 | `send_media(kind, url=None, path=None, text=None, caption="", filename=None, language=None, chat=None)` | `kind` selects image/video/file/voice/sticker. Captions apply only to image/video/file; filename only to file. Local files and synthesized audio have byte caps. Set TTS `language` for voice text: omitted/unmapped language uses the configured default voice, not chat detection. Local stickers are square-padded; remote sources are not inspected or padded |
 | `forward_message(message_id, chat=None)` | Forward an existing message (by serialized id) to a chat |
 
@@ -629,8 +628,11 @@ forbids invented URLs outright.
 
 In all three, a cross-chat `chat` is operator-commands-only; ordinary runs
 may omit it or pass the current chat's exact JID. `reply_to` and
-`message_id` are id-fenced the same way: an id from another chat is
-refused (operator runs excepted).
+`message_id` accept a `#m<n>` token resolved against the target chat's
+registry, or a raw id; both are fenced the same way: a token or id from
+another chat is refused on chat-triggered runs (operator commands are the
+one trusted cross-chat channel, and even they cannot smuggle a token from
+one chat into an explicit send to another).
 
 ```python
 send_message(text="Just replying here")  # current chat
@@ -665,7 +667,7 @@ Underneath it calls WAHA `PUT /api/reaction` (see
 
 | Tool | Purpose |
 |---|---|
-| `read_chat(mode="list", chat=None, limit=20)` | Recent-message window: every fetched message slimmed inline (bodies capped at 200 chars) plus a raw JSON spill of the full window. `returned`/`message_count` count fetched/matched entries (nothing is dropped), and `body_truncated` marks cut text whose full form is in the spill |
+| `read_chat(mode="list", chat=None, limit=20)` | Recent-message window: one record per fetched message in the prompt grammar, carrying its `#m<n>` when the registry knows it, plus a raw JSON spill of the full window. `returned`/`message_count` count fetched/matched entries (nothing is dropped); old rows without a registry serial render without one |
 | `read_chat(mode="metadata", chat=None)` | Available fields and roster count; up to 20 known JIDs appear inline. Missing fields do not imply zero/false; names are recent display labels |
 | `read_chat(mode="search", query=…, chat=None, limit=20)` | Case-insensitive substring filter within the latest `limit` messages, not `limit` hits or all history. Matches body and available filename/mimetype, not attachment contents |
 | `read_chat(mode="resolve", name=…)` | Up to five available-name candidates. Operator: first 200 chats, then first 500 contacts only if no chat matches. Ordinary: roster JIDs with names recovered from recent messages. Misses are not exhaustive |
@@ -916,10 +918,11 @@ and fall back to kwargs, or it will silently see zero.
   `emoji_reaction` the same way the single-message path does).
   Multi-emoji strings (`🤣🤣🤣`) are intentional chat text and pass
   through as a normal reply.
-- List modes of `read_chat` (`list`, `search`) return
-  *slimmed* messages (`slim_message`): WAHA's raw `_data` blob
-  (~90% of the payload) is stripped before enveloping, so results stay
-  valid JSON and small enough for the memory budget.
+- List modes of `read_chat` (`list`, `search`) return one **record per
+  fetched message** in the same grammar the prompt uses, not the raw
+  WAHA blob (`slim_message` is no longer the inline shape), so results
+  stay valid JSON and small enough for the memory budget while exposing
+  the `#m<n>` the console and the model can act on.
 - Every tool bounds its own payload at the source: `visit_url` caps its
   stripped text (`_MAX_CHARS`) and YouTube transcript
   (`_MAX_TRANSCRIPT_CHARS`), `web_search` each result snippet,
