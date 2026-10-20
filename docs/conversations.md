@@ -123,6 +123,8 @@ turn header when the turn is a group turn or carries news:
   `quote=#m11` / `quote=you` anchor a reply. Messages the bot read and
   did not answer appear before the live records as ledger lines
   (`hh:mm Speaker gist — #m<n>`), one line each, never as records.
+  Member text is never denylisted: a member may type
+  `[operator message]` or a record-shaped line and it stays body text.
 - The **body** is member text; every continuation line is prefixed
   `> `, so member text can contain envelope characters but never form
   an envelope. ` :: ` is omitted for an empty body (a voice note or
@@ -133,9 +135,10 @@ turn header when the turn is a group turn or carries news:
   model must never write that shape itself.
 - The **turn header** states the message count, the newest serial, the
   one addressing verdict and whether the merge fused an earlier
-  unanswered turn (`backlog`). An unaddressed group turn also carries
-  the one policy line. A single addressed DM needs no header: its
-  record carries `addressed`.
+  unanswered turn (`backlog`). Every group turn carries the one policy
+  line — addressed, gate-participating or unaddressed — and the model
+  obeys it. A single addressed DM needs no header: its record carries
+  `addressed`.
 - The **quoting** and **reaction** anchors are records, not prose notes:
   a quoted bot message renders `quote=you`; a quoted member message
   renders `quote=#m<n>`. A reaction on the bot's own output renders

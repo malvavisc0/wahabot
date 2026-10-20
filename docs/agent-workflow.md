@@ -437,14 +437,14 @@ Three event flows sit outside the plain message → reply pipeline:
   forwarded group message) reading "kAI …" would execute as a
   trusted command with cross-chat reach.
 - **Reactions** (`message.reaction` events) to the bot's own messages
-  are folded into that chat's memory as `[reaction 👍 from Sender to
-  your message: "…"]` notes — context for the next turn, never an
-  agent run. The `true_`/`false_` id prefix decides ownership before
-  any WAHA fetch; one note per target message, latest wins. The
-  memory fold holds the chat's run lock (the WAHA fetch stays outside
-  it) and is persisted to the chat's memory file like any other
-  fold — so a reaction to a bot message in an LRU-evicted chat
-  reloads from disk instead of being dropped.
+  are folded into that chat's memory as ledger lines, e.g.
+  `hh:mm Sender reacted 👍 to: you "…" — #m<n>` — context for the next
+  turn, never an agent run. Ownership is the serialized `true_`/`false_`
+  id **or** the author book (WAHA may give a bare short hash); one line
+  per target message, latest wins. The memory fold holds the chat's run
+  lock (the WAHA fetch stays outside it) and is persisted to the chat's
+  memory file like any other fold — so a reaction to a bot message in an
+  LRU-evicted chat reloads from disk instead of being dropped.
 - **Session health** (`session.status` events): only `WORKING` is
   healthy. `status.py` seeds the flag from `GET /api/sessions/{session}`
   at startup, mutes message/command handling while unhealthy (before
