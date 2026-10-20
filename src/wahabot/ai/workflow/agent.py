@@ -40,10 +40,10 @@ from wahabot.ai.history import (
     degrade_old_history,
     inbound_message_id,
     is_single_emoji,
-    mark_merged_backlog,
     minimum_turn,
     sanitize_chat_history,
     trim_to_budget,
+    turn_header,
 )
 from wahabot.ai.messages import TURN_HANDLED_KWARG
 from wahabot.ai.pinned_state import PINNED_STATE_TOKEN_LIMIT, pinned_state_block
@@ -384,11 +384,12 @@ class FunctionCallingAgentWorkflow(Workflow):
         await memory.aset(history)
         self.schedule_recap_merge(messages, history)
         self.schedule_thread_index(messages, history)
-        # Prompt-only: tell the model when this run's user turn is a
-        # backlog of unanswered messages fused by the FIFO merge, so it
-        # answers the newest message rather than the whole pile. The
+        # Prompt-only turn header: how many messages this turn holds, which is
+        # newest, and — from the wake gate — whether it was addressed. The
         # unmarked history above is what stays in memory.
-        prompt_history = mark_merged_backlog(history)
+        group = bool(await ctx.store.get("turn_group", default=False))
+        addressed = bool(await ctx.store.get("turn_addressed", default=True))
+        prompt_history = turn_header(history, group=group, addressed=addressed)
         return ([system] if system is not None else []) + prompt_history
 
     def schedule_recap_merge(

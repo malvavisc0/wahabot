@@ -2760,13 +2760,15 @@ def test_foreign_reaction_folds_name_and_jid(bot: Bot) -> None:
 
 
 def test_group_turn_sender_tag_carries_jid(bot: Bot) -> None:
-    """A group turn's captured user message opens with ``[Name <jid>]``."""
+    """A group turn's prompt opens with the turn header, then the
+    ``[Name <jid>]`` sender tag."""
     llm = bot.stack.llm
     event = waha_event()
     bot.post(event)
     assert _wait(lambda: len(llm.requests) >= 1)
     first_user = user_turns_of(llm.requests[0])[0]
-    assert first_user.startswith("[Smoke Sender <491555000001@c.us>]"), first_user
+    assert first_user.startswith("[turn: 1 message | newest #1 |"), first_user
+    assert "[Smoke Sender <491555000001@c.us>]" in first_user
 
 
 def test_tag_copied_mention_resolves_end_to_end(bot: Bot) -> None:

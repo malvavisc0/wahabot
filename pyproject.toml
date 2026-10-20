@@ -107,4 +107,11 @@ ignore_names = [
     "has_pending",
     # Note dataclass fields read via asdict() and the notebook views.
     "created_at", "updated_at",
+    # Phase 1 record-grammar API (src/wahabot/ai/records.py): a pure
+    # renderer exercised by tests/test_records.py, wired into the turn
+    # path in a later step. tests/ is outside vulture's src/ scan.
+    "format_record", "format_header", "render_turn",
+    # Phase 1 serial registry (src/wahabot/ai/serials.py): same — built
+    # and tested (tests/test_serials.py) ahead of the ingest wiring.
+    "SerialRegistry", "resolve", "max_serial", "compact", "format_serial_token",
 ]

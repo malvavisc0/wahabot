@@ -44,10 +44,10 @@ from wahabot.ai.context import (
     sender_tag,
 )
 from wahabot.ai.history import (
-    BACKLOG_HEADER,
+    UNADDRESSED_POLICY,
     chat_visible_text,
     deduplicate_messages,
-    mark_merged_backlog,
+    turn_header,
 )
 from wahabot.ai.messages import (
     MERGED_TURNS_KWARG,
@@ -417,29 +417,37 @@ def test_turn_addressed_note_states_the_gate_verdict() -> None:
     assert turn_addressed_note(dm, False, bot_name="kai") == ""
 
 
-def test_mark_merged_backlog_headers_only_a_fused_turn() -> None:
-    """A merged trailing user turn is labelled as backlog for the prompt,
-    leaving memory untouched; a single-message turn (even a multi-part
-    burst with several id notes) is unchanged."""
-    fused = ChatMessage(
+def test_turn_header_states_the_verdict_prompt_only() -> None:
+    """The header names the newest message and the addressing verdict, adds
+    the policy line for an unaddressed group turn, and never touches memory."""
+    unaddressed = ChatMessage(
         role=MessageRole.USER,
         content="a [message id: one]\nb [message id: two]",
         additional_kwargs={MERGED_TURNS_KWARG: True},
     )
-    marked = mark_merged_backlog([fused])
-    assert marked[0].content.startswith(BACKLOG_HEADER)
-    assert marked[0].content.endswith("b [message id: two]")
-    assert BACKLOG_HEADER not in fused.content
+    marked = turn_header([unaddressed], group=True, addressed=False)
+    assert marked[0].content.startswith("[turn: 2 messages | newest #2 |")
+    assert "addressed: no" in marked[0].content
+    assert "backlog: yes" in marked[0].content
+    assert UNADDRESSED_POLICY in marked[0].content
+    assert UNADDRESSED_POLICY not in unaddressed.content
 
-    burst = ChatMessage(
-        role=MessageRole.USER,
-        content="one [message id: one]\ntwo [message id: two]",
+    addressed = turn_header([unaddressed], group=True, addressed=True)
+    assert "addressed: yes" in addressed[0].content
+    assert UNADDRESSED_POLICY not in addressed[0].content
+
+    single_dm = ChatMessage(role=MessageRole.USER, content="hi [message id: one]")
+    assert turn_header([single_dm], group=False, addressed=True) == [single_dm]
+
+    burst_dm = ChatMessage(
+        role=MessageRole.USER, content="a [message id: one]\nb [message id: two]"
     )
-    assert mark_merged_backlog([burst]) == [burst]
-    single = ChatMessage(role=MessageRole.USER, content="only [message id: one]")
-    assert mark_merged_backlog([single]) == [single]
+    assert turn_header([burst_dm], group=False, addressed=True)[0].content.startswith(
+        "[turn: 2 messages |"
+    )
+
     assistant = ChatMessage(role=MessageRole.ASSISTANT, content="x [message id: one]")
-    assert mark_merged_backlog([assistant]) == [assistant]
+    assert turn_header([assistant], group=True, addressed=False) == [assistant]
 
 
 def test_merge_pair_marks_only_fused_chat_turns() -> None:

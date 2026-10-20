@@ -69,12 +69,12 @@ __all__ = [
     "is_error_narration",
     "is_silence_narration",
     "is_trailing_note_text",
-    "mark_merged_backlog",
     "narration_kind",
     "sanitize_chat_history",
     "strip_trailing_note",
     "tool_calls",
     "trim_to_budget",
+    "turn_header",
     "wire_call",
 ]
 
@@ -82,16 +82,14 @@ __all__ = [
 #: appends it as the turn's last line): the id inside brackets.
 INBOUND_ID_RE = re.compile(r"\[message id: ([^\]]+)\]")
 
-#: Prompt-only header for a user turn the FIFO merged from several
-#: unresolved messages. The chat API forbids consecutive same-role
-#: turns, so unanswered group messages fuse into the next run's user
-#: turn — a bare emoji can arrive joined to the whole backlog. The
-#: header restores the boundary for the model so it reads the block as
-#: background context and only the last line as the live message.
-BACKLOG_HEADER = (
-    "[This turn merges messages that arrived since your last reply; they may"
-    " be from several members. Everything above the last message is background"
-    " context. Answer only the newest message, and only if it is for you.]"
+#: The strict unaddressed-group policy line the header carries. Over-silence
+#: is acceptable (a member who wants the bot names it), so the rule does not
+#: invite answering an unaddressed "open question". Measured against the
+#: incident replay: a decision made with this header cut the self-referential
+#: essay from ~33% to ~7% of replies.
+UNADDRESSED_POLICY = (
+    "(unaddressed: other members are talking. Do not reply — stay silent "
+    "unless this message names you or replies to you.)"
 )
 
 
@@ -673,15 +671,21 @@ def sanitize_chat_history(
     return trim_history(validated, drop_trailing_user)
 
 
-def mark_merged_backlog(messages: list[ChatMessage]) -> list[ChatMessage]:
-    """Prepend :data:`BACKLOG_HEADER` to a merged trailing user turn.
+def turn_header(
+    messages: list[ChatMessage], *, group: bool, addressed: bool
+) -> list[ChatMessage]:
+    """Prepend the turn header to the trailing user turn, prompt-only.
 
-    Returns a prompt-only copy: the caller stores the unmarked list, so
-    the header never accumulates in memory. Only a turn that
-    :func:`merge_pair` fused from separate inbound turns carries
-    ``MERGED_TURNS_KWARG`` — a single burst is one message and is left
-    alone — and only the trailing turn is labelled. A single-message
-    turn, or one whose newest message is not last, is returned unchanged.
+    The header is the one place the model is told how many messages this
+    turn holds, which one is newest, and — the load-bearing part — whether
+    it was addressed. Deciding attribution from the transcript is what the
+    incident's essay was made of; stating it cut the essay rate roughly
+    fivefold in the replay, and the header alone (no grammar) did it.
+
+    A single addressed DM message needs none of it and gets no header; a
+    group turn always does, and a DM gets one only when it carries news
+    (more than one message, or a fused backlog). Returns a copy for the
+    prompt: the caller stores the unmarked list, so nothing accumulates.
     """
     if not messages:
         return messages
@@ -689,15 +693,37 @@ def mark_merged_backlog(messages: list[ChatMessage]) -> list[ChatMessage]:
     message = messages[index]
     if message.role != MessageRole.USER:
         return messages
-    if not message.additional_kwargs.get(MERGED_TURNS_KWARG):
+    count = len(INBOUND_ID_RE.findall(str(message.content or ""))) or 1
+    backlog = bool(message.additional_kwargs.get(MERGED_TURNS_KWARG))
+    if not shows_turn_header(group=group, count=count, backlog=backlog):
         return messages
+    header = format_turn_header(
+        count=count, addressed=addressed, backlog=backlog, group=group
+    )
     marked = ChatMessage(
         role=message.role,
         blocks=list(message.blocks),
-        content=f"{BACKLOG_HEADER}\n{message.content}",
+        content=f"{header}\n{message.content}",
         additional_kwargs=dict(message.additional_kwargs),
     )
     return [*messages[:index], marked]
+
+
+def shows_turn_header(*, group: bool, count: int, backlog: bool) -> bool:
+    """Group turns always; a DM only when it carries news (a burst or a backlog)."""
+    return group or count > 1 or backlog
+
+
+def format_turn_header(*, count: int, addressed: bool, backlog: bool, group: bool) -> str:
+    """The header line: message count, newest, verdict, backlog; plus policy."""
+    line = (
+        f"[turn: {count} message{'s' if count != 1 else ''} | newest #{count} | "
+        f"addressed: {'yes' if addressed else 'no'} | "
+        f"backlog: {'yes' if backlog else 'no'}]"
+    )
+    if group and not addressed:
+        return f"{line}\n{UNADDRESSED_POLICY}"
+    return line
 
 
 def group_boundaries(messages: list[ChatMessage]) -> list[int]:

@@ -633,6 +633,11 @@ async def handle_message(
     """
     chat_id = str(event.payload.get("from", ""))
     logger.info("Agent handling message from {chat_id}", chat_id=chat_id)
+    if ctx is not None:
+        # The prompt-time turn header (history.turn_header) reads these back:
+        # the wake gate's addressing verdict, and whether this is a group turn.
+        await ctx.store.set("turn_addressed", addressed)
+        await ctx.store.set("turn_group", chat_id.endswith("@g.us"))
     if settings is not None and settings.vision_max_images > 0 and images:
         images = images[: settings.vision_max_images]
     user_msg, image_blocks = await turn_user_message(
