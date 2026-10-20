@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from wahabot.core.identity import message_key
+
 #: A prompt-side serial token, e.g. ``#m12``.
 TOKEN_RE = re.compile(r"^#m(\d+)$")
 
@@ -62,6 +64,7 @@ class SerialRegistry:
         self.path = Path(path)
         self.entries: dict[int, SerialEntry] = {}
         self.by_message: dict[str, int] = {}
+        self.by_hash: dict[str, int] = {}
         self.ordinals: dict[str, int] = {}
         self.next_ordinal = 1
         self.last_serial = 0
@@ -96,6 +99,7 @@ class SerialRegistry:
         )
         self.entries[entry.serial] = entry
         self.by_message[entry.message_id] = entry.serial
+        self.by_hash[message_key(entry.message_id)] = entry.serial
         self.last_serial = max(self.last_serial, entry.serial)
         if entry.ordinal and entry.jid and entry.jid not in self.ordinals:
             self.ordinals[entry.jid] = entry.ordinal
@@ -132,14 +136,18 @@ class SerialRegistry:
             entry = SerialEntry(serial, message_id, jid, name, ordinal)
             self.entries[serial] = entry
             self.by_message[message_id] = serial
+            self.by_hash[message_key(message_id)] = serial
             self.append(entry)
             return serial
 
     def serial_for(self, message_id: str) -> int:
-        """The serial already assigned to *message_id*, or 0."""
+        """The serial for a full id or a bare hash (``replyTo.id``), or 0."""
         with self.lock:
             self.load()
-            return self.by_message.get(message_id, 0)
+            serial = self.by_message.get(message_id)
+            if serial is not None:
+                return serial
+            return self.by_hash.get(message_key(message_id), 0)
 
     def append(self, entry: SerialEntry) -> None:
         """Append one entry with a single atomic write."""
@@ -212,6 +220,7 @@ class SerialRegistry:
         with self.lock:
             self.entries = {}
             self.by_message = {}
+            self.by_hash = {}
             self.ordinals = {}
             self.next_ordinal = 1
             self.last_serial = 0

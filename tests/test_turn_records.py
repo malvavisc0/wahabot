@@ -412,3 +412,33 @@ def test_dm_single_record_is_addressed_without_a_header(tmp_path: Path) -> None:
         addressed=True,
     )
     assert marked[0].content == text
+
+
+def test_case_14b_quote_ids_are_bare_hashes(tmp_path: Path) -> None:
+    member = "491555000101@c.us"
+    full = f"false_{CHAT}_HASH_{member}"
+    registry = _registry(tmp_path, (full, member, "Ada Sample"))
+    quoted = _event(
+        "R1",
+        "thanks",
+        replyTo={"id": "HASH", "participant": {"_serialized": member}},
+    )
+    text, _, _ = render_entries(
+        [RecordEntry(event=quoted)], registry=registry, tz_name="UTC"
+    )
+    assert "quote=#m1" in text
+
+    bot_full = f"true_{CHAT}_HASHBOT_{CHAT}"
+    registry.next(message_id=bot_full, jid="491555000000@c.us", name="Kai")
+    quoted_bot = _event(
+        "R2",
+        "nice",
+        replyTo={
+            "id": "HASHBOT",
+            "participant": {"_serialized": "491555000000@c.us"},
+        },
+    ).model_copy(update={"me": {"id": "491555000000@c.us"}})
+    bot_text, _, _ = render_entries(
+        [RecordEntry(event=quoted_bot)], registry=registry, tz_name="UTC"
+    )
+    assert "quote=you" in bot_text
