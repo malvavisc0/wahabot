@@ -10,6 +10,7 @@ from llama_index.core.base.llms.types import ChatMessage, ImageBlock, MessageRol
 from llama_index.core.workflow import Context
 from loguru import logger
 
+from wahabot.ai import records
 from wahabot.ai.history import (
     chat_visible_text,
     is_emoji_narration,
@@ -20,8 +21,8 @@ from wahabot.ai.history import (
 )
 from wahabot.ai.messages import (
     OPERATOR_NOTE_PREFIX,
-    SKIPPED_SERIALS_KWARG,
     TURN_HANDLED_KWARG,
+    TURN_SERIALS_KWARG,
     bot_jids,
     is_operator_event,
     jid_string,
@@ -479,24 +480,32 @@ async def chat_rules(
 
 
 async def record_handled_turn(
-    agent: FunctionCallingAgentWorkflow, ctx: Context, user_msg: str
+    agent: FunctionCallingAgentWorkflow,
+    ctx: Context,
+    user_msg: str,
+    *,
+    gist: str = "",
 ) -> None:
-    """Store the turn stamped handled so ``repair_memory`` never drops it.
+    """Store a quiet turn as ledger lines, stamped handled.
 
-    Without the stamp the next run would treat the trailing user message
-    as run scaffolding and drop it, vanishing it from the buffer, recap,
-    and thread index alike.
+    The gate read these messages and declined them; the next prompt gets one
+    line each instead of the wall it already judged. Without the stamp the
+    next run would treat the trailing message as scaffolding and drop it,
+    vanishing it from the buffer, recap, and thread index alike.
     """
     memory = await agent.ensure_memory(ctx)
-    serials = await ctx.store.get("turn_serials", default=None)
-    kwargs: dict[str, Any] = {TURN_HANDLED_KWARG: True}
-    if serials:
-        kwargs[SKIPPED_SERIALS_KWARG] = list(serials)
+    serials = await ctx.store.get("turn_serials", default=None) or []
+    content = records.ledger_turn(
+        user_msg, gist=gist, newest_serial=max(serials, default=0)
+    )
     await memory.aput(
         ChatMessage(
             role=MessageRole.USER,
-            content=user_msg,
-            additional_kwargs=kwargs,
+            content=content,
+            additional_kwargs={
+                TURN_HANDLED_KWARG: True,
+                **({TURN_SERIALS_KWARG: list(serials)} if serials else {}),
+            },
         )
     )
 
@@ -566,7 +575,9 @@ async def run_gate(
     await ctx.store.set("triage_audit", None)
     if await agent.start_triage(ctx, target, user_msg, addressed, gate_first):
         return True
-    await record_handled_turn(agent, ctx, user_msg)
+    result = await agent.stored_triage_result(ctx)
+    gist = result.verdict.gist if result is not None else ""
+    await record_handled_turn(agent, ctx, user_msg, gist=gist)
     return False
 
 
@@ -742,10 +753,10 @@ async def turn_user_message(
 
     Inbound chat turns are one record per message
     (``turn_records.render_entries``) and carry no ids, tags or addressing
-    notes; the header and the ``skipped`` overlay render later, at prompt
-    assembly. Operator command events keep the prose shape (they are
-    synthetic, not messages the chat's members spoke). Image bytes ride as
-    blocks on the first LLM call only.
+    notes; the header renders later, at prompt assembly. Operator command
+    events keep the prose shape (they are synthetic, not messages the
+    chat's members spoke). Image bytes ride as blocks on the first LLM
+    call only.
     """
     chat_id = str(event.payload.get("from", ""))
     # Roster before tag: group sender tags render ``[Name <jid>]`` via

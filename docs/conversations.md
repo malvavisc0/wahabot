@@ -119,8 +119,10 @@ turn header when the turn is a group turn or carries news:
 - **Kind** is derived from the message's own shape (`text`, `link`,
   `image`, `video`, `audio`, `sticker`, `document`, `album`,
   `reaction`), never from what analysis returned. Flags are presence-only:
-  `addressed`, `skipped`, and media slots (`image#1`, `video#1`,
-  `album#1-3`); `quote=#m11` / `quote=you` anchor a reply.
+  `addressed` and media slots (`image#1`, `video#1`, `album#1-3`);
+  `quote=#m11` / `quote=you` anchor a reply. Messages the bot read and
+  did not answer appear before the live records as ledger lines
+  (`hh:mm Speaker gist — #m<n>`), one line each, never as records.
 - The **body** is member text; every continuation line is prefixed
   `> `, so member text can contain envelope characters but never form
   an envelope. ` :: ` is omitted for an empty body (a voice note or

@@ -10,8 +10,7 @@ from typing import Any
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 
 from wahabot.ai.history import UNADDRESSED_POLICY, turn_header
-from wahabot.ai.messages import SKIPPED_SERIALS_KWARG
-from wahabot.ai.records import record_serials
+from wahabot.ai.records import ledger_serial, ledger_turn, record_serials
 from wahabot.ai.serials import SerialRegistry
 from wahabot.ai.turn_records import (
     RecordEntry,
@@ -206,7 +205,7 @@ def test_case_8_empty_and_edge_bodies(tmp_path: Path) -> None:
     assert lines[2].endswith(":: @")
 
 
-def test_case_9_skipped_overlay_is_prompt_only(tmp_path: Path) -> None:
+def test_case_9_quiet_turns_become_ledger_lines(tmp_path: Path) -> None:
     text, _, _ = render_entries(
         [
             RecordEntry(event=_event("A", "anyone?")),
@@ -215,15 +214,12 @@ def test_case_9_skipped_overlay_is_prompt_only(tmp_path: Path) -> None:
         registry=_registry(tmp_path),
         tz_name="UTC",
     )
-    message = ChatMessage(
-        role=MessageRole.USER,
-        content=text,
-        additional_kwargs={SKIPPED_SERIALS_KWARG: [1]},
-    )
-    marked = turn_header([message], group=True, addressed=True)[0]
-    assert "]] text skipped :: anyone?" in marked.content
-    assert "]] text addressed :: so, Kai?" in marked.content
-    assert "skipped" not in text
+    ledger = ledger_turn(text, gist="asked whether anyone was around", newest_serial=2)
+    assert record_serials(ledger) == []
+    assert len(ledger.splitlines()) == 2
+    assert "asked whether anyone was around — #m2" in ledger
+    assert "anyone? — #m1" in ledger
+    assert "]]" not in ledger
 
 
 def test_case_10_history_lines_use_the_same_escaping(tmp_path: Path) -> None:
@@ -444,22 +440,43 @@ def test_case_14b_quote_ids_are_bare_hashes(tmp_path: Path) -> None:
     assert "quote=you" in bot_text
 
 
-def test_skipped_overlay_preserves_body_whitespace(tmp_path: Path) -> None:
+def test_ledger_mechanical_gist_covers_media_and_links(tmp_path: Path) -> None:
+    registry = _registry(tmp_path)
     text, _, _ = render_entries(
-        [RecordEntry(event=_event("S1", "keep   these    spaces"))],
-        registry=_registry(tmp_path),
+        [
+            RecordEntry(event=_event("I", "", kind="image")),
+            RecordEntry(event=_event("L", "https://example.com/a")),
+        ],
+        registry=registry,
         tz_name="UTC",
     )
-    marked = turn_header(
-        [
-            ChatMessage(
-                role=MessageRole.USER,
-                content=text,
-                additional_kwargs={SKIPPED_SERIALS_KWARG: [1]},
-            )
-        ],
-        group=True,
-        addressed=False,
-    )[0]
-    assert "keep   these    spaces" in marked.content
-    assert "]] text skipped ::" in marked.content
+    lines = ledger_turn(text).splitlines()
+    assert lines[0].endswith("sent an image — #m1")
+    assert lines[1].endswith("shared a link — #m2")
+
+
+def test_ledger_lines_are_capped_with_live_records(tmp_path: Path) -> None:
+    from wahabot.ai.records import cap_turn
+
+    registry = _registry(tmp_path)
+    text, _, _ = render_entries(
+        [RecordEntry(event=_event(f"R{i}", f"record {i}")) for i in range(4)],
+        registry=registry,
+        tz_name="UTC",
+    )
+    mixed = f"{ledger_turn(text)}\n{text}"
+    capped = cap_turn(
+        mixed,
+        window=8,
+        max_tokens=100,
+        token_counter=lambda value: len(value),
+    )
+    assert "record 3" in capped
+    assert "record 0" not in capped
+    assert "sent" not in capped
+
+
+def test_ledger_serial_parser() -> None:
+    assert ledger_serial("18:02 Marco asked why — #m9") == 9
+    assert ledger_serial("18:02 Marco — #m9") == 9
+    assert ledger_serial("not a ledger line") == 0

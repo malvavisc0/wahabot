@@ -32,6 +32,7 @@ from llama_index.core.workflow import (
 from llama_index.llms.openai_like import OpenAILike
 from loguru import logger
 
+from wahabot.ai import records
 from wahabot.ai.events import InputEvent, ToolCallEvent
 from wahabot.ai.history import (
     INBOUND_ID_RE,
@@ -46,11 +47,7 @@ from wahabot.ai.history import (
     trim_to_budget,
     turn_header,
 )
-from wahabot.ai.messages import (
-    SKIPPED_SERIALS_KWARG,
-    TURN_HANDLED_KWARG,
-    TURN_SERIALS_KWARG,
-)
+from wahabot.ai.messages import TURN_HANDLED_KWARG, TURN_SERIALS_KWARG
 from wahabot.ai.pinned_state import PINNED_STATE_TOKEN_LIMIT, pinned_state_block
 from wahabot.ai.tools.notebook import MAX_NOTE_TOKENS, NOTEBOOK_INSTRUCTIONS
 from wahabot.ai.tools.slim import slim_tool_specs
@@ -592,12 +589,12 @@ class FunctionCallingAgentWorkflow(Workflow):
         Race mode (DMs, addressed turns) always returns True: the gate
         can only tighten tools there. Block mode (unaddressed groups)
         runs only on a verdict that grants participation, and a verdict
-        that is present but silent (the new default) means silence. A
-        gate that is *unavailable* — failed, timed out, unreachable — is
-        different: it is a filter, not an authority, so the run degrades
-        to the pre-gate behaviour rather than muting the chat and losing
-        the chance to answer a real question. The failed verdict is
-        stored and audited either way.
+        that is present but silent (the new default) means silence. Block
+        mode also fails closed: a gate that is unavailable — failed,
+        timed out, unreachable — leaves the unaddressed turn silent
+        rather than waking the agent over unread chatter. Race mode
+        (DMs, addressed turns) always runs. The failed verdict is stored
+        and audited either way.
         """
         if self.triage is None or target.chat_id == OPERATOR_CHAT_ID:
             return True
@@ -616,10 +613,9 @@ class FunctionCallingAgentWorkflow(Workflow):
             result = await self.triage.classify_bounded(context)
             await ctx.store.set("triage_result", result_to_dict(result))
             if result.failed or result.timed_out:
-                # Gate down: degrade to the pre-gate behaviour — wake the
-                # agent. An outage must not mute the chat; only a verdict
-                # the gate actually produced can decline a turn.
-                return True
+                # Block mode fails closed: an unavailable gate declines the
+                # unaddressed turn instead of waking the agent over chatter.
+                return False
             return result.verdict.participate
         except Exception as exc:
             logger.warning(
@@ -628,9 +624,8 @@ class FunctionCallingAgentWorkflow(Workflow):
                 error=exc,
             )
             logger.opt(exception=exc).debug("Triage gate failure detail")
-            # Gate unavailable: degrade to the pre-gate behaviour in both
-            # modes — the agent runs, unhardened.
-            return True
+            # Block mode fails closed; race mode still runs unhardened.
+            return not gate_first
 
     async def stored_triage_result(self, ctx: Context) -> TriageResult | None:
         """The verdict already in this context, if any, as an object."""
@@ -980,16 +975,16 @@ class FunctionCallingAgentWorkflow(Workflow):
         stamp tells ``history``'s trailing-user drop that this message
         is real conversation a completed run read — in ``judicious``
         group mode a silent run's message must stay in context for the
-        next run, not be discarded as scaffolding. A silent run also
-        records the serials it read in ``skipped_serials``; the next
-        prompt renders that as the prompt-time ``skipped`` overlay
-        (never as stored content). Fail-soft: without the stamp the turn
-        merely behaves like today (dropped on the next run's repair).
+        next run, not be discarded as scaffolding. A silent run rewrites
+        its turn as ledger lines, one per message it read and did not
+        answer, so the next prompt gets the gist instead of the wall.
+        Fail-soft: without the stamp the turn merely behaves like today
+        (dropped on the next run's repair).
         """
         memory = await ctx.store.get("memory", default=None)
         if memory is None:
             return
-        serials = await ctx.store.get("turn_serials", default=None)
+        serials = await ctx.store.get("turn_serials", default=None) or []
         messages = await memory.aget_all()
         for i in range(len(messages) - 1, -1, -1):
             msg = messages[i]
@@ -997,12 +992,19 @@ class FunctionCallingAgentWorkflow(Workflow):
                 msg.additional_kwargs
             ):
                 kwargs = {**msg.additional_kwargs, TURN_HANDLED_KWARG: True}
+                content = str(msg.content or "")
                 if silent and serials:
-                    kwargs[SKIPPED_SERIALS_KWARG] = list(serials)
+                    result = await self.stored_triage_result(ctx)
+                    gist = result.verdict.gist if result is not None else ""
+                    content = records.ledger_turn(
+                        content,
+                        gist=gist,
+                        newest_serial=max(serials, default=0),
+                    )
                 messages[i] = ChatMessage(
                     role=msg.role,
                     blocks=list(msg.blocks),
-                    content=msg.content,
+                    content=content,
                     additional_kwargs=kwargs,
                 )
                 break

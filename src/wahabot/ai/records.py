@@ -1,4 +1,4 @@
-"""Render inbound messages as records — the Phase 1 turn grammar.
+"""Render inbound messages as records — the message-construction grammar.
 
 A pure module: callers pass already-resolved primitives (a formatted time
 label, a speaker token, a kind, a body, flag strings) and get text back.
@@ -6,15 +6,21 @@ Nothing here reads a WAHA event, the roster, the clock or the disk, so the
 grammar is testable in isolation and the same renderer serves the stored
 turn, the ``read_chat`` view and the golden suite.
 
-The grammar (one line per message, plus renderer-written payload lines)::
+The grammar (one line per live message, plus renderer-written payload
+lines)::
 
     [[<hh:mm> <speaker> #m<n>]] <kind> <flags> :: <body>
     > <body continuation, escaped>
       · <machine payload>
 
-Only the renderer writes the three line-anchored shapes — ``[[`` at column 0,
-``> `` continuations, ``  · `` payloads — so member text can contain those
-characters but never that shape (there is no denylist to maintain).
+Quiet messages the bot read and did not answer collapse to one ledger line
+instead, so an old backlog cannot recreate a wall of text::
+
+    <hh:mm> <speaker> <gist> — #m<n>
+
+Only the renderer writes the line-anchored shapes — ``[[`` at column 0,
+``> `` continuations, ``  · `` payloads, and ledger lines — so member text
+can contain those characters but never that shape (there is no denylist).
 """
 
 from __future__ import annotations
@@ -26,16 +32,27 @@ from collections.abc import Callable, Iterable, Sequence
 #: session prompt; the renderer only assembles the line.
 CONTINUATION_PREFIX = "> "
 PAYLOAD_PREFIX = "  · "
+LEDGER_SEPARATOR = " — "
 
 #: A record head: ``[[hh:mm speaker #m<n>]] kind flags...``.
 RECORD_HEAD_RE = re.compile(r"^(\[\[[^\]]*#m(\d+)\]\])\s+(\S+)(.*)$")
 
+#: A ledger line: ``hh:mm speaker <gist> — #m<n>`` (also ``dd.mm hh:mm``).
+LEDGER_RE = re.compile(
+    r"^(?P<time>\d{2}:\d{2}(?:\.\d{2})?|\d{2}\.\d{2} \d{2}:\d{2}) "
+    + r"(?P<speaker>.+) — #m(?P<serial>\d+)$"
+)
+
 #: A reference to an earlier record from a flag or payload.
 REFERENCE_RE = re.compile(r"(?:quote=#m|to: #m)(\d+)")
 
+#: How many body words a mechanical ledger gist keeps.
+GIST_WORDS = 8
+GIST_CHARS = 120
+
 
 def record_serials(text: str) -> list[int]:
-    """Every record serial in *text*, in order."""
+    """Every live record serial in *text*, in order (ledger lines excluded)."""
     return [
         int(match.group(2))
         for line in text.splitlines()
@@ -43,65 +60,36 @@ def record_serials(text: str) -> list[int]:
     ]
 
 
-def apply_skipped(text: str, skipped: set[int]) -> str:
-    """Insert the prompt-time ``skipped`` flag on the chosen records.
-
-    The stored turn never carries this overlay — a silent run saw the
-    records but did not answer them, and only the next prompt needs to say
-    so. Insertion follows the grammar's flag order (media slots, then
-    state), so an overlaid line is indistinguishable from one rendered
-    skipped in the first place.
-    """
-    if not skipped:
-        return text
-    out: list[str] = []
-    for line in text.splitlines():
-        match = RECORD_HEAD_RE.match(line)
-        if match is None or int(match.group(2)) not in skipped:
-            out.append(line)
-            continue
-        out.append(add_skipped_flag(match))
-    return "\n".join(out)
-
-
-def add_skipped_flag(match: re.Match[str]) -> str:
-    """Return one record line with ``skipped`` inserted, body untouched."""
-    head, kind, rest = match.group(1), match.group(3), match.group(4)
-    flags_part, separator, body = rest.partition(" :: ")
-    flags = flags_part.split()
-    if "skipped" not in flags:
-        index = 0
-        while index < len(flags) and (
-            flags[index] == "addressed"
-            or flags[index].startswith(("image#", "video#", "album#"))
-        ):
-            index += 1
-        flags.insert(index, "skipped")
-    tail = f" {kind}" + (f" {' '.join(flags)}" if flags else "")
-    if separator:
-        tail += f" :: {body}"
-    return f"{head}{tail}"
+def ledger_serial(line: str) -> int:
+    """The serial named by a ledger line, or 0."""
+    match = LEDGER_RE.match(line)
+    return int(match.group("serial")) if match else 0
 
 
 def record_blocks(text: str) -> list[tuple[int, str]]:
-    """Split *text* into ``(serial, block)``; serial 0 for non-record lines.
+    """Split *text* into signed blocks.
 
-    A record owns its continuation and payload lines; anything that is not
-    a record head (a stray header or policy line) is kept as its own block
-    so a cap never swallows context it cannot classify.
+    A live record owns its continuation and payload lines and carries its
+    positive serial; a ledger line carries its serial negated so the cap can
+    tell a gist line from a live record. Anything unclassified is serial 0.
     """
     blocks: list[tuple[int, str]] = []
     for line in text.splitlines():
         match = RECORD_HEAD_RE.match(line)
         if match is not None:
             blocks.append((int(match.group(2)), line))
-        elif blocks and (
+            continue
+        ledger = ledger_serial(line)
+        if ledger:
+            blocks.append((-ledger, line))
+            continue
+        if blocks and (
             line.startswith(CONTINUATION_PREFIX) or line.startswith(PAYLOAD_PREFIX)
         ):
             serial, block = blocks[-1]
             blocks[-1] = (serial, f"{block}\n{line}")
-        else:
-            blocks.append((0, line))
+            continue
+        blocks.append((0, line))
     return blocks
 
 
@@ -118,71 +106,175 @@ def cap_turn(
     max_tokens: int,
     token_counter: Callable[[str], int],
 ) -> str:
-    """Keep the current turn, the newest *window* older records and quotes.
+    """Keep the current turn, the newest *window* older records and its ledger.
 
-    The current burst is always kept; older records are selected newest
-    first up to *window*, and any record an older selected record quotes
-    or reacts to is kept too. Then the oldest selected record is dropped
-    one at a time until the result fits *max_tokens* — never the newest
-    record, so the turn always keeps the message being answered.
+    The current burst is always kept; older live records are selected newest
+    first up to *window*, and any record an older selected record quotes or
+    reacts to is kept too. Ledger lines are kept unless a live record for the
+    same serial supersedes them. Then the oldest block — ledger first, because
+    it is older — is dropped one at a time until the result fits
+    *max_tokens*; the newest live record always stays.
     """
     blocks = record_blocks(text)
-    serials = [serial for serial, _ in blocks if serial]
-    if len(serials) <= 1:
+    live = [serial for serial, _ in blocks if serial > 0]
+    if not live:
         return text
     current = {int(serial) for serial in keep_serials}
     kept = select_blocks(blocks, text, current, window)
-    kept = trim_blocks(kept, current, max_tokens, token_counter)
+    kept = trim_blocks(kept, max_tokens, token_counter)
     return "\n".join(block for _, block in kept)
 
 
 def select_blocks(
     blocks: list[tuple[int, str]], text: str, current: set[int], window: int
 ) -> list[tuple[int, str]]:
-    """Select the current burst, the newest *window* older records and quotes."""
-    serials = [serial for serial, _ in blocks if serial]
+    """Select the current burst, the newest *window* records, quotes and ledger."""
+    live = [serial for serial, _ in blocks if serial > 0]
     selected: set[int] = set(current)
-    older = [serial for serial in serials if serial not in current]
+    older = [serial for serial in live if serial not in current]
     selected.update(older[-max(window, 0) :])
-    selected.update(referenced_serials(text) & set(serials))
-    selected.add(serials[-1])
+    selected.update(referenced_serials(text) & set(live))
+    selected.add(live[-1])
+    live_set = set(live)
     return [
-        (serial, block) for serial, block in blocks if not serial or serial in selected
+        (serial, block)
+        for serial, block in blocks
+        if keep_block(serial, selected, live_set)
     ]
+
+
+def keep_block(serial: int, selected: set[int], live: set[int]) -> bool:
+    """Whether a block survives selection: unclassified, selected live, or ledger."""
+    if serial == 0:
+        return True
+    if serial > 0:
+        return serial in selected
+    return -serial not in live
 
 
 def trim_blocks(
     blocks: list[tuple[int, str]],
-    current: set[int],
     max_tokens: int,
     token_counter: Callable[[str], int],
 ) -> list[tuple[int, str]]:
-    """Drop the oldest selected records until the turn fits the token ceiling."""
+    """Drop the oldest selected blocks until the turn fits the token ceiling."""
     kept = blocks
     while (
         token_counter("\n".join(block for _, block in kept)) > max_tokens
         and len([serial for serial, _ in kept if serial]) > 1
     ):
-        kept = drop_oldest(kept, current)
+        kept = drop_oldest(kept)
     return kept
 
 
-def drop_oldest(
-    blocks: list[tuple[int, str]], current: set[int]
-) -> list[tuple[int, str]]:
-    """Drop the oldest block that is not the newest record.
+def drop_oldest(blocks: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Drop the oldest block, never the newest live record.
 
-    Non-current records go first; within the current burst the oldest is
-    dropped only when nothing older is left. The final record always stays.
+    Ledger serials are older than the live window, so their absolute serial
+    wins the comparison; the final live record is never a candidate.
     """
-    records = [index for index, (serial, _) in enumerate(blocks) if serial]
-    if len(records) <= 1:
+    serials = [serial for serial, _ in blocks if serial]
+    if len(serials) <= 1:
         return blocks
-    drop = next(
-        (index for index in records[:-1] if blocks[index][0] not in current),
-        records[0],
-    )
+    newest = max((serial for serial in serials if serial > 0), default=0)
+    candidates = [
+        index for index, (serial, _) in enumerate(blocks) if serial and serial != newest
+    ]
+    if not candidates:
+        return blocks
+    drop = min(candidates, key=lambda index: abs(blocks[index][0]))
     return blocks[:drop] + blocks[drop + 1 :]
+
+
+def record_to_ledger(block: str, gist: str = "") -> str | None:
+    """One record block as a ledger line, dropping its payload and body detail."""
+    match = RECORD_HEAD_RE.match(block.splitlines()[0])
+    if match is None:
+        return None
+    time_label, speaker = split_head(match.group(1))
+    kind = match.group(3)
+    body = record_body_text(block, match.group(4))
+    words = gist.strip() or mechanical_gist(body, kind, block)
+    return f"{time_label} {speaker} {words}{LEDGER_SEPARATOR}#m{match.group(2)}"
+
+
+def split_head(head: str) -> tuple[str, str]:
+    """``[[hh:mm Name #m1]]`` -> ``(hh:mm, Name)``; speaker spaces stay."""
+    inner = head[2:-2]
+    left, _, _ = inner.rpartition(" #m")
+    time_label, _, speaker = left.partition(" ")
+    return time_label, speaker
+
+
+def record_body_text(block: str, rest: str) -> str:
+    """The member text of a record block, including escaped continuation lines."""
+    _, separator, first = rest.partition(" :: ")
+    if not separator:
+        return ""
+    parts = [first, *continuation_text(block)]
+    return " ".join(" ".join(parts).split())
+
+
+def continuation_text(block: str) -> list[str]:
+    """The body continuation lines of a block (payload lines excluded)."""
+    return [
+        line[len(CONTINUATION_PREFIX) :]
+        for line in block.splitlines()[1:]
+        if line.startswith(CONTINUATION_PREFIX)
+    ]
+
+
+def mechanical_gist(body: str, kind: str, block: str = "") -> str:
+    """A deterministic one-line gist when no reader supplied one."""
+    text = " ".join(body.split())
+    if kind == "reaction":
+        target = reaction_target(block)
+        words = f"reacted {text or 'to a message'}"
+        return f"{words} {target}".strip()[:GIST_CHARS]
+    if text.startswith(("http://", "https://")):
+        words = "shared a link"
+    elif text:
+        words = " ".join(text.split()[:GIST_WORDS])
+        if len(text.split()) > GIST_WORDS:
+            words = f"{words}…"
+    else:
+        words = KIND_GISTS.get(kind, "sent a message")
+    return words[:GIST_CHARS]
+
+
+def reaction_target(block: str) -> str:
+    """The ``to: …`` payload of a reaction record, if it has one."""
+    for line in block.splitlines():
+        if line.startswith(PAYLOAD_PREFIX):
+            payload = line[len(PAYLOAD_PREFIX) :]
+            if payload.startswith("to: "):
+                return payload
+    return ""
+
+
+KIND_GISTS = {
+    "image": "sent an image",
+    "video": "sent a video",
+    "audio": "sent a voice note",
+    "sticker": "sent a sticker",
+    "document": "sent a document",
+    "album": "sent photos",
+    "link": "shared a link",
+    "reaction": "sent a reaction",
+}
+
+
+def ledger_turn(text: str, *, gist: str = "", newest_serial: int = 0) -> str:
+    """Rewrite a quiet turn's records as ledger lines, keeping existing ones."""
+    out: list[str] = []
+    for serial, block in record_blocks(text):
+        if serial > 0:
+            line = record_to_ledger(block, gist if serial == newest_serial else "")
+            if line is not None:
+                out.append(line)
+        elif block.strip():
+            out.append(block)
+    return "\n".join(out)
 
 
 def escape_body(body: str) -> str:
@@ -211,13 +303,13 @@ def format_record(
     """One record line (plus any payload lines) for one inbound message.
 
     ``flags`` are the presence-only tokens — media slots (``image#1``), then
-    state (``addressed``, ``skipped``, ``edited``, ``deleted``), then
-    ``quote=…`` / ``to: …`` — joined in the order given. ``body`` is escaped;
-    an empty body drops the `` :: `` tail entirely (a voice note or a bare
-    media record). ``payloads`` are renderer-written machine lines, already
-    formatted, one per line under the record. ``serial=0`` omits the
-    ``#m<n>`` token: the account's own output has no arrival serial, so a
-    ``read_chat`` view of a bot message renders ``[[hh:mm <bot>]]``.
+    state (``addressed``, ``edited``, ``deleted``), then ``quote=…`` /
+    ``to: …`` — joined in the order given. ``body`` is escaped; an empty body
+    drops the `` :: `` tail entirely (a voice note or a bare media record).
+    ``payloads`` are renderer-written machine lines, already formatted, one
+    per line under the record. ``serial=0`` omits the ``#m<n>`` token: the
+    account's own output has no arrival serial, so a ``read_chat`` view of a
+    bot message renders ``[[hh:mm <bot>]]``.
     """
     token = f" #m{serial}" if serial else ""
     head = f"[[{time_label} {speaker}{token}]] {kind}"
@@ -239,9 +331,10 @@ def format_header(
 ) -> str:
     """The prompt-time turn header, naming the newest record and the verdict.
 
-    ``count`` is the number of records in the turn and ``newest_serial`` their
-    highest ``#m<n>``. ``policy`` — the one-line answering rule for an
-    unaddressed group turn — renders on its own line below the header.
+    ``count`` is the number of live records in the turn and ``newest_serial``
+    their highest ``#m<n>``. Ledger lines are not live records and do not
+    count. ``policy`` — the one-line answering rule for an unaddressed group
+    turn — renders on its own line below the header.
     """
     plural = "s" if count != 1 else ""
     line = (

@@ -428,6 +428,11 @@ def test_silent_run_message_stays_in_context(bot: Bot) -> None:
     assert any("el partido de anoche" in turn for turn in follow_up_turns), (
         "the silent-run message must ride the next run's history"
     )
+    assert any(
+        "el partido de anoche" in line and " — #m" in line
+        for turn in follow_up_turns
+        for line in turn.splitlines()
+    ), "the silent run must be a ledger line"
     assert any("viste el partido" in turn for turn in follow_up_turns), (
         "the new message itself must ride its own run"
     )
@@ -514,8 +519,10 @@ def test_fromMe_own_message_folded(bot: Bot) -> None:
     turns = asyncio.run(remembered())
     folded = [c for r, c in turns if "operator typed this from the app" in c]
     assert folded, turns
-    # Tag first — the same shape a waking operator turn renders.
-    assert folded[0].startswith("[[") and "<operator>" in folded[0]
+    # The fold is a ledger line, not a live record.
+    assert not folded[0].startswith("[[") and "<operator>" in folded[0]
+    assert "operator typed this from the app" in folded[0]
+    assert " — #m" in folded[0]
     # A teammate's words are never stored as the bot's own.
     assert all(
         r != "MessageRole.ASSISTANT"
@@ -1819,7 +1826,7 @@ def test_reaction_fold_in(bot: Bot) -> None:
         ctx = handlers_contexts[(SESSION, CHAT_ID)]
         memory = await ctx.store.get("memory")
         messages = await memory.aget_all()
-        return [str(m.content) for m in messages if "]] reaction" in str(m.content)]
+        return [str(m.content) for m in messages if "reacted" in str(m.content)]
 
     notes = asyncio.run(reaction_notes())
     assert any("👍" in note and 'to: you "smoke reply one"' in note for note in notes)
@@ -2233,7 +2240,7 @@ def test_persistent_memory_roundtrip_wire(bot: Bot) -> None:
     bot.post(pc_event("operator typed pc", "PCOWN", from_me=True))
     assert len(bot.waha.sent) == 0
     assert any(
-        c.startswith("[[") and "<operator>" in c and "operator typed pc" in c
+        not c.startswith("[[") and "<operator>" in c and "operator typed pc" in c
         for c in persisted_contents()
     )
 
@@ -2257,8 +2264,7 @@ def test_persistent_memory_roundtrip_wire(bot: Bot) -> None:
     )
     assert len(llm.requests) == 0
     assert any(
-        "]] reaction" in c and 'to: you "smoke reply one"' in c
-        for c in persisted_contents()
+        "reacted" in c and 'to: you "smoke reply one"' in c for c in persisted_contents()
     )
 
 
@@ -2748,7 +2754,7 @@ def test_foreign_reaction_folds_name_and_jid(bot: Bot) -> None:
         ctx = handlers_contexts[(SESSION, CHAT_ID)]
         memory = await ctx.store.get("memory")
         messages = await memory.aget_all()
-        return [str(m.content) for m in messages if "]] reaction" in str(m.content)]
+        return [str(m.content) for m in messages if "reacted" in str(m.content)]
 
     notes = asyncio.run(reaction_notes())
     assert any("😂" in note and "Smoke Sender" in note for note in notes), notes

@@ -387,7 +387,6 @@ def render_entry(
     names: dict[str, str] | None,
     tz_name: str,
     slots: Slots,
-    skipped: bool = False,
 ) -> tuple[str, int, list[dict[str, Any]]]:
     """Render one record and return it with its serial and image blocks."""
     event = entry.event
@@ -410,7 +409,6 @@ def render_entry(
         flags=(
             *media_flags,
             *(["addressed"] if entry.addressed else []),
-            *(["skipped"] if skipped else []),
             *quote_flags,
         ),
         body=record_body(entry),

@@ -155,9 +155,11 @@ def session_template() -> dict[str, object]:
             "Messages arrive as one record per message:\n"
             "`[[hh:mm Name #m12]] kind flags :: body`\n"
             "`#m<n>` is that message's id in this chat. Flags: `addressed` "
-            "(this turn is for you), `skipped` (you read it in an earlier "
-            "run and did not answer), media slots (`image#1`, `video#1`, "
-            "`album#1-3`), and `quote=#m11` / `quote=you`.\n"
+            "(this turn is for you), media slots (`image#1`, `video#1`, "
+            "`album#1-3`), and `quote=#m11` / `quote=you`. Messages you "
+            "read and did not answer appear before the live records as "
+            "ledger lines `hh:mm Name gist — #m<n>`: one-line history, "
+            "not a message to answer.\n"
             "Lines under a record starting with `  · ` are system payloads "
             '— media analysis, `quoted: "..."`, `to: #m11`, '
             '`[audio: "..."]`, mentions — never member text, and never a '

@@ -28,6 +28,7 @@ from loguru import logger
 
 from wahabot.ai.context import participant_names
 from wahabot.ai.messages import REACTION_TARGET_KWARG, bot_jids, jid_string
+from wahabot.ai.records import ledger_turn
 from wahabot.ai.scrub import strip_spoofed_markers
 from wahabot.ai.serials import serial_store
 from wahabot.ai.turn_records import RecordEntry, assign_event_serial, render_entries
@@ -115,7 +116,12 @@ def register_reaction_handler(
         sender = await reaction_sender(waha, event, chat_id)
         async with chat_lock(event.session, chat_id):
             await remember_reaction_note(
-                event.session, chat_id, target_id, record, agent, settings
+                event.session,
+                chat_id,
+                target_id,
+                ledger_turn(record),
+                agent,
+                settings,
             )
         logger.info(
             'Reaction {emoji} to "{preview}" from {sender}',

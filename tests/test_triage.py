@@ -563,7 +563,9 @@ def test_hard_muted_chat_never_answers_but_still_runs_the_gate(
 
 
 def test_blocked_group_does_not_start_the_agent(monkeypatch: pytest.MonkeyPatch) -> None:
-    gate = FakeGate(result=TriageResult(TriageVerdict(participate=False)))
+    gate = FakeGate(
+        result=TriageResult(TriageVerdict(participate=False, gist="joked about the chat"))
+    )
     agent = FunctionCallingAgentWorkflow(
         llm=Mock(spec=FunctionCallingLLM),
         system_prompt="x",
@@ -597,15 +599,14 @@ def test_blocked_group_does_not_start_the_agent(monkeypatch: pytest.MonkeyPatch)
     run.assert_not_awaited()
 
 
-def test_gate_outage_wakes_the_agent_in_an_unaddressed_group(
+def test_gate_outage_keeps_an_unaddressed_group_silent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A gate outage degrades to the pre-gate behaviour: the agent runs.
+    """Block mode fails closed: an unavailable gate does not wake the agent.
 
-    An unavailable gate (failure/timeout) must not mute the chat — only a
-    verdict the gate actually produced can decline a turn. A failed
-    verdict in block mode starts the run; the stored verdict keeps the
-    run unhardened and the journal shows the failure.
+    Only a verdict that grants participation starts an unaddressed group
+    run; the failed verdict is stored/audited and the turn is kept as a
+    mechanical ledger line so the next prompt still knows it happened.
     """
     gate = FakeGate(result=TriageResult.fallback(failed=True))
     agent = FunctionCallingAgentWorkflow(
@@ -634,10 +635,10 @@ def test_gate_outage_wakes_the_agent_in_an_unaddressed_group(
 
     reply, target, stored = asyncio.run(scenario())
 
-    assert reply == "saw it"
+    assert reply == ""
     assert target.chat_id == GROUP
     assert gate.calls == 1
-    run.assert_awaited_once()
+    run.assert_not_awaited()
     assert isinstance(stored, dict) and stored["failed"] is True
 
 
@@ -720,7 +721,9 @@ def test_gate_blocks_an_unaddressed_group_on_the_wire(bot: Any) -> None:
     config = json.loads(config_path.read_text())
     config["group_participation"] = "judicious"
     config_path.write_text(json.dumps(config))
-    gate = FakeGate(result=TriageResult(TriageVerdict(participate=False)))
+    gate = FakeGate(
+        result=TriageResult(TriageVerdict(participate=False, gist="joked about the chat"))
+    )
     bot.agent.triage = cast(Any, gate)
     before = len(bot.stack.llm.requests)
 
@@ -732,8 +735,31 @@ def test_gate_blocks_an_unaddressed_group_on_the_wire(bot: Any) -> None:
     assert (HARNESS_SESSION, CHAT_ID) in bot.waha.seen_chats
     memory = load_memory(bot.settings.data_dir, HARNESS_SESSION, CHAT_ID)
     assert memory is not None
-    assert any(
-        "lol did you see that" in str(message.content) for message in memory.get_all()
+    contents = [str(message.content) for message in memory.get_all()]
+    assert any("joked about the chat" in text and "— #m" in text for text in contents)
+    assert all("lol did you see that" not in text for text in contents)
+
+
+def test_parse_verdict_clamps_the_ledger_gist() -> None:
+    raw = json.dumps(
+        {
+            "adversarial": False,
+            "escalate": False,
+            "participate": False,
+            "why": "banter",
+            "gist": '"' + " ".join(f"word{i}" for i in range(20)) + '"',
+        }
+    )
+    verdict = parse_verdict(raw)
+    assert len(verdict.gist.split()) == 16
+    assert verdict.gist.endswith("…")
+    assert '"' not in verdict.gist
+
+
+def test_gist_roundtrips_through_context_state() -> None:
+    result = TriageResult(TriageVerdict(gist="asked about the invoice"))
+    assert result_from_dict(result_to_dict(result)).verdict.gist == (
+        "asked about the invoice"
     )
 
 
@@ -751,7 +777,9 @@ def test_gate_silenced_turn_survives_into_the_next_run(bot: Any) -> None:
     config = json.loads(config_path.read_text())
     config["group_participation"] = "judicious"
     config_path.write_text(json.dumps(config))
-    gate = FakeGate(result=TriageResult(TriageVerdict(participate=False)))
+    gate = FakeGate(
+        result=TriageResult(TriageVerdict(participate=False, gist="joked about the chat"))
+    )
     bot.agent.triage = cast(Any, gate)
 
     # Message 1: unaddressed banter; the gate keeps the bot silent.
@@ -771,9 +799,10 @@ def test_gate_silenced_turn_survives_into_the_next_run(bot: Any) -> None:
         for m in llm.requests[0]["messages"]
         if m.get("role") == "user"
     ]
-    assert any("lol did you see that" in turn for turn in turns), (
-        "the gate-silenced message must ride the next run's history"
+    assert any("joked about the chat" in turn and "— #m" in turn for turn in turns), (
+        "the gate-silenced message must ride the next run as a ledger line"
     )
+    assert all("lol did you see that" not in turn for turn in turns)
     assert any("viste" in turn or "did you think" in turn for turn in turns), (
         "the new message itself must ride its own run"
     )

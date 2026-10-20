@@ -268,8 +268,10 @@ Before each run reaches the LLM, the buffered history passes through
 3. relies on the prompt-time **turn header** (`history.turn_header` →
    `records.format_header`) for the count, newest serial, one
    addressing verdict and backlog flag. The header is not stored; it is
-   prepended only for the prompt. `skipped_serials` is a prompt-time
-   overlay applied there too, never written into memory;
+   prepended only for the prompt. Messages the bot read and did not
+   answer are stored as one-line ledger entries (`hh:mm speaker gist —
+   #m<n>`) instead of verbatim records, so a quiet backlog costs one line
+   per message and still recalls its serial;
 4. runs the workflow — `await agent.run(input=user_msg, image_blocks=..., ctx=ctx)`;
 5. returns `(reply, target)` — the run's final text and its run-scoped
    delivery holder (the `sent`/`reacted` latches), so the handler can

@@ -56,7 +56,6 @@ from wahabot.ai.messages import (
     MERGED_TURNS_KWARG,
     OPERATOR_FOLD_KWARG,
     REACTION_TARGET_KWARG,
-    SKIPPED_SERIALS_KWARG,
     TURN_HANDLED_KWARG,
     TURN_SERIALS_KWARG,
     WRAP_UP_NOTE_KWARG,
@@ -551,12 +550,6 @@ def merge_pair(first: ChatMessage, second: ChatMessage) -> ChatMessage:
     kwargs: dict[str, Any] = {**first.additional_kwargs, **second.additional_kwargs}
     if is_inbound_chat_turn(first) and is_inbound_chat_turn(second):
         kwargs[MERGED_TURNS_KWARG] = True
-        skipped = [
-            *(first.additional_kwargs.get(SKIPPED_SERIALS_KWARG) or []),
-            *(second.additional_kwargs.get(SKIPPED_SERIALS_KWARG) or []),
-        ]
-        if skipped:
-            kwargs[SKIPPED_SERIALS_KWARG] = list(dict.fromkeys(skipped))
     return ChatMessage(
         role=first.role,
         content=f"{first.content or ''}\n{second.content or ''}",
@@ -691,13 +684,13 @@ def turn_header(
     incident's essay was made of; stating it cut the essay rate roughly
     fivefold in the replay, and the header alone (no grammar) did it.
 
-    Records turns derive the count and newest serial from the record lines
-    themselves and get the ``skipped`` overlay here (prompt-time only: the
-    stored turn stays unmarked). A prose turn (an operator command) keeps
-    the id-note count. A single addressed DM message needs no header and
-    gets none; a group turn always does, and a DM gets one only when it
-    carries news. Returns a copy for the prompt: the caller stores the
-    unmarked list, so nothing accumulates.
+    Records turns derive the count and newest serial from the live record
+    lines themselves; ledger lines are older quiet messages and do not
+    count. A prose turn (an operator command) keeps the id-note count. A
+    single addressed DM message needs no header and gets none; a group
+    turn always does, and a DM gets one only when it carries news.
+    Returns a copy for the prompt: the caller stores the unmarked list,
+    so nothing accumulates.
     """
     if not messages:
         return messages
@@ -720,8 +713,8 @@ def turn_header(
 def turn_content_and_header(
     message: ChatMessage, *, group: bool, addressed: bool
 ) -> tuple[str, str | None]:
-    """Apply the skipped overlay and build the header, or ``(content, None)``."""
-    content = apply_skipped_overlay(message, str(message.content or ""))
+    """Build the header for a turn, or ``(content, None)`` when none is due."""
+    content = str(message.content or "")
     count, newest = turn_numbers(content)
     backlog = bool(message.additional_kwargs.get(MERGED_TURNS_KWARG))
     if not shows_turn_header(group=group, count=count, backlog=backlog):
@@ -733,15 +726,6 @@ def turn_content_and_header(
         backlog=backlog,
         policy="" if addressed or not group else UNADDRESSED_POLICY,
     )
-
-
-def apply_skipped_overlay(message: ChatMessage, content: str) -> str:
-    """Apply ``skipped_serials`` to the stored records, prompt-time only."""
-    serials = records.record_serials(content)
-    if not serials:
-        return content
-    skipped = message.additional_kwargs.get(SKIPPED_SERIALS_KWARG) or ()
-    return records.apply_skipped(content, {int(serial) for serial in skipped})
 
 
 def turn_numbers(content: str) -> tuple[int, int]:

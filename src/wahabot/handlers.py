@@ -45,6 +45,7 @@ from wahabot.ai.messages import (
     video_media,
 )
 from wahabot.ai.observability import chat_trace_attributes, enable_langfuse
+from wahabot.ai.records import ledger_turn
 from wahabot.ai.serials import serial_store
 from wahabot.ai.tools import build_default_tools
 from wahabot.ai.tools.url_images import fetch_url_images, image_urls
@@ -425,7 +426,7 @@ async def remember_own_message(
         settings,
         ChatMessage(
             role=MessageRole.USER,
-            content=content,
+            content=ledger_turn(content),
             additional_kwargs={OPERATOR_FOLD_KWARG: True},
         ),
     )

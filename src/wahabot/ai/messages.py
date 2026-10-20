@@ -42,10 +42,8 @@ WRAP_UP_NOTE_KWARG = "wrap_up_note"
 #: handled by construction (never the trailing scaffolding of a run).
 OPERATOR_FOLD_KWARG = "operator_fold"
 
-#: Kwarg keys for the records grammar: the serials the run read, and the
-#: subset it read and did not answer (the prompt-time ``skipped`` overlay).
+#: Kwarg key for the serials the run read (the live burst for the turn cap).
 TURN_SERIALS_KWARG = "turn_serials"
-SKIPPED_SERIALS_KWARG = "skipped_serials"
 
 
 def jid_string(value: Any) -> str:
