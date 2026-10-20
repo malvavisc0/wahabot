@@ -118,6 +118,21 @@ class SerialRegistry:
                 self.ordinals[jid] = ordinal
             return ordinal
 
+    def known_ordinal(self, jid: str) -> int:
+        """The stored ordinal for *jid*, or 0 when none was persisted.
+
+        A read-only lookup: it never allocates, so a caller rendering a
+        mere mention (not the sender of a stored message) cannot pin an
+        ordinal that a restart would forget — it renders ``<member-?>``
+        instead. Ordinals persist only as part of an ingested message's
+        entry, so the sender path stays the one allocation site.
+        """
+        if not jid:
+            return 0
+        with self.lock:
+            self.load()
+            return self.ordinals.get(jid, 0)
+
     def next(
         self, *, message_id: str, jid: str = "", name: str = "", ordinal: int = 0
     ) -> int:
@@ -137,6 +152,9 @@ class SerialRegistry:
             self.entries[serial] = entry
             self.by_message[message_id] = serial
             self.by_hash[message_key(message_id)] = serial
+            if ordinal and jid and jid not in self.ordinals:
+                self.ordinals[jid] = ordinal
+                self.next_ordinal = max(self.next_ordinal, ordinal + 1)
             self.append(entry)
             return serial
 

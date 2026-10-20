@@ -57,6 +57,13 @@ def test_recall_drops_live_window_duplicates() -> None:
     assert dedupe_recall(slices, live) == ["user: something from an older turn"]
 
 
+def test_recall_keeps_a_slice_that_a_live_record_only_references() -> None:
+    """A bare ``quote=#m<n>`` reference is a pointer, not a verbatim copy."""
+    live = ["[[18:00 Ada #m12]] text quote=#m11 :: what did you mean"]
+    slices = ["user: [[18:00 Ada #m11]] text :: the only full text of it"]
+    assert dedupe_recall(slices, live) == slices
+
+
 def test_recap_keeps_only_the_newest_lines() -> None:
     recap = "\n".join(f"line {number}" for number in range(20))
     kept = capped_recap(recap).splitlines()

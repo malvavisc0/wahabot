@@ -3065,3 +3065,88 @@ def test_dm_silent_run_is_a_ledger_line(bot: Bot) -> None:
         if "mensaje que no contestare" in line
     )
     assert _wait(lambda: any(chat == dm for _, chat, _, _ in bot.waha.sent))
+
+
+def _judicious_bot(bot: Bot) -> Bot:
+    """The same bot with ``group_participation: judicious``, hot-reloaded.
+
+    The config file is rewritten in place (the reloader stats it per
+    event), so no re-registration is needed.
+    """
+    path = bot.settings.access_config
+    config = json.loads(path.read_text())
+    config["group_participation"] = "judicious"
+    path.write_text(json.dumps(config))
+    return bot
+
+
+def _group_event(mid: str, body: str, participant: str) -> dict[str, Any]:
+    """A group text event that does not name the bot (unaddressed)."""
+    event = waha_event(mid)
+    event["payload"]["participant"] = participant
+    event["payload"]["body"] = body
+    event["payload"]["_data"] = dict(event["payload"]["_data"])
+    event["payload"]["_data"]["id"] = {"_serialized": f"false_{CHAT_ID}_{mid}"}
+    return event
+
+
+def test_unaddressed_group_turn_carries_the_negative_header(bot: Bot) -> None:
+    """The header the unaddressed judicious path renders: no addressed flag,
+    the unaddressed verdict, and the model may still answer."""
+    _judicious_bot(bot)
+    llm = bot.stack.llm
+    llm.requests.clear()
+    bot.waha.sent.clear()
+    bot.post(_group_event("GU1", "jaja mira el video", "491555000001@c.us"))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    turn = user_turns_of(llm.requests[0])[0]
+    assert turn.startswith("[turn: 1 message | newest #m1 | addressed: no")
+    assert "backlog: no" in turn.splitlines()[0]
+    assert "]] text :: jaja mira el video" in turn
+    assert "addressed ::" not in turn
+    # No gate in the harness: the run is allowed to answer, and the fake
+    # model does.
+    assert _wait(lambda: any(chat == CHAT_ID for _, chat, _, _ in bot.waha.sent))
+
+
+def test_group_backlog_ledger_then_mention_answers(bot: Bot) -> None:
+    """Scenario A then B of the simulation, wired: quiet group messages a
+    run declined stay as ledger lines, and the next run — woken by an
+    @kai mention — reads them as one-line history, carries the backlog
+    header, and answers the newest record."""
+    _judicious_bot(bot)
+    llm = bot.stack.llm
+    llm.requests.clear()
+    bot.waha.sent.clear()
+    # Run 1 declines the quiet chatter: the model stays silent.
+    llm.override = tool_call_response(
+        "stay_silent",
+        {"reason": "banter between others"},
+        call_id="call_group_silent",
+        response_id="chatcmpl-group-silent",
+        created=1788525845,
+    )
+    bot.post(_group_event("GQ1", "jaja mira el video", "491555000001@c.us"))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    assert bot.waha.sent == []
+
+    # Run 2: a member @kai-mentions; the quiet turn must ride as ledger
+    # lines, the header must state backlog and the addressed verdict.
+    llm.clear()
+    llm.override = None
+    bot.post(_group_event("GQ2", "kai ¿ya está lista la factura?", "491555000002@c.us"))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    turns = user_turns_of(llm.requests[0])
+    quiet = [
+        line
+        for turn in turns
+        for line in turn.splitlines()
+        if "jaja mira el video" in line
+    ]
+    assert quiet, "the declined turn must ride the next run's history"
+    assert all(" — #m" in line for line in quiet)
+    assert all("]] text" not in line for line in quiet)
+    live = [turn for turn in turns if "factura" in turn]
+    assert live, "the new mention must ride its own run"
+    assert live[0].startswith("[turn: 1 message | newest #m2 | addressed: yes")
+    assert _wait(lambda: any(chat == CHAT_ID for _, chat, _, _ in bot.waha.sent))

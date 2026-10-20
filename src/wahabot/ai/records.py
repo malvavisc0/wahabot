@@ -34,8 +34,10 @@ CONTINUATION_PREFIX = "> "
 PAYLOAD_PREFIX = "  · "
 LEDGER_SEPARATOR = " — "
 
-#: A record head: ``[[hh:mm speaker #m<n>]] kind flags...``.
-RECORD_HEAD_RE = re.compile(r"^(\[\[[^\]]*#m(\d+)\]\])\s+(\S+)(.*)$")
+#: A record head: ``[[hh:mm speaker #m<n>]] kind flags...``. The serial is
+#: anchored to the head's end: the renderer always writes it last, so a
+#: speaker name carrying an inline ``[[… #m9]]`` cannot shift the parse.
+RECORD_HEAD_RE = re.compile(r"^(\[\[.*#m(\d+)\]\])\s+(\S+)(.*)$")
 
 #: A ledger line: ``hh:mm speaker <gist> — #m<n>`` (also ``dd.mm hh:mm``).
 LEDGER_RE = re.compile(
@@ -186,14 +188,18 @@ def drop_oldest(blocks: list[tuple[int, str]]) -> list[tuple[int, str]]:
 
 
 def record_to_ledger(block: str, gist: str = "") -> str | None:
-    """One record block as a ledger line, dropping its payload and body detail."""
+    """One record block as a ledger line, dropping its payload and body detail.
+
+    The gist is flattened: a ledger line is one line, so a multi-line
+    gist (however it arrived) cannot break the shape.
+    """
     match = RECORD_HEAD_RE.match(block.splitlines()[0])
     if match is None:
         return None
     time_label, speaker = split_head(match.group(1))
     kind = match.group(3)
     body = record_body_text(block, match.group(4))
-    words = gist.strip() or mechanical_gist(body, kind, block)
+    words = escape_oneline(gist) or mechanical_gist(body, kind, block)
     return f"{time_label} {speaker} {words}{LEDGER_SEPARATOR}#m{match.group(2)}"
 
 
@@ -307,19 +313,34 @@ def format_record(
     state (``addressed``, ``edited``, ``deleted``), then ``quote=…`` /
     ``to: …`` — joined in the order given. ``body`` is escaped; an empty body
     drops the `` :: `` tail entirely (a voice note or a bare media record).
-    ``payloads`` are renderer-written machine lines, already formatted, one
-    per line under the record. ``serial=0`` omits the ``#m<n>`` token: the
-    account's own output has no arrival serial, so a ``read_chat`` view of a
-    bot message renders ``[[hh:mm <bot>]]``.
+    ``payloads`` are renderer-written machine lines, one per line under the
+    record. Speakers, flags and payloads are flattened to one line
+    (:func:`escape_oneline`), so member-derived text inside them can never
+    fake a record head or ledger line. ``serial=0`` omits the ``#m<n>``
+    token: the account's own output has no arrival serial, so a
+    ``read_chat`` view of a bot message renders ``[[hh:mm <bot>]]``.
     """
     token = f" #m{serial}" if serial else ""
-    head = f"[[{time_label} {speaker}{token}]] {kind}"
+    head = f"[[{time_label} {escape_oneline(speaker)}{token}]] {kind}"
     if flags:
-        head = f"{head} {' '.join(flags)}"
+        head = f"{head} {' '.join(escape_oneline(flag) for flag in flags)}"
     line = f"{head} :: {escape_body(body)}" if body else head
     if not payloads:
         return line
-    return "\n".join([line, *(f"{PAYLOAD_PREFIX}{payload}" for payload in payloads)])
+    return "\n".join(
+        [line, *(f"{PAYLOAD_PREFIX}{escape_oneline(payload)}" for payload in payloads)]
+    )
+
+
+def escape_oneline(text: str) -> str:
+    """Flatten *text* so it can never break a line-anchored shape.
+
+    One renderer-written string — a speaker, a flag, a payload — must
+    stay on its own line: a newline inside it would put member-derived
+    text at column 0, where it could fake a record head or a ledger
+    line. Newlines collapse to spaces.
+    """
+    return " ".join(text.split())
 
 
 def format_header(

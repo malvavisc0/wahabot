@@ -74,8 +74,9 @@ class Settings(BaseSettings):
     gate_api_base: str = "http://omnitron.tago.lan:9194/v1"
     gate_model: str = "d1-3B"
     gate_api_key: str = ""
-    #: Hard cap on one gate verdict, in seconds. A timeout falls back
-    #: to a normal run.
+    #: Hard cap on one gate verdict, in seconds. A timed-out or failed
+    #: verdict leaves an unaddressed group turn silent (block mode fails
+    #: closed); DMs and addressed turns run regardless.
     gate_timeout: float = 4.0
     memory_token_limit: int = 16000
     #: How many older records a merged live turn keeps before the current

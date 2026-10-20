@@ -702,11 +702,12 @@ def turn_header(
 
     Records turns derive the count and newest serial from the live record
     lines themselves; ledger lines are older quiet messages and do not
-    count. A prose turn (an operator command) keeps the id-note count. A
-    single addressed DM message needs no header and gets none; a group
-    turn always does, and a DM gets one only when it carries news.
-    Returns a copy for the prompt: the caller stores the unmarked list,
-    so nothing accumulates.
+    count. A prose turn (an operator command) keeps the id-note count.
+    Every group and direct turn carries a header — a direct turn always
+    needs its DM policy line, even a single addressed message; a prose
+    command turn gets one only when it carries news (more than one
+    message or a fused backlog). Returns a copy for the prompt: the
+    caller stores the unmarked list, so nothing accumulates.
     """
     if not messages:
         return messages

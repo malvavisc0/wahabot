@@ -4,15 +4,15 @@ The gate is a small classifier that runs outside the agent's context. It
 labels hostile input, messages that need a human, and whether an
 unaddressed group message should get a reply at all. It is a filter, not
 an authority: a timeout, parse failure, or unavailable service never
-blocks a DM or an addressed turn, and never mutes a group either — an
-outage degrades to the pre-gate behaviour, where the agent runs and can
-still answer a real question. Fail-closed applies only to a verdict the
-gate actually produced: a reply that omits ``participate`` defaults to
-silence, so a gate that answers without granting participation leaves the
-unaddressed message unanswered instead of waking the agent to answer
-chatter that was never addressed to it. The escalation a verdict asks for
-is sent off the verdict's latency path, so a slow send can neither time
-the verdict out nor be cancelled by a run that ends first.
+blocks a DM or an addressed turn — race mode always runs. Block mode (an
+unaddressed ``judicious`` group turn) fails closed: an unavailable gate
+leaves the turn silent rather than waking the agent over unread chatter.
+Fail-closed also applies to a verdict the gate actually produced: a
+reply that omits ``participate`` defaults to silence, so a gate that
+answers without granting participation leaves the unaddressed message
+unanswered. The escalation a verdict asks for is sent off the verdict's
+latency path, so a slow send can neither time the verdict out nor be
+cancelled by a run that ends first.
 """
 
 from __future__ import annotations

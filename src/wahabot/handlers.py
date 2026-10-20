@@ -1024,8 +1024,8 @@ def register_agent_handler(
             return
         # The vision cap applies at collection time: once the shared
         # list holds ``vision_max_images`` entries, a further image can
-        # never ride the prompt (the run trims to the same cap), so
-        # downloading and captioning it would be pure waste.
+        # never ride the prompt, so downloading and captioning it would
+        # be pure waste.
         if settings.vision_max_images > 0 and len(images) >= settings.vision_max_images:
             entry.omitted += 1
             return
@@ -1041,8 +1041,15 @@ def register_agent_handler(
         images: list[dict[str, Any]],
         entry: RecordEntry,
     ) -> None:
-        """Fetch image URLs sniffed from one buffered body, if vision is on."""
+        """Fetch image URLs sniffed from one buffered body, if vision is on.
+
+        The vision cap applies here too: the shared list already holds
+        ``vision_max_images`` entries once the direct images of earlier
+        burst parts filled it, so fetching more would be pure waste.
+        """
         if not settings.vision or not body:
+            return
+        if settings.vision_max_images > 0 and len(images) >= settings.vision_max_images:
             return
         fetched = await asyncio.to_thread(
             fetch_url_images, settings, image_urls(body, settings.max_url_images)

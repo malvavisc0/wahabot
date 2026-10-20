@@ -24,13 +24,13 @@ fit the run's reserved budget raises :class:`ContextBudgetError`,
 notebook facts are dropped oldest-first instead.
 """
 
-import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
 from loguru import logger
 
 from wahabot.ai.history import ContextBudgetError
+from wahabot.ai.records import record_serials
 from wahabot.core.notebook import (
     KIND_RULE,
     NOTEBOOK_SNAPSHOT_TOKEN_LIMIT,
@@ -63,7 +63,6 @@ RECALL_PREAMBLE = (
     "Leads, verify before relying on them: older transcript slices, not "
     + "authoritative facts.\n\n"
 )
-LIVE_SERIAL_RE = re.compile(r"#m(\d+)")
 
 
 def render_pinned_block(
@@ -363,15 +362,16 @@ def recap_section(recap: str) -> str:
 def dedupe_recall(slices: Sequence[str], live_texts: Sequence[str]) -> list[str]:
     """Drop recalled slices the live window already carries.
 
-    A slice that names a serial in the live turn is the same conversation
-    the model can already read verbatim; a slice whose whole text is a
-    live line is a duplicate. Partial overlap is kept — a slice may carry
-    older neighbours the window does not.
+    A slice that names a serial of a live record in the turn is the same
+    conversation the model can already read verbatim; a slice whose whole
+    text is a live line is a duplicate. Partial overlap is kept — a slice
+    may carry older neighbours the window does not. Only the serials of
+    live record heads count: a bare ``quote=#m<n>`` / ``to: #m<n>``
+    reference inside the turn is a pointer, not a verbatim copy — dropping
+    a slice over a pointer would delete the only full text of #m<n>.
     """
     live = " ".join(" ".join(text.split()) for text in live_texts if text)
-    live_serials = {
-        int(serial) for text in live_texts for serial in LIVE_SERIAL_RE.findall(text)
-    }
+    live_serials = {serial for text in live_texts for serial in record_serials(text)}
     kept: list[str] = []
     for item in slices:
         normalized = " ".join(item.split())

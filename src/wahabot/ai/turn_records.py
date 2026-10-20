@@ -242,7 +242,14 @@ def mentions_parts(
     names: dict[str, str] | None,
     registry: SerialRegistry,
 ) -> list[str]:
-    """The ``mentions: @<typed> is <speaker>`` payload, JID-free."""
+    """The ``mentions: @<typed> is <speaker>`` payload, JID-free.
+
+    A mentioned JID with no roster name renders its stored ordinal when
+    one exists (persisted with an ingested message); otherwise
+    ``<member-?>`` — this path never allocates an ordinal, since an
+    unpersisted allocation would be reassigned to someone else after a
+    restart.
+    """
     mentioned = event.payload.get("_data", {}).get("mentionedJidList") or []
     jids = list(dict.fromkeys(j for j in map(jid_string, mentioned) if j))
     if not jids:
@@ -255,7 +262,8 @@ def mentions_parts(
             who = "you or your operator"
         else:
             name = display_name(jid, names)
-            who = name or f"<member-{registry.ordinal_for(jid)}>"
+            ordinal = registry.known_ordinal(jid)
+            who = name or (f"<member-{ordinal}>" if ordinal else "<member-?>")
         parts.append(f"@{user} is {who}")
     return ["mentions: " + "; ".join(parts)]
 
@@ -452,8 +460,11 @@ def read_record(
     ``read_chat`` and the prompt must agree on what a message looks like,
     and the console needs the ``#m<n>`` to act on. The registry is written
     at ingest only: a fetched message the bot never saw renders without a
-    serial (a raw id still addresses it), and the account's own output
-    never gets one — the sentinel ``quote=you`` / ``to: you`` carries it.
+    serial (a raw id still addresses it). The account's own ``fromMe``
+    rows render without one on purpose — the model cannot quote or react
+    to its own or the operator's output by token, only by the raw id it
+    holds when it has one; ``quote=you`` / ``to: you`` remain the prompt's
+    sentinels for them.
     """
     payload = dict(message)
     message_id = str(payload.get("id", ""))
@@ -461,15 +472,15 @@ def read_record(
         payload["from"] = chat_from_message_id(message_id)
     event = WahaEvent(event="message", session="", payload=payload)
     sender = event_sender(event)
-    serial = registry.serial_for(message_id)
+    serial = 0 if payload.get("fromMe") else registry.serial_for(message_id)
     if payload.get("fromMe"):
         speaker = (
             "<operator>" if authors.author(message_id) == AUTHOR_OPERATOR else "<bot>"
         )
     else:
         name = display_name(sender)
-        ordinal = None if name else registry.ordinal_for(sender)
-        speaker = speaker_token(event, name=name, ordinal=ordinal)
+        ordinal = registry.known_ordinal(sender)
+        speaker = speaker_token(event, name=name, ordinal=ordinal if ordinal else None)
     return format_record(
         time_label=time_label(event, tz_name),
         speaker=speaker,

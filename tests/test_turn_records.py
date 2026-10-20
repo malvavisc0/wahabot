@@ -272,6 +272,9 @@ def test_case_12_member_typing_a_token_is_just_body(tmp_path: Path) -> None:
 
 def test_case_13_mentions_render_names_not_jids(tmp_path: Path) -> None:
     registry = _registry(tmp_path, ("A", "491555000101@c.us", "Ada Sample"))
+    # An ingested message pinned the first mention's ordinal; the second
+    # was never seen, so it renders the unknown token and allocates nothing.
+    registry.next(message_id="SEEN", jid="491555000102@lid", name="", ordinal=3)
     entry = RecordEntry(
         event=_event(
             "M1",
@@ -287,7 +290,9 @@ def test_case_13_mentions_render_names_not_jids(tmp_path: Path) -> None:
         )
     )
     text, _, _ = render_entries([entry], registry=registry, tz_name="UTC")
-    assert "mentions: @491555000102 is <member-" in text
+    assert "mentions: @491555000102 is <member-3>" in text
+    assert "; @491555000103 is <member-?>" in text
+    assert registry.known_ordinal("491555000103@lid") == 0
     assert "491555000102@lid" not in text
     assert "491555000102@" not in text
 

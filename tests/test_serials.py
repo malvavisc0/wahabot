@@ -65,3 +65,18 @@ def test_compact_keeps_the_newest_entries(tmp_path: Path) -> None:
     assert registry.resolve("#m4") is not None
     assert registry.resolve("#m2") is None
     assert len(path.read_text().splitlines()) == 2
+
+
+def test_next_folds_an_ordinal_into_the_live_map(tmp_path: Path) -> None:
+    """An ordinal assigned with a new entry is readable before any reload."""
+    registry = SerialRegistry(tmp_path / "chat.ids.jsonl")
+    registry.next(message_id="a", jid="7@lid", name="", ordinal=3)
+    assert registry.known_ordinal("7@lid") == 3
+    assert registry.ordinal_for("7@lid") == 3
+
+
+def test_known_ordinal_never_allocates(tmp_path: Path) -> None:
+    registry = SerialRegistry(tmp_path / "chat.ids.jsonl")
+    assert registry.known_ordinal("9@lid") == 0
+    assert registry.ordinal_for("9@lid") == 1
+    assert registry.known_ordinal("9@lid") == 1

@@ -44,7 +44,6 @@ from wahabot.ai.tools.whatsapp import (
 )
 from wahabot.ai.turn_records import (
     LINK_VIDEO_MARKER_KEY,
-    TRANSCRIPT_KEY,
     VIDEO_MARKER_KEY,
     RecordEntry,
     render_entries,
@@ -875,22 +874,17 @@ def single_record_entry(
     video_frames: list[dict[str, Any]] | None,
     addressed: bool,
 ) -> RecordEntry:
-    """Build the one-record entry of a single inbound message."""
+    """Build the one-record entry of a single inbound message.
+
+    ``body`` stays None so :func:`turn_records.record_body` reads the
+    payload itself (and strips the code's voice-note prefix).
+    """
     return RecordEntry(
         event=event,
-        body=record_entry_body(event),
         images=images,
         video=record_entry_video(event, video_frames),
         addressed=addressed,
     )
-
-
-def record_entry_body(event: WahaEvent) -> str:
-    """The record body, with the code's voice-note prefix removed."""
-    body = str(event.payload.get("body", "")).strip()
-    if str(event.payload.get(TRANSCRIPT_KEY) or "").strip():
-        return body.removeprefix("[voice note]").strip()
-    return body
 
 
 def record_entry_video(
