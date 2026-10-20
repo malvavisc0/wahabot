@@ -40,6 +40,7 @@ from wahabot.ai.history import (
     degrade_old_history,
     inbound_message_id,
     is_single_emoji,
+    mark_merged_backlog,
     minimum_turn,
     sanitize_chat_history,
     trim_to_budget,
@@ -383,7 +384,12 @@ class FunctionCallingAgentWorkflow(Workflow):
         await memory.aset(history)
         self.schedule_recap_merge(messages, history)
         self.schedule_thread_index(messages, history)
-        return ([system] if system is not None else []) + history
+        # Prompt-only: tell the model when this run's user turn is a
+        # backlog of unanswered messages fused by the FIFO merge, so it
+        # answers the newest message rather than the whole pile. The
+        # unmarked history above is what stays in memory.
+        prompt_history = mark_merged_backlog(history)
+        return ([system] if system is not None else []) + prompt_history
 
     def schedule_recap_merge(
         self, messages: list[ChatMessage], history: list[ChatMessage]
@@ -572,10 +578,13 @@ class FunctionCallingAgentWorkflow(Workflow):
 
         Race mode (DMs, addressed turns) always returns True: the gate
         can only tighten tools there. Block mode (unaddressed groups)
-        runs only on an explicit participate verdict — but a failed or
-        timed-out gate degrades to today's behaviour (the agent runs),
-        per the plan's rule that a down layer never mutes a chat: the
-        gate is a filter, not an authority, and its outage is audited.
+        runs only on a verdict that grants participation, and a verdict
+        that is present but silent (the new default) means silence. A
+        gate that is *unavailable* — failed, timed out, unreachable — is
+        different: it is a filter, not an authority, so the run degrades
+        to the pre-gate behaviour rather than muting the chat and losing
+        the chance to answer a real question. The failed verdict is
+        stored and audited either way.
         """
         if self.triage is None or target.chat_id == OPERATOR_CHAT_ID:
             return True
@@ -594,9 +603,9 @@ class FunctionCallingAgentWorkflow(Workflow):
             result = await self.triage.classify_bounded(context)
             await ctx.store.set("triage_result", result_to_dict(result))
             if result.failed or result.timed_out:
-                # Gate down: degrade to today's behaviour — wake the
-                # agent. The failed verdict is already stored (so the
-                # run's tool layer stays unhardened) and audited.
+                # Gate down: degrade to the pre-gate behaviour — wake the
+                # agent. An outage must not mute the chat; only a verdict
+                # the gate actually produced can decline a turn.
                 return True
             return result.verdict.participate
         except Exception as exc:
@@ -606,7 +615,7 @@ class FunctionCallingAgentWorkflow(Workflow):
                 error=exc,
             )
             logger.opt(exception=exc).debug("Triage gate failure detail")
-            # Gate unavailable: degrade to today's behaviour in both
+            # Gate unavailable: degrade to the pre-gate behaviour in both
             # modes — the agent runs, unhardened.
             return True
 

@@ -24,6 +24,12 @@ REACTION_TARGET_KWARG = "reaction_target_id"
 #: silent run's message must stay in context for the next run).
 TURN_HANDLED_KWARG = "turn_handled"
 
+#: Kwarg key stamped by :func:`history.merge_pair` when it fuses two
+#: separate inbound chat turns into one. Distinct from a single burst,
+#: which is already one message: it marks the run's user turn as a
+#: backlog of earlier unanswered messages, so the prompt can label it.
+MERGED_TURNS_KWARG = "merged_turns"
+
 #: Kwarg key tagging the model's post-delivery wrap-up note — the
 #: one-sentence self-record stored after a delivery fired. The note
 #: was never sent to the chat (the one-delivery latch holds), so
@@ -128,6 +134,44 @@ def message_kind(event: WahaEvent) -> str:
     if kind == "album":
         return "album"
     return "text"
+
+
+#: Emoji and pictograph code-point ranges — the one vocabulary shared by
+#: the inbound reaction filter here and ``history``'s lone-emoji reply
+#: filter, so both agree on what counts as an emoji.
+EMOJI_CHARS = (
+    r"\U0001F600-\U0001F64F"
+    r"\U0001F300-\U0001F5FF"
+    r"\U0001F680-\U0001F6FF"
+    r"\U0001F1E0-\U0001F1FF"
+    r"\U00002702-\U000027B0"
+    r"\U0000FE00-\U0000FE0F"
+    r"\U0001F900-\U0001F9FF"
+    r"\U0001FA00-\U0001FA6F"
+    r"\U0001FA70-\U0001FAFF"
+    r"\U00002600-\U000026FF"
+    r"\U0000200D"
+    r"\U0000FE0F"
+)
+
+#: A body of emoji and/or punctuation with no word character. Deliberately
+#: looser than ``history``'s single-emoji reply filter: on the way *in*,
+#: ``🤣🤣🤣`` and ``!!!`` are still reactions, not openings.
+REACTION_ONLY_RE = re.compile(rf"^(?:[{EMOJI_CHARS}]|[^\w\s])+$")
+
+
+def is_reaction_only(event: WahaEvent) -> bool:
+    """True for a text message whose body is only emoji/punctuation.
+
+    A bare ``🤣`` carries no request: it is a reaction, not an opening.
+    In ``judicious`` groups it must not *start* a turn — the model reads
+    the whole merged backlog as its current message and answers it (the
+    emoji-to-essay failure). A media message is never reaction-only, so
+    questions and statements always wake the agent.
+    """
+    if message_kind(event) != "text":
+        return False
+    return bool(REACTION_ONLY_RE.match(str(event.payload.get("body", "")).strip()))
 
 
 def extract_text(event: WahaEvent) -> str | None:
@@ -285,7 +329,9 @@ def is_group_addressed(
       name/regex (``bot_mentioned``) or when a message replies to a bot
       message.
     - ``judicious`` — wake on mention/reply as well, but also wake for
-      any text so the agent can decide whether to speak.
+      any text so the agent can decide whether to speak. A bare emoji or
+      punctuation-only body is a reaction, not an opening, and does not
+      wake it on its own.
     """
     payload = event.payload
     if not str(payload.get("from", "")).endswith("@g.us"):
@@ -294,10 +340,13 @@ def is_group_addressed(
         return False
     if participation == "never":
         return False
-    if participation == "judicious":
-        # Let the agent judge every text message; it may stay silent.
+    if replies_to_bot(event, bot_name, bot_mention_regex):
         return True
-    return replies_to_bot(event, bot_name, bot_mention_regex)
+    if participation == "judicious":
+        # Let the agent judge every message; it may stay silent. A
+        # reaction-only body is skipped so an emoji cannot summon a run.
+        return not is_reaction_only(event)
+    return False
 
 
 def replies_to_bot(
@@ -420,3 +469,54 @@ def addressed_note(
             " shared account, written by you or your operator]"
         )
     return ""
+
+
+#: The negative counterpart of :func:`addressed_note`: an unaddressed
+#: group turn. Its absence used to be the *only* signal, which the model
+#: could not tell apart from a direct address — so it treated other
+#: members' questions and shared links as its own. Stated explicitly, the
+#: model stops answering chatter it was never asked about.
+UNADDRESSED_NOTE = (
+    "\n[you were not addressed: this is other members talking in the group."
+    " Do not answer another member's question, a remark, or a shared link as"
+    " if it were yours. Reply only if you can add something genuinely useful;"
+    " otherwise call stay_silent]"
+)
+
+#: Fallback positive note for a merge whose addressed member is not the
+#: newest one (a burst event loses the earlier member's quote/mention).
+GENERIC_ADDRESSED_NOTE = "\n[you were addressed: this message is for you]"
+
+
+def is_group_turn(event: WahaEvent) -> bool:
+    """True for a non-``fromMe`` group message (the only not-addressed case)."""
+    payload = event.payload
+    return (
+        not is_operator_event(event)
+        and not payload.get("fromMe")
+        and str(payload.get("from", "")).endswith("@g.us")
+    )
+
+
+def turn_addressed_note(
+    event: WahaEvent,
+    addressed: bool,
+    bot_name: str | None = None,
+    bot_mention_regex: str | None = None,
+) -> str:
+    """The turn note for *event*, trusting the wake gate's *addressed*.
+
+    ``addressed_note`` re-derives "addressed" from the event alone, which
+    a merged burst turn loses (its quote/mention rides an earlier member,
+    stripped before the model sees it). The gate already decided, so its
+    verdict wins: an addressed turn always carries a positive note, and an
+    unaddressed group turn now carries an explicit negative one instead of
+    the old silent blank.
+    """
+    if not is_group_turn(event):
+        return addressed_note(event, bot_name, bot_mention_regex)
+    if addressed:
+        return addressed_note(event, bot_name, bot_mention_regex) or (
+            GENERIC_ADDRESSED_NOTE
+        )
+    return UNADDRESSED_NOTE

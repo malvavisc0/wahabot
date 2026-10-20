@@ -51,6 +51,8 @@ from llama_index.core.base.llms.types import (
 )
 
 from wahabot.ai.messages import (
+    EMOJI_CHARS,
+    MERGED_TURNS_KWARG,
     OPERATOR_FOLD_KWARG,
     REACTION_TARGET_KWARG,
     TURN_HANDLED_KWARG,
@@ -67,6 +69,7 @@ __all__ = [
     "is_error_narration",
     "is_silence_narration",
     "is_trailing_note_text",
+    "mark_merged_backlog",
     "narration_kind",
     "sanitize_chat_history",
     "strip_trailing_note",
@@ -78,6 +81,18 @@ __all__ = [
 #: The serialized id note an inbound turn carries (``context.py``
 #: appends it as the turn's last line): the id inside brackets.
 INBOUND_ID_RE = re.compile(r"\[message id: ([^\]]+)\]")
+
+#: Prompt-only header for a user turn the FIFO merged from several
+#: unresolved messages. The chat API forbids consecutive same-role
+#: turns, so unanswered group messages fuse into the next run's user
+#: turn — a bare emoji can arrive joined to the whole backlog. The
+#: header restores the boundary for the model so it reads the block as
+#: background context and only the last line as the live message.
+BACKLOG_HEADER = (
+    "[This turn merges messages that arrived since your last reply; they may"
+    " be from several members. Everything above the last message is background"
+    " context. Answer only the newest message, and only if it is for you.]"
+)
 
 
 class ContextBudgetError(ValueError):
@@ -96,27 +111,9 @@ class ContextBudgetError(ValueError):
 #: system prompt says "A lone emoji is a reaction, never a message",
 #: so we treat a single-emoji final reply as an implicit reaction or
 #: silence.  Multi-emoji strings like ``🤣🤣🤣`` are kept as real
-#: messages — those are intentional chat text.
-SINGLE_EMOJI_RE = re.compile(
-    "".join(
-        (
-            r"^\s*(?:",
-            r"[\U0001F600-\U0001F64F]",  # emoticons
-            r"|[\U0001F300-\U0001F5FF]",  # misc symbols & pictographs
-            r"|[\U0001F680-\U0001F6FF]",  # transport & map
-            r"|[\U0001F1E0-\U0001F1FF]",  # flags (regional indicators)
-            r"|[\U00002702-\U000027B0]",  # dingbats
-            r"|[\U0000FE00-\U0000FE0F]",  # variation selectors
-            r"|[\U0001F900-\U0001F9FF]",  # supplemental symbols
-            r"|[\U0001FA00-\U0001FA6F]",  # chess symbols / extended-A
-            r"|[\U0001FA70-\U0001FAFF]",  # symbols extended-A (cont.)
-            r"|[\U00002600-\U000026FF]",  # misc symbols (☀, ⚡, …)
-            r"|[\U0000200D]",  # ZWJ
-            r"|[\U0000FE0F]",  # VS-16
-            r")\s*$",  # exactly ONE emoji (with optional whitespace)
-        )
-    )
-)
+#: messages — those are intentional chat text. The emoji vocabulary is
+#: shared with the inbound reaction filter (``messages.EMOJI_CHARS``).
+SINGLE_EMOJI_RE = re.compile(rf"^\s*(?:[{EMOJI_CHARS}])\s*$")
 
 
 def is_single_emoji(reply: str) -> bool:
@@ -550,10 +547,27 @@ def merge_pair(first: ChatMessage, second: ChatMessage) -> ChatMessage:
     """
     if merges_across_wrap_up_boundary(first, second):
         raise ValueError("refusing to merge a wrap-up note with a chat turn")
+    kwargs: dict[str, Any] = {**first.additional_kwargs, **second.additional_kwargs}
+    if is_inbound_chat_turn(first) and is_inbound_chat_turn(second):
+        kwargs[MERGED_TURNS_KWARG] = True
     return ChatMessage(
         role=first.role,
         content=f"{first.content or ''}\n{second.content or ''}",
-        additional_kwargs={**first.additional_kwargs, **second.additional_kwargs},
+        additional_kwargs=kwargs,
+    )
+
+
+def is_inbound_chat_turn(msg: ChatMessage) -> bool:
+    """True for a plain inbound chat turn (not an out-of-band fold).
+
+    A reaction note or an operator ``fromMe`` text is a user-role message
+    too, but it is not a turn the group's members spoke; fusing one with
+    the next turn must not label the result as a backlog of member
+    messages.
+    """
+    return msg.role == MessageRole.USER and not any(
+        key in msg.additional_kwargs
+        for key in (REACTION_TARGET_KWARG, OPERATOR_FOLD_KWARG, WRAP_UP_NOTE_KWARG)
     )
 
 
@@ -657,6 +671,33 @@ def sanitize_chat_history(
     deduplicated = deduplicate_messages(chat_history)
     validated = validate_tool_groups(deduplicated)
     return trim_history(validated, drop_trailing_user)
+
+
+def mark_merged_backlog(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Prepend :data:`BACKLOG_HEADER` to a merged trailing user turn.
+
+    Returns a prompt-only copy: the caller stores the unmarked list, so
+    the header never accumulates in memory. Only a turn that
+    :func:`merge_pair` fused from separate inbound turns carries
+    ``MERGED_TURNS_KWARG`` — a single burst is one message and is left
+    alone — and only the trailing turn is labelled. A single-message
+    turn, or one whose newest message is not last, is returned unchanged.
+    """
+    if not messages:
+        return messages
+    index = len(messages) - 1
+    message = messages[index]
+    if message.role != MessageRole.USER:
+        return messages
+    if not message.additional_kwargs.get(MERGED_TURNS_KWARG):
+        return messages
+    marked = ChatMessage(
+        role=message.role,
+        blocks=list(message.blocks),
+        content=f"{BACKLOG_HEADER}\n{message.content}",
+        additional_kwargs=dict(message.additional_kwargs),
+    )
+    return [*messages[:index], marked]
 
 
 def group_boundaries(messages: list[ChatMessage]) -> list[int]:

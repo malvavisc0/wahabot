@@ -4,11 +4,15 @@ The gate is a small classifier that runs outside the agent's context. It
 labels hostile input, messages that need a human, and whether an
 unaddressed group message should get a reply at all. It is a filter, not
 an authority: a timeout, parse failure, or unavailable service never
-blocks a DM, and never mutes a group either — every layer degrades to
-today's behaviour, so a gate outage wakes the agent exactly as the
-pre-gate bot did. The escalation a verdict asks for is sent off the
-verdict's latency path, so a slow send can neither time the verdict
-out nor be cancelled by a run that ends first.
+blocks a DM or an addressed turn, and never mutes a group either — an
+outage degrades to the pre-gate behaviour, where the agent runs and can
+still answer a real question. Fail-closed applies only to a verdict the
+gate actually produced: a reply that omits ``participate`` defaults to
+silence, so a gate that answers without granting participation leaves the
+unaddressed message unanswered instead of waking the agent to answer
+chatter that was never addressed to it. The escalation a verdict asks for
+is sent off the verdict's latency path, so a slow send can neither time
+the verdict out nor be cancelled by a run that ends first.
 """
 
 from __future__ import annotations
@@ -134,7 +138,7 @@ class TriageVerdict:
 
     adversarial: bool = False
     escalate: bool = False
-    participate: bool = True
+    participate: bool = False
     why: str = ""
     needs: tuple[str, ...] = ()
 
@@ -161,7 +165,12 @@ class TriageResult:
 
     @classmethod
     def fallback(cls, *, timed_out: bool = False, failed: bool = False) -> TriageResult:
-        """The normal-run verdict used on timeout or failure."""
+        """The verdict recorded when the gate produced none.
+
+        ``participate`` defaults to False so a missing label is never
+        read as permission; the caller separately treats a timeout or
+        failure as an unavailable gate and degrades to running the agent.
+        """
         return cls(TriageVerdict(), timed_out=timed_out, failed=failed)
 
 
@@ -472,7 +481,7 @@ def result_from_dict(payload: Mapping[str, Any]) -> TriageResult:
         TriageVerdict(
             adversarial=bool(payload.get("adversarial", False)),
             escalate=bool(payload.get("escalate", False)),
-            participate=bool(payload.get("participate", True)),
+            participate=bool(payload.get("participate", False)),
             why=str(payload.get("why") or ""),
             needs=tuple(str(item) for item in needs if isinstance(item, str)),
         ),
@@ -505,7 +514,7 @@ def parse_verdict(raw: str) -> TriageVerdict:
     return TriageVerdict(
         adversarial=as_bool(payload.get("adversarial"), default=False),
         escalate=as_bool(payload.get("escalate"), default=False),
-        participate=as_bool(payload.get("participate"), default=True),
+        participate=as_bool(payload.get("participate"), default=False),
         why=why,
         needs=parse_needs(payload.get("needs")),
     )

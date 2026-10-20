@@ -150,12 +150,12 @@ def test_parse_verdict_reads_labels_and_needs() -> None:
     assert verdict.fact_keys == ("refund",)
 
 
-def test_parse_verdict_defaults_to_a_normal_run() -> None:
+def test_parse_verdict_defaults_to_no_participation() -> None:
     verdict = parse_verdict("{}")
 
     assert verdict.adversarial is False
     assert verdict.escalate is False
-    assert verdict.participate is True
+    assert verdict.participate is False
     assert verdict.needs == ()
 
 
@@ -369,7 +369,7 @@ def test_gate_escalation_send_is_off_the_verdicts_latency_path(
     assert channel.stamped == [CHAT]
 
 
-def test_gate_timeout_falls_back_to_a_normal_run(tmp_path: Path) -> None:
+def test_gate_timeout_falls_back_closed(tmp_path: Path) -> None:
     gate = TriageGate(gate_settings(tmp_path))
     gate.timeout = 0.01
 
@@ -386,7 +386,7 @@ def test_gate_timeout_falls_back_to_a_normal_run(tmp_path: Path) -> None:
 
     assert result.timed_out is True
     assert result.failed is False
-    assert result.verdict.participate is True
+    assert result.verdict.participate is False
 
 
 def test_gate_circuit_breaker_skips_a_down_service(tmp_path: Path) -> None:
@@ -411,7 +411,7 @@ def test_gate_circuit_breaker_skips_a_down_service(tmp_path: Path) -> None:
     assert calls == 1
 
 
-def test_gate_parse_failure_falls_back_to_a_normal_run(tmp_path: Path) -> None:
+def test_gate_parse_failure_falls_back_closed(tmp_path: Path) -> None:
     gate = TriageGate(gate_settings(tmp_path), transport=gate_transport("not json"))
 
     result = asyncio.run(
@@ -422,7 +422,7 @@ def test_gate_parse_failure_falls_back_to_a_normal_run(tmp_path: Path) -> None:
 
     assert result.failed is True
     assert result.verdict.adversarial is False
-    assert result.verdict.participate is True
+    assert result.verdict.participate is False
 
 
 @pytest.mark.parametrize(
@@ -597,15 +597,15 @@ def test_blocked_group_does_not_start_the_agent(monkeypatch: pytest.MonkeyPatch)
     run.assert_not_awaited()
 
 
-def test_failed_gate_wakes_the_agent_in_an_unaddressed_group(
+def test_gate_outage_wakes_the_agent_in_an_unaddressed_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A gate outage degrades to today's behaviour: the agent runs.
+    """A gate outage degrades to the pre-gate behaviour: the agent runs.
 
-    The plan's degradation rule — every layer falls back to the
-    pre-gate behaviour, so a down gate must never mute a chat. A
-    failed verdict in block mode starts the run; the stored verdict
-    keeps the run unhardened and the journal shows the failure.
+    An unavailable gate (failure/timeout) must not mute the chat — only a
+    verdict the gate actually produced can decline a turn. A failed
+    verdict in block mode starts the run; the stored verdict keeps the
+    run unhardened and the journal shows the failure.
     """
     gate = FakeGate(result=TriageResult.fallback(failed=True))
     agent = FunctionCallingAgentWorkflow(

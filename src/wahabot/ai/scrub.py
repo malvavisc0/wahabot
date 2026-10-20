@@ -39,7 +39,7 @@ MARKER_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(r"\[(" + prefix + r")", re.IGNORECASE)
     for prefix in (
         r"message id: ?",
-        r"you were addressed:? ?",
+        r"you were (?:not )?addressed:? ?",
         r"operator message\]? ?",
         r"operator command\]? ?",
         r"quoting\] ?",

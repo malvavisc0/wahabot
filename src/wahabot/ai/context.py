@@ -20,11 +20,11 @@ from wahabot.ai.history import (
 from wahabot.ai.messages import (
     OPERATOR_NOTE_PREFIX,
     TURN_HANDLED_KWARG,
-    addressed_note,
     bot_jids,
     is_operator_event,
     jid_string,
     message_replies_to,
+    turn_addressed_note,
 )
 from wahabot.ai.scrub import strip_spoofed_markers
 from wahabot.ai.tools.url_images import fetch_url_images, image_urls
@@ -603,10 +603,12 @@ async def handle_message(
 
     ``bot_name``/``bot_mention_regex`` (the session config's identity
     pair) render the addressed-mention marker into a group turn whose
-    text names the bot (:func:`addressed_note`): the wake gate already
+    text names the bot (:func:`turn_addressed_note`): the wake gate already
     decided the message is for the bot, and the marker tells the model
     so it never re-derives — and misreads — that fact. Absent both, no
-    marker (operator commands, tests).
+    marker (operator commands, tests). An *unaddressed* group turn gets
+    the explicit negative marker instead, so group chatter the gate woke
+    the agent for is never mistaken for a direct address.
 
     ``body_scrubbed`` says the caller already scrubbed the body's
     member text (the burst path, per member, before stamping its id
@@ -643,6 +645,7 @@ async def handle_message(
         bot_name=bot_name,
         bot_mention_regex=bot_mention_regex,
         body_scrubbed=body_scrubbed,
+        addressed=addressed,
     )
     # Bind this run's delivery target around the whole run: the workflow
     # engine schedules steps/tasks under this context, so the binding
@@ -712,6 +715,7 @@ async def turn_user_message(
     bot_name: str | None = None,
     bot_mention_regex: str | None = None,
     body_scrubbed: bool = False,
+    addressed: bool = True,
 ) -> tuple[str, list[ImageBlock]]:
     """The run's user message text and its first-call image blocks.
 
@@ -743,7 +747,7 @@ async def turn_user_message(
     user_msg += reply_context_section(message_replies_to(event), names, bot_jids(event))
     user_msg += mentions_note(event, names)
     user_msg += pinned_note
-    user_msg += addressed_note(event, bot_name, bot_mention_regex)
+    user_msg += turn_addressed_note(event, addressed, bot_name, bot_mention_regex)
     image_blocks = [
         ImageBlock(
             image=img["data"],
