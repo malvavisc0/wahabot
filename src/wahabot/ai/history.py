@@ -101,6 +101,9 @@ PARTICIPATE_POLICY = (
     "(unaddressed, but the gate judged this turn worth a contribution. "
     "Answer the newest need; do not answer banter or side threads.)"
 )
+DM_POLICY = (
+    "(direct message: answer unless the message is for the human operator personally.)"
+)
 
 
 class ContextBudgetError(ValueError):
@@ -682,7 +685,12 @@ def sanitize_chat_history(
 
 
 def turn_header(
-    messages: list[ChatMessage], *, group: bool, addressed: bool, speak: bool = False
+    messages: list[ChatMessage],
+    *,
+    group: bool,
+    addressed: bool,
+    speak: bool = False,
+    direct: bool = False,
 ) -> list[ChatMessage]:
     """Prepend the turn header to the trailing user turn, prompt-only.
 
@@ -707,7 +715,7 @@ def turn_header(
     if message.role != MessageRole.USER:
         return messages
     content, header = turn_content_and_header(
-        message, group=group, addressed=addressed, speak=speak
+        message, group=group, addressed=addressed, speak=speak, direct=direct
     )
     if header is None:
         return messages
@@ -721,25 +729,32 @@ def turn_header(
 
 
 def turn_content_and_header(
-    message: ChatMessage, *, group: bool, addressed: bool, speak: bool
+    message: ChatMessage,
+    *,
+    group: bool,
+    addressed: bool,
+    speak: bool,
+    direct: bool,
 ) -> tuple[str, str | None]:
     """Build the header for a turn, or ``(content, None)`` when none is due."""
     content = str(message.content or "")
     count, newest = turn_numbers(content)
     backlog = bool(message.additional_kwargs.get(MERGED_TURNS_KWARG))
-    if not shows_turn_header(group=group, count=count, backlog=backlog):
+    if not shows_turn_header(group=group, count=count, backlog=backlog, direct=direct):
         return content, None
     return content, records.format_header(
         count=count,
         newest_serial=newest,
         addressed=addressed,
         backlog=backlog,
-        policy=turn_policy(group=group, addressed=addressed, speak=speak),
+        policy=turn_policy(group=group, addressed=addressed, speak=speak, direct=direct),
     )
 
 
-def turn_policy(*, group: bool, addressed: bool, speak: bool) -> str:
+def turn_policy(*, group: bool, addressed: bool, speak: bool, direct: bool) -> str:
     """The one answering rule for this turn, owned by the header."""
+    if direct:
+        return DM_POLICY
     if not group:
         return ""
     if addressed:
@@ -760,9 +775,11 @@ def turn_numbers(content: str) -> tuple[int, int]:
     return count, (max(serials) if serials else count)
 
 
-def shows_turn_header(*, group: bool, count: int, backlog: bool) -> bool:
-    """Group turns always; a DM only when it carries news (a burst or a backlog)."""
-    return group or count > 1 or backlog
+def shows_turn_header(
+    *, group: bool, count: int, backlog: bool, direct: bool = False
+) -> bool:
+    """Group and direct turns always; a command turn only when it carries news."""
+    return group or direct or count > 1 or backlog
 
 
 def cap_records_turn(

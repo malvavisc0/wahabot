@@ -2983,3 +2983,85 @@ def test_leaked_silence_token_delivers_and_stores_nothing(bot: Bot) -> None:
 
     turns = asyncio.run(assistant_turns())
     assert all(str(t).strip() != "stay_silent" for t in turns), turns
+
+
+def test_dm_single_turn_is_an_addressed_record(bot: Bot) -> None:
+    """A 1:1 message is a record with `addressed`, no group header/policy."""
+    dm = "491555000001@c.us"
+    llm = bot.stack.llm
+    llm.requests.clear()
+    bot.waha.sent.clear()
+    bot.post(chat_event(body="hola, necesito ayuda", mid="DM1", chat=dm))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    turn = user_turns_of(llm.requests[0])[0]
+    assert turn.startswith("[turn: 1 message | newest #m1 | addressed: yes")
+    assert "direct message" in turn
+    assert "]] text addressed :: hola" in turn
+    assert "491555000001" not in turn
+    assert _wait(lambda: any(chat == dm for _, chat, _, _ in bot.waha.sent))
+
+
+def test_dm_burst_carries_exactly_one_addressed_flag(bot: Bot) -> None:
+    """A DM burst has one verdict, on its newest record, and a header."""
+    dm = "491555000001@c.us"
+    burst_bot = bot.rebuild(
+        burst_enabled=True,
+        burst_inactivity_s=0.4,
+        burst_hold_cap_s=5.0,
+        send_seen=False,
+    )
+    llm = burst_bot.stack.llm
+    llm.requests.clear()
+    for i in range(3):
+        burst_bot.post(chat_event(body=f"dm line {i}", mid=f"DMB{i}", chat=dm))
+    assert _wait(
+        lambda: any(
+            "dm line 0" in turn
+            for request in llm.requests
+            for turn in user_turns_of(request)
+        )
+    )
+    turn = next(
+        turn
+        for request in llm.requests
+        for turn in user_turns_of(request)
+        if "dm line 0" in turn and "dm line 2" in turn
+    )
+    records = [line for line in turn.splitlines() if line.startswith("[[")]
+    assert sum(" addressed" in line for line in records) == 1
+    assert "text addressed :: dm line 2" in turn
+    assert turn.startswith("[turn: 3 messages | newest #m3 | addressed: yes")
+
+
+def test_dm_silent_run_is_a_ledger_line(bot: Bot) -> None:
+    """A quiet DM run is stored as one ledger line, not a verbatim turn."""
+    dm = "491555000001@c.us"
+    llm = bot.stack.llm
+    llm.requests.clear()
+    llm.override = tool_call_response(
+        "stay_silent",
+        {"reason": "not mine"},
+        call_id="call_dm_silent",
+        response_id="chatcmpl-dm-silent",
+        created=1788525845,
+    )
+    bot.post(chat_event(body="mensaje que no contestare", mid="DMS1", chat=dm))
+    assert _wait(lambda: len(llm.requests) >= 1)
+
+    llm.clear()
+    llm.override = None
+    bot.post(chat_event(body="segundo mensaje", mid="DMS2", chat=dm))
+    assert _wait(lambda: len(llm.requests) >= 1)
+    turns = user_turns_of(llm.requests[0])
+    assert any(
+        "mensaje que no contestare" in line and " — #m" in line
+        for turn in turns
+        for line in turn.splitlines()
+    )
+    assert all(
+        "]] text" not in line
+        for turn in turns
+        for line in turn.splitlines()
+        if "mensaje que no contestare" in line
+    )
+    assert _wait(lambda: any(chat == dm for _, chat, _, _ in bot.waha.sent))

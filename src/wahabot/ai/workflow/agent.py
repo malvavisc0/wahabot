@@ -404,8 +404,9 @@ class FunctionCallingAgentWorkflow(Workflow):
         group = bool(await ctx.store.get("turn_group", default=False))
         addressed = bool(await ctx.store.get("turn_addressed", default=True))
         speak = bool(await ctx.store.get("turn_speak", default=addressed))
+        direct = bool(await ctx.store.get("turn_direct", default=False))
         prompt_history = turn_header(
-            history, group=group, addressed=addressed, speak=speak
+            history, group=group, addressed=addressed, speak=speak, direct=direct
         )
         return ([system] if system is not None else []) + prompt_history
 

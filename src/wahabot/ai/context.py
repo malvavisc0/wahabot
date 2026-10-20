@@ -24,6 +24,7 @@ from wahabot.ai.messages import (
     TURN_HANDLED_KWARG,
     TURN_SERIALS_KWARG,
     bot_jids,
+    conversation_jid,
     is_operator_event,
     jid_string,
     message_kind,
@@ -592,13 +593,14 @@ async def prepare_turn_state(
 ) -> list[dict[str, Any]] | None:
     """Record the header verdict and cap image blocks before the run."""
     if ctx is not None:
+        chat_id = conversation_jid(event)
+        group = chat_id.endswith("@g.us")
         # The prompt-time turn header (history.turn_header) reads these back:
-        # the wake gate's addressing verdict, and whether this is a group turn.
+        # the wake gate's verdict and whether this is a group/direct chat.
         await ctx.store.set("turn_addressed", addressed)
         await ctx.store.set("turn_speak", addressed)
-        await ctx.store.set(
-            "turn_group", str(event.payload.get("from", "")).endswith("@g.us")
-        )
+        await ctx.store.set("turn_group", group)
+        await ctx.store.set("turn_direct", event.event != "command" and not group)
     if settings is not None and settings.vision_max_images > 0 and images:
         return images[: settings.vision_max_images]
     return images

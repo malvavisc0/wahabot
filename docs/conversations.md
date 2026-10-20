@@ -137,7 +137,8 @@ turn header when the turn is a group turn or carries news:
   one addressing verdict and whether the merge fused an earlier
   unanswered turn (`backlog`). Every group turn carries the one policy
   line — addressed, gate-participating or unaddressed — and the model
-  obeys it. A single addressed DM needs no header: its record carries
+  obeys it. A direct-message turn also carries a header and its own
+  `(direct message: …)` policy line; the record still carries
   `addressed`.
 - The **quoting** and **reaction** anchors are records, not prose notes:
   a quoted bot message renders `quote=you`; a quoted member message

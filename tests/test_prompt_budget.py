@@ -6,6 +6,7 @@ from llama_index.core.base.llms.types import ChatMessage, MessageRole
 
 from wahabot.ai.history import (
     ADDRESSED_POLICY,
+    DM_POLICY,
     PARTICIPATE_POLICY,
     UNADDRESSED_POLICY,
     turn_header,
@@ -31,8 +32,8 @@ def test_header_owns_the_turn_policy() -> None:
     assert PARTICIPATE_POLICY in participated.content
     silent = turn_header(_message(), group=True, addressed=False, speak=False)[0]
     assert UNADDRESSED_POLICY in silent.content
-    dm = turn_header(_message(), group=False, addressed=True, speak=True)[0]
-    assert dm.content == _message()[0].content
+    dm = turn_header(_message(), group=False, addressed=True, speak=True, direct=True)[0]
+    assert DM_POLICY in dm.content
 
 
 def test_constant_prompt_has_no_group_policy() -> None:

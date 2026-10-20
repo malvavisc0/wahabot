@@ -9,7 +9,7 @@ from typing import Any
 
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 
-from wahabot.ai.history import UNADDRESSED_POLICY, turn_header
+from wahabot.ai.history import DM_POLICY, UNADDRESSED_POLICY, turn_header
 from wahabot.ai.records import (
     format_record,
     ledger_serial,
@@ -394,7 +394,7 @@ def test_album_serial_and_react_resolution(tmp_path: Path) -> None:
     assert raw["id"] == "ALB" and raw["m"] == serial
 
 
-def test_dm_single_record_is_addressed_without_a_header(tmp_path: Path) -> None:
+def test_dm_single_record_carries_a_direct_policy_header(tmp_path: Path) -> None:
     dm = "491555000101@c.us"
     text, _, _ = render_entries(
         [
@@ -411,8 +411,10 @@ def test_dm_single_record_is_addressed_without_a_header(tmp_path: Path) -> None:
         [ChatMessage(role=MessageRole.USER, content=text)],
         group=False,
         addressed=True,
+        direct=True,
     )
-    assert marked[0].content == text
+    assert marked[0].content.startswith("[turn: 1 message | newest #m1 |")
+    assert DM_POLICY in marked[0].content
 
 
 def test_case_14b_quote_ids_are_bare_hashes(tmp_path: Path) -> None:

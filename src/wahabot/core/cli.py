@@ -198,7 +198,7 @@ def session_template() -> dict[str, object]:
             "## Participation\n"
             "\n"
             "The `[turn: …]` header's policy line is the rule for this "
-            "turn; obey it. In a direct message there is no header policy "
+            "turn; obey it. A direct-message turn carries its own policy "
             "line: answer unless the message is for the human operator "
             "personally.\n"
             "\n"
