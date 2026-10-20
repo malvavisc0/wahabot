@@ -50,12 +50,15 @@ from llama_index.core.base.llms.types import (
     ToolCallBlock,
 )
 
+from wahabot.ai import records
 from wahabot.ai.messages import (
     EMOJI_CHARS,
     MERGED_TURNS_KWARG,
     OPERATOR_FOLD_KWARG,
     REACTION_TARGET_KWARG,
+    SKIPPED_SERIALS_KWARG,
     TURN_HANDLED_KWARG,
+    TURN_SERIALS_KWARG,
     WRAP_UP_NOTE_KWARG,
 )
 
@@ -682,10 +685,13 @@ def turn_header(
     incident's essay was made of; stating it cut the essay rate roughly
     fivefold in the replay, and the header alone (no grammar) did it.
 
-    A single addressed DM message needs none of it and gets no header; a
-    group turn always does, and a DM gets one only when it carries news
-    (more than one message, or a fused backlog). Returns a copy for the
-    prompt: the caller stores the unmarked list, so nothing accumulates.
+    Records turns derive the count and newest serial from the record lines
+    themselves and get the ``skipped`` overlay here (prompt-time only: the
+    stored turn stays unmarked). A prose turn (an operator command) keeps
+    the id-note count. A single addressed DM message needs no header and
+    gets none; a group turn always does, and a DM gets one only when it
+    carries news. Returns a copy for the prompt: the caller stores the
+    unmarked list, so nothing accumulates.
     """
     if not messages:
         return messages
@@ -693,17 +699,27 @@ def turn_header(
     message = messages[index]
     if message.role != MessageRole.USER:
         return messages
-    count = len(INBOUND_ID_RE.findall(str(message.content or ""))) or 1
+    content = str(message.content or "")
+    serials = records.record_serials(content)
+    if serials:
+        skipped = message.additional_kwargs.get(SKIPPED_SERIALS_KWARG) or ()
+        content = records.apply_skipped(content, {int(serial) for serial in skipped})
+    count = len(serials) or len(INBOUND_ID_RE.findall(content)) or 1
+    newest = max(serials) if serials else count
     backlog = bool(message.additional_kwargs.get(MERGED_TURNS_KWARG))
     if not shows_turn_header(group=group, count=count, backlog=backlog):
         return messages
-    header = format_turn_header(
-        count=count, addressed=addressed, backlog=backlog, group=group
+    header = records.format_header(
+        count=count,
+        newest_serial=newest,
+        addressed=addressed,
+        backlog=backlog,
+        policy="" if addressed or not group else UNADDRESSED_POLICY,
     )
     marked = ChatMessage(
         role=message.role,
         blocks=list(message.blocks),
-        content=f"{header}\n{message.content}",
+        content=records.render_turn([content], header=header),
         additional_kwargs=dict(message.additional_kwargs),
     )
     return [*messages[:index], marked]
@@ -714,16 +730,46 @@ def shows_turn_header(*, group: bool, count: int, backlog: bool) -> bool:
     return group or count > 1 or backlog
 
 
-def format_turn_header(*, count: int, addressed: bool, backlog: bool, group: bool) -> str:
-    """The header line: message count, newest, verdict, backlog; plus policy."""
-    line = (
-        f"[turn: {count} message{'s' if count != 1 else ''} | newest #{count} | "
-        f"addressed: {'yes' if addressed else 'no'} | "
-        f"backlog: {'yes' if backlog else 'no'}]"
+def cap_records_turn(
+    messages: list[ChatMessage],
+    *,
+    budget: int,
+    token_counter: Callable[[ChatMessage], int],
+    window: int,
+) -> list[ChatMessage]:
+    """Shrink a merged records turn to its current burst, newest window and quotes.
+
+    The live turn is the only place the model can still be drowned by volume:
+    a group backlog fused into one user message. The current burst is always
+    kept; older records are kept newest-first up to *window*, plus anything a
+    kept record quotes or reacts to. A quarter of the memory budget is the
+    ceiling, and the oldest record goes first — never the newest.
+    """
+    if not messages:
+        return messages
+    last = messages[-1]
+    if last.role != MessageRole.USER:
+        return messages
+    content = str(last.content or "")
+    keep = last.additional_kwargs.get(TURN_SERIALS_KWARG) or ()
+    text = records.cap_turn(
+        content,
+        keep_serials=keep,
+        window=window,
+        max_tokens=max(budget // 4, 1),
+        token_counter=lambda text: token_counter(
+            ChatMessage(role=MessageRole.USER, content=text)
+        ),
     )
-    if group and not addressed:
-        return f"{line}\n{UNADDRESSED_POLICY}"
-    return line
+    if text == content:
+        return messages
+    capped = ChatMessage(
+        role=last.role,
+        blocks=list(last.blocks),
+        content=text,
+        additional_kwargs=dict(last.additional_kwargs),
+    )
+    return [*messages[:-1], capped]
 
 
 def group_boundaries(messages: list[ChatMessage]) -> list[int]:

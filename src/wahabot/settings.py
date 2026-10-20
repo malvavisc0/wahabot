@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     #: to a normal run.
     gate_timeout: float = 0.8
     memory_token_limit: int = 8000
+    #: How many older records a merged live turn keeps before the current
+    #: burst (newest-first); quoted/reacted-to records are kept beyond it.
+    records_window: int = 8
     #: Persist each chat's memory to disk (data/memory/). When false,
     #: loads and saves are skipped — exactly the pre-persistence
     #: blank-start behavior. The one kill switch; no TTL ships.

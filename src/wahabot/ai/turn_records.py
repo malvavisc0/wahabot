@@ -1,36 +1,112 @@
 """Compose prompt-time records from inbound WAHA events (Phase 1).
 
 The pure grammar lives in :mod:`wahabot.ai.records`; this is the thin
-WAHA-aware layer that maps a parsed event onto it — the record's kind, its
-speaker token, and its presence flags. Callers pass what only they can
-resolve (the display name or ``<member-n>`` ordinal, the ``#m<n>`` serial,
-the time label, and any media/quote payloads), so the module stays free of
-I/O and the roster.
+WAHA-aware layer that maps parsed events onto it — the record's kind, its
+speaker token, presence flags, media slots and the renderer-written payload
+lines. Callers pass what only they can resolve (the ``#m<n>`` registry, the
+roster names, the prepared media), so the module stays free of I/O and the
+roster.
+
+Media slots are numbered per turn in arrival order: an image record carries
+``image#n``, a video ``video#n``, and an album ``album#a-b`` over the image
+slots it owns. The attachment list handed to the model is built by the same
+pass, in the same order, so slot *n* is attachment *n*.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from wahabot.ai.messages import extract_text, is_operator_event, message_kind
+from wahabot.ai.messages import (
+    OPERATOR_NOTE_PREFIX,
+    bot_jids,
+    conversation_jid,
+    extract_text,
+    is_operator_event,
+    is_reaction_only,
+    jid_string,
+    message_kind,
+    message_replies_to,
+    reply_description,
+)
 from wahabot.ai.records import format_record
+from wahabot.ai.serials import (
+    SerialEntry,
+    SerialRegistry,
+    SerialStore,
+    format_serial_token,
+)
+from wahabot.ai.video import MAX_TRANSCRIPT_CHARS
+from wahabot.ai.vision import image_caption, image_noun
+from wahabot.core.identity import AUTHOR_BOT, AUTHOR_OPERATOR, authors, display_name
+from wahabot.core.identity import names as name_book
+from wahabot.core.jid import chat_from_message_id, is_own_message_id
 from wahabot.core.models import WahaEvent
+
+#: Payload keys the media pipeline stamps on an event before rendering.
+TRANSCRIPT_KEY = "_wahabot_transcript"
+VIDEO_MARKER_KEY = "_wahabot_video_marker"
+LINK_VIDEO_MARKER_KEY = "_wahabot_link_video_marker"
 
 #: A body that is nothing but one URL is a ``link`` record.
 BARE_URL_RE = re.compile(r"^https?://\S+$")
+
+
+@dataclass
+class RecordEntry:
+    """One record to render: the event plus what only the caller resolved."""
+
+    event: WahaEvent
+    body: str | None = None
+    images: list[dict[str, Any]] = field(default_factory=list)
+    video: dict[str, Any] | None = None
+    omitted: int = 0
+    album: bool = False
+    extra_payloads: list[str] = field(default_factory=list)
+    addressed: bool = False
+
+
+@dataclass
+class Slots:
+    """Per-turn attachment counters, shared by every record in the turn."""
+
+    images: int = 0
+    videos: int = 0
+
+    def take_images(self, count: int) -> int:
+        """Reserve *count* image slots and return the first one."""
+        start = self.images + 1
+        self.images += count
+        return start
+
+    def take_video(self) -> int:
+        """Reserve one video slot and return it."""
+        self.videos += 1
+        return self.videos
 
 
 def record_kind(event: WahaEvent) -> str:
     """The record's ``kind``, derived from the message's own shape.
 
     A text body that is a bare URL is a ``link`` whether or not the
-    download/caption later succeeds, so the kind is stable across runs;
-    everything else is the WAHA kind unchanged.
+    download/caption later succeeds, so the kind is stable across runs.
+    A text body of emoji/punctuation only is a ``reaction``; a WAHA
+    reaction event is one too. Everything else is the WAHA kind unchanged.
     """
+    if event.event == "message.reaction" or isinstance(
+        event.payload.get("reaction"), dict
+    ):
+        return "reaction"
     kind = message_kind(event)
     if kind != "text":
         return kind
+    if is_reaction_only(event):
+        return "reaction"
     return "link" if BARE_URL_RE.match((extract_text(event) or "").strip()) else "text"
 
 
@@ -49,38 +125,306 @@ def speaker_token(event: WahaEvent, *, name: str = "", ordinal: int | None = Non
     return f"<member-{ordinal}>" if ordinal is not None else "<member-?>"
 
 
-def build_record(
-    event: WahaEvent,
-    *,
-    speaker: str,
-    serial: int,
-    time_label: str,
-    addressed: bool = False,
-    skipped: bool = False,
-    body: str | None = None,
-    media_slots: Sequence[str] = (),
-    links: Sequence[str] = (),
-    payloads: Sequence[str] = (),
-) -> str:
-    """One record line for *event*, in the §10.2 flag order.
+def event_sender(event: WahaEvent) -> str:
+    """The author JID of *event* (the chat itself in a DM)."""
+    data = event.payload.get("_data", {})
+    sender = jid_string(event.payload.get("participant") or data.get("author"))
+    if not sender and not str(event.payload.get("from", "")).endswith("@g.us"):
+        sender = jid_string(event.payload.get("from"))
+    return sender
 
-    Flags assemble as media slots, then state (``addressed``, ``skipped``),
-    then links (``quote=#m<n>`` / ``to: #m<n>``). ``body`` overrides the
-    event's own text (an operator fold, a reaction note, a collapsed
-    narration); ``payloads`` are the already-formatted machine lines only
-    the caller can build (media analysis, a quote or reaction preview).
+
+def event_display_name(event: WahaEvent) -> str:
+    """The sender's learnable display name, "" when none was learned."""
+    data = event.payload.get("_data", {})
+    name = str(data.get("notifyName") or event.payload.get("notifyName") or "").strip()
+    return name or name_book.name(event_sender(event))
+
+
+def assign_event_serial(store: SerialStore, event: WahaEvent) -> SerialEntry:
+    """Assign this inbound event its chat-global ``#m<n>`` at ingest.
+
+    Runs before any gate, so messages that never wake a run still get a
+    serial (a later quote or reaction can anchor to them). An unknown
+    sender reserves a stable ``<member-n>`` ordinal in the same write.
     """
-    state = tuple(
-        flag for flag, on in (("addressed", addressed), ("skipped", skipped)) if on
+    chat_id = conversation_jid(event)
+    sender = event_sender(event)
+    name = "" if is_operator_event(event) else event_display_name(event)
+    registry = store.for_chat(event.session, chat_id)
+    ordinal = 0
+    if not name and not is_operator_event(event) and sender:
+        ordinal = registry.ordinal_for(sender)
+    return store.assign(
+        event.session,
+        chat_id,
+        message_id=str(event.payload.get("id", "")),
+        jid=sender,
+        name=name,
+        ordinal=ordinal,
     )
-    flags = (*media_slots, *state, *links)
-    text = extract_text(event) if body is None else body
+
+
+def time_label(event: WahaEvent, tz_name: str = "UTC") -> str:
+    """Chat-local ``hh:mm``, or ``dd.mm hh:mm`` for an earlier day."""
+    try:
+        tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError, ValueError, OSError:
+        tz = ZoneInfo("UTC")
+    now = datetime.now(tz)
+    timestamp = event.payload.get("timestamp", event.timestamp)
+    try:
+        moment = datetime.fromtimestamp(float(timestamp), tz)
+    except TypeError, ValueError, OSError, OverflowError:
+        moment = now
+    pattern = "%H:%M" if moment.date() == now.date() else "%d.%m %H:%M"
+    return moment.strftime(pattern)
+
+
+def quoted_is_bot(event: WahaEvent, quoted: dict[str, Any]) -> bool:
+    """True when the quoted message came from the bot's own account output."""
+    quoted_id = str(quoted.get("id") or "")
+    author = authors.author(quoted_id)
+    if author == AUTHOR_OPERATOR:
+        return False
+    if author == AUTHOR_BOT:
+        return True
+    participant = jid_string(
+        quoted.get("participant") or quoted.get("_data", {}).get("author")
+    )
+    return bool(participant and participant in bot_jids(event)) or is_own_message_id(
+        quoted_id
+    )
+
+
+def quote_parts(
+    event: WahaEvent, registry: SerialRegistry
+) -> tuple[list[str], list[str]]:
+    """The ``quote=…`` flag and its preview payload for a reply."""
+    quoted = message_replies_to(event)
+    if not quoted:
+        return [], []
+    flags: list[str] = []
+    if quoted_is_bot(event, quoted):
+        flags.append("quote=you")
+    else:
+        serial = registry.serial_for(str(quoted.get("id") or ""))
+        if serial:
+            flags.append(f"quote={format_serial_token(serial)}")
+    preview = reply_description(quoted)[:120].replace('"', "'")
+    return flags, [f'quoted: "{preview}"'] if preview else []
+
+
+def reaction_parts(event: WahaEvent, registry: SerialRegistry) -> list[str]:
+    """The ``to: #m<n>`` / ``to: you`` payload of a reaction event."""
+    reaction = event.payload.get("reaction")
+    if not isinstance(reaction, dict):
+        return []
+    reaction = cast(dict[str, Any], reaction)
+    target = str(reaction.get("messageId") or "")
+    if not target:
+        return []
+    if is_own_message_id(target) or authors.author(target) == AUTHOR_BOT:
+        label = "you"
+    else:
+        serial = registry.serial_for(target)
+        label = format_serial_token(serial) if serial else ""
+    if not label:
+        return []
+    preview = str(reaction.get("preview") or "").strip()[:60].replace('"', "'")
+    return [f'to: {label} "{preview}"' if preview else f"to: {label}"]
+
+
+def mentions_parts(
+    event: WahaEvent,
+    names: dict[str, str] | None,
+    registry: SerialRegistry,
+) -> list[str]:
+    """The ``mentions: @<typed> is <speaker>`` payload, JID-free."""
+    mentioned = event.payload.get("_data", {}).get("mentionedJidList") or []
+    jids = list(dict.fromkeys(j for j in map(jid_string, mentioned) if j))
+    if not jids:
+        return []
+    own = bot_jids(event)
+    parts: list[str] = []
+    for jid in jids[:10]:
+        user = jid.split("@", 1)[0]
+        if jid in own:
+            who = "you or your operator"
+        else:
+            name = display_name(jid, names)
+            who = name or f"<member-{registry.ordinal_for(jid)}>"
+        parts.append(f"@{user} is {who}")
+    return ["mentions: " + "; ".join(parts)]
+
+
+def audio_payload(event: WahaEvent) -> list[str]:
+    """The ``[audio: "…"]`` payload of a transcribed voice note."""
+    transcript = str(event.payload.get(TRANSCRIPT_KEY) or "").strip()
+    if not transcript:
+        return []
+    trimmed = transcript[:MAX_TRANSCRIPT_CHARS].rstrip().replace('"', "'")
+    suffix = "…" if len(transcript) > MAX_TRANSCRIPT_CHARS else ""
+    return [f'[audio: "{trimmed}{suffix}"]']
+
+
+def image_payloads(images: Sequence[dict[str, Any]]) -> list[str]:
+    """The media-analysis payload line for an entry's images."""
+    if not images:
+        return []
+    return [image_noun([image_caption(image) for image in images])]
+
+
+def record_body(entry: RecordEntry) -> str:
+    """Member text for *entry*, without code-only prefixes."""
+    body = (
+        entry.body
+        if entry.body is not None
+        else str(entry.event.payload.get("body", "")).strip()
+    )
+    body = body.removeprefix(OPERATOR_NOTE_PREFIX).strip()
+    if str(entry.event.payload.get(TRANSCRIPT_KEY) or "").strip():
+        body = body.removeprefix("[voice note]").strip()
+    return body
+
+
+def media_parts(
+    entry: RecordEntry, slots: Slots
+) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+    """Flags, payloads and image blocks for one entry's attachments."""
+    flags: list[str] = []
+    payloads: list[str] = []
+    blocks: list[dict[str, Any]] = []
+    if entry.video is not None:
+        flags.append(f"video#{slots.take_video()}")
+        payloads.append(str(entry.video.get("marker") or "(video)"))
+        blocks.extend(entry.video.get("frames") or [])
+    if entry.album:
+        total = len(entry.images) + entry.omitted
+        if total:
+            start = slots.take_images(total)
+            flags.append(
+                f"album#{start}" if total == 1 else f"album#{start}-{start + total - 1}"
+            )
+        payloads.extend(image_payloads(entry.images))
+        payloads.extend(["(image omitted: not shown)"] * entry.omitted)
+        blocks.extend(entry.images)
+        return flags, payloads, blocks
+    for _ in entry.images:
+        flags.append(f"image#{slots.take_images(1)}")
+    for _ in range(entry.omitted):
+        flags.append(f"image#{slots.take_images(1)}")
+    payloads.extend(image_payloads(entry.images))
+    payloads.extend(["(image omitted: not shown)"] * entry.omitted)
+    blocks.extend(entry.images)
+    return flags, payloads, blocks
+
+
+def render_entry(
+    entry: RecordEntry,
+    *,
+    registry: SerialRegistry,
+    names: dict[str, str] | None,
+    tz_name: str,
+    slots: Slots,
+    skipped: bool = False,
+) -> tuple[str, int, list[dict[str, Any]]]:
+    """Render one record and return it with its serial and image blocks."""
+    event = entry.event
+    sender = event_sender(event)
+    name = event_display_name(event) or (names or {}).get(sender, "")
+    ordinal = None if name or is_operator_event(event) else registry.ordinal_for(sender)
+    message_id = str(event.payload.get("id", ""))
+    serial = registry.serial_for(message_id) or registry.next(
+        message_id=message_id,
+        jid=sender,
+        name=name,
+        ordinal=ordinal or 0,
+    )
+    media_flags, media_payloads, blocks = media_parts(entry, slots)
+    quote_flags, quote_payloads = quote_parts(event, registry)
+    payloads = [
+        *media_payloads,
+        *audio_payload(event),
+        *quote_payloads,
+        *reaction_parts(event, registry),
+        *mentions_parts(event, names, registry),
+        *entry.extra_payloads,
+    ]
+    line = format_record(
+        time_label=time_label(event, tz_name),
+        speaker=speaker_token(event, name=name, ordinal=ordinal),
+        serial=serial,
+        kind=record_kind(event),
+        flags=(
+            *media_flags,
+            *(["addressed"] if entry.addressed else []),
+            *(["skipped"] if skipped else []),
+            *quote_flags,
+        ),
+        body=record_body(entry),
+        payloads=payloads,
+    )
+    return line, serial, blocks
+
+
+def render_entries(
+    entries: Sequence[RecordEntry],
+    *,
+    registry: SerialRegistry,
+    names: dict[str, str] | None = None,
+    tz_name: str = "UTC",
+) -> tuple[str, list[int], list[dict[str, Any]]]:
+    """Render a turn's entries in order: text, serials and image blocks."""
+    slots = Slots()
+    records: list[str] = []
+    serials: list[int] = []
+    blocks: list[dict[str, Any]] = []
+    for entry in entries:
+        line, serial, entry_blocks = render_entry(
+            entry, registry=registry, names=names, tz_name=tz_name, slots=slots
+        )
+        records.append(line)
+        serials.append(serial)
+        blocks.extend(entry_blocks)
+    return "\n".join(records), serials, blocks
+
+
+def read_record(
+    message: dict[str, Any],
+    registry: SerialRegistry,
+    tz_name: str = "UTC",
+) -> str:
+    """Render one fetched message as a read view record, assigning a serial.
+
+    ``read_chat`` and the prompt must agree on what a message looks like,
+    and the console needs the ``#m<n>`` to act on. A fetched message from
+    before the registry existed gets its serial here, so every row the
+    tool shows is addressable.
+    """
+    payload = dict(message)
+    message_id = str(payload.get("id", ""))
+    if not payload.get("from"):
+        payload["from"] = chat_from_message_id(message_id)
+    event = WahaEvent(event="message", session="", payload=payload)
+    sender = event_sender(event)
+    if payload.get("fromMe"):
+        speaker = (
+            "<operator>" if authors.author(message_id) == AUTHOR_OPERATOR else "<bot>"
+        )
+        name = ""
+        ordinal = None
+    else:
+        name = display_name(sender)
+        ordinal = None if name else registry.ordinal_for(sender)
+        speaker = speaker_token(event, name=name, ordinal=ordinal)
+    serial = registry.serial_for(message_id) or registry.next(
+        message_id=message_id, jid=sender, name=name, ordinal=ordinal or 0
+    )
     return format_record(
-        time_label=time_label,
+        time_label=time_label(event, tz_name),
         speaker=speaker,
         serial=serial,
         kind=record_kind(event),
-        flags=flags,
-        body=text or "",
-        payloads=payloads,
+        body=str(payload.get("body", "") or "").strip(),
     )

@@ -19,12 +19,142 @@ characters but never that shape (there is no denylist to maintain).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+import re
+from collections.abc import Callable, Iterable, Sequence
 
 #: The addressing verdict, policy line and attach-slot vocabulary live in the
 #: session prompt; the renderer only assembles the line.
 CONTINUATION_PREFIX = "> "
 PAYLOAD_PREFIX = "  · "
+
+#: A record head: ``[[hh:mm speaker #m<n>]] kind flags...``.
+RECORD_HEAD_RE = re.compile(r"^(\[\[[^\]]*#m(\d+)\]\])\s+(\S+)(.*)$")
+
+#: A reference to an earlier record from a flag or payload.
+REFERENCE_RE = re.compile(r"(?:quote=#m|to: #m)(\d+)")
+
+
+def record_serials(text: str) -> list[int]:
+    """Every record serial in *text*, in order."""
+    return [
+        int(match.group(2))
+        for line in text.splitlines()
+        if (match := RECORD_HEAD_RE.match(line))
+    ]
+
+
+def apply_skipped(text: str, skipped: set[int]) -> str:
+    """Insert the prompt-time ``skipped`` flag on the chosen records.
+
+    The stored turn never carries this overlay — a silent run saw the
+    records but did not answer them, and only the next prompt needs to say
+    so. Insertion follows the grammar's flag order (media slots, then
+    state), so an overlaid line is indistinguishable from one rendered
+    skipped in the first place.
+    """
+    if not skipped:
+        return text
+    out: list[str] = []
+    for line in text.splitlines():
+        match = RECORD_HEAD_RE.match(line)
+        if match is None or int(match.group(2)) not in skipped:
+            out.append(line)
+            continue
+        head, kind, rest = match.group(1), match.group(3), match.group(4)
+        flags = rest.split()
+        if "skipped" not in flags:
+            index = 0
+            while index < len(flags) and (
+                flags[index] == "addressed"
+                or flags[index].startswith(("image#", "video#", "album#"))
+            ):
+                index += 1
+            flags.insert(index, "skipped")
+        tail = f" {kind}" + (f" {' '.join(flags)}" if flags else "")
+        out.append(f"{head}{tail}")
+    return "\n".join(out)
+
+
+def record_blocks(text: str) -> list[tuple[int, str]]:
+    """Split *text* into ``(serial, block)``; serial 0 for non-record lines.
+
+    A record owns its continuation and payload lines; anything that is not
+    a record head (a stray header or policy line) is kept as its own block
+    so a cap never swallows context it cannot classify.
+    """
+    blocks: list[tuple[int, str]] = []
+    for line in text.splitlines():
+        match = RECORD_HEAD_RE.match(line)
+        if match is not None:
+            blocks.append((int(match.group(2)), line))
+        elif blocks and (
+            line.startswith(CONTINUATION_PREFIX) or line.startswith(PAYLOAD_PREFIX)
+        ):
+            serial, block = blocks[-1]
+            blocks[-1] = (serial, f"{block}\n{line}")
+        else:
+            blocks.append((0, line))
+    return blocks
+
+
+def referenced_serials(text: str) -> set[int]:
+    """Serials named by ``quote=#m<n>`` / ``to: #m<n>`` anywhere in *text*."""
+    return {int(serial) for serial in REFERENCE_RE.findall(text)}
+
+
+def cap_turn(
+    text: str,
+    *,
+    keep_serials: Sequence[int] = (),
+    window: int,
+    max_tokens: int,
+    token_counter: Callable[[str], int],
+) -> str:
+    """Keep the current turn, the newest *window* older records and quotes.
+
+    The current burst is always kept; older records are selected newest
+    first up to *window*, and any record an older selected record quotes
+    or reacts to is kept too. Then the oldest selected record is dropped
+    one at a time until the result fits *max_tokens* — never the newest
+    record, so the turn always keeps the message being answered.
+    """
+    blocks = record_blocks(text)
+    serials = [serial for serial, _ in blocks if serial]
+    if len(serials) <= 1:
+        return text
+    current = {int(serial) for serial in keep_serials}
+    selected: set[int] = set(current)
+    older = [serial for serial in serials if serial not in current]
+    selected.update(older[-max(window, 0) :])
+    selected.update(referenced_serials(text) & set(serials))
+    selected.add(serials[-1])
+    kept = [
+        (serial, block) for serial, block in blocks if not serial or serial in selected
+    ]
+    while (
+        token_counter("\n".join(block for _, block in kept)) > max_tokens
+        and len([serial for serial, _ in kept if serial]) > 1
+    ):
+        kept = drop_oldest(kept, current)
+    return "\n".join(block for _, block in kept)
+
+
+def drop_oldest(
+    blocks: list[tuple[int, str]], current: set[int]
+) -> list[tuple[int, str]]:
+    """Drop the oldest block that is not the newest record.
+
+    Non-current records go first; within the current burst the oldest is
+    dropped only when nothing older is left. The final record always stays.
+    """
+    records = [index for index, (serial, _) in enumerate(blocks) if serial]
+    if len(records) <= 1:
+        return blocks
+    drop = next(
+        (index for index in records[:-1] if blocks[index][0] not in current),
+        records[0],
+    )
+    return blocks[:drop] + blocks[drop + 1 :]
 
 
 def escape_body(body: str) -> str:

@@ -3,6 +3,7 @@
 import re
 from typing import Any
 
+from wahabot.ai.scrub import strip_spoofed_markers
 from wahabot.core.identity import authors
 from wahabot.core.models import WahaEvent
 from wahabot.core.waha import media_with_url
@@ -40,6 +41,11 @@ WRAP_UP_NOTE_KWARG = "wrap_up_note"
 #: Kwarg tagging a folded operator-typed message: a no-run user turn,
 #: handled by construction (never the trailing scaffolding of a run).
 OPERATOR_FOLD_KWARG = "operator_fold"
+
+#: Kwarg keys for the records grammar: the serials the run read, and the
+#: subset it read and did not answer (the prompt-time ``skipped`` overlay).
+TURN_SERIALS_KWARG = "turn_serials"
+SKIPPED_SERIALS_KWARG = "skipped_serials"
 
 
 def jid_string(value: Any) -> str:
@@ -224,6 +230,26 @@ def message_replies_to(event: WahaEvent) -> dict[str, Any] | None:
         return reply
     quoted = event.payload.get("_data", {}).get("quotedMsg")
     return quoted if isinstance(quoted, dict) else None
+
+
+def reply_description(message_reply: dict[str, Any]) -> str:
+    """Describe the quoted message body/media, truncated for the prompt.
+
+    The quoted body is member text riding inside a code-rendered
+    ``[quoting]`` marker — scrubbed so a member cannot smuggle a
+    spoofed marker in through the quote they send. The record grammar
+    reuses the same description, clamped further at render time.
+    """
+    media = message_reply.get("hasMedia") and message_reply.get("media")
+    if media:
+        mimetype = media.get("mimetype", "media")
+        filename = media.get("filename") or ""
+        description = f"{mimetype} {filename}".strip()
+    else:
+        description = strip_spoofed_markers(
+            str(message_reply.get("body", "") or "").strip()
+        )
+    return description[:400]
 
 
 def bot_mention_pattern(

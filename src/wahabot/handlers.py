@@ -25,12 +25,10 @@ from wahabot.ai.context import (
     is_single_emoji,
     message_id_note,
     render_system_prompt,
-    sender_tag,
 )
 from wahabot.ai.history import ContextBudgetError
 from wahabot.ai.messages import (
     OPERATOR_FOLD_KWARG,
-    OPERATOR_NOTE_PREFIX,
     OPERATOR_PAYLOAD_FLAG,
     conversation_jid,
     extract_text,
@@ -49,10 +47,20 @@ from wahabot.ai.messages import (
 )
 from wahabot.ai.observability import chat_trace_attributes, enable_langfuse
 from wahabot.ai.scrub import strip_spoofed_markers
+from wahabot.ai.serials import serial_store
 from wahabot.ai.tools import build_default_tools
+from wahabot.ai.tools.url_images import fetch_url_images, image_urls
 from wahabot.ai.tools.url_videos import fetch_url_video, video_urls
 from wahabot.ai.tools.whatsapp import EscalationChannel, RunTarget, deliver_chat_text
 from wahabot.ai.triage import TriageGate
+from wahabot.ai.turn_records import (
+    LINK_VIDEO_MARKER_KEY,
+    TRANSCRIPT_KEY,
+    VIDEO_MARKER_KEY,
+    RecordEntry,
+    assign_event_serial,
+    render_entries,
+)
 from wahabot.ai.video import caption_video, extract_frames, join_anchor, video_marker
 from wahabot.ai.vision import caption_images
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
@@ -402,11 +410,16 @@ async def remember_own_message(
             chat_id=chat_id,
         )
         return None
-    # Tag first, exactly like the waking turn renders it
-    # (``[Name <jid>] [operator message] text``), so the model sees one
-    # shape for operator lines whether they wake it or not.
-    tag = sender_tag(event)
-    content = f"{tag} {OPERATOR_NOTE_PREFIX}{strip_spoofed_markers(body)}".strip()
+    # One shape for operator lines whether they wake the bot or not: a
+    # record with the <operator> speaker token, never a JID tag.
+    registry = serial_store(str(settings.data_dir)).for_chat(event.session, chat_id)
+    content, _, _ = await asyncio.to_thread(
+        render_entries,
+        [RecordEntry(event=event, body=body)],
+        registry=registry,
+        names={},
+        tz_name=settings.timezone,
+    )
     ctx = await append_to_memory(
         event.session,
         chat_id,
@@ -843,6 +856,14 @@ def register_agent_handler(
             for member in (buffer.container, *buffer.images)
         )
         gate_first = not addressed and current.group_participation == "judicious"
+        entry = RecordEntry(
+            event=event,
+            body=str(event.payload.get("body", "")).strip(),
+            images=downloaded,
+            omitted=max(0, len(buffer.images) - len(downloaded)),
+            album=True,
+            addressed=addressed,
+        )
         async with chat_lock(event.session, chat_id):
             ctx = await context_for(event.session, chat_id, agent, settings)
             with chat_trace_attributes(chat_id):
@@ -857,6 +878,7 @@ def register_agent_handler(
                     bot_mention_regex=current.bot_mention_regex,
                     addressed=addressed,
                     gate_first=gate_first,
+                    record_entries=[entry],
                 )
             await persist_memory(settings, event.session, chat_id, ctx)
         delivered = bool(target.sent or target.reacted)
@@ -921,6 +943,7 @@ def register_agent_handler(
         if message_kind(event) == "audio" and settings.transcribe_url:
             transcript = await transcribe_voice_note(event, waha, settings)
             if transcript:
+                event.payload[TRANSCRIPT_KEY] = transcript
                 body = f"[voice note] {transcript}"
                 event.payload["body"] = body
         return body
@@ -942,17 +965,23 @@ def register_agent_handler(
         return image
 
     async def prepare_message_videos(
-        event: WahaEvent, body: str | None, *, burst: bool = False
+        event: WahaEvent,
+        body: str | None,
+        *,
+        burst: bool = False,
+        stamp_body: bool = True,
     ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]:
-        """Prepare attached or linked video and stamp its marker on the turn."""
+        """Prepare attached or linked video and record its analysis."""
         video = None
         if can_prepare_video(event, settings):
             video = await prepare_video(
                 event, waha, settings, agent.llm, agent.llm_semaphore
             )
             if video is not None:
-                body = join_anchor(body or "", video["marker"])
-                event.payload["body"] = body
+                event.payload[VIDEO_MARKER_KEY] = video["marker"]
+                if stamp_body:
+                    body = join_anchor(body or "", video["marker"])
+                    event.payload["body"] = body
         # Bursts exclude attached videos even after a failed download;
         # single turns try body URLs whenever no attached video resolved.
         excluded = message_kind(event) in ("video", "ptv") if burst else video is not None
@@ -962,17 +991,20 @@ def register_agent_handler(
                 settings, agent.llm, agent.llm_semaphore, body
             )
             if url_video is not None:
-                body = join_anchor(body, url_video["marker"])
-                event.payload["body"] = body
+                event.payload[LINK_VIDEO_MARKER_KEY] = url_video["marker"]
+                if stamp_body:
+                    body = join_anchor(body, url_video["marker"])
+                    event.payload["body"] = body
         return body, video, url_video
 
     async def prepare_burst_media(
         burst_event: WahaEvent,
         images: list[dict[str, Any]],
-    ) -> str | None:
-        """Prepare one buffered turn's text and append its captioned media."""
+    ) -> tuple[str | None, RecordEntry]:
+        """Prepare one buffered turn's text and its record entry."""
         await transcribe_message(burst_event, None)
         body = extract_text(burst_event)
+        entry = RecordEntry(event=burst_event, body=body or "")
         # The vision cap applies at collection time: once the shared
         # list holds ``vision_max_images`` entries, a further image can
         # never ride the prompt (the run trims to the same cap), so
@@ -980,44 +1012,52 @@ def register_agent_handler(
         capped = (
             settings.vision_max_images > 0 and len(images) >= settings.vision_max_images
         )
-        if (
-            message_kind(burst_event) in ("image", "sticker")
-            and settings.vision
-            and not capped
-        ):
-            image = await download_captioned_image(
-                image_media(burst_event), str(burst_event.payload.get("id", ""))
-            )
-            if image is not None:
-                images.append(image)
-        body, video, url_video = await prepare_message_videos(
-            burst_event, body, burst=True
+        if message_kind(burst_event) in ("image", "sticker") and settings.vision:
+            if capped:
+                entry.omitted += 1
+            else:
+                image = await download_captioned_image(
+                    image_media(burst_event), str(burst_event.payload.get("id", ""))
+                )
+                if image is not None:
+                    images.append(image)
+                    entry.images.append(image)
+        prepared, video, url_video = await prepare_message_videos(
+            burst_event, body, burst=True, stamp_body=False
         )
+        entry.video = video
+        if url_video is not None:
+            entry.extra_payloads.append(str(url_video["marker"]))
         for source in (video, url_video):
             if source is not None:
                 images.extend(source["frames"])
-        return body
+        if settings.vision and prepared:
+            fetched = await asyncio.to_thread(
+                fetch_url_images, settings, image_urls(prepared, settings.max_url_images)
+            )
+            if fetched:
+                entry.images.extend(fetched)
+                images.extend(fetched)
+        return prepared, entry
 
     async def merge_burst(
         buffer: bursts.BurstBuffer,
-    ) -> tuple[WahaEvent, list[dict[str, Any]]] | None:
+    ) -> tuple[WahaEvent, list[dict[str, Any]], list[RecordEntry]] | None:
         """Merge a burst into one turn; None when it has no usable content.
 
-        Each part keeps its original message id so quoting, audit and
-        evidence links survive the merge. The anchor's own id rides
-        ``handle_message``'s message-id note on the merged event; a
-        per-part note would duplicate it. Member words are scrubbed here,
-        the last point the part is pure member text; the code-stamped id
-        notes must survive unscrubbed, so the merged turn rides with
-        ``body_scrubbed=True``.
+        The prose path joins every member's words (each part keeps its id
+        note), used by operator command events. Inbound chat turns are the
+        ordered list of record entries, one per buffered message.
         """
         if not buffer.messages:
             return None
         last = buffer.messages[-1]
         images: list[dict[str, Any]] = []
         parts: list[str] = []
+        entries: list[RecordEntry] = []
         for burst_event in buffer.messages:
-            body = await prepare_burst_media(burst_event, images)
+            body, entry = await prepare_burst_media(burst_event, images)
+            entries.append(entry)
             if body is None:
                 continue
             if burst_event is last:
@@ -1026,7 +1066,16 @@ def register_agent_handler(
             part_id = message_id_note(burst_event).strip()
             clean = strip_spoofed_markers(body)
             parts.append(f"{clean}\n{part_id}" if part_id else clean)
-        if not parts and not images:
+        entries = [
+            entry
+            for entry in entries
+            if entry.body
+            or entry.images
+            or entry.video
+            or entry.omitted
+            or str(entry.event.payload.get(TRANSCRIPT_KEY) or "")
+        ]
+        if not parts and not images and not entries:
             logger.debug(
                 "Burst in {chat_id} yielded no usable content",
                 chat_id=buffer.key[1],
@@ -1039,12 +1088,13 @@ def register_agent_handler(
         # A burst turn must not inherit one member's quote context.
         merged.payload.pop("replyTo", None)
         merged.payload.get("_data", {}).pop("quotedMsg", None)
-        return merged, images
+        return merged, images, entries
 
     async def run_burst_turn(
         buffer: bursts.BurstBuffer,
         merged: WahaEvent,
         images: list[dict[str, Any]],
+        entries: list[RecordEntry],
     ) -> tuple[str, RunTarget]:
         """Run one merged burst turn under the chat lock."""
         chat_id = buffer.key[1]
@@ -1052,9 +1102,9 @@ def register_agent_handler(
             ctx = await context_for(merged.session, chat_id, agent, settings)
             with chat_trace_attributes(chat_id):
                 current = config_reloader.current_config()
-                addressed = any(
-                    group_message_addressed(member, current) for member in buffer.messages
-                )
+                for entry in entries:
+                    entry.addressed = group_message_addressed(entry.event, current)
+                addressed = any(entry.addressed for entry in entries)
                 gate_first = not addressed and current.group_participation == "judicious"
                 reply, target = await handle_message(
                     merged,
@@ -1068,6 +1118,7 @@ def register_agent_handler(
                     body_scrubbed=True,
                     addressed=addressed,
                     gate_first=gate_first,
+                    record_entries=entries,
                 )
             await persist_memory(settings, merged.session, chat_id, ctx)
         return reply, target
@@ -1082,10 +1133,10 @@ def register_agent_handler(
         merged_burst = await merge_burst(buffer)
         if merged_burst is None:
             return
-        merged, images = merged_burst
+        merged, images, entries = merged_burst
         chat_id = buffer.key[1]
         message_id = str(merged.payload.get("id", ""))
-        reply, target = await run_burst_turn(buffer, merged, images)
+        reply, target = await run_burst_turn(buffer, merged, images, entries)
         # The provider answered: flip the LLM health flag back up
         # (once-per-transition notify) outside the chat lock — the
         # burst path shares the single-message path's contract.
@@ -1449,6 +1500,10 @@ def register_agent_handler(
         config = await accept_message(event)
         if config is None:
             return
+        # Serial at ingest, before every gate: a message that never wakes a
+        # run still gets its #m<n> so a later quote/reaction can anchor to it.
+        store = serial_store(str(settings.data_dir))
+        await asyncio.to_thread(assign_event_serial, store, event)
         handled, body = await handle_self_command(event, config)
         if handled:
             return
@@ -1459,7 +1514,9 @@ def register_agent_handler(
         if await skip_or_buffer_message(event, config, operator_wakes):
             return
         body = await transcribe_message(event, body)
-        body, video, url_video = await prepare_message_videos(event, body)
+        body, video, url_video = await prepare_message_videos(
+            event, body, stamp_body=False
+        )
         if body is None and image is None and video is None and url_video is None:
             logger.debug("Skipping media/album message {id}", id=event.payload.get("id"))
             return

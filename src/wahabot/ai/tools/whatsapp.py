@@ -30,6 +30,7 @@ from loguru import logger
 from PIL import Image
 
 from wahabot.ai.messages import jid_string
+from wahabot.ai.serials import serial_store
 from wahabot.ai.tools.envelope import error, ok
 from wahabot.ai.tools.outfile import write_json_output
 from wahabot.ai.tools.runcontext import (
@@ -64,6 +65,7 @@ from wahabot.ai.tools.schemas import (
     SendMessageSchema,
     StaySilentSchema,
 )
+from wahabot.ai.turn_records import read_record
 from wahabot.core.audit import save_action
 from wahabot.core.identity import AUTHOR_BOT, AUTHOR_OPERATOR, authors, display_name
 from wahabot.core.identity import names as name_book
@@ -286,7 +288,37 @@ def profile_picture_builder(waha: WahaClient) -> BaseTool:
     )
 
 
-def send_message(waha: WahaClient) -> BaseTool:
+def resolve_message_token(
+    token: str,
+    *,
+    session: str,
+    chat_id: str,
+    settings: Settings | None,
+    allow_search: bool = False,
+) -> tuple[str, str | None]:
+    """Resolve a ``#m<n>`` token to its raw id; raw ids pass through.
+
+    Resolution is against the *target* chat's registry: an operator
+    command that names a chat and then replies by token acts in that
+    chat, never in the console's synthetic context. Operator reactions
+    have no target chat, so they may search the session for a unique
+    match. Failure is a soft error string, never an exception.
+    """
+    value = token.strip()
+    if not value.startswith("#m"):
+        return value, None
+    if settings is None:
+        return "", f"unknown message token {value}"
+    store = serial_store(str(settings.data_dir))
+    entry = store.resolve(session, chat_id, value)
+    if entry is None and allow_search:
+        entry = store.find(session, value)
+    if entry is None:
+        return "", f"unknown message token {value} in this chat"
+    return entry.message_id, None
+
+
+def send_message(waha: WahaClient, settings: Settings | None = None) -> BaseTool:
     """Build a tool that sends a WhatsApp text message.
 
     Sends to the current chat by default; an operator-command run may
@@ -325,6 +357,16 @@ def send_message(waha: WahaClient) -> BaseTool:
         session = target.session
         if not session or not chat_id:
             return error("no active conversation context")
+        if reply_to:
+            reply_to, token_error = resolve_message_token(
+                reply_to,
+                session=session,
+                chat_id=chat_id,
+                settings=settings,
+                allow_search=operator_run(target),
+            )
+            if token_error:
+                return error(token_error)
         delivery_error = delivery_target_error(chat_id, reply_to, target)
         if delivery_error:
             return error(delivery_error)
@@ -587,11 +629,13 @@ def escalate(
     )
 
 
-def react_to_message(waha: WahaClient) -> BaseTool:
+def react_to_message(waha: WahaClient, settings: Settings | None = None) -> BaseTool:
     """Build a tool that reacts to a WhatsApp message.
 
     One successful reaction change (including removal) per run.
     Further reaction calls fail; the send latch is independent.
+    ``message_id`` may be a ``#m<n>`` token; operator commands resolve it
+    across the session when their synthetic context has no chat.
     """
 
     def react_to_message_fn(message_id: str, reaction: str = "", reason: str = "") -> str:
@@ -603,6 +647,15 @@ def react_to_message(waha: WahaClient) -> BaseTool:
             return error("no active conversation context")
         if not message_id:
             return error("message_id is required")
+        message_id, token_error = resolve_message_token(
+            message_id,
+            session=session,
+            chat_id=target.chat_id,
+            settings=settings,
+            allow_search=operator_run(target),
+        )
+        if token_error:
+            return error(token_error)
         _, id_error = fenced_message_id(message_id, target)
         if id_error:
             return error(id_error)
@@ -1223,23 +1276,38 @@ def sender_fields(message: dict[str, Any]) -> dict[str, str]:
     return fields
 
 
-def fit_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
+def fit_messages(
+    messages: list[dict[str, Any]],
+    *,
+    settings: Settings | None = None,
+    session: str = "",
+    chat_id: str = "",
+) -> dict[str, Any]:
     """Slim every fetched message inline and spill the raw window to a file.
 
     Nothing requested is silently dropped: every message appears in
-    the slimmed inline list (bodies capped by :func:`slim_message`),
-    and the full raw window — complete ``_data``, uncapped bodies —
-    goes to the spill file, whose metadata rides along as ``file``.
+    the inline list (bodies capped by :func:`slim_message`), and the
+    full raw window — complete ``_data``, uncapped bodies — goes to the
+    spill file, whose metadata rides along as ``file``.
     ``returned``/``message_count`` agree; each message's
     ``body_truncated`` flags cut text whose full form is in the file.
     Empty windows omit count/file; spill failure omits ``file`` (and
     the inline list is still complete).
+
+    With the records grammar, the inline view is the same shape the prompt
+    reads (``records`` instead of ``messages``), so the console and the
+    model agree and every row carries its ``#m<n>``. The raw spill is
+    unchanged.
     """
     kept = [slim_message(message) for message in messages]
-    out: dict[str, Any] = {
-        "messages": kept,
-        "returned": len(kept),
-    }
+    out: dict[str, Any] = {"returned": len(kept)}
+    if settings is not None:
+        registry = serial_store(str(settings.data_dir)).for_chat(session, chat_id)
+        out["records"] = [
+            read_record(message, registry, settings.timezone) for message in messages
+        ]
+    else:
+        out["messages"] = kept
     if messages:
         out["message_count"] = len(messages)
         try:
@@ -1398,13 +1466,24 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
             return error(f"unknown mode: {mode!r}")
         if mode in ("list", "search") and limit is not None and limit <= 0:
             return error("limit must be positive")
+        if chat and chat.strip().startswith("#m"):
+            raw, token_error = resolve_message_token(
+                chat,
+                session=target.session,
+                chat_id=target.chat_id,
+                settings=settings,
+                allow_search=operator_run(target),
+            )
+            if token_error:
+                return error(token_error)
+            chat = chat_jid(raw, target)
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)
         if not chat_id:
             return error("no active conversation context")
         target.allowed_chats.add(chat_id)
-        return handler(waha, target.session, chat_id, query, name, limit)
+        return handler(waha, target.session, chat_id, query, name, limit, settings)
 
     return FunctionTool.from_defaults(
         fn=read_chat_fn,
@@ -1508,6 +1587,7 @@ def read_chat_messages(
     query: str,
     name: str,
     limit: int | None,
+    settings: Settings | None = None,
 ) -> str:
     """The `list` mode: recent messages from a chat, newest first.
 
@@ -1515,7 +1595,10 @@ def read_chat_messages(
     the slim inline preview (see :func:`fit_messages`). No paging.
     """
     messages = waha.fetch_chat_messages(session, chat_id, limit=limit or _LIST_WINDOW)
-    return ok(chat=chat_id, **fit_messages(messages))
+    return ok(
+        chat=chat_id,
+        **fit_messages(messages, settings=settings, session=session, chat_id=chat_id),
+    )
 
 
 def read_search_messages(
@@ -1525,6 +1608,7 @@ def read_search_messages(
     query: str,
     name: str,
     limit: int | None,
+    settings: Settings | None = None,
 ) -> str:
     """Substring-filter the latest *limit* messages, not the full history.
 
@@ -1536,12 +1620,18 @@ def read_search_messages(
     return ok(
         chat=chat_id,
         query=query,
-        **fit_messages(messages),
+        **fit_messages(messages, settings=settings, session=session, chat_id=chat_id),
     )
 
 
 def read_chat_metadata(
-    waha: WahaClient, session: str, chat_id: str, query: str, name: str, limit: int
+    waha: WahaClient,
+    session: str,
+    chat_id: str,
+    query: str,
+    name: str,
+    limit: int,
+    settings: Settings | None = None,
 ) -> str:
     """Available overview fields and roster summary; names may be missing."""
     overview = waha.get_chat_overview(session, chat_id)
@@ -1912,7 +2002,10 @@ def deliver_chat_text(
     try:
         roster = chat_roster(waha, session, chat_id)
         text, roster = prepare_mentions(waha, session, text, roster)
-        merged = ordered_merge(mentions or [], resolve_mentions(text, roster))
+        explicit, unresolved = resolve_explicit_mentions(
+            waha, session, chat_id, mentions or [], roster
+        )
+        merged = ordered_merge(explicit, resolve_mentions(text, roster))
         dangling = dangling_mentions(text, roster)
         sent_id = waha.send_text(
             session, chat_id, text, reply_to=reply_to, mentions=merged or None
@@ -1923,7 +2016,47 @@ def deliver_chat_text(
         if indicator:
             clear_typing(waha, session, chat_id)
         raise
-    return sent_id, merged, dangling
+    return sent_id, merged, [*dangling, *unresolved]
+
+
+def resolve_explicit_mentions(
+    waha: WahaClient,
+    session: str,
+    chat_id: str,
+    mentions: list[str],
+    roster: list[str],
+) -> tuple[list[str], list[str]]:
+    """Resolve explicit ``mentions`` names to JIDs; return the unresolved.
+
+    A JID or numeric id passes through. A name resolves only when exactly
+    one named member matches — two members sharing a name tag neither, and
+    the name rides back as a warning so the model can quote the ``#m<n>``
+    record instead. Roster reads fail soft: entries stay unresolved.
+    """
+    if not mentions:
+        return [], []
+    try:
+        names = sender_names(waha, session, chat_id)
+    except Exception:
+        return [], [mention for mention in mentions if "@" not in mention]
+    members = [{"id": jid, "name": display_name(jid, names)} for jid in roster]
+    resolved: list[str] = []
+    unresolved: list[str] = []
+    for mention in mentions:
+        value = mention.strip()
+        if not value:
+            continue
+        if "@" in value or value.isdigit():
+            resolved.append(value)
+            continue
+        hits = [
+            m for m in members if m["name"] and m["name"].casefold() == value.casefold()
+        ]
+        if len(hits) == 1:
+            resolved.append(hits[0]["id"])
+        else:
+            unresolved.append(value)
+    return resolved, unresolved
 
 
 def resolve_in_current_chat(

@@ -36,6 +36,7 @@ from wahabot.ai.events import InputEvent, ToolCallEvent
 from wahabot.ai.history import (
     INBOUND_ID_RE,
     ContextBudgetError,
+    cap_records_turn,
     chat_visible_text,
     degrade_old_history,
     inbound_message_id,
@@ -45,7 +46,11 @@ from wahabot.ai.history import (
     trim_to_budget,
     turn_header,
 )
-from wahabot.ai.messages import TURN_HANDLED_KWARG
+from wahabot.ai.messages import (
+    SKIPPED_SERIALS_KWARG,
+    TURN_HANDLED_KWARG,
+    TURN_SERIALS_KWARG,
+)
 from wahabot.ai.pinned_state import PINNED_STATE_TOKEN_LIMIT, pinned_state_block
 from wahabot.ai.tools.notebook import MAX_NOTE_TOKENS, NOTEBOOK_INSTRUCTIONS
 from wahabot.ai.tools.slim import slim_tool_specs
@@ -380,6 +385,13 @@ class FunctionCallingAgentWorkflow(Workflow):
                 role=MessageRole.SYSTEM, content=f"{prompt}\n\n{block}".strip()
             )
             budget = self.memory_token_limit - count_message_tokens(system)
+        if self.settings is not None:
+            messages = cap_records_turn(
+                messages,
+                budget=budget,
+                token_counter=count_message_tokens,
+                window=self.settings.records_window,
+            )
         history = trim_to_budget(messages, budget, count_message_tokens)
         await memory.aset(history)
         self.schedule_recap_merge(messages, history)
@@ -768,13 +780,23 @@ class FunctionCallingAgentWorkflow(Workflow):
         await ctx.store.set("image_blocks", getattr(ev, "image_blocks", None))
         await ctx.store.set("tool_rounds", 0)
         await ctx.store.set("last_tool_calls", [])
-        if not await self.already_in_buffer(memory, str(ev.input)):
-            await memory.aput(ChatMessage(role="user", content=str(ev.input)))
+        serials = await ctx.store.get("turn_serials", default=None)
+        if not await self.already_in_buffer(memory, str(ev.input), serials):
+            kwargs: dict[str, Any] = (
+                {TURN_SERIALS_KWARG: list(serials)} if serials else {}
+            )
+            await memory.aput(
+                ChatMessage(role="user", content=str(ev.input), additional_kwargs=kwargs)
+            )
         await ctx.store.set("memory", memory)
         return InputEvent(input=await self.chat_history(ctx))
 
     @staticmethod
-    async def already_in_buffer(memory: ChatMemoryBuffer, incoming: str) -> bool:
+    async def already_in_buffer(
+        memory: ChatMemoryBuffer,
+        incoming: str,
+        serials: list[int] | None = None,
+    ) -> bool:
         """Whether *incoming*'s message-id note already rides the buffer.
 
         A WAHA redelivery (the handler drops the seen marker so a
@@ -786,9 +808,16 @@ class FunctionCallingAgentWorkflow(Workflow):
         serialized id in the ``[message id: …]`` note identifies the
         exact event: already present means this is a redelivery whose
         body the buffer already carries, and the run proceeds without
-        appending (the agent still gets its fresh run).
+        appending (the agent still gets its fresh run). A records turn
+        carries no id note; its allocated serials are the identity.
         """
         message_id = inbound_message_id(incoming)
+        if not message_id and serials:
+            messages = await memory.aget_all()
+            for message in reversed(messages):
+                if message.role != MessageRole.USER:
+                    continue
+                return message.additional_kwargs.get(TURN_SERIALS_KWARG) == serials
         if not message_id:
             return False
         messages = await memory.aget_all()
@@ -892,9 +921,9 @@ class FunctionCallingAgentWorkflow(Workflow):
         if any(call.tool_name == SILENCE_TOOL for call in tool_calls):
             self.log_silence_reason(tool_calls)
             logger.debug("Stopping run: model chose stay_silent")
-            return await self.stop_with(ctx, self.stopped_response())
+            return await self.stop_with(ctx, self.stopped_response(), silent=True)
         if tool_calls and await self.repeats_tool_call(ctx, tool_calls):
-            return await self.stop_with(ctx, self.stopped_response())
+            return await self.stop_with(ctx, self.stopped_response(), silent=True)
         if not tool_calls:
             return await self.finish_text_round(ctx, response, rounds)
         if self.delivery_complete(tool_calls) or rounds >= self.tool_round_limit:
@@ -910,7 +939,9 @@ class FunctionCallingAgentWorkflow(Workflow):
         await self.remember(ctx, response, tool_calls)
         return ToolCallEvent(tool_calls=tool_calls)
 
-    async def stop_with(self, ctx: Context, event: StopEvent) -> StopEvent:
+    async def stop_with(
+        self, ctx: Context, event: StopEvent, *, silent: bool = False
+    ) -> StopEvent:
         """End the run with *event*: stamp the turn and collapse the delivery group.
 
         The wrap-up note is journalled and written to the notebook by
@@ -918,7 +949,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         (``kind=lesson``), never an assistant turn, so nothing is staged
         for storage here.
         """
-        await self.mark_turn_handled(ctx)
+        await self.mark_turn_handled(ctx, silent=silent)
         await self.collapse_delivery(ctx)
         return event
 
@@ -930,7 +961,10 @@ class FunctionCallingAgentWorkflow(Workflow):
         delivered = self.any_delivery()
         note = str(response.message.content or "").strip() if delivered else ""
         await self.remember(ctx, response, [], skip_text=delivered)
-        await self.mark_turn_handled(ctx)
+        silent = not delivered and not chat_visible_text(
+            str(response.message.content or "")
+        )
+        await self.mark_turn_handled(ctx, silent=silent)
         await self.collapse_delivery(ctx)
         if delivered:
             if note:
@@ -938,7 +972,7 @@ class FunctionCallingAgentWorkflow(Workflow):
             self.audit_wrap_up_note(note)
         return StopEvent(result=self.drop_post_delivery_text(response))
 
-    async def mark_turn_handled(self, ctx: Context) -> None:
+    async def mark_turn_handled(self, ctx: Context, *, silent: bool = False) -> None:
         """Stamp the run's inbound user turn as handled conversation.
 
         ``prepare_chat_history`` appended the turn unstamped; the four
@@ -946,24 +980,30 @@ class FunctionCallingAgentWorkflow(Workflow):
         stamp tells ``history``'s trailing-user drop that this message
         is real conversation a completed run read — in ``judicious``
         group mode a silent run's message must stay in context for the
-        next run, not be discarded as scaffolding. Fail-soft: without
-        the stamp the turn merely behaves like today (dropped on the
-        next run's repair).
+        next run, not be discarded as scaffolding. A silent run also
+        records the serials it read in ``skipped_serials``; the next
+        prompt renders that as the prompt-time ``skipped`` overlay
+        (never as stored content). Fail-soft: without the stamp the turn
+        merely behaves like today (dropped on the next run's repair).
         """
         memory = await ctx.store.get("memory", default=None)
         if memory is None:
             return
+        serials = await ctx.store.get("turn_serials", default=None)
         messages = await memory.aget_all()
         for i in range(len(messages) - 1, -1, -1):
             msg = messages[i]
             if msg.role == MessageRole.USER and TURN_HANDLED_KWARG not in (
                 msg.additional_kwargs
             ):
+                kwargs = {**msg.additional_kwargs, TURN_HANDLED_KWARG: True}
+                if silent and serials:
+                    kwargs[SKIPPED_SERIALS_KWARG] = list(serials)
                 messages[i] = ChatMessage(
                     role=msg.role,
                     blocks=list(msg.blocks),
                     content=msg.content,
-                    additional_kwargs={**msg.additional_kwargs, TURN_HANDLED_KWARG: True},
+                    additional_kwargs=kwargs,
                 )
                 break
         await memory.aset(messages)

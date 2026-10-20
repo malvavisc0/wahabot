@@ -29,6 +29,8 @@ from loguru import logger
 from wahabot.ai.context import participant_names
 from wahabot.ai.messages import REACTION_TARGET_KWARG, bot_jids, jid_string
 from wahabot.ai.scrub import strip_spoofed_markers
+from wahabot.ai.serials import serial_store
+from wahabot.ai.turn_records import RecordEntry, assign_event_serial, render_entries
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.identity import display_name
 from wahabot.core.jid import chat_from_message_id, is_own_message_id
@@ -61,6 +63,8 @@ def register_reaction_handler(
 
     @on_reaction
     async def log_reaction(event: WahaEvent) -> None:
+        store = serial_store(str(settings.data_dir))
+        await asyncio.to_thread(assign_event_serial, store, event)
         reaction: dict[str, Any] = event.payload.get("reaction", {})
         target_id = reaction.get("messageId", "")
         if not target_id:
@@ -96,17 +100,22 @@ def register_reaction_handler(
             return
         emoji = str(reaction.get("text", "")).strip() or "(removed)"
         preview = message_preview(message)
-        # In groups `from` is the group JID and `participant` the actual
-        # reactor — the note must name the person, not the room. The
-        # roster resolves the JID to ``Name <jid>`` (the mention-handle
-        # shape sender tags carry); the bare JID stays when the roster
-        # knows no name.
+        # The record reads `to: you "preview"`; the target is always one
+        # of the account's own messages here (checked above).
+        reaction["preview"] = preview[:60]
         chat_id = chat_id_from_message_id(str(target_id))
+        registry = serial_store(str(settings.data_dir)).for_chat(event.session, chat_id)
+        record, _, _ = await asyncio.to_thread(
+            render_entries,
+            [RecordEntry(event=event, body=emoji)],
+            registry=registry,
+            names={},
+            tz_name=settings.timezone,
+        )
         sender = await reaction_sender(waha, event, chat_id)
-        note = f"[reaction {emoji} from {sender} to your message: {preview}]"
         async with chat_lock(event.session, chat_id):
             await remember_reaction_note(
-                event.session, chat_id, target_id, note, agent, settings
+                event.session, chat_id, target_id, record, agent, settings
             )
         logger.info(
             'Reaction {emoji} to "{preview}" from {sender}',

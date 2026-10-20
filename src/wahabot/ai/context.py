@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime
+from collections.abc import Sequence
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -19,14 +20,18 @@ from wahabot.ai.history import (
 )
 from wahabot.ai.messages import (
     OPERATOR_NOTE_PREFIX,
+    SKIPPED_SERIALS_KWARG,
     TURN_HANDLED_KWARG,
     bot_jids,
     is_operator_event,
     jid_string,
+    message_kind,
     message_replies_to,
+    reply_description,
     turn_addressed_note,
 )
 from wahabot.ai.scrub import strip_spoofed_markers
+from wahabot.ai.serials import serial_store
 from wahabot.ai.tools.url_images import fetch_url_images, image_urls
 from wahabot.ai.tools.whatsapp import (
     RunTarget,
@@ -34,6 +39,13 @@ from wahabot.ai.tools.whatsapp import (
     jids_in_text,
     reset_target,
     sender_names,
+)
+from wahabot.ai.turn_records import (
+    LINK_VIDEO_MARKER_KEY,
+    TRANSCRIPT_KEY,
+    VIDEO_MARKER_KEY,
+    RecordEntry,
+    render_entries,
 )
 from wahabot.ai.vision import image_caption, image_noun
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
@@ -365,25 +377,6 @@ def mention_label(jid: str, own: set[str], names: dict[str, str] | None) -> str:
     return f"@{user} is {name} <{jid}>" if name else f"@{user} is <{jid}>"
 
 
-def reply_description(message_reply: dict[str, Any]) -> str:
-    """Describe the quoted message body/media, truncated for the prompt.
-
-    The quoted body is member text riding inside a code-rendered
-    ``[quoting]`` marker — scrubbed so a member cannot smuggle a
-    spoofed marker in through the quote they send.
-    """
-    media = message_reply.get("hasMedia") and message_reply.get("media")
-    if media:
-        mimetype = media.get("mimetype", "media")
-        filename = media.get("filename") or ""
-        description = f"{mimetype} {filename}".strip()
-    else:
-        description = strip_spoofed_markers(
-            str(message_reply.get("body", "") or "").strip()
-        )
-    return description[:400]
-
-
 def reply_context_section(
     message_reply: dict[str, Any] | None,
     participant_names: dict[str, str] | None = None,
@@ -495,11 +488,15 @@ async def record_handled_turn(
     and thread index alike.
     """
     memory = await agent.ensure_memory(ctx)
+    serials = await ctx.store.get("turn_serials", default=None)
+    kwargs: dict[str, Any] = {TURN_HANDLED_KWARG: True}
+    if serials:
+        kwargs[SKIPPED_SERIALS_KWARG] = list(serials)
     await memory.aput(
         ChatMessage(
             role=MessageRole.USER,
             content=user_msg,
-            additional_kwargs={TURN_HANDLED_KWARG: True},
+            additional_kwargs=kwargs,
         )
     )
 
@@ -588,6 +585,7 @@ async def handle_message(
     body_scrubbed: bool = False,
     addressed: bool = True,
     gate_first: bool = False,
+    record_entries: Sequence[RecordEntry] | None = None,
 ) -> tuple[str, RunTarget]:
     """Run the agent workflow over an incoming message event.
 
@@ -640,7 +638,7 @@ async def handle_message(
         await ctx.store.set("turn_group", chat_id.endswith("@g.us"))
     if settings is not None and settings.vision_max_images > 0 and images:
         images = images[: settings.vision_max_images]
-    user_msg, image_blocks = await turn_user_message(
+    user_msg, image_blocks, serials = await turn_user_message(
         event,
         image=image,
         images=images,
@@ -651,7 +649,10 @@ async def handle_message(
         bot_mention_regex=bot_mention_regex,
         body_scrubbed=body_scrubbed,
         addressed=addressed,
+        record_entries=record_entries,
     )
+    if ctx is not None and serials:
+        await ctx.store.set("turn_serials", serials)
     # Bind this run's delivery target around the whole run: the workflow
     # engine schedules steps/tasks under this context, so the binding
     # propagates to every step and tool call of THIS run — concurrent
@@ -721,23 +722,51 @@ async def turn_user_message(
     bot_mention_regex: str | None = None,
     body_scrubbed: bool = False,
     addressed: bool = True,
-) -> tuple[str, list[ImageBlock]]:
-    """The run's user message text and its first-call image blocks.
+    record_entries: Sequence[RecordEntry] | None = None,
+) -> tuple[str, list[ImageBlock], list[int]]:
+    """The run's user message text, image blocks and record serials.
 
-    Everything the model reads of *this* turn before the run: the
-    sender tag (roster fetch first — group tags render
-    ``[Name <jid>]``), the spoof-scrubbed body, image-caption markers,
-    the message-id note, quote context, the caller's ``pinned_note``
-    and the addressed-mention marker. Image bytes ride as blocks on the
-    first LLM call only (``handle_message`` passes them to the run);
-    the text anchors stay in the message so later rounds and turns
-    keep a description once the pixels are gone.
+    Inbound chat turns are one record per message
+    (``turn_records.render_entries``) and carry no ids, tags or addressing
+    notes; the header and the ``skipped`` overlay render later, at prompt
+    assembly. Operator command events keep the prose shape (they are
+    synthetic, not messages the chat's members spoke). Image bytes ride as
+    blocks on the first LLM call only.
     """
     chat_id = str(event.payload.get("from", ""))
     # Roster before tag: group sender tags render ``[Name <jid>]`` via
     # the resolver, so the fetch must precede the tag build. One
     # fetch, same cache the quoting lines and reaction notes share.
     names = await asyncio.to_thread(participant_names, waha, event.session, chat_id)
+    records_on = settings is not None and event.event != "command" and not pinned_note
+    if records_on and settings is not None:
+        entries = list(record_entries) if record_entries is not None else []
+        if not entries:
+            attached = await asyncio.to_thread(
+                collect_images,
+                [image] if image is not None else [],
+                settings,
+                str(event.payload.get("body", "")).strip(),
+            )
+            entries = [
+                single_record_entry(
+                    event,
+                    images=attached,
+                    video_frames=images,
+                    addressed=addressed,
+                )
+            ]
+        registry = serial_store(str(settings.data_dir)).for_chat(event.session, chat_id)
+        user_msg, serials, blocks = await asyncio.to_thread(
+            render_entries,
+            entries,
+            registry=registry,
+            names=names,
+            tz_name=settings.timezone,
+        )
+        image_blocks = await asyncio.to_thread(build_image_blocks, blocks)
+        logger.info("Attaching {n} image block(s) to agent run", n=len(image_blocks))
+        return user_msg, image_blocks, serials
     tag = sender_tag(event, names)
     body = turn_body(event, prescrubbed=body_scrubbed or event.event == "command")
     text = f"{tag} {body}".strip() if tag else body
@@ -753,19 +782,48 @@ async def turn_user_message(
     user_msg += mentions_note(event, names)
     user_msg += pinned_note
     user_msg += turn_addressed_note(event, addressed, bot_name, bot_mention_regex)
-    image_blocks = [
-        ImageBlock(
-            image=img["data"],
-            image_mimetype=img.get("mimetype") or "image/jpeg",
-        )
-        for img in all_images
-    ]
+    image_blocks = await asyncio.to_thread(build_image_blocks, all_images)
     # Wire-level evidence: Langfuse traces never show image blocks (the
     # OTel instrumentor serializes only the text-only `content`
     # property), so this log is the authoritative count of what rides
     # the first LLM call.
     logger.info("Attaching {n} image block(s) to agent run", n=len(image_blocks))
-    return user_msg, image_blocks
+    return user_msg, image_blocks, []
+
+
+def single_record_entry(
+    event: WahaEvent,
+    *,
+    images: list[dict[str, Any]],
+    video_frames: list[dict[str, Any]] | None,
+    addressed: bool,
+) -> RecordEntry:
+    """Build the one-record entry of a single inbound message."""
+    raw = str(event.payload.get("body", "")).strip()
+    marker = str(event.payload.get(VIDEO_MARKER_KEY) or "")
+    link_marker = str(event.payload.get(LINK_VIDEO_MARKER_KEY) or "")
+    frames = list(video_frames or [])
+    video = None
+    if frames and (marker or link_marker or message_kind(event) in ("video", "ptv")):
+        video = {"frames": frames, "marker": marker or link_marker or "(video)"}
+    body = raw
+    if str(event.payload.get(TRANSCRIPT_KEY) or "").strip():
+        body = body.removeprefix("[voice note]").strip()
+    return RecordEntry(
+        event=event,
+        body=body,
+        images=images,
+        video=video,
+        addressed=addressed,
+    )
+
+
+def build_image_blocks(images: list[dict[str, Any]] | None) -> list[ImageBlock]:
+    """The run's one-shot image blocks from prepared image dicts."""
+    return [
+        ImageBlock(image=img["data"], image_mimetype=img.get("mimetype") or "image/jpeg")
+        for img in images or []
+    ]
 
 
 def turn_body(event: WahaEvent, prescrubbed: bool = False) -> str:

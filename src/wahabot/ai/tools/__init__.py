@@ -56,10 +56,10 @@ def build_default_tools(
         settings = get_settings()
     channel = escalation_channel or EscalationChannel()
     tools = [
-        send_message(waha),
+        send_message(waha, settings),
         stay_silent(),
         escalate(waha, channel, settings),
-        react_to_message(waha),
+        react_to_message(waha, settings),
         send_media(waha, settings),
         read_chat(waha, settings),
         notebook_builder(settings),

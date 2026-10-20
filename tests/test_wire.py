@@ -343,7 +343,7 @@ def test_voice_note_transcription(bot: Bot) -> None:
     assert _wait(lambda: len(llm.requests) >= 1)
     voiced_turns = [m for m in llm.requests[0]["messages"] if m.get("role") == "user"]
     assert any(
-        "[voice note] hello from voice" in str(m.get("content", "")) for m in voiced_turns
+        '[audio: "hello from voice"]' in str(m.get("content", "")) for m in voiced_turns
     )
 
 
@@ -515,7 +515,7 @@ def test_fromMe_own_message_folded(bot: Bot) -> None:
     folded = [c for r, c in turns if "operator typed this from the app" in c]
     assert folded, turns
     # Tag first — the same shape a waking operator turn renders.
-    assert folded[0].startswith("[Operator Human <491555000000@lid>] [operator message]")
+    assert folded[0].startswith("[[") and "<operator>" in folded[0]
     # A teammate's words are never stored as the bot's own.
     assert all(
         r != "MessageRole.ASSISTANT"
@@ -568,9 +568,9 @@ def test_operator_mention_wakes_bot(bot: Bot) -> None:
         if m.get("role") == "user"
     ]
     turn = next(t for t in users if "resume el grupo" in t)
-    assert "[operator message] kai, resume el grupo" in turn
-    assert "<491555000000@lid>" in turn
-    assert "your operator" in turn
+    assert turn.startswith("[turn: 1 message | newest #m")
+    assert "<operator>" in turn and ":: kai, resume el grupo" in turn
+    assert "491555000000" not in turn
     # Same chat fence as any member's turn: the reply lands in this group.
     assert _wait(lambda: len(bot.waha.sent) >= 1)
     assert bot.waha.sent[0][1] == CHAT_ID
@@ -600,9 +600,8 @@ def test_operator_mention_wakes_bot_in_dm(bot: Bot) -> None:
         if m.get("role") == "user"
     ]
     turn = next(t for t in users if "dime algo" in t)
-    assert "[operator message] kai, dime algo" in turn
-    assert "<491555000000@lid>" in turn
-    assert "your operator" in turn
+    assert "<operator>" in turn and ":: kai, dime algo" in turn
+    assert "491555000000" not in turn
     assert _wait(lambda: len(bot.waha.sent) >= 1)
     assert bot.waha.sent[0][1] == partner
 
@@ -887,17 +886,13 @@ def test_burst_assembles_one_turn(bot: Bot) -> None:
     assert "there is a leak" in turn_text
     assert "flat 3B" in turn_text
     assert "near the panel" in turn_text
-    # Every buffered message id is stamped exactly once, in order, in
-    # the same serialized form the single-message path stamps — the
-    # model can quote or react to each original message. The anchor's
-    # id rides the note once (not duplicated by a per-part annotation).
-    for i in range(3):
-        mid = f"false_{chat}_BURST{i}"
-        assert turn_text.count(f"[message id: {mid}]") == 1, (
-            f"anchor/member id {mid} not stamped exactly once:\n{turn_text}"
-        )
+    # One record per buffered message, in arrival order, each with its
+    # own #m<n> the model can quote or react to.
+    assert turn_text.count("[[") >= 3
     assert (
-        turn_text.index("BURST0") < turn_text.index("BURST1") < turn_text.index("BURST2")
+        turn_text.index("there is a leak")
+        < turn_text.index("flat 3B")
+        < turn_text.index("near the panel")
     )
 
 
@@ -1824,11 +1819,11 @@ def test_reaction_fold_in(bot: Bot) -> None:
         ctx = handlers_contexts[(SESSION, CHAT_ID)]
         memory = await ctx.store.get("memory")
         messages = await memory.aget_all()
-        return [str(m.content) for m in messages if "[reaction" in str(m.content)]
+        return [str(m.content) for m in messages if "]] reaction" in str(m.content)]
 
     notes = asyncio.run(reaction_notes())
-    assert any("👍" in note and "smoke reply one" in note for note in notes)
-    assert any("491555000001@c.us" in note for note in notes)
+    assert any("👍" in note and 'to: you "smoke reply one"' in note for note in notes)
+    assert any("Smoke Sender" in note and "491555000001" not in note for note in notes)
 
     # Reaction to someone else's message stays ignored.
     foreign = {
@@ -2238,8 +2233,7 @@ def test_persistent_memory_roundtrip_wire(bot: Bot) -> None:
     bot.post(pc_event("operator typed pc", "PCOWN", from_me=True))
     assert len(bot.waha.sent) == 0
     assert any(
-        c.startswith("[Operator Human <491555000000@lid>] [operator message]")
-        and "operator typed pc" in c
+        c.startswith("[[") and "<operator>" in c and "operator typed pc" in c
         for c in persisted_contents()
     )
 
@@ -2262,7 +2256,10 @@ def test_persistent_memory_roundtrip_wire(bot: Bot) -> None:
         }
     )
     assert len(llm.requests) == 0
-    assert any("[reaction" in c and "smoke reply one" in c for c in persisted_contents())
+    assert any(
+        "]] reaction" in c and 'to: you "smoke reply one"' in c
+        for c in persisted_contents()
+    )
 
 
 def test_persistence_corrupt_and_forget(bot: Bot) -> None:
@@ -2751,24 +2748,23 @@ def test_foreign_reaction_folds_name_and_jid(bot: Bot) -> None:
         ctx = handlers_contexts[(SESSION, CHAT_ID)]
         memory = await ctx.store.get("memory")
         messages = await memory.aget_all()
-        return [str(m.content) for m in messages if "[reaction" in str(m.content)]
+        return [str(m.content) for m in messages if "]] reaction" in str(m.content)]
 
     notes = asyncio.run(reaction_notes())
-    assert any(
-        "😂" in note and "Smoke Sender <491555000001@c.us>" in note for note in notes
-    ), notes
+    assert any("😂" in note and "Smoke Sender" in note for note in notes), notes
+    assert all("491555000001" not in note for note in notes), notes
 
 
 def test_group_turn_sender_tag_carries_jid(bot: Bot) -> None:
-    """A group turn's prompt opens with the turn header, then the
-    ``[Name <jid>]`` sender tag."""
+    """A group turn's prompt opens with the header, then the record."""
     llm = bot.stack.llm
     event = waha_event()
     bot.post(event)
     assert _wait(lambda: len(llm.requests) >= 1)
     first_user = user_turns_of(llm.requests[0])[0]
-    assert first_user.startswith("[turn: 1 message | newest #1 |"), first_user
-    assert "[Smoke Sender <491555000001@c.us>]" in first_user
+    assert first_user.startswith("[turn: 1 message | newest #m"), first_user
+    assert "]] text addressed :: kai hola, smoke check" in first_user
+    assert "491555000001@c.us" not in first_user
 
 
 def test_tag_copied_mention_resolves_end_to_end(bot: Bot) -> None:

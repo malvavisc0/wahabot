@@ -9,6 +9,10 @@ Storage is append-only JSONL, one line per message, written with a single
 ``O_APPEND`` ``write()`` — atomic for a sub-4 KB line, so the hot path takes
 no lock. Compaction keeps the newest entries for a chat and runs through a
 temp file plus ``os.replace`` under an exclusive ``flock``.
+
+An unknown sender keeps a stable ``<member-n>`` ordinal in the same entry, so
+the prompt never falls back to a JID. A learned name wins from then on; the
+ordinal stays with the chat in case the name is lost.
 """
 
 from __future__ import annotations
@@ -18,7 +22,9 @@ import json
 import os
 import re
 import tempfile
+import threading
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 #: A prompt-side serial token, e.g. ``#m12``.
@@ -36,11 +42,17 @@ class SerialEntry:
     message_id: str
     jid: str
     name: str
+    ordinal: int = 0
 
 
 def format_serial_token(serial: int) -> str:
     """The prompt-side token for a serial (``12`` -> ``#m12``)."""
     return f"#m{serial}"
+
+
+def registry_file(data_dir: str | Path, session: str, chat_id: str) -> Path:
+    """The chat's registry, next to its persisted memory."""
+    return Path(data_dir) / "memory" / session / f"{chat_id}.ids.jsonl"
 
 
 class SerialRegistry:
@@ -50,17 +62,21 @@ class SerialRegistry:
         self.path = Path(path)
         self.entries: dict[int, SerialEntry] = {}
         self.by_message: dict[str, int] = {}
+        self.ordinals: dict[str, int] = {}
+        self.next_ordinal = 1
         self.last_serial = 0
         self.loaded = False
+        self.lock = threading.RLock()
 
     def load(self) -> None:
         """Read the file once, skipping a torn tail line."""
-        if self.loaded:
-            return
-        if self.path.exists():
-            for line in self.path.read_text(encoding="utf-8").splitlines():
-                self.add_line(line)
-        self.loaded = True
+        with self.lock:
+            if self.loaded:
+                return
+            if self.path.exists():
+                for line in self.path.read_text(encoding="utf-8").splitlines():
+                    self.add_line(line)
+            self.loaded = True
 
     def add_line(self, line: str) -> None:
         """Fold one stored JSONL line into the maps; ignore a torn line."""
@@ -76,28 +92,54 @@ class SerialRegistry:
             message_id=str(raw["id"]),
             jid=str(raw.get("jid", "")),
             name=str(raw.get("name", "")),
+            ordinal=int(raw.get("ord", 0)),
         )
         self.entries[entry.serial] = entry
         self.by_message[entry.message_id] = entry.serial
         self.last_serial = max(self.last_serial, entry.serial)
+        if entry.ordinal and entry.jid and entry.jid not in self.ordinals:
+            self.ordinals[entry.jid] = entry.ordinal
+            self.next_ordinal = max(self.next_ordinal, entry.ordinal + 1)
 
-    def next(self, *, message_id: str, jid: str = "", name: str = "") -> int:
+    def ordinal_for(self, jid: str) -> int:
+        """The stable ``<member-n>`` ordinal for *jid*, assigning one once."""
+        if not jid:
+            return 0
+        with self.lock:
+            self.load()
+            ordinal = self.ordinals.get(jid)
+            if ordinal is None:
+                ordinal = self.next_ordinal
+                self.next_ordinal += 1
+                self.ordinals[jid] = ordinal
+            return ordinal
+
+    def next(
+        self, *, message_id: str, jid: str = "", name: str = "", ordinal: int = 0
+    ) -> int:
         """The serial for *message_id*, assigning one on first sight.
 
         A WAHA redelivery of the same message returns its existing serial
         and writes nothing.
         """
-        self.load()
-        existing = self.by_message.get(message_id)
-        if existing is not None:
-            return existing
-        serial = self.last_serial + 1
-        self.last_serial = serial
-        entry = SerialEntry(serial, message_id, jid, name)
-        self.entries[serial] = entry
-        self.by_message[message_id] = serial
-        self.append(entry)
-        return serial
+        with self.lock:
+            self.load()
+            existing = self.by_message.get(message_id)
+            if existing is not None:
+                return existing
+            serial = self.last_serial + 1
+            self.last_serial = serial
+            entry = SerialEntry(serial, message_id, jid, name, ordinal)
+            self.entries[serial] = entry
+            self.by_message[message_id] = serial
+            self.append(entry)
+            return serial
+
+    def serial_for(self, message_id: str) -> int:
+        """The serial already assigned to *message_id*, or 0."""
+        with self.lock:
+            self.load()
+            return self.by_message.get(message_id, 0)
 
     def append(self, entry: SerialEntry) -> None:
         """Append one entry with a single atomic write."""
@@ -108,6 +150,7 @@ class SerialRegistry:
                 "id": entry.message_id,
                 "jid": entry.jid,
                 "name": entry.name,
+                "ord": entry.ordinal,
             },
             ensure_ascii=False,
         )
@@ -122,31 +165,34 @@ class SerialRegistry:
         match = TOKEN_RE.match(token.strip())
         if match is None:
             return None
-        self.load()
-        return self.entries.get(int(match.group(1)))
+        with self.lock:
+            self.load()
+            return self.entries.get(int(match.group(1)))
 
     def max_serial(self) -> int:
         """The highest assigned serial, for continuing numbering across runs."""
-        self.load()
-        return self.last_serial
+        with self.lock:
+            self.load()
+            return self.last_serial
 
     def compact(self, keep: int = DEFAULT_KEEP) -> None:
         """Keep the newest *keep* entries, atomically and under a lock."""
-        if not self.path.exists():
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        lock = self.path.with_name(f"{self.path.name}.lock")
-        with open(lock, "w", encoding="utf-8") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            lines = [
-                line
-                for line in self.path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
-            if len(lines) <= keep:
+        with self.lock:
+            if not self.path.exists():
                 return
-            self.rewrite(lines[-keep:])
-        self.reset()
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            lock = self.path.with_name(f"{self.path.name}.lock")
+            with open(lock, "w", encoding="utf-8") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                lines = [
+                    line
+                    for line in self.path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                if len(lines) <= keep:
+                    return
+                self.rewrite(lines[-keep:])
+            self.reset()
 
     def rewrite(self, lines: list[str]) -> None:
         """Replace the file with *lines* through a temp file and ``os.replace``."""
@@ -163,7 +209,77 @@ class SerialRegistry:
 
     def reset(self) -> None:
         """Forget the in-memory view so the next read reloads from disk."""
-        self.entries = {}
-        self.by_message = {}
-        self.last_serial = 0
-        self.loaded = False
+        with self.lock:
+            self.entries = {}
+            self.by_message = {}
+            self.ordinals = {}
+            self.next_ordinal = 1
+            self.last_serial = 0
+            self.loaded = False
+
+
+class SerialStore:
+    """A process-wide cache of per-chat registries under one data directory."""
+
+    def __init__(self, data_dir: str | Path) -> None:
+        self.data_dir = Path(data_dir)
+        self.registries: dict[tuple[str, str], SerialRegistry] = {}
+        self.lock = threading.Lock()
+
+    def for_chat(self, session: str, chat_id: str) -> SerialRegistry:
+        """The registry for one chat, loaded lazily and cached."""
+        with self.lock:
+            key = (session, chat_id)
+            registry = self.registries.get(key)
+            if registry is None:
+                registry = SerialRegistry(registry_file(self.data_dir, session, chat_id))
+                self.registries[key] = registry
+            return registry
+
+    def assign(
+        self,
+        session: str,
+        chat_id: str,
+        *,
+        message_id: str,
+        jid: str = "",
+        name: str = "",
+        ordinal: int = 0,
+    ) -> SerialEntry:
+        """Assign *message_id* a serial and return its stored entry."""
+        registry = self.for_chat(session, chat_id)
+        serial = registry.next(message_id=message_id, jid=jid, name=name, ordinal=ordinal)
+        if registry.max_serial() % 500 == 0:
+            registry.compact()
+        registry.load()
+        return registry.entries[serial]
+
+    def resolve(self, session: str, chat_id: str, token: str) -> SerialEntry | None:
+        """Resolve a ``#m<n>`` token in one chat, fail-soft."""
+        return self.for_chat(session, chat_id).resolve(token)
+
+    def find(self, session: str, token: str) -> SerialEntry | None:
+        """Resolve a token across the session's chats; unique match only.
+
+        Operator commands have no chat of their own. A token that names the
+        same serial in more than one chat is ambiguous and resolves to None
+        (the caller falls back to a soft error) rather than guessing.
+        """
+        match = TOKEN_RE.match(token.strip())
+        if match is None:
+            return None
+        base = self.data_dir / "memory" / session
+        if not base.is_dir():
+            return None
+        hits: list[SerialEntry] = []
+        for path in sorted(base.glob("*.ids.jsonl")):
+            entry = SerialRegistry(path).resolve(token)
+            if entry is not None:
+                hits.append(entry)
+        return hits[0] if len(hits) == 1 else None
+
+
+@lru_cache(maxsize=32)
+def serial_store(data_dir: str) -> SerialStore:
+    """The cached store for *data_dir* (one per process and data root)."""
+    return SerialStore(data_dir)

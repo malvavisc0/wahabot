@@ -426,7 +426,7 @@ def test_turn_header_states_the_verdict_prompt_only() -> None:
         additional_kwargs={MERGED_TURNS_KWARG: True},
     )
     marked = turn_header([unaddressed], group=True, addressed=False)
-    assert marked[0].content.startswith("[turn: 2 messages | newest #2 |")
+    assert marked[0].content.startswith("[turn: 2 messages | newest #m2 |")
     assert "addressed: no" in marked[0].content
     assert "backlog: yes" in marked[0].content
     assert UNADDRESSED_POLICY in marked[0].content
@@ -5319,7 +5319,7 @@ def test_silence_cancels_other_tools_in_the_same_batch() -> None:
         event = stop.call_args.args[1]
         assert isinstance(event, StopEvent)
         # Nothing is staged for storage: the wrap-up note is notebook-only.
-        assert stop.call_args.kwargs == {}
+        assert stop.call_args.kwargs == {"silent": True}
 
 
 def test_tool_call_log_extra() -> None:
