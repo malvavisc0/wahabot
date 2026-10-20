@@ -24,6 +24,7 @@ fit the run's reserved budget raises :class:`ContextBudgetError`,
 notebook facts are dropped oldest-first instead.
 """
 
+import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -62,6 +63,7 @@ RECALL_PREAMBLE = (
     "Leads, verify before relying on them: older transcript slices, not "
     + "authoritative facts.\n\n"
 )
+LIVE_SERIAL_RE = re.compile(r"#m(\d+)")
 
 
 def render_pinned_block(
@@ -356,6 +358,31 @@ def recap_section(recap: str) -> str:
     if not lines:
         return ""
     return RECAP_HEADING + "\n".join(lines)
+
+
+def dedupe_recall(slices: Sequence[str], live_texts: Sequence[str]) -> list[str]:
+    """Drop recalled slices the live window already carries.
+
+    A slice that names a serial in the live turn is the same conversation
+    the model can already read verbatim; a slice whose whole text is a
+    live line is a duplicate. Partial overlap is kept — a slice may carry
+    older neighbours the window does not.
+    """
+    live = " ".join(" ".join(text.split()) for text in live_texts if text)
+    live_serials = {
+        int(serial) for text in live_texts for serial in LIVE_SERIAL_RE.findall(text)
+    }
+    kept: list[str] = []
+    for item in slices:
+        normalized = " ".join(item.split())
+        if not normalized:
+            continue
+        if any(f"#m{serial}" in normalized for serial in live_serials):
+            continue
+        if normalized in live:
+            continue
+        kept.append(item)
+    return kept
 
 
 def recall_section(slices: Sequence[str]) -> str:

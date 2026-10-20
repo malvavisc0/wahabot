@@ -52,6 +52,10 @@ VERSION = 1
 #: capped at ~500 tokens.
 LEARNED_RECAP_TOKEN_LIMIT = 500
 
+#: The recap rides the prompt whole; keep its line cap at the merge prompt's
+#: ten even if an older or hand-edited file grew larger.
+RECAP_MAX_LINES = 10
+
 #: One merge batches at most this much dropped text; older drops from a
 #: single huge trim are discarded (they predate the recap's coverage, and
 #: merges on later trims keep the recap current from here on).
@@ -122,7 +126,7 @@ def load_learned(data_dir: Path, session: str, chat_id: str) -> str:
         )
         return ""
     recap = data.get(_ENVELOPE_RECAP)
-    return recap if isinstance(recap, str) else ""
+    return capped_recap(recap) if isinstance(recap, str) else ""
 
 
 def save_learned(
@@ -178,12 +182,13 @@ def forget_learned(data_dir: Path, session: str, chat_id: str) -> bool:
 
 
 def capped_recap(recap: str, tokenizer: Any = None) -> str:
-    """*recap* cut to the token cap from the front, newest lines kept.
-
-    A recap that grew past the cap loses its oldest lines rather than
-    its newest information. Returns *recap* unchanged when it fits.
-    """
-    if not recap or text_tokens(recap, tokenizer) <= LEARNED_RECAP_TOKEN_LIMIT:
+    """*recap* cut to the line and token caps, newest lines kept."""
+    if not recap:
+        return recap
+    lines = recap.splitlines()
+    if len(lines) > RECAP_MAX_LINES:
+        recap = "\n".join(lines[-RECAP_MAX_LINES:])
+    if text_tokens(recap, tokenizer) <= LEARNED_RECAP_TOKEN_LIMIT:
         return recap
     lines = recap.splitlines()
     kept: list[str] = []

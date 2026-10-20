@@ -574,7 +574,9 @@ async def run_gate(
     await ctx.store.set("triage_result", None)
     await ctx.store.set("triage_audit", None)
     if await agent.start_triage(ctx, target, user_msg, addressed, gate_first):
+        await ctx.store.set("turn_speak", True)
         return True
+    await ctx.store.set("turn_speak", False)
     result = await agent.stored_triage_result(ctx)
     gist = result.verdict.gist if result is not None else ""
     await record_handled_turn(agent, ctx, user_msg, gist=gist)
@@ -593,6 +595,7 @@ async def prepare_turn_state(
         # The prompt-time turn header (history.turn_header) reads these back:
         # the wake gate's addressing verdict, and whether this is a group turn.
         await ctx.store.set("turn_addressed", addressed)
+        await ctx.store.set("turn_speak", addressed)
         await ctx.store.set(
             "turn_group", str(event.payload.get("from", "")).endswith("@g.us")
         )

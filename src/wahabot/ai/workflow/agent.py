@@ -48,7 +48,11 @@ from wahabot.ai.history import (
     turn_header,
 )
 from wahabot.ai.messages import TURN_HANDLED_KWARG, TURN_SERIALS_KWARG
-from wahabot.ai.pinned_state import PINNED_STATE_TOKEN_LIMIT, pinned_state_block
+from wahabot.ai.pinned_state import (
+    PINNED_STATE_TOKEN_LIMIT,
+    dedupe_recall,
+    pinned_state_block,
+)
 from wahabot.ai.tools.notebook import MAX_NOTE_TOKENS, NOTEBOOK_INSTRUCTIONS
 from wahabot.ai.tools.slim import slim_tool_specs
 from wahabot.ai.tools.whatsapp import (
@@ -376,6 +380,7 @@ class FunctionCallingAgentWorkflow(Workflow):
             self.memory_token_limit - required,
             query=query,
             fact_keys=fact_keys,
+            live_messages=messages,
         )
         if block:
             system = ChatMessage(
@@ -398,7 +403,10 @@ class FunctionCallingAgentWorkflow(Workflow):
         # unmarked history above is what stays in memory.
         group = bool(await ctx.store.get("turn_group", default=False))
         addressed = bool(await ctx.store.get("turn_addressed", default=True))
-        prompt_history = turn_header(history, group=group, addressed=addressed)
+        speak = bool(await ctx.store.get("turn_speak", default=addressed))
+        prompt_history = turn_header(
+            history, group=group, addressed=addressed, speak=speak
+        )
         return ([system] if system is not None else []) + prompt_history
 
     def schedule_recap_merge(
@@ -495,6 +503,7 @@ class FunctionCallingAgentWorkflow(Workflow):
         prompt_budget: int,
         query: str = "",
         fact_keys: Sequence[str] = (),
+        live_messages: Sequence[ChatMessage] = (),
     ) -> str:
         """Assemble this run's pinned state block (fail-soft, bounded).
 
@@ -517,7 +526,10 @@ class FunctionCallingAgentWorkflow(Workflow):
             if self.settings is not None
             else ""
         )
-        recall = await self.recall_slices(target, query)
+        recall = dedupe_recall(
+            await self.recall_slices(target, query),
+            [str(message.content or "") for message in live_messages],
+        )
         required_notes = self.fact_notes(target, fact_keys)
         return await pinned_state_block(
             notebook=self.notebook,

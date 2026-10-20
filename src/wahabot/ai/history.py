@@ -93,6 +93,14 @@ UNADDRESSED_POLICY = (
     "(unaddressed: other members are talking. Do not reply — stay silent "
     "unless this message names you or replies to you.)"
 )
+ADDRESSED_POLICY = (
+    "(addressed: this message names you, replies to you, or is a direct "
+    "message. Answer it.)"
+)
+PARTICIPATE_POLICY = (
+    "(unaddressed, but the gate judged this turn worth a contribution. "
+    "Answer the newest need; do not answer banter or side threads.)"
+)
 
 
 class ContextBudgetError(ValueError):
@@ -674,7 +682,7 @@ def sanitize_chat_history(
 
 
 def turn_header(
-    messages: list[ChatMessage], *, group: bool, addressed: bool
+    messages: list[ChatMessage], *, group: bool, addressed: bool, speak: bool = False
 ) -> list[ChatMessage]:
     """Prepend the turn header to the trailing user turn, prompt-only.
 
@@ -698,7 +706,9 @@ def turn_header(
     message = messages[index]
     if message.role != MessageRole.USER:
         return messages
-    content, header = turn_content_and_header(message, group=group, addressed=addressed)
+    content, header = turn_content_and_header(
+        message, group=group, addressed=addressed, speak=speak
+    )
     if header is None:
         return messages
     marked = ChatMessage(
@@ -711,7 +721,7 @@ def turn_header(
 
 
 def turn_content_and_header(
-    message: ChatMessage, *, group: bool, addressed: bool
+    message: ChatMessage, *, group: bool, addressed: bool, speak: bool
 ) -> tuple[str, str | None]:
     """Build the header for a turn, or ``(content, None)`` when none is due."""
     content = str(message.content or "")
@@ -724,8 +734,17 @@ def turn_content_and_header(
         newest_serial=newest,
         addressed=addressed,
         backlog=backlog,
-        policy="" if addressed or not group else UNADDRESSED_POLICY,
+        policy=turn_policy(group=group, addressed=addressed, speak=speak),
     )
+
+
+def turn_policy(*, group: bool, addressed: bool, speak: bool) -> str:
+    """The one answering rule for this turn, owned by the header."""
+    if not group:
+        return ""
+    if addressed:
+        return ADDRESSED_POLICY
+    return PARTICIPATE_POLICY if speak else UNADDRESSED_POLICY
 
 
 def turn_numbers(content: str) -> tuple[int, int]:
