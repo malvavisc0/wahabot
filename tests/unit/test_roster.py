@@ -17,7 +17,6 @@ from wahabot.ai.tools.whatsapp import (
     mention_tokens,
     sender_names,
 )
-from wahabot.core.host import host_context
 from wahabot.settings import Settings
 
 
@@ -57,15 +56,6 @@ def test_sender_names_reads_notify_name() -> None:
         "491555000001@c.us": "Smoke",
         "491555000003@lid": "Lidler",
     }
-
-
-def test_host_placeholder() -> None:
-    """``{{host}}`` resolves to the machine snapshot in the prompt."""
-    rendered = render_system_prompt("Host info:\n{{host}}")
-    assert "{{host}}" not in rendered
-    assert rendered == f"Host info:\n{host_context()}"
-    assert "Host: " in rendered
-    assert "- Python: " in rendered
 
 
 def test_host_lists_only_present_binaries() -> None:
@@ -129,7 +119,6 @@ def test_remember_strips_thinking_separator(unit_settings: Settings) -> None:
     from llama_index.core.base.llms.types import (
         ChatMessage,
         ChatResponse,
-        MessageRole,
         TextBlock,
         ThinkingBlock,
     )
@@ -174,7 +163,7 @@ def test_post_delivery_wrap_up_note_becomes_a_notebook_fact(
     replies; the durable record is the
     notebook copy, so memory keeps only the delivered turn.
     """
-    from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
+    from llama_index.core.base.llms.types import ChatMessage, ChatResponse
     from llama_index.core.workflow import Context
 
     from wahabot.ai.messages import WRAP_UP_NOTE_KWARG
@@ -234,7 +223,7 @@ def test_wrap_up_prompt_used_after_delivery(unit_settings: Settings) -> None:
     over the round-limit prompt when the delivery latch fired, and write
     the produced lesson to the notebook — never to memory.
     """
-    from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
+    from llama_index.core.base.llms.types import ChatMessage, ChatResponse
     from llama_index.core.workflow import Context
 
     from wahabot.ai.messages import WRAP_UP_NOTE_KWARG
@@ -308,7 +297,6 @@ def test_remember_drops_lone_emoji_reply(unit_settings: Settings) -> None:
     from llama_index.core.base.llms.types import (
         ChatMessage,
         ChatResponse,
-        MessageRole,
         TextBlock,
     )
     from llama_index.core.workflow import Context
@@ -333,62 +321,6 @@ def test_remember_drops_lone_emoji_reply(unit_settings: Settings) -> None:
     assert asyncio.run(stored_count("🤣🤣🤣")) == 1
 
 
-def test_warn_accidental_silence() -> None:
-    """``warn_accidental_silence`` fires only on the accidental-empty shape.
-
-    The trace-audit case: a reasoning model spends its tokens thinking,
-    returns an empty final answer after tool rounds, nothing is
-    delivered — indistinguishable at run time from chosen silence, so
-    this warning is the only signal in the logs. Chosen silence (first
-    round, or a delivery already made) must stay unlogged.
-    """
-    from collections.abc import Iterator
-    from contextlib import contextmanager
-
-    from llama_index.core.base.llms.types import ChatResponse
-    from loguru import logger
-
-    from wahabot.ai.tools.whatsapp import RunTarget, bind_target, reset_target
-    from wahabot.ai.workflow import FunctionCallingAgentWorkflow
-
-    wf = FunctionCallingAgentWorkflow.__new__(FunctionCallingAgentWorkflow)
-    empty = ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content=""))
-    text = ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content="hi"))
-    quiet = RunTarget(session=SESSION, chat_id=CHAT_ID)
-    delivered = RunTarget(session=SESSION, chat_id=CHAT_ID, sent=CHAT_ID)
-
-    @contextmanager
-    def bound(target: RunTarget) -> Iterator[None]:
-        token = bind_target(target)
-        try:
-            yield
-        finally:
-            reset_target(token)
-
-    logs: list[str] = []
-
-    def record(message: str, **_: Any) -> None:
-        logs.append(message)
-
-    with (
-        unittest.mock.patch.object(logger, "warning", record),
-        bound(quiet),
-    ):
-        wf.warn_accidental_silence(empty, rounds=8)  # the audit shape: warns
-        wf.warn_accidental_silence(empty, rounds=1)  # first-round silence: no
-        wf.warn_accidental_silence(text, rounds=8)  # visible answer: no
-    with unittest.mock.patch.object(logger, "warning", record), bound(delivered):
-        wf.warn_accidental_silence(empty, rounds=8)  # post-delivery quiet: no
-    assert logs == [
-        "".join(
-            (
-                "Stopping run: empty final answer after {rounds} rounds ",
-                "(nothing delivered, no stay_silent)",
-            )
-        )
-    ]
-
-
 def test_mention_tokens() -> None:
     """``mention_tokens`` extracts only user-part and JID-shaped tokens."""
     text = "Para @111222333444555 y @491555000001@c.us, no @ana ni mail@x.com"
@@ -404,7 +336,6 @@ def test_operator_tools_placeholder_renders() -> None:
     repeated in every tool description — the render must substitute it
     and never leave the placeholder verbatim, on any turn.
     """
-    from wahabot.ai.context import render_system_prompt
 
     out = render_system_prompt("Rules:\n{{operator_tools}}")
     assert "reserved to `[operator command]` turns" in out

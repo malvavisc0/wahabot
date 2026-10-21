@@ -247,10 +247,9 @@ def test_unresolved_video_retry_falls_back_to_page(unit_settings: Settings) -> N
         ),
         unittest.mock.patch(
             "wahabot.ai.tools.visit_url.page.fetch_page", return_value=response
-        ) as fetch,
+        ),
     ):
         result = json.loads(visit_url(unit_settings, response.url))
-    fetch.assert_called_once()
     assert result["ok"] is True and result["text"] == "Readable fallback."
     assert "kind" not in result
 

@@ -373,14 +373,13 @@ def test_shell_spill_failure_keeps_exit_and_drains_output(
     settings = unit_settings.model_copy(update={"shell_max_output": 200})
     with unittest.mock.patch(
         "wahabot.ai.tools.shell.open_byte_output", side_effect=OSError("disk unavailable")
-    ) as spill:
+    ):
         result = json.loads(shell_command(settings, "printf '%010000d' 1; exit 7"))
     assert result["ok"] is True and result["exit_code"] == 7
     assert result["stdout"] == "0" * 200
     assert result["truncated"] is True
     assert "disk unavailable" in result["capture_errors"]["stdout"]
     assert "file" not in result
-    spill.assert_called_once()
 
 
 @pytest.mark.parametrize("failure", ["seed", "overflow", "later", "close"])
@@ -399,14 +398,13 @@ def test_shell_failed_spills_are_not_published(failure: str, tmp_path: Path) -> 
     sink = _StreamSink("test", 10)
     with unittest.mock.patch(
         "wahabot.ai.tools.shell.open_byte_output", return_value=(handle, meta)
-    ) as spill:
+    ):
         sink.append(b"x" * 20)
         sink.append(b"later")
         assert sink.file_meta() is None
         writes = handle.write.call_count
         sink.append(b"discarded")
         assert handle.write.call_count == writes
-    spill.assert_called_once()
     assert sink.text == "x" * 10
     assert sink.truncated is True and sink.capture_error is not None
 

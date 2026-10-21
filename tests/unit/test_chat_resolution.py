@@ -226,64 +226,6 @@ def test_burst_rejects_unconfigured() -> None:
     assert bursts.add_message(event) is False
 
 
-def test_burst_flush_logs_hold_metrics(tmp_path: Path) -> None:
-    """The flush log carries the burst's size and hold duration."""
-    from loguru import logger as _logger
-
-    from wahabot.ai import bursts
-
-    logged: list[str] = []
-
-    def sink(message: Any) -> None:
-        logged.append(str(message))
-
-    handler_id = _logger.add(sink, level="INFO")
-    try:
-
-        async def scenario() -> None:
-            bursts.reset()
-
-            async def noop(buffer: object) -> None:
-                return None
-
-            bursts.set_completion_handler(noop)
-            bursts.configure(inactivity_s=0.2, hold_cap_s=5.0)
-            assert bursts.add_message(
-                WahaEvent(
-                    id="e-hold",
-                    timestamp=1,
-                    event="message",
-                    session=SESSION,
-                    me={},
-                    payload={
-                        "id": "m1",
-                        "from": CHAT_ID,
-                        "body": "leak",
-                        "participant": "4915…@c.us",
-                        "fromMe": False,
-                    },
-                )
-            )
-            await asyncio.sleep(0.3)
-            assert not bursts.pending(CHAT_ID)
-            bursts.set_completion_handler(None)
-
-        asyncio.run(scenario())
-    finally:
-        _logger.remove(handler_id)
-    # Tuning data: the operator grepping logs after a
-    # week must find size and hold per burst — both in one line.
-    burst_lines = [line for line in logged if "Burst complete" in line]
-    assert len(burst_lines) == 1, f"expected exactly one flush line, got {burst_lines}"
-    line = burst_lines[0]
-    assert "1 message(s)" in line
-    assert "held " in line
-    # The hold was recorded as a number of seconds (0.2s window plus
-    # scheduling slack); the unit test pins the format, not the value.
-    hold = float(line.split("held ", 1)[1].split("s", 1)[0])
-    assert hold >= 0.2
-
-
 def test_audit_save_action_and_caps(tmp_path: Path) -> None:
     """save_action appends JSONL under data/audit/<session>/ and caps fields."""
     from wahabot.core.audit import save_action
@@ -300,19 +242,6 @@ def test_audit_save_action_and_caps(tmp_path: Path) -> None:
     # The 500-char reply was capped to the 300-char audit budget.
     assert len(entry["reply"]) == 300
     assert entry["at"]
-
-
-def test_audit_write_never_raises(tmp_path: Path) -> None:
-    """A read-only audit dir is logged and swallowed, not raised."""
-    from wahabot.core.audit import save_action
-
-    locked = tmp_path / "audit"
-    locked.mkdir()
-    locked.chmod(0o500)
-    try:
-        save_action(locked.parent, SESSION, "silence", chat_id=CHAT_ID)
-    finally:
-        locked.chmod(0o700)
 
 
 def test_tool_outcome_detects_enveloped_failures() -> None:

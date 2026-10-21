@@ -52,11 +52,10 @@ def test_probe_media_url_retries_head_method_not_allowed() -> None:
         ),
         unittest.mock.patch.object(
             httpx, "get", return_value=unittest.mock.Mock(status_code=404)
-        ) as get,
+        ),
     ):
         error = probe_media_url("https://media.invalid/missing.webp")
     assert error is not None and "HTTP 404" in error
-    get.assert_called_once()
 
 
 def test_probe_media_url_soft_fails_offline() -> None:

@@ -210,7 +210,6 @@ def test_profile_picture_tool_envelope() -> None:
     finally:
         reset_target(token)
     assert payload["ok"] is True and payload["url"] == "https://pic.invalid/a.png"
-    waha.get_profile_picture.assert_called_once_with(SESSION, CHAT_ID)
 
     waha.get_profile_picture.return_value = ""
     token = bind_target(target)

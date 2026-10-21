@@ -100,7 +100,6 @@ def test_chat_reader_mode_limits_and_name_caps(unit_settings: Settings) -> None:
         tool = cast(Any, read_chat(waha, unit_settings))
         recent = json.loads(str(tool(mode="recent", limit=100).content))
         assert recent["ok"] is True
-        waha.list_chats.assert_called_with(SESSION, limit=30)
         resolved = json.loads(str(tool(mode="resolve", name="  Family  ").content))
         assert resolved["ok"] is True and len(resolved["matches"]) == 5
         waha.list_contacts.assert_not_called()

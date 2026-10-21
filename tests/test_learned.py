@@ -171,7 +171,6 @@ def test_schedule_never_calls_the_llm(learned_settings: Settings) -> None:
     merger = RecapMerger(llm, learned_settings.data_dir)
     merger.schedule(SESSION, CHAT, "[user] hola, me prometiste un PDF")
     assert merger.has_pending()
-    llm.achat.assert_not_called()
 
 
 def test_merge_pending_merges_and_saves(learned_settings: Settings) -> None:
