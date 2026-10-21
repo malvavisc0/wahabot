@@ -64,14 +64,9 @@ class BurstMixin(HandlerBase):
         try:
             await self.deliver_burst_reply(buffer)
         except Exception as exc:
-            # Same failure classes as the chat path: a timeout or an
-            # outage notifies cleanly (never the false "unreachable"
-            # narrative for a mere slow generation); anything else is
-            # a bug with the full traceback. An oversized burst is
-            # permanent — the same messages can never fit — so its
-            # seen markers stay and no retry loop starts. The dropped
-            # seen markers let WAHA's redelivery retry the whole burst
-            # in every other case.
+            # Same failure policy as a single turn: a permanent budget
+            # error keeps the seen markers, everything else drops them so
+            # WAHA redelivers the whole burst.
             if isinstance(exc, ContextBudgetError):
                 logger.warning(
                     "Burst in {chat_id} exceeds the context budget ({limit} tokens)",

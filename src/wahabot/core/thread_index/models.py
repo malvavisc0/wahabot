@@ -7,9 +7,6 @@ from llama_index.core.base.llms.types import ChatMessage, MessageRole
 
 from wahabot.ai.history import INBOUND_ID_RE, narration_kind
 from wahabot.ai.messages import WRAP_UP_NOTE_KWARG
-from wahabot.core.thread_index.constants import (  # noqa: F401
-    OPERATOR_CHAT_ID,
-)
 
 
 class EmbeddingModel(Protocol):

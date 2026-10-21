@@ -41,9 +41,6 @@ from wahabot.ai.workflow.toolkit import (
     tool_outcome_ok,
 )
 
-#: Everything the old single-module surface exported — tests import
-#: helpers directly from ``wahabot.ai.workflow``. Kept together here
-#: so any future caller sees the full split surface in one place.
 __all__ = [
     "DELIVERY_TOOLS",
     "EARLY_STOPPING_PROMPT",

@@ -1,5 +1,7 @@
 """State and method contract shared by the handler mixins."""
 
+# pyright: reportUninitializedInstanceVariable=false
+
 from typing import Any
 
 from wahabot.ai.tools.whatsapp import EscalationChannel
@@ -13,14 +15,14 @@ from wahabot.settings import Settings
 class HandlerBase:
     """Per-registration state shared by every handler mixin."""
 
-    settings: Settings  # pyright: ignore[reportUninitializedInstanceVariable]
-    waha: WahaClient  # pyright: ignore[reportUninitializedInstanceVariable]
-    config: SessionConfig  # pyright: ignore[reportUninitializedInstanceVariable]
-    config_reloader: SessionConfigReloader  # pyright: ignore[reportUninitializedInstanceVariable]
-    escalation_channel: EscalationChannel  # pyright: ignore[reportUninitializedInstanceVariable]
-    triage: TriageGate | None  # pyright: ignore[reportUninitializedInstanceVariable]
-    started_at: float  # pyright: ignore[reportUninitializedInstanceVariable]
-    agent: FunctionCallingAgentWorkflow  # pyright: ignore[reportUninitializedInstanceVariable]
+    settings: Settings
+    waha: WahaClient
+    config: SessionConfig
+    config_reloader: SessionConfigReloader
+    escalation_channel: EscalationChannel
+    triage: TriageGate | None
+    started_at: float
+    agent: FunctionCallingAgentWorkflow
 
     async def transcribe_message(self, *args: Any, **kwargs: Any) -> Any: ...
     async def download_captioned_image(self, *args: Any, **kwargs: Any) -> Any: ...

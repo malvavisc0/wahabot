@@ -1,5 +1,7 @@
 """Attribute contract shared by the workflow and its mixins."""
 
+# pyright: reportUninitializedInstanceVariable=false
+
 import asyncio
 from collections.abc import Callable
 from typing import Any
@@ -18,20 +20,20 @@ from wahabot.settings import Settings
 class AgentBase:
     """Attributes assigned by ``FunctionCallingAgentWorkflow.__init__``."""
 
-    tools: list[BaseTool]  # pyright: ignore[reportUninitializedInstanceVariable]
-    system_prompt: str | None  # pyright: ignore[reportUninitializedInstanceVariable]
-    prompt_renderer: Callable[[], str] | None  # pyright: ignore[reportUninitializedInstanceVariable]
-    llm: FunctionCallingLLM  # pyright: ignore[reportUninitializedInstanceVariable]
-    memory_token_limit: int  # pyright: ignore[reportUninitializedInstanceVariable]
-    tool_round_limit: int  # pyright: ignore[reportUninitializedInstanceVariable]
-    llm_semaphore: asyncio.Semaphore  # pyright: ignore[reportUninitializedInstanceVariable]
-    settings: Settings | None  # pyright: ignore[reportUninitializedInstanceVariable]
-    notebook: Notebook | None  # pyright: ignore[reportUninitializedInstanceVariable]
-    rules_renderer: Callable[[], str] | None  # pyright: ignore[reportUninitializedInstanceVariable]
-    triage: TriageGate | None  # pyright: ignore[reportUninitializedInstanceVariable]
-    triage_tasks: dict[int, asyncio.Task[TriageResult]]  # pyright: ignore[reportUninitializedInstanceVariable]
-    recap_merger: RecapMerger | None  # pyright: ignore[reportUninitializedInstanceVariable]
-    thread_index: ThreadIndexer | None  # pyright: ignore[reportUninitializedInstanceVariable]
+    tools: list[BaseTool]
+    system_prompt: str | None
+    prompt_renderer: Callable[[], str] | None
+    llm: FunctionCallingLLM
+    memory_token_limit: int
+    tool_round_limit: int
+    llm_semaphore: asyncio.Semaphore
+    settings: Settings | None
+    notebook: Notebook | None
+    rules_renderer: Callable[[], str] | None
+    triage: TriageGate | None
+    triage_tasks: dict[int, asyncio.Task[TriageResult]]
+    recap_merger: RecapMerger | None
+    thread_index: ThreadIndexer | None
 
     def audit(self, kind: str, **fields: Any) -> None: ...
 

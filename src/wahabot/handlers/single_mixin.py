@@ -104,15 +104,9 @@ class SingleMixin(HandlerBase):
             # chat's next run.
             await self.agent.merge_learned()
         except Exception as exc:
-            # Clean failure classes first: a timeout gets one concise
-            # line (the chained httpx/openai traceback is noise for a
-            # mere slow generation), an outage the operator notify —
-            # both with the seen-marker drop so WAHA's redelivery
-            # retries; the run is just as lost either way. An
-            # oversized turn is permanent — the same message can
-            # never fit — so its seen marker stays and no retry loop
-            # starts. Anything else is a bug: full traceback, also
-            # redeliverable.
+            # Timeout/outage: notify and drop the seen marker so WAHA
+            # retries. Budget: permanent, keep the marker. Anything else
+            # is a bug and is redelivered.
             if isinstance(exc, ContextBudgetError):
                 logger.warning(
                     "Message {id} in {chat_id} exceeds the budget ({limit} tokens)",

@@ -208,12 +208,8 @@ class IngestMixin(HandlerBase):
             and not operator_wakes
             and bursts.is_bufferable(event)
         ):
-            # Burst assembly: hold this message for its sender's window
-            # instead of running the agent now. Only messages that
-            # already passed every gate above reach here (the doc's
-            # "only messages that would wake the bot enter the
-            # buffer"); albums never reach this line (the album
-            # branches above), and unknown kinds run the pre-burst path.
+            # Hold for the sender's window; only messages that passed
+            # every gate reach here, and albums were handled above.
             bursts.add_message(event)
             return True
         return False
