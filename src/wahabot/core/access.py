@@ -7,7 +7,6 @@ from pathlib import Path
 from loguru import logger
 from pydantic import BaseModel
 
-from wahabot.core.session_prompt import prompt_needs_migration
 from wahabot.core.tokens import text_tokens
 
 CONFIG_MEMORY_TOKEN_LIMIT = 1024
@@ -77,12 +76,6 @@ def parse_session_config(raw: str, path: Path) -> SessionConfig:
 
 def log_config_load(path: Path, config: SessionConfig) -> None:
     """Log a successful config load in one summary line."""
-    if prompt_needs_migration(config.system_prompt):
-        logger.warning(
-            "Session config {path} uses the pre-v1.1.10 prompt grammar; "
-            + "run `wahabot sessions migrate`",
-            path=path,
-        )
     logger.info(
         (
             "Loaded session config from {path}: {wl} whitelisted, {bl} blacklisted, "

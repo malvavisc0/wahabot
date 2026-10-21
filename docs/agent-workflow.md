@@ -948,9 +948,3 @@ Runs also carry `wahabot.message_ids` (opaque hashes, never raw WhatsApp
 ids) and the local audit journal carries the raw intake ids, the
 outbound `sent_id`, the delivery path and the outcome. Use the journal
 when you need to match a chat message to a run.
-
-After upgrading a deployment that already has session configs, run
-`wahabot sessions migrate` once before serving. It upgrades the known
-pre-v1.1.10 prompt fragments (`quote=operator`, `quoted (context)`, the
-correction rule); `sessions init` only writes new files and will not
-touch an existing prompt.

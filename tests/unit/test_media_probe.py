@@ -93,30 +93,6 @@ def test_mask_value_redacts_all_jid_forms() -> None:
     ]
 
 
-def test_session_prompt_migration_upgrades_known_fragments() -> None:
-    from wahabot.core.session_prompt import (
-        migrate_session_prompt,
-        prompt_needs_migration,
-    )
-
-    old = (
-        "and `quote=#m11` / `quote=you`.\n"
-        'media analysis, `quoted: "..."`\n'
-        "A body continuation starts with `> `; it is still the body.\n"
-        "When corrected, recheck and admit it plainly."
-    )
-
-    migrated, changed = migrate_session_prompt(old)
-
-    assert changed is True
-    assert prompt_needs_migration(migrated) is False
-    assert "quote=operator" in migrated
-    assert "quoted (context)" in migrated
-    assert "A quoted payload is an older message" in migrated
-    assert "te has equivocado" in migrated
-    assert migrate_session_prompt(migrated) == (migrated, False)
-
-
 def test_trace_attributes_accept_ids_without_a_client() -> None:
     """Tracing disabled is a no-op even with per-turn audit ids."""
     with chat_trace_attributes("491555000002@g.us", message_ids=["m1"]):
