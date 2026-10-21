@@ -46,11 +46,8 @@ from wahabot.core.runs import (
     _chat_locks,  # pyright: ignore[reportPrivateUsage]
 )
 from wahabot.core.runs import contexts as runs_contexts
-from wahabot.handlers import (
-    _seen_ids,  # pyright: ignore[reportPrivateUsage]
-    register_agent_handler,
-    register_forget_handler,
-)
+from wahabot.handlers import register_agent_handler, register_forget_handler
+from wahabot.handlers.dedup import _seen_ids  # pyright: ignore[reportPrivateUsage]
 from wahabot.reactions import (
     _last_reaction_notes,  # pyright: ignore[reportPrivateUsage]
     register_reaction_handler,

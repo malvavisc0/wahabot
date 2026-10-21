@@ -114,6 +114,7 @@ One-line messages only. No body, no trailers.
   `core/hmac.py`) with public names
 - No dead code
 - No `_`-prefix for methods
+- No Python file over 600 lines in `src/` or `tests/`
 
 ## Style
 Write the simplest correct solution. Delete anything that isn't needed.

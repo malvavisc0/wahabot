@@ -100,7 +100,7 @@ ignore_decorators = ["@step", "@app.post", "@app.get", "@on_message", "@on_comma
 ignore_names = [
     "session_init", "session_list", "session_view", "session_migrate", "serve", "tell",
     "forget", "escalations", "model_config", "timestamp", "engine",
-    "handlers", "LoggingH11Protocol", "__call__", "recovery_poller_armed",
+    "handlers", "LoggingH11Protocol", "__call__",
     # BaseEmbedding calls these overrides; vulture cannot see the dispatch.
     "_get_query_embedding", "_aget_query_embedding", "_get_text_embedding",
     "_aget_text_embedding", "_get_text_embeddings", "_aget_text_embeddings",

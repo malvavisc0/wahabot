@@ -31,7 +31,6 @@ from wahabot.ai.messages import WRAP_UP_NOTE_KWARG
 from wahabot.ai.pinned_state import render_pinned_block
 from wahabot.ai.tools.whatsapp import RunTarget, bind_target, reset_target
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
-from wahabot.core import thread_index as thread_index_module
 from wahabot.core.notebook import Note
 from wahabot.core.persistence import load_memory, save_memory
 from wahabot.core.thread_index import (
@@ -42,6 +41,7 @@ from wahabot.core.thread_index import (
     index_file,
     vector_file,
 )
+from wahabot.core.thread_index import indexer as thread_index_module
 from wahabot.evals.fixtures import support_threads
 from wahabot.settings import Settings
 

@@ -18,14 +18,7 @@ The package re-exports everything the caller surface expects, so
 load_llm, ...`` keeps working.
 """
 
-from wahabot.ai.workflow.agent import (
-    _EARLY_STOPPING_PROMPT,  # pyright: ignore[reportPrivateUsage]
-    _POST_DELIVERY_WRAP_UP_PROMPT,  # pyright: ignore[reportPrivateUsage]
-    FunctionCallingAgentWorkflow,
-    ObservableOpenAILike,
-    build_agent,
-    load_llm,
-)
+from wahabot.ai.workflow.agent import FunctionCallingAgentWorkflow, build_agent
 from wahabot.ai.workflow.delivery import (
     DELIVERY_TOOLS,
     MIME_MARKERS,
@@ -33,6 +26,12 @@ from wahabot.ai.workflow.delivery import (
     collapse_send_group,
     delivered_text,
     delivery_content,
+)
+from wahabot.ai.workflow.prompts import (
+    EARLY_STOPPING_PROMPT,
+    POST_DELIVERY_WRAP_UP_PROMPT,
+    ObservableOpenAILike,
+    load_llm,
 )
 from wahabot.ai.workflow.text import message_text, token_count
 from wahabot.ai.workflow.toolkit import (
@@ -47,10 +46,10 @@ from wahabot.ai.workflow.toolkit import (
 #: so any future caller sees the full split surface in one place.
 __all__ = [
     "DELIVERY_TOOLS",
+    "EARLY_STOPPING_PROMPT",
     "MIME_MARKERS",
+    "POST_DELIVERY_WRAP_UP_PROMPT",
     "SILENCE_TOOL",
-    "_EARLY_STOPPING_PROMPT",
-    "_POST_DELIVERY_WRAP_UP_PROMPT",
     "FunctionCallingAgentWorkflow",
     "ObservableOpenAILike",
     "build_agent",
