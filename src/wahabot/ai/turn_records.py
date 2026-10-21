@@ -31,6 +31,7 @@ from wahabot.ai.messages import (
     jid_string,
     message_kind,
     message_replies_to,
+    quoted_account_author,
     reply_description,
 )
 from wahabot.ai.records import format_record
@@ -183,38 +184,30 @@ def time_label(event: WahaEvent, tz_name: str = "UTC") -> str:
     return moment.strftime(pattern)
 
 
-def quoted_is_bot(event: WahaEvent, quoted: dict[str, Any]) -> bool:
-    """True when the quoted message came from the bot's own account output."""
-    quoted_id = str(quoted.get("id") or "")
-    author = authors.author(quoted_id)
-    if author == AUTHOR_OPERATOR:
-        return False
-    if author == AUTHOR_BOT:
-        return True
-    participant = jid_string(
-        quoted.get("participant") or quoted.get("_data", {}).get("author")
-    )
-    return bool(participant and participant in bot_jids(event)) or is_own_message_id(
-        quoted_id
-    )
-
-
 def quote_parts(
     event: WahaEvent, registry: SerialRegistry
 ) -> tuple[list[str], list[str]]:
-    """The ``quote=…`` flag and its preview payload for a reply."""
+    """The ``quote=…`` flag and its context payload for a reply."""
     quoted = message_replies_to(event)
     if not quoted:
         return [], []
     flags: list[str] = []
-    if quoted_is_bot(event, quoted):
+    account_author = quoted_account_author(event)
+    if account_author == AUTHOR_BOT:
+        flags.append("quote=you")
+    elif account_author == AUTHOR_OPERATOR:
+        flags.append("quote=operator")
+    elif account_author == "":
+        # An account message without an author record: the classifier
+        # already proved it belongs to the shared account; keep the old
+        # bot fallback for the record flag.
         flags.append("quote=you")
     else:
         serial = registry.serial_for(str(quoted.get("id") or ""))
         if serial:
             flags.append(f"quote={format_serial_token(serial)}")
     preview = reply_description(quoted)[:120].replace('"', "'")
-    return flags, [f'quoted: "{preview}"'] if preview else []
+    return flags, [f'quoted (context): "{preview}"'] if preview else []
 
 
 def reaction_parts(event: WahaEvent, registry: SerialRegistry) -> list[str]:

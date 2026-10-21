@@ -29,6 +29,7 @@ from wahabot.ai.messages import (
     jid_string,
     message_kind,
     message_replies_to,
+    newest_quote_flags,
     reply_description,
     turn_addressed_note,
 )
@@ -533,6 +534,9 @@ async def bind_run_rules(
     target: RunTarget,
     addressed: bool,
     gate_first: bool,
+    quoted_other: bool = False,
+    quoted_bot: bool = False,
+    quoted_operator: bool = False,
 ) -> bool:
     """Apply the chat's code-read rules to *target*; False when hard-muted.
 
@@ -548,7 +552,15 @@ async def bind_run_rules(
     if RULE_HARD_MUTE in rules:
         logger.info("Chat is hard-muted; not answering {chat_id}", chat_id=target.chat_id)
         if ctx is not None and await run_gate(
-            agent, ctx, target, user_msg, addressed, gate_first
+            agent,
+            ctx,
+            target,
+            user_msg,
+            addressed,
+            gate_first,
+            quoted_other,
+            quoted_bot,
+            quoted_operator,
         ):
             await record_handled_turn(agent, ctx, user_msg)
         return False
@@ -563,6 +575,9 @@ async def run_gate(
     user_msg: str,
     addressed: bool,
     gate_first: bool,
+    quoted_other: bool = False,
+    quoted_bot: bool = False,
+    quoted_operator: bool = False,
 ) -> bool:
     """Reset triage state and consult the gate; False when it ends the turn.
 
@@ -573,7 +588,16 @@ async def run_gate(
     """
     await ctx.store.set("triage_result", None)
     await ctx.store.set("triage_audit", None)
-    if await agent.start_triage(ctx, target, user_msg, addressed, gate_first):
+    if await agent.start_triage(
+        ctx,
+        target,
+        user_msg,
+        addressed,
+        gate_first,
+        quoted_other,
+        quoted_bot,
+        quoted_operator,
+    ):
         await ctx.store.set("turn_speak", True)
         return True
     await ctx.store.set("turn_speak", False)
@@ -661,6 +685,8 @@ async def handle_message(
     """
     chat_id = str(event.payload.get("from", ""))
     logger.info("Agent handling message from {chat_id}", chat_id=chat_id)
+    newest_event = record_entries[-1].event if record_entries else event
+    quoted_other, quoted_bot, quoted_operator = newest_quote_flags(newest_event)
     await prepare_turn_state(ctx, event, addressed)
     user_msg, image_blocks, serials = await turn_user_message(
         event,
@@ -692,10 +718,28 @@ async def handle_message(
     token = bind_target(target)
     try:
         await bind_inbound_image(image, settings, target)
-        if not await bind_run_rules(agent, ctx, user_msg, target, addressed, gate_first):
+        if not await bind_run_rules(
+            agent,
+            ctx,
+            user_msg,
+            target,
+            addressed,
+            gate_first,
+            quoted_other,
+            quoted_bot,
+            quoted_operator,
+        ):
             return "", target
         if ctx is not None and not await run_gate(
-            agent, ctx, target, user_msg, addressed, gate_first
+            agent,
+            ctx,
+            target,
+            user_msg,
+            addressed,
+            gate_first,
+            quoted_other,
+            quoted_bot,
+            quoted_operator,
         ):
             return "", target
         result = await run_agent_once(agent, ctx, user_msg, image_blocks, settings)

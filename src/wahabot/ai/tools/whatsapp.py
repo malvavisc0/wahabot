@@ -29,7 +29,7 @@ from llama_index.core.tools import BaseTool, FunctionTool
 from loguru import logger
 from PIL import Image
 
-from wahabot.ai.messages import jid_string
+from wahabot.ai.messages import is_blame_text, jid_string
 from wahabot.ai.serials import SerialEntry, serial_store
 from wahabot.ai.tools.envelope import error, ok
 from wahabot.ai.tools.outfile import write_json_output
@@ -408,6 +408,16 @@ def prepare_send_target(
     return chat_id, reply_to, None
 
 
+def blame_delivery_error(text: str) -> str | None:
+    """The correction-guard error for a delivery text, or None."""
+    if not is_blame_text(text):
+        return None
+    return (
+        "correction-guard: do not tell the recipient they were wrong; "
+        "apologize plainly or stay silent"
+    )
+
+
 def send_message(waha: WahaClient, settings: Settings | None = None) -> BaseTool:
     """Build a tool that sends a WhatsApp text message.
 
@@ -436,6 +446,8 @@ def send_message(waha: WahaClient, settings: Settings | None = None) -> BaseTool
     ) -> str:
         if not text.strip():
             return error("empty message text")
+        if blame := blame_delivery_error(text):
+            return error(blame)
         target = current_target()
         if target.sent:
             return error(
@@ -470,6 +482,7 @@ def send_message(waha: WahaClient, settings: Settings | None = None) -> BaseTool
             return send_failed_envelope("send_message", chat_id, exc)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
+        target.sent_id = sent_id
         return sent_message_envelope(
             chat_id, apply_chat_prefix(text, target.prefix), merged, dangling
         )
@@ -788,13 +801,24 @@ def send_media(waha: WahaClient, settings: Settings) -> BaseTool:
         reason: str = "",
     ) -> str:
         target = current_target()
-        if target.sent:
-            return error(
-                f"message already sent this run (to {target.sent}); do not send again"
-            )
-        handler = _SEND_MEDIA_HANDLERS.get(kind)
-        if handler is None:
-            return error(f"unknown kind: {kind!r}")
+
+        def preflight() -> tuple[Callable[..., str] | None, str | None]:
+            """The delivery target, blame guard and kind handler, or an error."""
+            if target.sent:
+                return None, (
+                    f"message already sent this run (to {target.sent}); do not send again"
+                )
+            if blame := blame_delivery_error(f"{caption}\n{text or ''}"):
+                return None, blame
+            handler = _SEND_MEDIA_HANDLERS.get(kind)
+            if handler is None:
+                return None, f"unknown kind: {kind!r}"
+            return handler, None
+
+        handler, preflight_error = preflight()
+        if preflight_error:
+            return error(preflight_error)
+        assert handler is not None
         # Blank sources count as absent (a whitespace-only url must not
         # outrank a real path below) — normalize before the XOR check
         # and the dispatch, so both see the same source.
@@ -949,6 +973,7 @@ def send_media_image(
         return send_failed_envelope("send_media", chat_id, exc)
     delivered_to_self(chat_id, sent_id)
     target.sent = chat_id
+    target.sent_id = sent_id
     return ok(
         chat=chat_id,
         kind="image",
@@ -977,6 +1002,7 @@ def send_media_video(
         return send_failed_envelope("send_media", chat_id, exc)
     delivered_to_self(chat_id, sent_id)
     target.sent = chat_id
+    target.sent_id = sent_id
     return ok(
         chat=chat_id,
         kind="video",
@@ -1011,6 +1037,7 @@ def send_media_file(
         return send_failed_envelope("send_media", chat_id, exc)
     delivered_to_self(chat_id, sent_id)
     target.sent = chat_id
+    target.sent_id = sent_id
     return ok(
         chat=chat_id,
         kind="file",
@@ -1042,6 +1069,7 @@ def send_media_voice(
         return send_failed_envelope("send_media", chat_id, exc)
     delivered_to_self(chat_id, sent_id)
     target.sent = chat_id
+    target.sent_id = sent_id
     return ok(
         chat=chat_id,
         kind="voice",
@@ -1077,6 +1105,7 @@ def send_voice_text(
         return send_failed_envelope("send_media", chat_id, exc)
     delivered_to_self(chat_id, sent_id)
     target.sent = chat_id
+    target.sent_id = sent_id
     return ok(
         chat=chat_id,
         kind="voice",
@@ -1108,6 +1137,7 @@ def send_media_sticker(
         return send_failed_envelope("send_media", chat_id, exc)
     delivered_to_self(chat_id, sent_id)
     target.sent = chat_id
+    target.sent_id = sent_id
     return ok(
         chat=chat_id,
         kind="sticker",
@@ -2270,6 +2300,7 @@ def forward_message(waha: WahaClient) -> BaseTool:
             return send_failed_envelope("forward_message", chat_id, exc)
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
+        target.sent_id = sent_id
         return ok(message_id=message_id, chat=chat_id)
 
     return FunctionTool.from_defaults(

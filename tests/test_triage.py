@@ -192,6 +192,54 @@ def test_render_context_contains_the_bounded_sources() -> None:
     assert "Incoming message:\nlol" in text
 
 
+def test_side_thread_is_rendered_and_classified() -> None:
+    context = TriageContext(
+        session=SESSION,
+        chat_id=GROUP,
+        message="[[07:55 Ana #m2]] text quote=#m1 :: Beto, you never answered me",
+        group=True,
+        addressed=False,
+        quoted_other=True,
+    )
+
+    text = render_context(context)
+
+    assert context.side_thread is True
+    assert "Quote: another member" in text
+    assert "Side thread: yes" in text
+
+
+def test_side_thread_verdict_cannot_participate_or_escalate(tmp_path: Path) -> None:
+    gate = TriageGate(
+        gate_settings(tmp_path),
+        transport=gate_transport(
+            json.dumps(
+                {
+                    "adversarial": False,
+                    "escalate": True,
+                    "participate": True,
+                    "why": "unanswered complaint",
+                    "gist": "Ana told Beto he never answered",
+                    "needs": [],
+                }
+            )
+        ),
+    )
+    context = TriageContext(
+        session=SESSION,
+        chat_id=GROUP,
+        message="[[07:55 Ana #m2]] text quote=#m1 :: Beto, you never answered me",
+        group=True,
+        addressed=False,
+        quoted_other=True,
+    )
+
+    result = asyncio.run(gate.classify(context))
+
+    assert result.verdict.participate is False
+    assert result.verdict.escalate is False
+
+
 def test_enrich_recall_query_adds_history_topics() -> None:
     assert enrich_recall_query("PDF", ("history:upload", "note:x", "web")) == "PDF upload"
 

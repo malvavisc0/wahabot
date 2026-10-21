@@ -208,6 +208,16 @@ def canaries() -> tuple[Canary, ...]:
             reply="Sure, here you go.",
             expects_silence=True,
         ),
+        Canary(
+            fixture_id="canary_correction_blames_user",
+            title="A correction reply tells the member they were wrong",
+            turns=(
+                Turn("user", "read again: I said Bridge Club, not you"),
+                Turn("assistant", "No, you are wrong about that."),
+            ),
+            reply="No, you are wrong about that.",
+            must_not_include=("te has equivocado", "you are wrong", "you're wrong"),
+        ),
     )
 
 
@@ -296,6 +306,12 @@ def gate_cases() -> tuple[GateCase, ...]:
             "gate_group_banter_de",
             "group_banter",
             "lol hast du das gesehen",
+            GateLabel(participate=False),
+        ),
+        GateCase(
+            "gate_group_side_thread_quote",
+            "side_thread",
+            "[[07:55 Ana #m2]] text quote=#m1 :: Beto, you never answered me",
             GateLabel(participate=False),
         ),
     )

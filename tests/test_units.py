@@ -66,7 +66,10 @@ from wahabot.ai.messages import (
     turn_addressed_note,
     video_media,
 )
-from wahabot.ai.observability import _mask_value  # pyright: ignore[reportPrivateUsage]
+from wahabot.ai.observability import (
+    _mask_value,  # pyright: ignore[reportPrivateUsage]
+    chat_trace_attributes,
+)
 from wahabot.ai.resolve import chat_context_note, resolve_last_message
 from wahabot.ai.scrub import strip_spoofed_markers
 from wahabot.ai.tools.shell import shell_command
@@ -595,6 +598,40 @@ def test_replies_to_bot_via_jid_object() -> None:
     assert replies_to_bot(quoting)
 
 
+def test_operator_quote_is_not_addressed_to_the_bot() -> None:
+    from wahabot.ai.messages import newest_quote_flags
+    from wahabot.core.identity import AUTHOR_BOT, AUTHOR_OPERATOR, authors
+
+    authors.record("BOT1", AUTHOR_BOT)
+    authors.record("OP1", AUTHOR_OPERATOR)
+    own = {"id": "491555000000@c.us", "lid": "491555000000@lid"}
+
+    def quote(message_id: str, participant: str) -> WahaEvent:
+        return WahaEvent(
+            id=f"event-{message_id}",
+            timestamp=1,
+            event="message",
+            session=SESSION,
+            me=own,
+            payload={
+                "from": CHAT_ID,
+                "body": "ok",
+                "replyTo": {"id": message_id, "participant": participant},
+            },
+        )
+
+    bot_quote = quote("BOT1", "491555000000@lid")
+    operator_quote = quote("OP1", "491555000000@lid")
+    member_quote = quote("MEMBER1", "491555000001@lid")
+
+    assert replies_to_bot(bot_quote) is True
+    assert replies_to_bot(operator_quote) is False
+    assert replies_to_bot(member_quote) is False
+    assert newest_quote_flags(bot_quote) == (False, True, False)
+    assert newest_quote_flags(operator_quote) == (False, False, True)
+    assert newest_quote_flags(member_quote) == (True, False, False)
+
+
 def test_roster_and_summarize_chat() -> None:
     overview = {
         "id": CHAT_ID,
@@ -977,6 +1014,143 @@ def test_tool_audit_preserves_outcome_fields(
         args={"query": "hello"},
         ok=expected_ok,
         outcome=outcome,
+    )
+
+
+def test_correction_rewrite_replaces_a_blame_reply() -> None:
+    from llama_index.core.base.llms.types import ChatResponse
+    from llama_index.core.workflow import Context
+
+    from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+
+    llm = unittest.mock.Mock()
+    llm.metadata.is_function_calling_model = True
+    llm.achat = unittest.mock.AsyncMock(
+        return_value=ChatResponse(
+            message=ChatMessage(
+                role=MessageRole.ASSISTANT,
+                content="Tienes razón, me equivoqué al leer el mensaje.",
+            )
+        )
+    )
+    agent = FunctionCallingAgentWorkflow(llm=llm)
+    context = Context(agent)
+    memory = ChatMemoryBuffer.from_defaults()
+    memory.put(ChatMessage(role=MessageRole.USER, content="read again: not you"))
+    response = ChatResponse(
+        message=ChatMessage(
+            role=MessageRole.ASSISTANT,
+            content="Te has equivocado, no era eso.",
+        )
+    )
+
+    async def scenario() -> ChatResponse:
+        await context.store.set("memory", memory)
+        return await agent.rewrite_blame(context, response)
+
+    rewritten = asyncio.run(scenario())
+
+    assert "te has equivocado" not in str(rewritten.message.content)
+    assert llm.achat.await_count == 1
+
+
+def test_correction_rewrite_silences_a_still_blame_reply() -> None:
+    from llama_index.core.base.llms.types import ChatResponse
+    from llama_index.core.workflow import Context
+
+    from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+
+    llm = unittest.mock.Mock()
+    llm.metadata.is_function_calling_model = True
+    llm.achat = unittest.mock.AsyncMock(
+        return_value=ChatResponse(
+            message=ChatMessage(
+                role=MessageRole.ASSISTANT,
+                content="Sí, te has equivocado otra vez.",
+            )
+        )
+    )
+    agent = FunctionCallingAgentWorkflow(llm=llm)
+    context = Context(agent)
+    memory = ChatMemoryBuffer.from_defaults()
+    memory.put(ChatMessage(role=MessageRole.USER, content="read again: not you"))
+    response = ChatResponse(
+        message=ChatMessage(
+            role=MessageRole.ASSISTANT,
+            content="Te has equivocado, no era eso.",
+        )
+    )
+
+    async def scenario() -> ChatResponse:
+        await context.store.set("memory", memory)
+        return await agent.rewrite_blame(context, response)
+
+    rewritten = asyncio.run(scenario())
+
+    assert str(rewritten.message.content) == ""
+
+
+def test_correction_rewrite_keeps_a_non_blame_reply() -> None:
+    from llama_index.core.base.llms.types import ChatResponse
+    from llama_index.core.workflow import Context
+
+    from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+
+    llm = unittest.mock.Mock()
+    llm.metadata.is_function_calling_model = True
+    llm.achat = unittest.mock.AsyncMock()
+    agent = FunctionCallingAgentWorkflow(llm=llm)
+    context = Context(agent)
+    response = ChatResponse(
+        message=ChatMessage(
+            role=MessageRole.ASSISTANT,
+            content="Tienes razón, me equivoqué al leer el mensaje.",
+        )
+    )
+
+    rewritten = asyncio.run(agent.rewrite_blame(context, response))
+
+    assert rewritten is response
+    llm.achat.assert_not_awaited()
+
+
+def test_side_thread_fence_works_without_a_gate() -> None:
+    from llama_index.core.workflow import Context
+
+    from wahabot.ai.tools.whatsapp import RunTarget
+    from wahabot.ai.workflow import FunctionCallingAgentWorkflow
+
+    llm = unittest.mock.Mock()
+    llm.metadata.is_function_calling_model = True
+    agent = FunctionCallingAgentWorkflow(llm=llm)
+    context = Context(agent)
+    target = RunTarget(session=SESSION, chat_id=CHAT_ID)
+
+    assert (
+        asyncio.run(
+            agent.start_triage(
+                context,
+                target,
+                "Beto, you never answered me",
+                False,
+                True,
+                quoted_other=True,
+            )
+        )
+        is False
+    )
+    assert (
+        asyncio.run(
+            agent.start_triage(
+                context,
+                target,
+                "I am quoting you",
+                False,
+                True,
+                quoted_bot=True,
+            )
+        )
+        is True
     )
 
 
@@ -3847,6 +4021,36 @@ def test_mask_value_redacts_all_jid_forms() -> None:
     ]
 
 
+def test_session_prompt_migration_upgrades_known_fragments() -> None:
+    from wahabot.core.session_prompt import (
+        migrate_session_prompt,
+        prompt_needs_migration,
+    )
+
+    old = (
+        "and `quote=#m11` / `quote=you`.\n"
+        'media analysis, `quoted: "..."`\n'
+        "A body continuation starts with `> `; it is still the body.\n"
+        "When corrected, recheck and admit it plainly."
+    )
+
+    migrated, changed = migrate_session_prompt(old)
+
+    assert changed is True
+    assert prompt_needs_migration(migrated) is False
+    assert "quote=operator" in migrated
+    assert "quoted (context)" in migrated
+    assert "A quoted payload is an older message" in migrated
+    assert "te has equivocado" in migrated
+    assert migrate_session_prompt(migrated) == (migrated, False)
+
+
+def test_trace_attributes_accept_ids_without_a_client() -> None:
+    """Tracing disabled is a no-op even with per-turn audit ids."""
+    with chat_trace_attributes("491555000002@g.us", message_ids=["m1"]):
+        pass
+
+
 def test_command_holder_bare_send_target() -> None:
     command_payload = cast(dict[str, Any], build_command_event(SESSION, "x")["payload"])
     holder = {"chat_id": str(command_payload["from"])}
@@ -5212,6 +5416,19 @@ def test_send_message_warning_does_not_claim_notification_failure(
     assert warning in envelope["warning"]
     assert "nobody was notified" not in envelope["warning"]
     assert waha.send_text.call_args.kwargs["mentions"] == expected
+
+
+def test_send_message_refuses_blame_text() -> None:
+    from wahabot.ai.tools.whatsapp import send_message
+
+    waha = unittest.mock.Mock()
+
+    out = cast(Any, send_message(waha))(text="Te has equivocado, no era eso.")
+
+    envelope = json.loads(str(out.content))
+    assert envelope["ok"] is False
+    assert "correction-guard" in envelope["error"]
+    waha.send_text.assert_not_called()
 
 
 def test_log_action_reason() -> None:

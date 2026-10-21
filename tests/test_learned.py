@@ -194,6 +194,11 @@ def test_merge_pending_merges_and_saves(learned_settings: Settings) -> None:
     assert "PDF" in body
 
 
+def test_merge_prompt_marks_retractions() -> None:
+    """A corrected bot statement must leave one retraction line, not a fact."""
+    assert "Retracted:" in MERGE_PROMPT
+
+
 def test_merge_supersedes_the_existing_recap(learned_settings: Settings) -> None:
     save_learned(learned_settings.data_dir, SESSION, CHAT, "- Delivery on Friday.")
     llm = ScriptedLLM(["- Delivery moved to Monday; Friday was superseded."])

@@ -4,7 +4,7 @@ import asyncio
 import io
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, cast
 
 import httpx
@@ -227,6 +227,8 @@ async def finish_agent_reply(
     settings: Settings,
     prefix: str = "",
     emoji_reaction: bool = False,
+    target: RunTarget | None = None,
+    message_ids: Sequence[str] = (),
 ) -> None:
     """Deliver a finished run's reply text, or record why not.
 
@@ -246,20 +248,9 @@ async def finish_agent_reply(
     so a failed send never leaves an audit row claiming the chat was
     answered; its failure is journaled as ``send_failed`` instead.
     """
-    if delivered:
-        logger.info(
-            "Agent decision for {chat_id}: delivered via tool",
-            chat_id=chat_id,
-        )
-        save_action(settings.data_dir, session, "delivered_via_tool", chat_id=chat_id)
-        log_final_text(chat_id, reply)
-        return
-    if not reply or not reply.strip():
-        save_action(settings.data_dir, session, "silence", chat_id=chat_id)
-        logger.info("Agent decision for {chat_id}: stay silent", chat_id=chat_id)
-        return
-    if is_single_emoji(reply):
-        emoji = reply.strip()
+
+    async def react_or_silence(emoji: str) -> None:
+        """React to a lone emoji, or journal it as silence."""
         if emoji_reaction and message_id and random.random() < 0.5:
             logger.info(
                 "Converting lone emoji to reaction on {mid}: {emoji}",
@@ -280,20 +271,64 @@ async def finish_agent_reply(
                 chat_id=chat_id,
                 reaction=emoji,
                 message_id=message_id,
+                message_ids=list(message_ids),
+                delivered_via="reaction",
             )
             return
         save_action(
-            settings.data_dir, session, "silence", chat_id=chat_id, dropped_emoji=emoji
+            settings.data_dir,
+            session,
+            "silence",
+            chat_id=chat_id,
+            dropped_emoji=emoji,
+            message_id=message_id,
+            message_ids=list(message_ids),
+            delivered_via="silence",
         )
         logger.info(
-            "Dropping lone emoji as silence for {chat_id}: {reply!r}",
+            "Dropping lone emoji as silence for {chat_id}: {emoji}",
             chat_id=chat_id,
-            reply=reply,
+            emoji=emoji,
         )
+
+    if delivered:
+        logger.info(
+            "Agent decision for {chat_id}: delivered via tool",
+            chat_id=chat_id,
+        )
+        reacted = target.reacted if target is not None else ""
+        sent_id = target.sent_id if target is not None else ""
+        save_action(
+            settings.data_dir,
+            session,
+            "delivered_via_tool",
+            chat_id=chat_id,
+            message_id=message_id,
+            message_ids=list(message_ids),
+            sent_id=sent_id,
+            reacted=reacted,
+            delivered_via="reaction" if reacted and not sent_id else "tool",
+        )
+        log_final_text(chat_id, reply)
+        return
+    if not reply or not reply.strip():
+        save_action(
+            settings.data_dir,
+            session,
+            "silence",
+            chat_id=chat_id,
+            message_id=message_id,
+            message_ids=list(message_ids),
+            delivered_via="silence",
+        )
+        logger.info("Agent decision for {chat_id}: stay silent", chat_id=chat_id)
+        return
+    if is_single_emoji(reply):
+        await react_or_silence(reply.strip())
         return
     logger.info("Replying to {chat_id}: {reply}", chat_id=chat_id, reply=reply[:500])
     try:
-        await asyncio.to_thread(
+        sent_id, _, _ = await asyncio.to_thread(
             deliver_chat_text,
             waha,
             session,
@@ -315,6 +350,9 @@ async def finish_agent_reply(
         "reply",
         chat_id=chat_id,
         message_id=message_id,
+        message_ids=list(message_ids),
+        sent_id=sent_id,
+        delivered_via="text",
         reply=reply,
     )
 
@@ -863,7 +901,7 @@ def register_agent_handler(
         )
         async with chat_lock(event.session, chat_id):
             ctx = await context_for(event.session, chat_id, agent, settings)
-            with chat_trace_attributes(chat_id):
+            with chat_trace_attributes(chat_id, message_ids=[album_message_id(event)]):
                 reply, target = await handle_message(
                     event,
                     agent,
@@ -889,6 +927,8 @@ def register_agent_handler(
             settings,
             prefix=target.prefix,
             emoji_reaction=not delivered,
+            target=target,
+            message_ids=[album_message_id(event)],
         )
         # Post-reply memory jobs outside the chat lock: the recap merge
         # and the embedding drain must never hold the chat's next run.
@@ -1157,7 +1197,9 @@ def register_agent_handler(
         chat_id = buffer.key[1]
         async with chat_lock(merged.session, chat_id):
             ctx = await context_for(merged.session, chat_id, agent, settings)
-            with chat_trace_attributes(chat_id):
+            with chat_trace_attributes(
+                chat_id, message_ids=[str(merged.payload.get("id", ""))]
+            ):
                 current = config_reloader.current_config()
                 addressed = mark_addressed_entry(entries, current)
                 gate_first = not addressed and current.group_participation == "judicious"
@@ -1204,6 +1246,8 @@ def register_agent_handler(
             settings,
             prefix=target.prefix,
             emoji_reaction=True,
+            target=target,
+            message_ids=[str(entry.event.payload.get("id", "")) for entry in entries],
         )
         # Post-reply memory jobs outside the chat lock: the recap merge
         # and the embedding drain must never hold the chat's next run.
@@ -1480,7 +1524,7 @@ def register_agent_handler(
                 # timeline; runs in different chats proceed in parallel
                 # (each binds its own run target inside the workflow).
                 ctx = await context_for(event.session, chat_id, agent, settings)
-                with chat_trace_attributes(chat_id):
+                with chat_trace_attributes(chat_id, message_ids=[message_id]):
                     reply, target = await handle_message(
                         event,
                         agent,
@@ -1510,6 +1554,8 @@ def register_agent_handler(
                 settings,
                 prefix=target.prefix,
                 emoji_reaction=True,
+                target=target,
+                message_ids=[message_id],
             )
             # Post-reply memory jobs outside the chat lock: the recap
             # merge and the embedding drain must never hold this

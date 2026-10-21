@@ -47,7 +47,11 @@ from wahabot.ai.history import (
     trim_to_budget,
     turn_header,
 )
-from wahabot.ai.messages import TURN_HANDLED_KWARG, TURN_SERIALS_KWARG
+from wahabot.ai.messages import (
+    TURN_HANDLED_KWARG,
+    TURN_SERIALS_KWARG,
+    is_blame_text,
+)
 from wahabot.ai.pinned_state import (
     PINNED_STATE_TOKEN_LIMIT,
     dedupe_recall,
@@ -71,6 +75,7 @@ from wahabot.ai.triage import (
     TriageResult,
     enrich_recall_query,
     format_turns,
+    is_side_thread,
     is_tool_allowed,
     result_from_dict,
     result_to_dict,
@@ -134,6 +139,16 @@ _POST_DELIVERY_WRAP_UP_PROMPT = (
 #: later reader knows the lesson was shortened by storage, not by the
 #: model's own wording.
 _TRUNCATED_NOTE_SUFFIX = "\n[Truncated wrap-up note]"
+
+#: One rewrite call, only when is_blame_text matches a final reply.
+_CORRECTION_REWRITE_PROMPT = (
+    "You are rewriting one WhatsApp reply. The draft below tells the "
+    "recipient they are wrong. If the conversation corrects the assistant, "
+    "rewrite the draft to admit the assistant's own mistake plainly. If the "
+    "recipient is genuinely wrong, keep the correction but remove the "
+    "accusation. Return only the rewritten reply, in the same language, with "
+    "no preamble."
+)
 
 _TOPIC_PREFIX = "topic:"
 
@@ -568,6 +583,9 @@ class FunctionCallingAgentWorkflow(Workflow):
         message: str,
         messages: Sequence[ChatMessage],
         addressed: bool,
+        quoted_other: bool = False,
+        quoted_bot: bool = False,
+        quoted_operator: bool = False,
     ) -> TriageContext:
         """Build the bounded gate input: message, last turns, mute, rules."""
         mute = ""
@@ -587,6 +605,9 @@ class FunctionCallingAgentWorkflow(Workflow):
             rules=self.rendered_session_rules(),
             group=target.chat_id.endswith("@g.us"),
             addressed=addressed,
+            quoted_other=quoted_other,
+            quoted_bot=quoted_bot,
+            quoted_operator=quoted_operator,
         )
 
     async def start_triage(
@@ -596,6 +617,9 @@ class FunctionCallingAgentWorkflow(Workflow):
         user_msg: str,
         addressed: bool,
         gate_first: bool,
+        quoted_other: bool = False,
+        quoted_bot: bool = False,
+        quoted_operator: bool = False,
     ) -> bool:
         """Start or await the gate; False means the run must stay silent.
 
@@ -609,12 +633,31 @@ class FunctionCallingAgentWorkflow(Workflow):
         (DMs, addressed turns) always runs. The failed verdict is stored
         and audited either way.
         """
+        if is_side_thread(
+            target.chat_id.endswith("@g.us"),
+            addressed,
+            quoted_other,
+            quoted_bot,
+            quoted_operator,
+        ):
+            # Code-owned fence even when the gate is disabled: a reply to
+            # another member's message is not a turn for the assistant.
+            self.audit("side_thread", rule="quote of another member")
+            return False
         if self.triage is None or target.chat_id == OPERATOR_CHAT_ID:
             return True
         try:
             memory = await self.ensure_memory(ctx)
             prior = await memory.aget_all()
-            context = self.triage_context(target, user_msg, prior, addressed)
+            context = self.triage_context(
+                target,
+                user_msg,
+                prior,
+                addressed,
+                quoted_other,
+                quoted_bot,
+                quoted_operator,
+            )
             await ctx.store.set(
                 "triage_audit",
                 {"session": context.session, "chat_id": context.chat_id},
@@ -967,6 +1010,8 @@ class FunctionCallingAgentWorkflow(Workflow):
         """A plain-text round: the reply, or the wrap-up note if delivered."""
         self.warn_accidental_silence(response, rounds)
         delivered = self.any_delivery()
+        if not delivered:
+            response = await self.rewrite_blame(ctx, response)
         note = str(response.message.content or "").strip() if delivered else ""
         await self.remember(ctx, response, [], skip_text=delivered)
         silent = not delivered and not chat_visible_text(
@@ -979,6 +1024,74 @@ class FunctionCallingAgentWorkflow(Workflow):
                 await self.store_wrap_up_note(note)
             self.audit_wrap_up_note(note)
         return StopEvent(result=self.drop_post_delivery_text(response))
+
+    async def rewrite_blame(self, ctx: Context, response: ChatResponse) -> ChatResponse:
+        """One rewrite when a final reply tells the recipient they are wrong.
+
+        The narrow pattern keeps this off ordinary replies. A failed or
+        empty rewrite keeps the draft; the audit records the attempt.
+        """
+        text = str(response.message.content or "").strip()
+        if not text or not chat_visible_text(text) or not is_blame_text(text):
+            return response
+        parts = await self.correction_rewrite_messages(ctx, text)
+        try:
+            async with self.llm_semaphore:
+                rewritten_response = await self.llm.achat(parts)
+            rewritten = str(rewritten_response.message.content or "").strip()
+        except Exception as exc:
+            logger.warning("Correction rewrite failed: {error}", error=exc)
+            self.audit_correction_rewrite(False)
+            return ChatResponse(
+                message=ChatMessage(role=MessageRole.ASSISTANT, content="")
+            )
+        if not rewritten or is_blame_text(rewritten):
+            self.audit_correction_rewrite(False)
+            return ChatResponse(
+                message=ChatMessage(role=MessageRole.ASSISTANT, content="")
+            )
+        self.audit_correction_rewrite(True)
+        return ChatResponse(
+            message=ChatMessage(role=MessageRole.ASSISTANT, content=rewritten)
+        )
+
+    async def correction_rewrite_messages(
+        self, ctx: Context, text: str
+    ) -> list[ChatMessage]:
+        """The rewrite prompt: system instruction plus the newest turn and draft."""
+        memory = await ctx.store.get("memory")
+        newest = next(
+            message_text(message)
+            for message in reversed(await memory.aget_all())
+            if message.role == MessageRole.USER
+        )
+        system = self.system_message()
+        instruction = _CORRECTION_REWRITE_PROMPT
+        if system is not None:
+            instruction = f"{system.content}\n\n{instruction}"
+        return [
+            ChatMessage(role=MessageRole.SYSTEM, content=instruction),
+            ChatMessage(
+                role=MessageRole.USER,
+                content=f"Newest chat message:\n{newest}\n\nDraft reply:\n{text}",
+            ),
+        ]
+
+    def audit_correction_rewrite(self, rewrote: bool) -> None:
+        """Journal the guard without storing the reply text."""
+        if self.settings is None:
+            return
+        try:
+            target = current_target()
+        except RuntimeError:
+            return
+        save_action(
+            self.settings.data_dir,
+            target.session,
+            "correction_rewrite",
+            chat_id=target.chat_id,
+            rewrote=rewrote,
+        )
 
     async def mark_turn_handled(self, ctx: Context, *, silent: bool = False) -> None:
         """Stamp the run's inbound user turn as handled conversation.
@@ -1259,6 +1372,8 @@ class FunctionCallingAgentWorkflow(Workflow):
             if note:
                 await self.store_wrap_up_note(note)
             self.audit_wrap_up_note(note)
+        else:
+            response = await self.rewrite_blame(ctx, response)
         return self.drop_post_delivery_text(response)
 
     async def store_wrap_up_note(self, note: str) -> None:

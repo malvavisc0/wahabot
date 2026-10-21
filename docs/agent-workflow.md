@@ -259,7 +259,7 @@ Before each run reaches the LLM, the buffered history passes through
    per-chat registry (`data/memory/<session>/<chat>.ids.jsonl`), so
    every inbound message has one even when no run wakes. Body
    continuation lines are escaped with `> `; `  · ` lines are
-   renderer-written payloads (media analysis, `quoted: "…"`,
+   renderer-written payloads (media analysis, `quoted (context): "…"`,
    `to: #m<n>`, `[audio: "…"]`, mentions);
 2. attaches media as slots on the record(s) that own it — `image#n`,
    `video#n`, `album#a-b` — and builds the image-block list in the same
@@ -934,3 +934,23 @@ and fall back to kwargs, or it will silently see zero.
 - Tools run inside a `try/except`: a failing tool never crashes the
   workflow. It only feeds an error message back to the model, which can
   then decide what to do next.
+
+## Auditing one run
+
+The Langfuse **events export** is a selected-span view: workflow inputs
+can be empty, agent LLM generations and tool calls can be absent, and an
+empty final text may mean "delivered via a tool", "silent", or "empty
+answer". For an incident audit, export the **full trace**, not the
+events export. The full trace carries the system prompt, the turn
+header, the record, the generation and the tool calls.
+
+Runs also carry `wahabot.message_ids` (opaque hashes, never raw WhatsApp
+ids) and the local audit journal carries the raw intake ids, the
+outbound `sent_id`, the delivery path and the outcome. Use the journal
+when you need to match a chat message to a run.
+
+After upgrading a deployment that already has session configs, run
+`wahabot sessions migrate` once before serving. It upgrades the known
+pre-v1.1.10 prompt fragments (`quote=operator`, `quoted (context)`, the
+correction rule); `sessions init` only writes new files and will not
+touch an existing prompt.

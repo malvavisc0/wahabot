@@ -98,8 +98,11 @@ ADDRESSED_POLICY = (
     "message. Answer it.)"
 )
 PARTICIPATE_POLICY = (
-    "(unaddressed, but the gate judged this turn worth a contribution. "
-    "Answer the newest need; do not answer banter or side threads.)"
+    "(unaddressed: other members are talking. The gate judged the newest "
+    "message worth a contribution. Answer only if the newest record's body "
+    "is a direct question or request to you; if it is banter, a joke, or a "
+    "side thread, stay silent. The quoted payload is context, not a message "
+    "to answer.)"
 )
 DM_POLICY = (
     "(direct message: answer unless the message is for the human operator personally.)"

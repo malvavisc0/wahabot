@@ -4,7 +4,8 @@ import re
 from typing import Any
 
 from wahabot.ai.scrub import strip_spoofed_markers
-from wahabot.core.identity import authors
+from wahabot.core.identity import AUTHOR_BOT, AUTHOR_OPERATOR, authors
+from wahabot.core.jid import is_own_message_id
 from wahabot.core.models import WahaEvent
 from wahabot.core.waha import media_with_url
 
@@ -382,15 +383,25 @@ def replies_to_bot(
 
     The quoted message's sender is matched against both of the bot's
     identities: quotes of the bot's messages carry its phone JID or its
-    LID depending on the group type.
+    LID depending on the group type. The author book decides bot vs
+    operator when it knows the quoted id; a quote of the operator's
+    output is not a reply to the bot. An unrecorded account author keeps
+    the old account-JID fallback.
     """
     if bot_mentioned(event, bot_name, bot_mention_regex):
         return True
     quoted = message_replies_to(event)
     if not quoted:
         return False
-    reply: dict[str, Any] = quoted
-    return bool(jid_string(reply.get("participant")) in bot_jids(event))
+    author = quoted_account_author(event)
+    if author == AUTHOR_BOT:
+        return True
+    if author == AUTHOR_OPERATOR:
+        return False
+    # An account message without an author record: the classifier's
+    # id/participant fallback already proved it belongs to the shared
+    # account, so keep the old addressed behaviour.
+    return author == ""
 
 
 #: Payload flag set on an operator-typed ``fromMe`` message once the
@@ -427,15 +438,43 @@ def quoted_account_author(event: WahaEvent) -> str | None:
 
     ``None`` when the message quotes nothing or someone else; otherwise
     ``"bot"``, ``"operator"`` or ``""`` (an account message from before
-    authors were recorded — it could be either teammate).
+    authors were recorded — it could be either teammate). The author
+    book is authoritative: an id-only quote or a phone/LID mismatch must
+    not erase a recorded bot/operator author.
     """
     quoted = message_replies_to(event)
     if not quoted:
         return None
     reply: dict[str, Any] = quoted
-    if jid_string(reply.get("participant")) not in bot_jids(event):
-        return None
-    return authors.author(str(reply.get("id") or ""))
+    quoted_id = str(reply.get("id") or "")
+    author = authors.author(quoted_id)
+    if author in (AUTHOR_BOT, AUTHOR_OPERATOR):
+        return author
+    participant = jid_string(
+        reply.get("participant") or reply.get("_data", {}).get("author")
+    )
+    if (participant and participant in bot_jids(event)) or is_own_message_id(quoted_id):
+        return ""
+    return None
+
+
+def newest_quote_flags(event: WahaEvent) -> tuple[bool, bool, bool]:
+    """Classify the newest message's quote as member, bot or operator.
+
+    Returns ``(quoted_other, quoted_bot, quoted_operator)``. A quote of
+    another member is a side-thread signal; a quote of the bot is
+    addressing; a quote of the operator is the human teammate, not the
+    bot. An unrecorded account author is ambiguous, not a member quote,
+    so it neither grants a source signal nor silences the turn.
+    """
+    author = quoted_account_author(event)
+    if author == AUTHOR_BOT:
+        return False, True, False
+    if author == AUTHOR_OPERATOR:
+        return False, False, True
+    if author is None:
+        return bool(message_replies_to(event)), False, False
+    return False, False, False
 
 
 def addressed_note(
@@ -544,3 +583,21 @@ def turn_addressed_note(
             GENERIC_ADDRESSED_NOTE
         )
     return UNADDRESSED_NOTE
+
+
+BLAME_RE = re.compile(
+    r"\b(?:te has equivocado|you(?:'re| are) (?:wrong|mistaken)|"
+    + r"du (?:hast dich geirrt|liegst falsch))\b",
+    re.IGNORECASE,
+)
+
+
+def is_blame_text(text: str) -> bool:
+    """True when *text* tells the recipient they are wrong.
+
+    A correction turn belongs to the bot's own mistake. The workflow
+    rewrites such a final reply; delivery tools refuse it so a model
+    that routes the blame through ``send_message``/``send_media`` cannot
+    bypass the guard.
+    """
+    return bool(text and BLAME_RE.search(text))

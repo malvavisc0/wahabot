@@ -19,6 +19,7 @@ from wahabot.ai.records import (
 from wahabot.ai.serials import SerialRegistry
 from wahabot.ai.turn_records import (
     RecordEntry,
+    quote_parts,
     read_record,
     record_kind,
     render_entries,
@@ -308,7 +309,7 @@ def test_case_14_quote_and_reaction_to_the_bot(tmp_path: Path) -> None:
         [RecordEntry(event=reply)], registry=registry, tz_name="UTC"
     )
     assert "quote=you" in text
-    assert 'quoted: "earlier answer"' in text
+    assert 'quoted (context): "earlier answer"' in text
 
     reaction = _event("REACT", "")
     reaction.payload["event"] = "message.reaction"
@@ -329,6 +330,26 @@ def test_case_14_quote_and_reaction_to_the_bot(tmp_path: Path) -> None:
         addressed=True,
     )[0]
     assert "addressed: yes" in marked.content
+
+
+def test_operator_quote_renders_the_operator_token(tmp_path: Path) -> None:
+    from wahabot.core.identity import AUTHOR_OPERATOR, authors
+
+    authors.record("OP1", AUTHOR_OPERATOR)
+    event = _event(
+        "R2",
+        "ok",
+        replyTo={
+            "id": "OP1",
+            "participant": "491555000000@c.us",
+            "body": "earlier",
+        },
+    ).model_copy(update={"me": {"id": "491555000000@c.us"}})
+
+    flags, payloads = quote_parts(event, _registry(tmp_path))
+
+    assert flags == ["quote=operator"]
+    assert payloads == ['quoted (context): "earlier"']
 
 
 def test_case_15_unknown_identity_keeps_a_stable_ordinal(tmp_path: Path) -> None:

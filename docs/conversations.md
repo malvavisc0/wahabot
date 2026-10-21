@@ -130,7 +130,7 @@ turn header when the turn is a group turn or carries news:
   an envelope. ` :: ` is omitted for an empty body (a voice note or
   bare media record).
 - **Payload lines** (`  · …`) are renderer-written only: media analysis,
-  `quoted: "…"`, `to: #m11 "…"` / `to: you "…"`, `[audio: "…"]`, and
+  `quoted (context): "…"`, `to: #m11 "…"` / `to: you "…"`, `[audio: "…"]`, and
   `mentions: @<typed> is <speaker>`. They are never member text, and the
   model must never write that shape itself.
 - The **turn header** states the message count, the newest serial, the

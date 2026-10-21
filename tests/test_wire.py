@@ -2548,6 +2548,9 @@ def test_journal_covers_every_path(bot: Bot) -> None:
         album_bot.post(album_event)
     assert _wait(lambda: len(album_bot.waha.sent) >= 1)
     assert _wait(lambda: _audit_entries(album_bot, "reply", CHAT_ID) != [])
+    reply_row = _audit_entries(album_bot, "reply", CHAT_ID)[0]
+    assert reply_row["sent_id"].startswith("true_")
+    assert reply_row["message_ids"]
     # The album path journals the same kinds as the single path —
     # a delivered_via_tool album run must not leave a "reply" row too.
     assert _audit_entries(album_bot, "silence", CHAT_ID) == []
@@ -3107,6 +3110,35 @@ def test_unaddressed_group_turn_carries_the_negative_header(bot: Bot) -> None:
     # No gate in the harness: the run is allowed to answer, and the fake
     # model does.
     assert _wait(lambda: any(chat == CHAT_ID for _, chat, _, _ in bot.waha.sent))
+
+
+def test_side_thread_quote_stays_silent_then_correction_answers(bot: Bot) -> None:
+    """The incident shape: a quote of another member's old message is a
+    side thread, even without a gate. A later correction that names the
+    bot is the only run that answers."""
+    _judicious_bot(bot)
+    llm = bot.stack.llm
+    llm.requests.clear()
+    bot.waha.sent.clear()
+
+    side_thread = _group_event("GS1", "Beto, you never answered me", "491555000001@c.us")
+    side_thread["payload"]["replyTo"] = {
+        "id": "OLD_JOKE",
+        "participant": "491555000009@c.us",
+        "body": "an old joke",
+    }
+    bot.post(side_thread)
+
+    assert _wait(lambda: _audit_entries(bot, "side_thread", CHAT_ID) != [])
+    assert llm.requests == []
+    assert bot.waha.sent == []
+
+    llm.clear()
+    bot.post(
+        _group_event("GS2", "kai read again: I said Bridge Club", "491555000001@c.us")
+    )
+    assert _wait(lambda: len(llm.requests) >= 1)
+    assert _wait(lambda: len(bot.waha.sent) == 1)
 
 
 def test_group_backlog_ledger_then_mention_answers(bot: Bot) -> None:

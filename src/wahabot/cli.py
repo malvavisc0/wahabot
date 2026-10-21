@@ -19,6 +19,7 @@ from wahabot.core import cli as cli_helpers
 from wahabot.core.access import load_session_config
 from wahabot.core.audit import audit_dir
 from wahabot.core.notebook import Notebook
+from wahabot.core.session_prompt import migrate_session_prompt
 from wahabot.core.waha import WahaClient
 from wahabot.handlers import register_agent_handler, register_forget_handler
 from wahabot.reactions import register_reaction_handler
@@ -87,6 +88,31 @@ def session_init(
         console,
         f"Wrote [bold]{path}[/] — edit system_prompt (and goal/bot_name) before serving.",
     )
+
+
+@sessions_app.command("migrate")
+def session_migrate() -> None:
+    """Upgrade the known old prompt fragments in every session config."""
+    settings = get_settings()
+    directory = settings.access_config.parent
+    configs = sorted(directory.glob("*.json")) if directory.is_dir() else []
+    changed = 0
+    for path in configs:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            prompt = str(data.get("system_prompt", ""))
+        except (OSError, json.JSONDecodeError, TypeError) as exc:
+            console.print(f"[yellow]Skipped {path}: {exc}[/]")
+            continue
+        migrated, did = migrate_session_prompt(prompt)
+        if not did:
+            continue
+        data["system_prompt"] = migrated
+        path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        changed += 1
+    cli_helpers.ok(console, f"Migrated {changed} session config(s).")
 
 
 @sessions_app.command("list")

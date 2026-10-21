@@ -26,8 +26,9 @@ keeping every knob in one place.
 """
 
 import atexit
+import hashlib
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -184,12 +185,18 @@ def _mask_value(value: Any) -> Any:
 
 
 @contextmanager
-def chat_trace_attributes(chat_id: str) -> Iterator[None]:
+def chat_trace_attributes(
+    chat_id: str,
+    *,
+    message_ids: Sequence[str] = (),
+) -> Iterator[None]:
     """Group one run's LLM traces under a Langfuse session per chat.
 
     A no-op when tracing is disabled, so the handler never needs to
     check. Each WhatsApp chat becomes a stable, re-findable Langfuse
     session (``wa:<chat_id>``); turns within it show up as traces.
+    Message ids are hashed before leaving the process: a WhatsApp id
+    embeds the chat JID, so the raw id belongs only in the local audit.
     """
     if _client is None:
         yield
@@ -197,9 +204,18 @@ def chat_trace_attributes(chat_id: str) -> Iterator[None]:
     try:
         from langfuse import propagate_attributes
 
+        metadata: dict[str, str] = {}
+        opaque_ids = [
+            hashlib.sha256(value.encode()).hexdigest()[:16]
+            for value in message_ids
+            if value
+        ]
+        if opaque_ids:
+            metadata["wahabot.message_ids"] = ",".join(opaque_ids)
         propagation = propagate_attributes(
             session_id=f"wa:{chat_id}",
             tags=["wahabot"],
+            metadata=metadata or None,
         )
     except Exception:
         logger.exception("Failed to start Langfuse attribute propagation")

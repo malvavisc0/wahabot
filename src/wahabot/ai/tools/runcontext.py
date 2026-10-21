@@ -41,7 +41,8 @@ class RunTarget:
     """One agent run's delivery target and latches.
 
     Mutable: the delivery latches (``sent``/``reacted``) flip mid-run
-    from tool threads. Scoped by ``contextvars`` (``bind_target``), so
+    from tool threads; ``sent_id`` is the outbound message id when the
+    provider returned one. Scoped by ``contextvars`` (``bind_target``), so
     concurrent runs in different chats never see each other's targets,
     latches, or the operator arming flag.
     """
@@ -49,6 +50,7 @@ class RunTarget:
     session: str = ""
     chat_id: str = ""
     sent: str = ""
+    sent_id: str = ""
     reacted: str = ""
     armed: bool = False
     #: Typing-presence window (``(min_s, max_s)``) from settings; None
