@@ -1,4 +1,5 @@
 import asyncio
+import time
 from typing import Any, override
 
 from loguru import logger
@@ -14,8 +15,10 @@ from wahabot.ai.messages import (
 )
 from wahabot.ai.observability import chat_trace_attributes
 from wahabot.ai.serials import serial_store
+from wahabot.ai.tools.whatsapp import RunTarget
 from wahabot.ai.turn_records import (
     assign_event_serial,
+    serial_tokens_for,
 )
 from wahabot.core.access import SessionConfig
 from wahabot.core.models import WahaEvent
@@ -59,14 +62,32 @@ class SingleMixin(HandlerBase):
         chat_id = jid_string(event.payload["from"])
         addressed = self.group_message_addressed(event, config)
         gate_first = not addressed and config.group_participation == "judicious"
+        turn_ids = [message_id]
+        started = time.monotonic()
+        target: RunTarget | None = None
+        outcome = "failed"
+        failure_class = ""
         try:
             image = await self.download_captioned_image(image, message_id)
             async with chat_lock(event.session, chat_id):
+                if self.intake.handled(turn_ids):
+                    outcome = "superseded"
+                    return
                 # Runs in the same chat serialize on its memory and
                 # timeline; runs in different chats proceed in parallel
                 # (each binds its own run target inside the workflow).
                 ctx = await context_for(event.session, chat_id, self.agent, self.settings)
-                with chat_trace_attributes(chat_id, message_ids=[message_id]):
+                with chat_trace_attributes(
+                    chat_id,
+                    message_ids=turn_ids,
+                    serial_tokens=serial_tokens_for(
+                        serial_store(str(self.settings.data_dir)),
+                        event.session,
+                        chat_id,
+                        turn_ids,
+                    ),
+                    reply_to=message_id,
+                ):
                     reply, target = await handle_message(
                         event,
                         self.agent,
@@ -79,6 +100,9 @@ class SingleMixin(HandlerBase):
                         bot_mention_regex=config.bot_mention_regex,
                         addressed=addressed,
                         gate_first=gate_first,
+                        intake=self.intake,
+                        turn_ids=turn_ids,
+                        turn_started_at=started,
                     )
                 await persist_memory(self.settings, event.session, chat_id, ctx)
                 delivered = bool(target.sent or target.reacted)
@@ -86,7 +110,7 @@ class SingleMixin(HandlerBase):
             # (once-per-transition notify) outside the chat lock, so
             # the notify send never serializes this chat's next run.
             await mark_llm_recovered(self.waha, event.session)
-            await finish_agent_reply(
+            outcome = await finish_agent_reply(
                 self.waha,
                 event.session,
                 chat_id,
@@ -97,7 +121,8 @@ class SingleMixin(HandlerBase):
                 prefix=target.prefix,
                 emoji_reaction=True,
                 target=target,
-                message_ids=[message_id],
+                message_ids=turn_ids,
+                duration_ms=int((time.monotonic() - started) * 1000),
             )
             # Post-reply memory jobs outside the chat lock: the recap
             # merge and the embedding drain must never hold this
@@ -114,6 +139,7 @@ class SingleMixin(HandlerBase):
                     chat_id=chat_id,
                     limit=self.settings.memory_token_limit,
                 )
+                failure_class = "budget"
                 return
             failure_class = await classify_llm_failure(
                 self.waha,
@@ -132,6 +158,16 @@ class SingleMixin(HandlerBase):
                 detail="(seen marker dropped; a WAHA redelivery will retry)",
             )
             return
+        finally:
+            self.finish_run(
+                event.session,
+                chat_id,
+                turn_ids,
+                target,
+                outcome,
+                started,
+                failure_class,
+            )
 
     async def reply_with_agent(self, event: WahaEvent) -> None:
         """Run the agent over an incoming message and send its reply via WAHA."""

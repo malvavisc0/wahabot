@@ -8,7 +8,12 @@ from loguru import logger
 from wahabot.ai.context import (
     is_single_emoji,
 )
-from wahabot.ai.tools.whatsapp import RunTarget, deliver_chat_text
+from wahabot.ai.observability import trace_outbound
+from wahabot.ai.tools.whatsapp import (
+    RunTarget,
+    deliver_chat_text,
+    delivery_guard,
+)
 from wahabot.core.audit import save_action
 from wahabot.core.echoes import remember_self_echo
 from wahabot.core.models import WahaEvent
@@ -77,7 +82,8 @@ async def finish_agent_reply(
     emoji_reaction: bool = False,
     target: RunTarget | None = None,
     message_ids: Sequence[str] = (),
-) -> None:
+    duration_ms: int = 0,
+) -> str:
     """Deliver a finished run's reply text, or record why not.
 
     Shared post-run decision of the single-message, burst and album
@@ -95,6 +101,7 @@ async def finish_agent_reply(
     succeeded — the same standard the durable escalation record set —
     so a failed send never leaves an audit row claiming the chat was
     answered; its failure is journaled as ``send_failed`` instead.
+    Returns the run outcome for the single per-run row.
     """
 
     async def react_or_silence(emoji: str) -> None:
@@ -120,8 +127,12 @@ async def finish_agent_reply(
                 reaction=emoji,
                 message_id=message_id,
                 message_ids=list(message_ids),
+                reply_to=message_id,
+                duration_ms=duration_ms,
                 delivered_via="reaction",
             )
+            if target is not None:
+                target.reacted = message_id
             return
         save_action(
             settings.data_dir,
@@ -131,6 +142,8 @@ async def finish_agent_reply(
             dropped_emoji=emoji,
             message_id=message_id,
             message_ids=list(message_ids),
+            reply_to=message_id,
+            duration_ms=duration_ms,
             delivered_via="silence",
         )
         logger.info(
@@ -139,13 +152,11 @@ async def finish_agent_reply(
             emoji=emoji,
         )
 
-    if delivered:
-        logger.info(
-            "Agent decision for {chat_id}: delivered via tool",
-            chat_id=chat_id,
-        )
+    def tool_delivery() -> str:
+        logger.info("Agent decision for {chat_id}: delivered via tool", chat_id=chat_id)
         reacted = target.reacted if target is not None else ""
         sent_id = target.sent_id if target is not None else ""
+        trace_outbound(sent_id)
         save_action(
             settings.data_dir,
             session,
@@ -153,13 +164,16 @@ async def finish_agent_reply(
             chat_id=chat_id,
             message_id=message_id,
             message_ids=list(message_ids),
-            sent_id=sent_id,
+            outbound_id=sent_id,
+            reply_to=message_id,
+            duration_ms=duration_ms,
             reacted=reacted,
             delivered_via="reaction" if reacted and not sent_id else "tool",
         )
         log_final_text(chat_id, reply)
-        return
-    if not reply or not reply.strip():
+        return "delivered_via_tool"
+
+    def silence_delivery() -> str:
         save_action(
             settings.data_dir,
             session,
@@ -167,42 +181,65 @@ async def finish_agent_reply(
             chat_id=chat_id,
             message_id=message_id,
             message_ids=list(message_ids),
+            reply_to=message_id,
+            duration_ms=duration_ms,
             delivered_via="silence",
         )
         logger.info("Agent decision for {chat_id}: stay silent", chat_id=chat_id)
-        return
+        return "empty" if target is not None and target.outcome == "empty" else "silence"
+
+    async def text_delivery() -> str:
+        logger.info("Replying to {chat_id}: {reply}", chat_id=chat_id, reply=reply[:500])
+        try:
+            sent_id, _, _ = await asyncio.to_thread(
+                deliver_chat_text,
+                waha,
+                session,
+                chat_id,
+                reply,
+                message_id,
+                typing=(
+                    settings.typing_presence_min_s,
+                    settings.typing_presence_max_s,
+                ),
+                prefix=prefix,
+            )
+        except Exception as exc:
+            journal_send_failure(settings, session, chat_id, "send_text", message_id, exc)
+            return "failed"
+        trace_outbound(sent_id)
+        if target is not None:
+            target.sent = chat_id
+            target.sent_id = sent_id
+        save_action(
+            settings.data_dir,
+            session,
+            "reply",
+            chat_id=chat_id,
+            message_id=message_id,
+            message_ids=list(message_ids),
+            outbound_id=sent_id,
+            reply_to=message_id,
+            duration_ms=duration_ms,
+            delivered_via="text",
+            reply=reply,
+        )
+        return "reply"
+
+    if delivered:
+        return tool_delivery()
+    if not reply.strip():
+        return silence_delivery()
+    if target is not None and delivery_guard(target):
+        logger.info(
+            "Superseded final reply for {chat_id}; newer intake owns the turn",
+            chat_id=chat_id,
+        )
+        return "superseded"
     if is_single_emoji(reply):
         await react_or_silence(reply.strip())
-        return
-    logger.info("Replying to {chat_id}: {reply}", chat_id=chat_id, reply=reply[:500])
-    try:
-        sent_id, _, _ = await asyncio.to_thread(
-            deliver_chat_text,
-            waha,
-            session,
-            chat_id,
-            reply,
-            message_id,
-            typing=(
-                settings.typing_presence_min_s,
-                settings.typing_presence_max_s,
-            ),
-            prefix=prefix,
-        )
-    except Exception as exc:
-        journal_send_failure(settings, session, chat_id, "send_text", message_id, exc)
-        return
-    save_action(
-        settings.data_dir,
-        session,
-        "reply",
-        chat_id=chat_id,
-        message_id=message_id,
-        message_ids=list(message_ids),
-        sent_id=sent_id,
-        delivered_via="text",
-        reply=reply,
-    )
+        return "silence"
+    return await text_delivery()
 
 
 _SELF_REPLY_RETRY_DELAYS_S = (2.0, 5.0, 0.0)

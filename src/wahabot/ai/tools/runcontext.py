@@ -9,11 +9,13 @@ fenced: only operator commands may select other chats.
 
 import contextvars
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from loguru import logger
 
+from wahabot.ai.intake import IntakeLedger
 from wahabot.ai.tools.envelope import error
 from wahabot.core.echoes import remember_self_echo
 from wahabot.core.jid import chat_from_message_id, same_chat
@@ -66,6 +68,13 @@ class RunTarget:
     #: Chats an operator run may deliver to: those named in the command
     #: or resolved with read_chat this run. Anything else is refused.
     allowed_chats: set[str] = field(default_factory=set)
+    #: Turn-level intake: the ids this run answers, when it started, the
+    #: newer ids it claimed after a refusal, and the workflow's outcome.
+    intake: IntakeLedger | None = None
+    turn_ids: list[str] = field(default_factory=list)
+    turn_started_at: float = field(default_factory=time.monotonic)
+    claimed_ids: list[str] = field(default_factory=list)
+    outcome: str = ""
 
     @classmethod
     def from_dict(cls, holder: dict[str, str]) -> RunTarget:
@@ -139,10 +148,78 @@ def current_target() -> RunTarget:
     return target
 
 
+#: At most this many newer rendered records ride one refusal; the model
+#: needs the newest turn, not a transcript.
+_GUARD_RECORDS = 3
+_GUARD_CHARS = 1200
+
+
+def delivery_guard(target: RunTarget) -> str | None:
+    """Refuse a send that would answer an older turn than the chat's intake.
+
+    The refusal claims the newer messages for this run. A retry after the
+    model has read them is allowed and settles the claim as handled;
+    operator runs and turns without intake ids keep their old behaviour.
+    """
+    if target.intake is None or target.armed or not target.turn_ids:
+        return None
+    newer = target.intake.pending(
+        target.session,
+        target.chat_id,
+        after=target.turn_started_at,
+        exclude=[*target.turn_ids, *target.claimed_ids],
+    )
+    if newer:
+        target.intake.claim(
+            target.session, target.chat_id, [entry.message_id for entry in newer]
+        )
+        target.claimed_ids.extend(entry.message_id for entry in newer)
+        shown = newer[-_GUARD_RECORDS:]
+        records = "\n".join(entry.record for entry in shown)[-_GUARD_CHARS:]
+        remaining = len(newer) - len(shown)
+        if remaining:
+            records = f"({remaining} older newer record(s) omitted)\n{records}"
+        return error(
+            "Newer message(s) arrived while you were answering; this reply "
+            + f"would answer an older turn.\n{records}\n"
+            + "Do not send this reply. Read the newest record and answer it once."
+        )
+    if target.claimed_ids:
+        target.intake.finish(target.claimed_ids, delivered=True)
+    return None
+
+
+def send_guard(target: RunTarget) -> str | None:
+    """The delivery refusal for a send (superseded or already sent), or None."""
+    if refusal := delivery_guard(target):
+        return refusal
+    if target.sent:
+        return error(
+            f"message already sent this run (to {target.sent}); do not send again"
+        )
+    return None
+
+
+def reaction_guard(target: RunTarget) -> str | None:
+    """The delivery refusal for a reaction (superseded or already reacted)."""
+    if refusal := delivery_guard(target):
+        return refusal
+    if target.reacted:
+        return error("already reacted this run; do not react again")
+    return None
+
+
 def current_prefix() -> str:
     """This run's chat-reply prefix, or "" when no run is bound."""
     target = _run_target.get()
     return target.prefix if target is not None else ""
+
+
+def mark_run_outcome(outcome: str) -> None:
+    """Set the current run's outcome when a run is bound."""
+    target = _run_target.get()
+    if target is not None:
+        target.outcome = outcome
 
 
 def current_image_path() -> str:

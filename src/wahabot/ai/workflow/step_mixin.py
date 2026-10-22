@@ -16,12 +16,22 @@ from wahabot.ai.events import ToolCallEvent
 from wahabot.ai.history import (
     chat_visible_text,
 )
+from wahabot.ai.tools.runcontext import mark_run_outcome
 from wahabot.ai.workflow.base import AgentBase
 from wahabot.ai.workflow.delivery import SILENCE_TOOL
 from wahabot.ai.workflow.toolkit import (
     run_tool_call,
     tool_outcome,
 )
+
+
+def _text_outcome(delivered: bool, visible: str, rounds: int) -> str:
+    """The run outcome for a plain-text round."""
+    if delivered:
+        return "delivered_via_tool"
+    if visible:
+        return "reply"
+    return "empty" if rounds > 1 else "silence"
 
 
 class StepMixin(AgentBase):
@@ -70,23 +80,35 @@ class StepMixin(AgentBase):
         if any(call.tool_name == SILENCE_TOOL for call in tool_calls):
             self.log_silence_reason(tool_calls)
             logger.debug("Stopping run: model chose stay_silent")
+            mark_run_outcome("silence")
             return await self.stop_with(ctx, self.stopped_response(), silent=True)
         if tool_calls and await self.repeats_tool_call(ctx, tool_calls):
+            mark_run_outcome("empty")
             return await self.stop_with(ctx, self.stopped_response(), silent=True)
         if not tool_calls:
             return await self.finish_text_round(ctx, response, rounds)
         if self.delivery_complete(tool_calls) or rounds >= self.tool_round_limit:
-            # Do not store calls which will not be executed: the chat API
-            # requires every advertised call to have a tool response.
-            reason = (
-                "non-delivery round after completed delivery"
-                if self.delivery_complete(tool_calls)
-                else f"round limit {self.tool_round_limit}"
-            )
-            result = await self.wrap_up_response(ctx, reason)
-            return await self.stop_with(ctx, StopEvent(result=result))
+            return await self.finish_tool_round(ctx, tool_calls)
         await self.remember(ctx, response, tool_calls)
         return ToolCallEvent(tool_calls=tool_calls)
+
+    async def finish_tool_round(
+        self, ctx: Context, tool_calls: list[ToolSelection]
+    ) -> StopEvent:
+        """Wrap up a round whose calls cannot run, and end the run."""
+        # Do not store calls which will not be executed: the chat API
+        # requires every advertised call to have a tool response.
+        delivered_round = self.delivery_complete(tool_calls)
+        reason = (
+            "non-delivery round after completed delivery"
+            if delivered_round
+            else f"round limit {self.tool_round_limit}"
+        )
+        result = await self.wrap_up_response(ctx, reason)
+        delivered = self.any_delivery()
+        visible = chat_visible_text(str(result.message.content or ""))
+        mark_run_outcome(_text_outcome(delivered, visible, 0))
+        return await self.stop_with(ctx, StopEvent(result=result))
 
     async def stop_with(
         self, ctx: Context, event: StopEvent, *, silent: bool = False
@@ -112,9 +134,9 @@ class StepMixin(AgentBase):
             response = await self.rewrite_blame(ctx, response)
         note = str(response.message.content or "").strip() if delivered else ""
         await self.remember(ctx, response, [], skip_text=delivered)
-        silent = not delivered and not chat_visible_text(
-            str(response.message.content or "")
-        )
+        visible = chat_visible_text(str(response.message.content or ""))
+        silent = not delivered and not visible
+        mark_run_outcome(_text_outcome(delivered, visible, rounds))
         await self.mark_turn_handled(ctx, silent=silent)
         await self.collapse_delivery(ctx)
         if delivered:

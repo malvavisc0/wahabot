@@ -1,5 +1,6 @@
 """Concrete handler object combining the handler mixins."""
 
+from wahabot.ai.intake import IntakeLedger
 from wahabot.ai.tools.whatsapp import EscalationChannel
 from wahabot.ai.triage import TriageGate
 from wahabot.core.access import SessionConfig, SessionConfigReloader
@@ -23,6 +24,7 @@ class Handlers(AlbumMixin, BurstMixin, IngestMixin, SingleMixin, ConfigMixin):
         config_reloader: SessionConfigReloader,
         escalation_channel: EscalationChannel,
         triage: TriageGate | None,
+        intake: IntakeLedger,
         started_at: float,
     ) -> None:
         self.settings = settings
@@ -31,4 +33,5 @@ class Handlers(AlbumMixin, BurstMixin, IngestMixin, SingleMixin, ConfigMixin):
         self.config_reloader = config_reloader
         self.escalation_channel = escalation_channel
         self.triage = triage
+        self.intake = intake
         self.started_at = started_at

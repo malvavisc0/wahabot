@@ -4,6 +4,7 @@ from wahabot.status.llm_health import (
     classify_llm_failure,
     llm_call_timed_out,
     llm_endpoint_down,
+    llm_failure_class,
     mark_llm_recovered,
     run_timed_out,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "disarm_recovery_poller",
     "llm_call_timed_out",
     "llm_endpoint_down",
+    "llm_failure_class",
     "llm_healthy",
     "mark_llm_recovered",
     "own_identity",

@@ -1,4 +1,5 @@
 import asyncio
+import time
 from typing import override
 
 import httpx
@@ -12,6 +13,8 @@ from wahabot.ai.messages import (
     is_replyable,
     self_command_instruction,
 )
+from wahabot.ai.serials import serial_store
+from wahabot.ai.turn_records import event_record
 from wahabot.core.access import SessionConfig
 from wahabot.core.echoes import is_self_echo
 from wahabot.core.filters import chat_allowed, jid_alias_lookup
@@ -169,6 +172,16 @@ class IngestMixin(HandlerBase):
             jid_aliases=jid_alias_lookup(event),
         ):
             return
+        chat_id = str(event.payload.get("from", ""))
+        self.intake.record(
+            event.session,
+            chat_id,
+            str(event.payload.get("id", "")),
+            event_record(
+                serial_store(str(self.settings.data_dir)), event, self.settings.timezone
+            ),
+            at=time.monotonic(),
+        )
         if (
             self.settings.send_seen
             and not operator_wakes
