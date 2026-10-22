@@ -9,6 +9,7 @@ from typing import Any
 from loguru import logger
 
 from wahabot.ai.intake import IntakeLedger
+from wahabot.ai.tools.runcontext import delivery_path
 from wahabot.ai.tools.whatsapp import EscalationChannel, RunTarget
 from wahabot.ai.triage import TriageGate
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
@@ -16,23 +17,6 @@ from wahabot.core.access import SessionConfig, SessionConfigReloader
 from wahabot.core.audit import save_run_outcome
 from wahabot.core.waha import WahaClient
 from wahabot.settings import Settings
-
-
-def _delivered_via(outcome: str, target: RunTarget | None) -> str:
-    """The audit delivery path for an outcome."""
-    if outcome == "reply":
-        return "text"
-    if outcome == "delivered_via_tool" or (
-        target is not None and (target.sent or target.reacted)
-    ):
-        return (
-            "reaction"
-            if target is not None and target.reacted and not target.sent_id
-            else "tool"
-        )
-    if outcome in ("silence", "empty"):
-        return "silence"
-    return ""
 
 
 class HandlerBase:
@@ -83,6 +67,6 @@ class HandlerBase:
             duration_ms=int((time.monotonic() - started) * 1000),
             message_ids=[*turn_ids, *claimed],
             outbound_id=target.sent_id if target is not None else "",
-            delivered_via=_delivered_via(outcome, target),
+            delivered_via=delivery_path(outcome, target),
             failure_class=failure_class,
         )

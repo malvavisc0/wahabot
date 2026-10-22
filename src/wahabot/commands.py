@@ -30,6 +30,7 @@ from wahabot.ai.history import ContextBudgetError
 from wahabot.ai.observability import chat_trace_attributes
 from wahabot.ai.resolve import ResolvedChat, chat_context_note, resolve_last_message
 from wahabot.ai.serials import serial_store
+from wahabot.ai.tools.runcontext import delivery_path
 from wahabot.ai.tools.whatsapp import RunTarget
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.audit import save_action, save_run_outcome
@@ -193,15 +194,7 @@ async def run_command(
             duration_ms=int((time.monotonic() - started) * 1000),
             message_ids=[str(event.payload.get("id", ""))],
             outbound_id=target.sent_id,
-            delivered_via=(
-                "text"
-                if outcome == "reply"
-                else "tool"
-                if outcome == "delivered_via_tool"
-                else "silence"
-                if outcome in ("silence", "empty")
-                else ""
-            ),
+            delivered_via=delivery_path(outcome, target),
             failure_class=failure_class,
         )
 
