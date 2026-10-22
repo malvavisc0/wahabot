@@ -157,6 +157,42 @@ class IngestMixin(HandlerBase):
             )
         return True, body
 
+    def record_intake(
+        self,
+        event: WahaEvent,
+        config: SessionConfig,
+        *,
+        operator_wakes: bool | None,
+    ) -> None:
+        """Ledger the accepted message, fail-soft.
+
+        Only a message that would wake a run may supersede one:
+        unaddressed group chatter must not stall an answer.
+        """
+        try:
+            addressed = bool(operator_wakes) or is_group_addressed(
+                event,
+                bot_name=config.bot_name,
+                bot_mention_regex=config.bot_mention_regex,
+                participation=config.group_participation,
+            )
+            self.intake.record(
+                event.session,
+                str(event.payload.get("from", "")),
+                str(event.payload.get("id", "")),
+                event_record(
+                    serial_store(str(self.settings.data_dir)),
+                    event,
+                    self.settings.timezone,
+                ),
+                at=time.monotonic(),
+                addressed=addressed,
+            )
+        except Exception:
+            # The ledger is turn-level memory, not audit: an unexpected
+            # payload must not cost the chat its reply.
+            logger.exception("Intake record failed for {id}", id=event.payload.get("id"))
+
     @override
     async def prepare_chat_message(
         self, event: WahaEvent, config: SessionConfig, body: str | None
@@ -172,32 +208,7 @@ class IngestMixin(HandlerBase):
             jid_aliases=jid_alias_lookup(event),
         ):
             return
-        chat_id = str(event.payload.get("from", ""))
-        try:
-            # Only a message that would wake a run may supersede one:
-            # unaddressed group chatter must not stall an answer.
-            addressed = bool(operator_wakes) or is_group_addressed(
-                event,
-                bot_name=config.bot_name,
-                bot_mention_regex=config.bot_mention_regex,
-                participation=config.group_participation,
-            )
-            self.intake.record(
-                event.session,
-                chat_id,
-                str(event.payload.get("id", "")),
-                event_record(
-                    serial_store(str(self.settings.data_dir)),
-                    event,
-                    self.settings.timezone,
-                ),
-                at=time.monotonic(),
-                addressed=addressed,
-            )
-        except Exception:
-            # The ledger is turn-level memory, not audit: an unexpected
-            # payload must not cost the chat its reply.
-            logger.exception("Intake record failed for {id}", id=event.payload.get("id"))
+        self.record_intake(event, config, operator_wakes=operator_wakes)
         if (
             self.settings.send_seen
             and not operator_wakes

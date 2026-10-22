@@ -193,20 +193,31 @@ def delivery_guard(target: RunTarget) -> str | None:
     return None
 
 
+#: Outcomes whose audit path is the outcome itself.
+_OUTCOME_PATHS = {
+    "reply": "text",
+    "reaction": "reaction",
+    "silence": "silence",
+    "empty": "silence",
+}
+
+
+def tool_delivery_path(target: RunTarget | None) -> str:
+    """The path for a tool-delivered run: a reaction when it only reacted."""
+    if target is None:
+        return "tool"
+    return "reaction" if target.reacted and not target.sent_id else "tool"
+
+
 def delivery_path(outcome: str, target: RunTarget | None) -> str:
     """The audit delivery path for a run outcome."""
-    if outcome == "reply":
-        return "text"
-    if outcome == "reaction":
-        return "reaction"
-    if outcome == "delivered_via_tool" or (
-        target is not None and (target.sent or target.reacted)
-    ):
-        reacted = target is not None and target.reacted and not target.sent_id
-        return "reaction" if reacted else "tool"
-    if outcome in ("silence", "empty"):
-        return "silence"
-    return ""
+    if outcome in _OUTCOME_PATHS:
+        return _OUTCOME_PATHS[outcome]
+    if outcome == "delivered_via_tool":
+        return tool_delivery_path(target)
+    if target is None or not (target.sent or target.reacted):
+        return ""
+    return tool_delivery_path(target)
 
 
 def send_guard(target: RunTarget) -> str | None:
