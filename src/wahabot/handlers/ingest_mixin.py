@@ -174,6 +174,14 @@ class IngestMixin(HandlerBase):
             return
         chat_id = str(event.payload.get("from", ""))
         try:
+            # Only a message that would wake a run may supersede one:
+            # unaddressed group chatter must not stall an answer.
+            addressed = bool(operator_wakes) or is_group_addressed(
+                event,
+                bot_name=config.bot_name,
+                bot_mention_regex=config.bot_mention_regex,
+                participation=config.group_participation,
+            )
             self.intake.record(
                 event.session,
                 chat_id,
@@ -184,6 +192,7 @@ class IngestMixin(HandlerBase):
                     self.settings.timezone,
                 ),
                 at=time.monotonic(),
+                addressed=addressed,
             )
         except Exception:
             # The ledger is turn-level memory, not audit: an unexpected

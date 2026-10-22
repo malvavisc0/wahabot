@@ -477,19 +477,21 @@ Three event flows sit outside the plain message → reply pipeline:
 
 ## Audit journal
 
-Every bot action is appended as one JSON object per line to
+ Every bot action is appended as one JSON object per line to
 `data/audit/<session>/<YYYY-MM-DD>.jsonl` (`core/audit.py`): tool
 calls (name, capped arguments, outcome read from the tool's `ok`
 envelope — a refused or failed send journals as `failed`, never as a
 success), final replies, silences (including dropped lone emoji),
-tool-delivered runs, reactions, escalations (with `status: "open"`),
+reactions, tool-delivered runs, escalations (with `status: "open"`),
 operator command replies, one `run_outcome` row per run (outcome,
 duration, intake ids, outbound id, delivery path and failure class),
-and `send_failed` rows for sends that raised. Reply, reaction,
-tool-delivered and silence rows carry the intake ids, reply-to id,
-outbound id, delivery path and duration. Records for actions that send
-are written only *after* the send succeeded — a failed send never leaves
-an audit row claiming the chat was answered. Writes are fail-soft (disk errors are logged and
+and `send_failed` rows for sends that raised. A run's outcome is one
+of `reply`, `reaction` (a delivered lone-emoji reaction), `silence`,
+`delivered_via_tool`, `superseded`, `failed` or `empty`. Reply,
+reaction, tool-delivered and silence rows carry the intake ids,
+reply-to id, outbound id, delivery path and duration. Records for
+actions that send are written only *after* the send succeeded — a
+failed send never leaves an audit row claiming the chat was answered. Writes are fail-soft (disk errors are logged and
 swallowed) and string fields cap at 300 chars. Day files are named by
 UTC date. `wahabot escalations [--days N]` lists the escalation
 entries newest-first; corrupt tail lines and non-date files are
@@ -948,7 +950,8 @@ events export. The full trace carries the system prompt, the turn
 header, the record, the generation and the tool calls.
 
 Runs also carry `wahabot.message_ids` (opaque hashes, never raw WhatsApp
-ids), `wahabot.serial_tokens`, `wahabot.reply_to` and
-`wahabot.outbound_id`. The local audit journal carries the raw intake
-ids, reply-to id, outbound id, delivery path, duration and outcome. Use
-the journal when you need to match a chat message to a run.
+ids), `wahabot.serial_tokens` and `wahabot.reply_to`. The local audit
+journal carries the raw intake ids, reply-to id, outbound id, delivery
+path, duration and outcome — the outbound id is known only after the
+run's span closed, so the journal, not the trace, is where to match a
+sent message to its run.

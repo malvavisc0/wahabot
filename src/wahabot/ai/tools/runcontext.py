@@ -157,10 +157,11 @@ _GUARD_CHARS = 1200
 def delivery_guard(target: RunTarget) -> str | None:
     """Refuse a send that would answer an older turn than the chat's intake.
 
-    The refusal claims the newer messages for this run. A retry after the
-    model has read them is allowed and settles the claim as handled; a
-    run that ends without a send releases the claims again. Operator runs
-    and turns without intake ids keep their old behaviour.
+    The refusal claims the newer records that would wake a run for this
+    one. A retry after the model has read them is allowed and the run's
+    own delivery settles the claim; a run that ends without a send
+    releases the claims again. Operator runs and turns without intake
+    ids keep their old behaviour.
     """
     if target.intake is None or target.armed or not target.turn_ids:
         return None
@@ -169,6 +170,7 @@ def delivery_guard(target: RunTarget) -> str | None:
         target.chat_id,
         after=target.turn_started_at,
         exclude=[*target.turn_ids, *target.claimed_ids],
+        addressed_only=True,
     )
     if newer:
         target.intake.claim(
@@ -183,10 +185,11 @@ def delivery_guard(target: RunTarget) -> str | None:
         return error(
             "Newer message(s) arrived while you were answering; this reply "
             + f"would answer an older turn.\n{records}\n"
-            + "Do not send this reply. Read the newest record and answer it once."
+            + "Do not send this reply. Read the newest record and answer it "
+            + "once. If the newest record is media you cannot read (no "
+            + "transcript or captions), end this run instead — its own run "
+            + "will answer it."
         )
-    if target.claimed_ids:
-        target.intake.finish(target.claimed_ids, delivered=True)
     return None
 
 
@@ -194,6 +197,8 @@ def delivery_path(outcome: str, target: RunTarget | None) -> str:
     """The audit delivery path for a run outcome."""
     if outcome == "reply":
         return "text"
+    if outcome == "reaction":
+        return "reaction"
     if outcome == "delivered_via_tool" or (
         target is not None and (target.sent or target.reacted)
     ):

@@ -8,7 +8,6 @@ from loguru import logger
 from wahabot.ai.context import (
     is_single_emoji,
 )
-from wahabot.ai.observability import trace_outbound
 from wahabot.ai.tools.whatsapp import (
     RunTarget,
     deliver_chat_text,
@@ -104,7 +103,7 @@ async def finish_agent_reply(
     Returns the run outcome for the single per-run row.
     """
 
-    async def react_or_silence(emoji: str) -> None:
+    async def react_or_silence(emoji: str) -> str:
         """React to a lone emoji, or journal it as silence."""
         if emoji_reaction and message_id and random.random() < 0.5:
             logger.info(
@@ -118,7 +117,7 @@ async def finish_agent_reply(
                 journal_send_failure(
                     settings, session, chat_id, "send_reaction", message_id, exc
                 )
-                return
+                return "failed"
             save_action(
                 settings.data_dir,
                 session,
@@ -133,7 +132,7 @@ async def finish_agent_reply(
             )
             if target is not None:
                 target.reacted = message_id
-            return
+            return "reaction"
         save_action(
             settings.data_dir,
             session,
@@ -151,12 +150,12 @@ async def finish_agent_reply(
             chat_id=chat_id,
             emoji=emoji,
         )
+        return "silence"
 
     def tool_delivery() -> str:
         logger.info("Agent decision for {chat_id}: delivered via tool", chat_id=chat_id)
         reacted = target.reacted if target is not None else ""
         sent_id = target.sent_id if target is not None else ""
-        trace_outbound(sent_id)
         save_action(
             settings.data_dir,
             session,
@@ -207,7 +206,6 @@ async def finish_agent_reply(
         except Exception as exc:
             journal_send_failure(settings, session, chat_id, "send_text", message_id, exc)
             return "failed"
-        trace_outbound(sent_id)
         if target is not None:
             target.sent = chat_id
             target.sent_id = sent_id
@@ -237,8 +235,7 @@ async def finish_agent_reply(
         )
         return "superseded"
     if is_single_emoji(reply):
-        await react_or_silence(reply.strip())
-        return "silence"
+        return await react_or_silence(reply.strip())
     return await text_delivery()
 
 

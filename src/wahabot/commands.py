@@ -93,8 +93,10 @@ def command_outcome(
     """The run outcome and failure class for one finished command."""
     if budget_error is not None:
         return "failed", "budget"
-    if target.sent or target.reacted:
+    if target.sent:
         return "delivered_via_tool", ""
+    if target.reacted:
+        return "reaction", ""
     if reply.strip():
         return "reply", ""
     return ("empty" if target.outcome == "empty" else "silence"), ""
@@ -186,10 +188,13 @@ async def run_command(
         failure_class = llm_failure_class(exc)
         raise
     finally:
+        # The outcome row belongs to the operator console, not any chat
+        # the command happened to deliver into: its message ids are the
+        # command's, and the delivery tools already journalled theirs.
         save_run_outcome(
             settings.data_dir,
             event.session,
-            target.sent or OPERATOR_CHAT_ID,
+            OPERATOR_CHAT_ID,
             outcome=outcome,
             duration_ms=int((time.monotonic() - started) * 1000),
             message_ids=[str(event.payload.get("id", ""))],
