@@ -6,6 +6,8 @@ import time
 from collections.abc import Sequence
 from typing import Any
 
+from loguru import logger
+
 from wahabot.ai.intake import IntakeLedger
 from wahabot.ai.tools.whatsapp import EscalationChannel, RunTarget
 from wahabot.ai.triage import TriageGate
@@ -69,7 +71,10 @@ class HandlerBase:
         claimed = list(target.claimed_ids) if target is not None else []
         sent = bool(target and (target.sent or target.reacted))
         delivered = outcome in ("reply", "delivered_via_tool") or sent
-        self.intake.finish_turn(turn_ids, claimed, delivered=delivered)
+        try:
+            self.intake.finish_turn(turn_ids, claimed, delivered=delivered)
+        except Exception:
+            logger.exception("Intake settle failed for {chat_id}", chat_id=chat_id)
         save_run_outcome(
             self.settings.data_dir,
             session,
