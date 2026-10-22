@@ -1,7 +1,6 @@
 import asyncio
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, cast
 
@@ -256,6 +255,14 @@ def test_escalate_fail_soft(tmp_path: Path) -> None:
 
 
 def test_same_chat_runs_serialize(bot: Bot) -> None:
+    """The later run's context carries the earlier run's exchange.
+
+    Runs in one chat serialize on its chat lock. Posting the second
+    turn after the first completes keeps the two-run shape: the
+    intake guard claims a mid-run arrival and answers it once, so a
+    concurrent post would exercise that path instead (see
+    test_wire_intake.py).
+    """
     llm = bot.stack.llm
     PC = "5553333333-5553333333@g.us"
     llm.clear()
@@ -270,17 +277,12 @@ def test_same_chat_runs_serialize(bot: Bot) -> None:
         return FirstResponse
 
     llm.selector = serialize_llm
-    events = [
+    for event in (
         pc_event("kai serial one", "SER1"),
         pc_event("kai serial two", "SER2"),
-    ]
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(bot.post, ev) for ev in events]
-        responses = [f.result(timeout=120) for f in futures]
-    for response in responses:
-        assert response.status_code == 200
-
-    assert _wait(lambda: len(bot.waha.sent) >= 2)
+    ):
+        assert bot.post(event).status_code == 200
+        assert _wait(lambda: len(bot.waha.sent) >= 1)
 
     def first_round_of(turn_text: str) -> dict[str, Any] | None:
         for request in llm.requests:
