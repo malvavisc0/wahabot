@@ -171,6 +171,9 @@ class SingleMixin(HandlerBase):
 
     async def reply_with_agent(self, event: WahaEvent) -> None:
         """Run the agent over an incoming message and send its reply via WAHA."""
+        # Arrival order, not processing order: identity flushes and media
+        # work can reorder two messages that reached the webhook together.
+        arrived_at = time.monotonic()
         config = await self.accept_message(event)
         if config is None:
             return
@@ -181,7 +184,9 @@ class SingleMixin(HandlerBase):
         handled, body = await self.handle_self_command(event, config)
         if handled:
             return
-        operator_wakes = await self.prepare_chat_message(event, config, body)
+        operator_wakes = await self.prepare_chat_message(
+            event, config, body, arrived_at=arrived_at
+        )
         if operator_wakes is None:
             return
         image = image_media(event) if self.settings.vision else None
