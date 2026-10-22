@@ -169,7 +169,9 @@ def test_journal_covers_every_path(bot: Bot) -> None:
     assert _wait(lambda: len(album_bot.waha.sent) >= 1)
     assert _wait(lambda: _audit_entries(album_bot, "reply", CHAT_ID) != [])
     reply_row = _audit_entries(album_bot, "reply", CHAT_ID)[0]
-    assert reply_row["sent_id"].startswith("true_")
+    assert reply_row["outbound_id"].startswith("true_")
+    assert reply_row["reply_to"] == reply_row["message_id"]
+    assert reply_row["duration_ms"] >= 0
     assert reply_row["message_ids"]
     # The album path journals the same kinds as the single path —
     # a delivered_via_tool album run must not leave a "reply" row too.

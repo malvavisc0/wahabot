@@ -168,6 +168,27 @@ def assign_event_serial(store: SerialStore, event: WahaEvent) -> SerialEntry:
     )
 
 
+def event_record(store: SerialStore, event: WahaEvent, tz_name: str = "UTC") -> str:
+    """Render one accepted event as the record an intake guard can show."""
+    registry = store.for_chat(event.session, conversation_jid(event))
+    record, _, _ = render_entries(
+        [RecordEntry(event=event)], registry=registry, tz_name=tz_name
+    )
+    return record
+
+
+def serial_tokens_for(
+    store: SerialStore, session: str, chat_id: str, message_ids: Sequence[str]
+) -> list[str]:
+    """The ``#m<n>`` tokens already assigned to a turn's message ids."""
+    registry = store.for_chat(session, chat_id)
+    return [
+        format_serial_token(serial)
+        for message_id in message_ids
+        if (serial := registry.serial_for(message_id))
+    ]
+
+
 def time_label(event: WahaEvent, tz_name: str = "UTC") -> str:
     """Chat-local ``hh:mm``, or ``dd.mm hh:mm`` for an earlier day."""
     try:

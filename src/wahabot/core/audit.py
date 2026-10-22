@@ -68,3 +68,28 @@ def save_action(
             audit.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as exc:
         logger.warning("Audit journal write failed ({kind}): {exc}", kind=kind, exc=exc)
+
+
+def save_run_outcome(
+    data_dir: Path,
+    session: str,
+    chat_id: str,
+    *,
+    outcome: str,
+    duration_ms: int,
+    message_ids: list[str] | tuple[str, ...] = (),
+    outbound_id: str = "",
+    delivered_via: str = "",
+    failure_class: str = "",
+) -> None:
+    """Record exactly one run-level outcome, the class an incident review reads."""
+    fields: dict[str, Any] = {
+        "outcome": outcome,
+        "duration_ms": duration_ms,
+        "message_ids": list(message_ids),
+        "outbound_id": outbound_id,
+        "delivered_via": delivered_via,
+    }
+    if failure_class:
+        fields["failure_class"] = failure_class
+    save_action(data_dir, session, "run_outcome", chat_id=chat_id, **fields)

@@ -10,6 +10,7 @@ from wahabot.ai.tools.runcontext import (
     fenced_message_id,
     log_action_reason,
     send_failed_envelope,
+    send_guard,
 )
 from wahabot.ai.tools.schemas import (
     ForwardMessageSchema,
@@ -29,10 +30,8 @@ def forward_message(waha: WahaClient) -> BaseTool:
         message_id: str, chat: str | None = None, reason: str = ""
     ) -> str:
         target = current_target()
-        if target.sent:
-            return error(
-                f"message already sent this run (to {target.sent}); do not send again"
-            )
+        if refusal := send_guard(target):
+            return refusal
         if not message_id.strip():
             return error("message_id is required")
         chat_id, fence_error = fenced_chat(chat, target)

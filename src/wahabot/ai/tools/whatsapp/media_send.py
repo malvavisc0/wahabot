@@ -11,6 +11,7 @@ from wahabot.ai.tools.runcontext import (
     fenced_chat,
     log_action_reason,
     send_failed_envelope,
+    send_guard,
 )
 from wahabot.ai.tools.schemas import (
     SendMediaSchema,
@@ -58,35 +59,31 @@ def send_media(waha: WahaClient, settings: Settings) -> BaseTool:
         reason: str = "",
     ) -> str:
         target = current_target()
+        if refusal := send_guard(target):
+            return refusal
 
         def preflight() -> tuple[Callable[..., str] | None, str | None]:
-            """The delivery target, blame guard and kind handler, or an error."""
-            if target.sent:
-                return None, (
-                    f"message already sent this run (to {target.sent}); do not send again"
-                )
+            """The handler and the argument error, with sources normalized."""
+            nonlocal url, path, text
             if blame := blame_delivery_error(f"{caption}\n{text or ''}"):
                 return None, blame
             handler = _SEND_MEDIA_HANDLERS.get(kind)
             if handler is None:
                 return None, f"unknown kind: {kind!r}"
-            return handler, None
+            # Blank sources count as absent (a whitespace-only url must not
+            # outrank a real path below) — normalize before the XOR check
+            # and the dispatch, so both see the same source.
+            url = normalize_media_source(url)
+            path = normalize_media_source(path)
+            text = normalize_media_source(text)
+            return handler, media_argument_error(
+                url, path, text, kind, caption, filename, language
+            )
 
         handler, preflight_error = preflight()
         if preflight_error:
             return error(preflight_error)
         assert handler is not None
-        # Blank sources count as absent (a whitespace-only url must not
-        # outrank a real path below) — normalize before the XOR check
-        # and the dispatch, so both see the same source.
-        url = normalize_media_source(url)
-        path = normalize_media_source(path)
-        text = normalize_media_source(text)
-        arg_error = media_argument_error(
-            url, path, text, kind, caption, filename, language
-        )
-        if arg_error:
-            return error(arg_error)
         chat_id, fence_error = fenced_chat(chat, target)
         if fence_error:
             return error(fence_error)

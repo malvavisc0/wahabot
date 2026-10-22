@@ -11,7 +11,9 @@ from wahabot.ai.tools.runcontext import (
     fenced_message_id,
     log_action_reason,
     operator_run,
+    reaction_guard,
     send_failed_envelope,
+    send_guard,
 )
 from wahabot.ai.tools.schemas import (
     ReactToMessageSchema,
@@ -78,10 +80,8 @@ def send_message(waha: WahaClient, settings: Settings | None = None) -> BaseTool
         if blame := blame_delivery_error(text):
             return error(blame)
         target = current_target()
-        if target.sent:
-            return error(
-                f"message already sent this run (to {target.sent}); do not send again"
-            )
+        if refusal := send_guard(target):
+            return refusal
         chat_id, reply_to, target_error = prepare_send_target(
             chat, reply_to, target, settings
         )
@@ -192,8 +192,8 @@ def react_to_message(waha: WahaClient, settings: Settings | None = None) -> Base
 
     def react_to_message_fn(message_id: str, reaction: str = "", reason: str = "") -> str:
         target = current_target()
-        if target.reacted:
-            return error("already reacted this run; do not react again")
+        if refusal := reaction_guard(target):
+            return refusal
         session = target.session
         if not session:
             return error("no active conversation context")

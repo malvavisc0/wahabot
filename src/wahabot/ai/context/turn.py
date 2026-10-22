@@ -1,4 +1,5 @@
 import asyncio
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -9,6 +10,7 @@ from loguru import logger
 from wahabot.ai import records
 from wahabot.ai.context.participants import chat_rules
 from wahabot.ai.context.user_message import final_reply, turn_user_message
+from wahabot.ai.intake import IntakeLedger
 from wahabot.ai.messages import (
     TURN_HANDLED_KWARG,
     TURN_SERIALS_KWARG,
@@ -195,6 +197,9 @@ async def handle_message(
     addressed: bool = True,
     gate_first: bool = False,
     record_entries: Sequence[RecordEntry] | None = None,
+    intake: IntakeLedger | None = None,
+    turn_ids: Sequence[str] = (),
+    turn_started_at: float | None = None,
 ) -> tuple[str, RunTarget]:
     """Run the agent workflow over an incoming message event.
 
@@ -269,7 +274,17 @@ async def handle_message(
         if settings is not None
         else None
     )
-    target = RunTarget(session=event.session, chat_id=chat_id, armed=armed, typing=typing)
+    target = RunTarget(
+        session=event.session,
+        chat_id=chat_id,
+        armed=armed,
+        typing=typing,
+        intake=intake,
+        turn_ids=list(turn_ids),
+        turn_started_at=(
+            time.monotonic() if turn_started_at is None else turn_started_at
+        ),
+    )
     token = bind_target(target)
     try:
         await bind_inbound_image(image, settings, target)

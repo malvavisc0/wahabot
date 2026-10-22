@@ -32,13 +32,14 @@ from wahabot.ai.resolve import ResolvedChat, chat_context_note, resolve_last_mes
 from wahabot.ai.serials import serial_store
 from wahabot.ai.tools.whatsapp import RunTarget
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
-from wahabot.core.audit import save_action
+from wahabot.core.audit import save_action, save_run_outcome
 from wahabot.core.models import WahaEvent
 from wahabot.core.runs import chat_lock, context_for, persist_memory
 from wahabot.core.waha import WahaClient
 from wahabot.settings import Settings
 from wahabot.status import (
     classify_llm_failure,
+    llm_failure_class,
     mark_llm_recovered,
     probe_session_recovery,
     session_healthy,
@@ -85,6 +86,19 @@ def chat_display_name(waha: WahaClient, session: str, chat_id: str) -> str:
         return chat_id
 
 
+def command_outcome(
+    reply: str, target: RunTarget, budget_error: ContextBudgetError | None
+) -> tuple[str, str]:
+    """The run outcome and failure class for one finished command."""
+    if budget_error is not None:
+        return "failed", "budget"
+    if target.sent or target.reacted:
+        return "delivered_via_tool", ""
+    if reply.strip():
+        return "reply", ""
+    return ("empty" if target.outcome == "empty" else "silence"), ""
+
+
 async def run_command(
     event: WahaEvent,
     agent: FunctionCallingAgentWorkflow,
@@ -124,39 +138,72 @@ async def run_command(
     if not instruction:
         logger.debug("Ignoring empty command {id}", id=event.payload.get("id"))
         return ""
-    logger.info(
-        "Running operator command {id}: {instruction}",
-        id=event.payload.get("id"),
-        instruction=instruction[:200],
-    )
-    # Ground truth before the model: when the command names a chat,
-    # resolve it against the operator's chat list and pin that chat's
-    # real last message into the turn. The shared operator history is
-    # channel-agnostic — it cannot answer "the last message in <chat>" —
-    # so the note replaces the inference, not supplements it. A command naming no
-    # chat resolves to nothing and runs unchanged. Failures are
-    # swallowed inside: pinning is best-effort, never a blocker.
-    resolved = await asyncio.to_thread(
-        resolve_last_message, waha, event.session, instruction
-    )
-    pinned_note = (
-        chat_context_note(resolved, pin_serial(resolved, settings, event.session))
-        if resolved
-        else ""
-    )
-    budget_error: ContextBudgetError | None = None
-    async with chat_lock(event.session, OPERATOR_CHAT_ID):
-        ctx = await context_for(event.session, OPERATOR_CHAT_ID, agent, settings)
-        with chat_trace_attributes("operator-command"):
-            # armed=True: operator commands are the one trusted cross-chat
-            # channel; the fence in the WhatsApp tools opens for this run
-            # alone (the arming flag rides the run's own target binding,
-            # so a concurrent chat run can never inherit it).
-            reply, target, budget_error = await run_command_turn(
-                event, agent, ctx, settings, waha, pinned_note
-            )
-        await persist_memory(settings, event.session, OPERATOR_CHAT_ID, ctx)
-    return command_reply(event, settings, reply, target, waha, budget_error)
+    started = time.monotonic()
+    target = RunTarget(session=event.session, chat_id=OPERATOR_CHAT_ID)
+    outcome = "failed"
+    failure_class = ""
+    try:
+        logger.info(
+            "Running operator command {id}: {instruction}",
+            id=event.payload.get("id"),
+            instruction=instruction[:200],
+        )
+        # Ground truth before the model: when the command names a chat,
+        # resolve it against the operator's chat list and pin that chat's
+        # real last message into the turn. The shared operator history is
+        # channel-agnostic — it cannot answer "the last message in <chat>" —
+        # so the note replaces the inference, not supplements it. A command naming no
+        # chat resolves to nothing and runs unchanged. Failures are
+        # swallowed inside: pinning is best-effort, never a blocker.
+        resolved = await asyncio.to_thread(
+            resolve_last_message, waha, event.session, instruction
+        )
+        pinned_note = (
+            chat_context_note(resolved, pin_serial(resolved, settings, event.session))
+            if resolved
+            else ""
+        )
+        budget_error: ContextBudgetError | None = None
+        async with chat_lock(event.session, OPERATOR_CHAT_ID):
+            ctx = await context_for(event.session, OPERATOR_CHAT_ID, agent, settings)
+            with chat_trace_attributes(
+                "operator-command",
+                message_ids=[str(event.payload.get("id", ""))],
+                reply_to=str(event.payload.get("reply_to", "")),
+            ):
+                # armed=True: operator commands are the one trusted cross-chat
+                # channel; the fence in the WhatsApp tools opens for this run
+                # alone (the arming flag rides the run's own target binding,
+                # so a concurrent chat run can never inherit it).
+                reply, target, budget_error = await run_command_turn(
+                    event, agent, ctx, settings, waha, pinned_note
+                )
+            await persist_memory(settings, event.session, OPERATOR_CHAT_ID, ctx)
+        outcome, failure_class = command_outcome(reply, target, budget_error)
+        return command_reply(event, settings, reply, target, waha, budget_error)
+    except Exception as exc:
+        failure_class = llm_failure_class(exc)
+        raise
+    finally:
+        save_run_outcome(
+            settings.data_dir,
+            event.session,
+            target.sent or OPERATOR_CHAT_ID,
+            outcome=outcome,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            message_ids=[str(event.payload.get("id", ""))],
+            outbound_id=target.sent_id,
+            delivered_via=(
+                "text"
+                if outcome == "reply"
+                else "tool"
+                if outcome == "delivered_via_tool"
+                else "silence"
+                if outcome in ("silence", "empty")
+                else ""
+            ),
+            failure_class=failure_class,
+        )
 
 
 async def run_command_turn(

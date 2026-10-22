@@ -94,6 +94,15 @@ async def mark_llm_unreachable(waha: WahaClient, session: str, exc: Exception) -
         await notify_operator(waha, session, message)
 
 
+def llm_failure_class(exc: Exception) -> str:
+    """The run outcome class for a model failure, without notifying."""
+    if llm_call_timed_out(exc) or run_timed_out(exc):
+        return "timeout"
+    if llm_endpoint_down(exc):
+        return "outage"
+    return "bug"
+
+
 async def classify_llm_failure(
     waha: WahaClient,
     session: str,
@@ -112,13 +121,14 @@ async def classify_llm_failure(
     all, the caller's full traceback is the report. Callers still own
     the seen-marker drop; this only decides who gets told what.
     """
-    if llm_call_timed_out(exc):
-        await mark_llm_timed_out(waha, session, exc, timeout_s)
+    failure_class = llm_failure_class(exc)
+    if failure_class == "timeout":
+        if llm_call_timed_out(exc):
+            await mark_llm_timed_out(waha, session, exc, timeout_s)
+        else:
+            await mark_run_timed_out(waha, session, exc, run_timeout_s)
         return "timeout"
-    if run_timed_out(exc):
-        await mark_run_timed_out(waha, session, exc, run_timeout_s)
-        return "timeout"
-    if llm_endpoint_down(exc):
+    if failure_class == "outage":
         await mark_llm_unreachable(waha, session, exc)
         return "outage"
     return "bug"

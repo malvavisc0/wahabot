@@ -1,4 +1,5 @@
 import asyncio
+import time
 from typing import Any, override
 
 from loguru import logger
@@ -14,6 +15,7 @@ from wahabot.ai.messages import (
     message_kind,
 )
 from wahabot.ai.observability import chat_trace_attributes
+from wahabot.ai.serials import serial_store
 from wahabot.ai.tools.url_images import fetch_url_images, image_urls
 from wahabot.ai.tools.whatsapp import RunTarget
 from wahabot.ai.turn_records import (
@@ -21,6 +23,7 @@ from wahabot.ai.turn_records import (
     TRANSCRIPT_KEY,
     VIDEO_MARKER_KEY,
     RecordEntry,
+    serial_tokens_for,
 )
 from wahabot.ai.video import join_anchor
 from wahabot.ai.vision import caption_images
@@ -61,8 +64,13 @@ class BurstMixin(HandlerBase):
         reprocesses them through the normal path — a burst never
         disappears, mirroring the single-message and album paths.
         """
+        turn_ids = list(buffer.ids())
+        started = time.monotonic()
+        target: RunTarget | None = None
+        outcome = "failed"
+        failure_class = ""
         try:
-            await self.deliver_burst_reply(buffer)
+            outcome, target = await self.deliver_burst_reply(buffer, started)
         except Exception as exc:
             # Same failure policy as a single turn: a permanent budget
             # error keeps the seen markers, everything else drops them so
@@ -73,6 +81,7 @@ class BurstMixin(HandlerBase):
                     chat_id=buffer.key[1],
                     limit=self.settings.memory_token_limit,
                 )
+                failure_class = "budget"
                 return
             for burst_id in buffer.ids():
                 forget_seen(burst_id)
@@ -88,6 +97,16 @@ class BurstMixin(HandlerBase):
                     "Failed to handle burst in {chat_id}",
                     chat_id=buffer.key[1],
                 )
+        finally:
+            self.finish_run(
+                buffer.key[0],
+                buffer.key[1],
+                turn_ids,
+                target,
+                outcome,
+                started,
+                failure_class,
+            )
 
     @override
     async def transcribe_message(self, event: WahaEvent, body: str | None) -> str | None:
@@ -336,13 +355,26 @@ class BurstMixin(HandlerBase):
         buffer: bursts.BurstBuffer,
         merged: WahaEvent,
         entries: list[RecordEntry],
-    ) -> tuple[str, RunTarget]:
+        *,
+        turn_ids: list[str],
+        started: float,
+    ) -> tuple[str, RunTarget | None]:
         """Run one merged burst turn under the chat lock."""
         chat_id = buffer.key[1]
         async with chat_lock(merged.session, chat_id):
+            if self.intake.handled(turn_ids):
+                return "", None
             ctx = await context_for(merged.session, chat_id, self.agent, self.settings)
             with chat_trace_attributes(
-                chat_id, message_ids=[str(merged.payload.get("id", ""))]
+                chat_id,
+                message_ids=turn_ids,
+                serial_tokens=serial_tokens_for(
+                    serial_store(str(self.settings.data_dir)),
+                    merged.session,
+                    chat_id,
+                    turn_ids,
+                ),
+                reply_to=str(merged.payload.get("id", "")),
             ):
                 current = self.config_reloader.current_config()
                 addressed = self.mark_addressed_entry(entries, current)
@@ -358,11 +390,16 @@ class BurstMixin(HandlerBase):
                     addressed=addressed,
                     gate_first=gate_first,
                     record_entries=entries,
+                    intake=self.intake,
+                    turn_ids=turn_ids,
+                    turn_started_at=started,
                 )
             await persist_memory(self.settings, merged.session, chat_id, ctx)
         return reply, target
 
-    async def deliver_burst_reply(self, buffer: bursts.BurstBuffer) -> None:
+    async def deliver_burst_reply(
+        self, buffer: bursts.BurstBuffer, started: float
+    ) -> tuple[str, RunTarget | None]:
         """Prepare each buffered message's media, run the agent once.
 
         One ``handle_message`` call over a merged turn whose text joins
@@ -371,16 +408,21 @@ class BurstMixin(HandlerBase):
         """
         merged_burst = await self.merge_burst(buffer)
         if merged_burst is None:
-            return
+            return "empty", None
         merged, entries = merged_burst
         chat_id = buffer.key[1]
         message_id = str(merged.payload.get("id", ""))
-        reply, target = await self.run_burst_turn(buffer, merged, entries)
+        turn_ids = list(buffer.ids())
+        reply, target = await self.run_burst_turn(
+            buffer, merged, entries, turn_ids=turn_ids, started=started
+        )
+        if target is None:
+            return "superseded", None
         # The provider answered: flip the LLM health flag back up
         # (once-per-transition notify) outside the chat lock — the
         # burst path shares the single-message path's contract.
         await mark_llm_recovered(self.waha, merged.session)
-        await finish_agent_reply(
+        outcome = await finish_agent_reply(
             self.waha,
             merged.session,
             chat_id,
@@ -391,8 +433,10 @@ class BurstMixin(HandlerBase):
             prefix=target.prefix,
             emoji_reaction=True,
             target=target,
-            message_ids=[str(entry.event.payload.get("id", "")) for entry in entries],
+            message_ids=turn_ids,
+            duration_ms=int((time.monotonic() - started) * 1000),
         )
         # Post-reply memory jobs outside the chat lock: the recap merge
         # and the embedding drain must never hold the chat's next run.
         await self.agent.merge_learned()
+        return outcome, target
