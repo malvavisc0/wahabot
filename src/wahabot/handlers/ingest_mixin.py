@@ -173,15 +173,22 @@ class IngestMixin(HandlerBase):
         ):
             return
         chat_id = str(event.payload.get("from", ""))
-        self.intake.record(
-            event.session,
-            chat_id,
-            str(event.payload.get("id", "")),
-            event_record(
-                serial_store(str(self.settings.data_dir)), event, self.settings.timezone
-            ),
-            at=time.monotonic(),
-        )
+        try:
+            self.intake.record(
+                event.session,
+                chat_id,
+                str(event.payload.get("id", "")),
+                event_record(
+                    serial_store(str(self.settings.data_dir)),
+                    event,
+                    self.settings.timezone,
+                ),
+                at=time.monotonic(),
+            )
+        except Exception:
+            # The ledger is turn-level memory, not audit: an unexpected
+            # payload must not cost the chat its reply.
+            logger.exception("Intake record failed for {id}", id=event.payload.get("id"))
         if (
             self.settings.send_seen
             and not operator_wakes

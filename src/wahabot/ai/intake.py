@@ -7,6 +7,7 @@ Storage is injectable: the default is process memory, and a durable
 store can implement the same read/write surface later.
 """
 
+import threading
 import time
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
@@ -73,6 +74,9 @@ class IntakeLedger:
         self.store = store or InMemoryIntakeStore()
         self.max_age_s = max_age_s
         self.max_messages = max_messages
+        # Delivery tools run on worker threads while the loop records
+        # new messages, so reads and claims must not interleave.
+        self._lock = threading.RLock()
 
     def record(
         self,
@@ -86,20 +90,21 @@ class IntakeLedger:
         """Add one accepted message as pending, unless it is already known."""
         if not message_id:
             return
-        key = (session, chat_id)
-        entries = self._live(key)
-        if any(entry.message_id == message_id for entry in entries):
-            return
-        entries.append(
-            IntakeEntry(
-                message_id=message_id,
-                session=session,
-                chat_id=chat_id,
-                record=record,
-                at=time.monotonic() if at is None else at,
+        with self._lock:
+            key = (session, chat_id)
+            entries = self._live(key)
+            if any(entry.message_id == message_id for entry in entries):
+                return
+            entries.append(
+                IntakeEntry(
+                    message_id=message_id,
+                    session=session,
+                    chat_id=chat_id,
+                    record=record,
+                    at=time.monotonic() if at is None else at,
+                )
             )
-        )
-        self.store.write(key, entries[-self.max_messages :])
+            self.store.write(key, entries[-self.max_messages :])
 
     def pending(
         self,
@@ -111,14 +116,15 @@ class IntakeLedger:
     ) -> list[IntakeEntry]:
         """Pending messages, optionally only those newer than ``after``."""
         skipped = set(exclude)
-        now = time.monotonic()
-        return [
-            entry
-            for entry in self._live((session, chat_id), now)
-            if entry.state == PENDING
-            and entry.message_id not in skipped
-            and (after is None or entry.at > after)
-        ]
+        with self._lock:
+            now = time.monotonic()
+            return [
+                entry
+                for entry in self._live((session, chat_id), now)
+                if entry.state == PENDING
+                and entry.message_id not in skipped
+                and (after is None or entry.at > after)
+            ]
 
     def claim(
         self, session: str, chat_id: str, message_ids: Sequence[str]
@@ -126,36 +132,48 @@ class IntakeLedger:
         """Claim pending rows for the run that is about to answer them."""
         key = (session, chat_id)
         wanted = set(message_ids)
-        entries = self._live(key)
-        claimed: list[IntakeEntry] = []
-        for entry in entries:
-            if entry.message_id in wanted and entry.state == PENDING:
-                entry.state = CLAIMED
-                claimed.append(entry)
-        if claimed:
-            self.store.write(key, entries)
-        return claimed
+        with self._lock:
+            entries = self._live(key)
+            claimed: list[IntakeEntry] = []
+            for entry in entries:
+                if entry.message_id in wanted and entry.state == PENDING:
+                    entry.state = CLAIMED
+                    claimed.append(entry)
+            if claimed:
+                self.store.write(key, entries)
+            return claimed
 
     def handled(self, message_ids: Sequence[str]) -> bool:
         """Whether every requested id is known and already handled."""
         wanted = set(message_ids)
         if not wanted:
             return False
-        found = self._find(wanted)
-        return {entry.message_id for entry in found} == wanted and all(
-            entry.state == HANDLED for entry in found
-        )
+        with self._lock:
+            found = self._find(wanted)
+            return {entry.message_id for entry in found} == wanted and all(
+                entry.state == HANDLED for entry in found
+            )
 
     def release(self, message_ids: Sequence[str]) -> None:
-        """Return claimed rows to pending so their own run can answer them."""
-        self._update(set(message_ids), lambda entry: entry.state == CLAIMED, PENDING)
+        """Return rows this run claimed to pending so their own run can answer.
+
+        A claim settled by a retried send is released too: the newer
+        message must not stay suppressed when that send then failed.
+        """
+        with self._lock:
+            self._update(
+                set(message_ids),
+                lambda entry: entry.state in (CLAIMED, HANDLED),
+                PENDING,
+            )
 
     def finish(self, message_ids: Sequence[str], delivered: bool) -> None:
         """Settle rows: handled after a delivery, released after silence."""
-        if delivered:
-            self._update(set(message_ids), lambda entry: True, HANDLED)
-        else:
-            self.release(message_ids)
+        with self._lock:
+            if delivered:
+                self._update(set(message_ids), lambda entry: True, HANDLED)
+            else:
+                self.release(message_ids)
 
     def finish_turn(
         self,
@@ -165,7 +183,12 @@ class IntakeLedger:
         delivered: bool,
     ) -> None:
         """Settle a run's own ids and every id it claimed while running."""
-        self.finish([*turn_ids, *claimed_ids], delivered)
+        if delivered:
+            self.finish([*turn_ids, *claimed_ids], delivered=True)
+        else:
+            # Only the claimed ids were this run's to lose; its own turn
+            # may already be handled by an earlier run.
+            self.release(claimed_ids)
 
     def _live(self, key: tuple[str, str], now: float | None = None) -> list[IntakeEntry]:
         moment = time.monotonic() if now is None else now

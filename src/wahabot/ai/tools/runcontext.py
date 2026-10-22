@@ -158,8 +158,9 @@ def delivery_guard(target: RunTarget) -> str | None:
     """Refuse a send that would answer an older turn than the chat's intake.
 
     The refusal claims the newer messages for this run. A retry after the
-    model has read them is allowed and settles the claim as handled;
-    operator runs and turns without intake ids keep their old behaviour.
+    model has read them is allowed and settles the claim as handled; a
+    run that ends without a send releases the claims again. Operator runs
+    and turns without intake ids keep their old behaviour.
     """
     if target.intake is None or target.armed or not target.turn_ids:
         return None

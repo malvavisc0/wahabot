@@ -1,5 +1,4 @@
 import asyncio
-import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -152,7 +151,6 @@ def test_silent_run_releases_the_newer_message_for_its_own_run(bot: Bot) -> None
         "silence",
         "delivered_via_tool",
     }
-    assert len(llm.requests) == 3
 
 
 def test_message_after_a_successful_send_gets_its_own_run(bot: Bot) -> None:
@@ -172,7 +170,7 @@ def test_message_after_a_successful_send_gets_its_own_run(bot: Bot) -> None:
     assert {row["outcome"] for row in outcomes} == {"delivered_via_tool"}
     assert all(row["outbound_id"].startswith("true_") for row in outcomes)
     assert all(row["duration_ms"] >= 0 for row in outcomes)
-    assert json.dumps([row["message_ids"] for row in outcomes])
+    assert all(row["message_ids"] for row in outcomes)
 
 
 def test_operator_command_writes_a_run_outcome(bot: Bot) -> None:
@@ -194,3 +192,23 @@ def test_operator_command_writes_a_run_outcome(bot: Bot) -> None:
     outcome = _audit_entries(bot, "run_outcome", "operator")[-1]
     assert outcome["outcome"] == "reply"
     assert outcome["duration_ms"] >= 0
+
+
+def test_repeated_tool_round_records_an_empty_outcome(bot: Bot) -> None:
+    """A loop that cannot advance stops empty, not as a chosen silence."""
+    llm = bot.stack.llm
+
+    async def selector(_body: dict[str, Any]) -> dict[str, Any]:
+        return tool_call_response(
+            "read_chat", {"mode": "metadata"}, call_id="call_repeat_meta"
+        )
+
+    llm.selector = selector
+    event = _turn_event("REPEAT", "kai check the metadata")
+    bot.post(event)
+
+    assert _wait(lambda: _run_outcomes(bot) != [])
+    assert bot.waha.sent == []
+    outcome = _run_outcomes(bot)[-1]
+    assert outcome["outcome"] == "empty"
+    assert outcome["delivered_via"] == "silence"

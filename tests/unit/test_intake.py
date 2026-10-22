@@ -139,6 +139,27 @@ def test_delivery_guard_allows_the_claimed_send_and_marks_it_handled() -> None:
     assert ledger.handled(["B"])
 
 
+def test_failed_send_releases_the_claim_for_the_newer_message() -> None:
+    ledger = IntakeLedger()
+    started = time.monotonic()
+    ledger.record("s", "chat", "A", "first", at=started)
+    ledger.record("s", "chat", "B", "newest", at=started + 1)
+    target = RunTarget(
+        session="s",
+        chat_id="chat",
+        intake=ledger,
+        turn_ids=["A"],
+        turn_started_at=started,
+    )
+    assert delivery_guard(target) is not None
+    assert delivery_guard(target) is None
+
+    ledger.finish_turn(["A"], target.claimed_ids, delivered=False)
+
+    assert not ledger.handled(["B"])
+    assert [row.message_id for row in ledger.pending("s", "chat")] == ["A", "B"]
+
+
 def test_delivery_guard_exempts_operator_runs_and_turns_without_ids() -> None:
     ledger = IntakeLedger()
     started = time.monotonic()

@@ -25,13 +25,13 @@ from wahabot.ai.workflow.toolkit import (
 )
 
 
-def _text_outcome(delivered: bool, visible: str, rounds: int) -> str:
+def _text_outcome(delivered: bool, visible: str, *, after_tools: bool) -> str:
     """The run outcome for a plain-text round."""
     if delivered:
         return "delivered_via_tool"
     if visible:
         return "reply"
-    return "empty" if rounds > 1 else "silence"
+    return "empty" if after_tools else "silence"
 
 
 class StepMixin(AgentBase):
@@ -107,7 +107,7 @@ class StepMixin(AgentBase):
         result = await self.wrap_up_response(ctx, reason)
         delivered = self.any_delivery()
         visible = chat_visible_text(str(result.message.content or ""))
-        mark_run_outcome(_text_outcome(delivered, visible, 0))
+        mark_run_outcome(_text_outcome(delivered, visible, after_tools=True))
         return await self.stop_with(ctx, StopEvent(result=result))
 
     async def stop_with(
@@ -136,7 +136,7 @@ class StepMixin(AgentBase):
         await self.remember(ctx, response, [], skip_text=delivered)
         visible = chat_visible_text(str(response.message.content or ""))
         silent = not delivered and not visible
-        mark_run_outcome(_text_outcome(delivered, visible, rounds))
+        mark_run_outcome(_text_outcome(delivered, visible, after_tools=rounds > 1))
         await self.mark_turn_handled(ctx, silent=silent)
         await self.collapse_delivery(ctx)
         if delivered:
