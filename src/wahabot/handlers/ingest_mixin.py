@@ -163,6 +163,7 @@ class IngestMixin(HandlerBase):
         config: SessionConfig,
         *,
         operator_wakes: bool | None,
+        arrived_at: float | None = None,
     ) -> None:
         """Ledger the accepted message, fail-soft.
 
@@ -185,7 +186,7 @@ class IngestMixin(HandlerBase):
                     event,
                     self.settings.timezone,
                 ),
-                at=time.monotonic(),
+                at=time.monotonic() if arrived_at is None else arrived_at,
                 addressed=addressed,
             )
         except Exception:
@@ -195,7 +196,12 @@ class IngestMixin(HandlerBase):
 
     @override
     async def prepare_chat_message(
-        self, event: WahaEvent, config: SessionConfig, body: str | None
+        self,
+        event: WahaEvent,
+        config: SessionConfig,
+        body: str | None,
+        *,
+        arrived_at: float | None = None,
     ) -> bool | None:
         """Apply access gates and fold or buffer turns that need no immediate run."""
         operator_wakes = operator_wake(event, config)
@@ -208,7 +214,9 @@ class IngestMixin(HandlerBase):
             jid_aliases=jid_alias_lookup(event),
         ):
             return
-        self.record_intake(event, config, operator_wakes=operator_wakes)
+        self.record_intake(
+            event, config, operator_wakes=operator_wakes, arrived_at=arrived_at
+        )
         if (
             self.settings.send_seen
             and not operator_wakes
