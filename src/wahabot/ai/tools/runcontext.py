@@ -190,6 +190,20 @@ def delivery_guard(target: RunTarget) -> str | None:
     return None
 
 
+def delivery_path(outcome: str, target: RunTarget | None) -> str:
+    """The audit delivery path for a run outcome."""
+    if outcome == "reply":
+        return "text"
+    if outcome == "delivered_via_tool" or (
+        target is not None and (target.sent or target.reacted)
+    ):
+        reacted = target is not None and target.reacted and not target.sent_id
+        return "reaction" if reacted else "tool"
+    if outcome in ("silence", "empty"):
+        return "silence"
+    return ""
+
+
 def send_guard(target: RunTarget) -> str | None:
     """The delivery refusal for a send (superseded or already sent), or None."""
     if refusal := delivery_guard(target):
