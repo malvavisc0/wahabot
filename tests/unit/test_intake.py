@@ -40,11 +40,11 @@ def test_ledger_claim_hides_a_row_until_the_run_finishes() -> None:
 
     assert [row.message_id for row in claimed] == ["B"]
     assert [row.message_id for row in ledger.pending("s", "chat")] == ["A"]
-    assert not ledger.handled(["B"])
+    assert not ledger.handled("s", "chat", ["B"])
 
-    ledger.finish(["B"], delivered=True)
+    ledger.finish("s", "chat", ["B"], delivered=True)
 
-    assert ledger.handled(["B"])
+    assert ledger.handled("s", "chat", ["B"])
 
 
 def test_ledger_finish_turn_releases_claims_when_the_run_was_silent() -> None:
@@ -53,9 +53,9 @@ def test_ledger_finish_turn_releases_claims_when_the_run_was_silent() -> None:
     ledger.record("s", "chat", "B", "newest")
     ledger.claim("s", "chat", ["B"])
 
-    ledger.finish_turn(["A"], ["B"], delivered=False)
+    ledger.finish_turn("s", "chat", ["A"], ["B"], delivered=False)
 
-    assert not ledger.handled(["B"])
+    assert not ledger.handled("s", "chat", ["B"])
     assert [row.message_id for row in ledger.pending("s", "chat")] == ["A", "B"]
 
 
@@ -65,10 +65,39 @@ def test_ledger_finish_turn_marks_turn_and_claims_delivered() -> None:
     ledger.record("s", "chat", "B", "newest")
     ledger.claim("s", "chat", ["B"])
 
-    ledger.finish_turn(["A"], ["B"], delivered=True)
+    ledger.finish_turn("s", "chat", ["A"], ["B"], delivered=True)
 
-    assert ledger.handled(["A", "B"])
+    assert ledger.handled("s", "chat", ["A", "B"])
     assert ledger.pending("s", "chat") == []
+
+
+def test_claimed_reports_an_active_claim_until_it_settles() -> None:
+    ledger = IntakeLedger()
+    ledger.record("s", "chat", "A", "first")
+    ledger.record("s", "chat", "B", "newest")
+
+    assert not ledger.claimed("s", "chat", ["A", "B"])
+    ledger.claim("s", "chat", ["B"])
+
+    assert ledger.claimed("s", "chat", ["A", "B"])
+    assert not ledger.claimed("s", "chat", ["A"])
+
+    ledger.finish_turn("s", "chat", ["A"], ["B"], delivered=True)
+
+    assert not ledger.claimed("s", "chat", ["A", "B"])
+    assert ledger.handled("s", "chat", ["B"])
+
+
+def test_release_never_flips_a_row_another_run_settled() -> None:
+    ledger = IntakeLedger()
+    ledger.record("s", "chat", "A", "first")
+    ledger.record("s", "chat", "B", "newest")
+    ledger.finish("s", "chat", ["B"], delivered=True)
+
+    ledger.release("s", "chat", ["A", "B"])
+
+    assert [row.message_id for row in ledger.pending("s", "chat")] == ["A"]
+    assert ledger.handled("s", "chat", ["B"])
 
 
 def test_ledger_expires_rows_past_the_age_bound() -> None:
@@ -121,7 +150,7 @@ def test_delivery_guard_refuses_an_older_reply_and_carries_the_newest_record() -
     assert target.claimed_ids == ["B"]
 
 
-def test_delivery_guard_allows_the_claimed_send_and_marks_it_handled() -> None:
+def test_delivery_guard_allows_the_claimed_send_and_leaves_settling_to_the_run() -> None:
     ledger = IntakeLedger()
     started = time.monotonic()
     ledger.record("s", "chat", "A", "first", at=started)
@@ -136,7 +165,11 @@ def test_delivery_guard_allows_the_claimed_send_and_marks_it_handled() -> None:
     assert delivery_guard(target) is not None
 
     assert delivery_guard(target) is None
-    assert ledger.handled(["B"])
+    assert not ledger.handled("s", "chat", ["B"])
+
+    ledger.finish_turn("s", "chat", ["A"], target.claimed_ids, delivered=True)
+
+    assert ledger.handled("s", "chat", ["B"])
 
 
 def test_failed_send_releases_the_claim_for_the_newer_message() -> None:
@@ -154,9 +187,9 @@ def test_failed_send_releases_the_claim_for_the_newer_message() -> None:
     assert delivery_guard(target) is not None
     assert delivery_guard(target) is None
 
-    ledger.finish_turn(["A"], target.claimed_ids, delivered=False)
+    ledger.finish_turn("s", "chat", ["A"], target.claimed_ids, delivered=False)
 
-    assert not ledger.handled(["B"])
+    assert not ledger.handled("s", "chat", ["B"])
     assert [row.message_id for row in ledger.pending("s", "chat")] == ["A", "B"]
 
 
@@ -193,6 +226,23 @@ def test_delivery_guard_ignores_older_pending_rows() -> None:
     )
 
     assert delivery_guard(target) is None
+
+
+def test_delivery_guard_ignores_newer_records_that_would_not_wake_a_run() -> None:
+    ledger = IntakeLedger()
+    started = time.monotonic()
+    ledger.record("s", "chat", "A", "first", at=started)
+    ledger.record("s", "chat", "B", "banter", at=started + 1, addressed=False)
+    target = RunTarget(
+        session="s",
+        chat_id="chat",
+        intake=ledger,
+        turn_ids=["A"],
+        turn_started_at=started,
+    )
+
+    assert delivery_guard(target) is None
+    assert target.claimed_ids == []
 
 
 @pytest.mark.parametrize(

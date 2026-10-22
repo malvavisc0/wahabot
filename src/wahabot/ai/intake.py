@@ -2,9 +2,10 @@
 
 The seen cache is a fast duplicate check; this ledger survives the gap
 between accepting a message and its run finishing. A run claims messages
-that arrive after it started, so a stale reply cannot overtake them.
-Storage is injectable: the default is process memory, and a durable
-store can implement the same read/write surface later.
+that arrive after it started, so a stale reply cannot overtake them, and
+a queued run waits for an active claim instead of racing it. Storage is
+injectable: the default is process memory, and a durable store can
+implement the same read/write surface later.
 """
 
 import threading
@@ -33,6 +34,10 @@ class IntakeEntry:
     record: str
     at: float
     state: str = PENDING
+    #: Whether the message would wake a run of its own. Records that
+    #: never wake a run (unaddressed group chatter) never supersede a
+    #: reply either — they age out unclaimed.
+    addressed: bool = True
 
 
 class IntakeStore(Protocol):
@@ -41,8 +46,6 @@ class IntakeStore(Protocol):
     def read(self, key: tuple[str, str]) -> list[IntakeEntry]: ...
 
     def write(self, key: tuple[str, str], entries: Sequence[IntakeEntry]) -> None: ...
-
-    def chat_keys(self) -> list[tuple[str, str]]: ...
 
 
 class InMemoryIntakeStore:
@@ -56,9 +59,6 @@ class InMemoryIntakeStore:
 
     def write(self, key: tuple[str, str], entries: Sequence[IntakeEntry]) -> None:
         self._chats[key] = list(entries)
-
-    def chat_keys(self) -> list[tuple[str, str]]:
-        return list(self._chats)
 
 
 class IntakeLedger:
@@ -86,6 +86,7 @@ class IntakeLedger:
         record: str,
         *,
         at: float | None = None,
+        addressed: bool = True,
     ) -> None:
         """Add one accepted message as pending, unless it is already known."""
         if not message_id:
@@ -102,6 +103,7 @@ class IntakeLedger:
                     chat_id=chat_id,
                     record=record,
                     at=time.monotonic() if at is None else at,
+                    addressed=addressed,
                 )
             )
             self.store.write(key, entries[-self.max_messages :])
@@ -113,6 +115,7 @@ class IntakeLedger:
         *,
         after: float | None = None,
         exclude: Collection[str] = (),
+        addressed_only: bool = False,
     ) -> list[IntakeEntry]:
         """Pending messages, optionally only those newer than ``after``."""
         skipped = set(exclude)
@@ -124,6 +127,7 @@ class IntakeLedger:
                 if entry.state == PENDING
                 and entry.message_id not in skipped
                 and (after is None or entry.at > after)
+                and (not addressed_only or entry.addressed)
             ]
 
     def claim(
@@ -143,40 +147,73 @@ class IntakeLedger:
                 self.store.write(key, entries)
             return claimed
 
-    def handled(self, message_ids: Sequence[str]) -> bool:
+    def claimed(self, session: str, chat_id: str, message_ids: Sequence[str]) -> bool:
+        """Whether any requested id is currently claimed by an active run.
+
+        A claim never outlives its run — the run's finally-block settles
+        or releases it — so ``True`` means "wait for that run's decision",
+        never "this turn is stranded".
+        """
+        wanted = set(message_ids)
+        if not wanted:
+            return False
+        with self._lock:
+            return any(
+                entry.message_id in wanted and entry.state == CLAIMED
+                for entry in self._live((session, chat_id))
+            )
+
+    def handled(self, session: str, chat_id: str, message_ids: Sequence[str]) -> bool:
         """Whether every requested id is known and already handled."""
         wanted = set(message_ids)
         if not wanted:
             return False
         with self._lock:
-            found = self._find(wanted)
+            found = [
+                entry
+                for entry in self._live((session, chat_id))
+                if entry.message_id in wanted
+            ]
             return {entry.message_id for entry in found} == wanted and all(
                 entry.state == HANDLED for entry in found
             )
 
-    def release(self, message_ids: Sequence[str]) -> None:
+    def release(self, session: str, chat_id: str, message_ids: Sequence[str]) -> None:
         """Return rows this run claimed to pending so their own run can answer.
 
-        A claim settled by a retried send is released too: the newer
-        message must not stay suppressed when that send then failed.
+        Only claims: a row another run settled by delivering stays
+        handled — ``HANDLED`` means an answer reached the chat, never a
+        suppression left to undo.
         """
         with self._lock:
             self._update(
+                (session, chat_id),
                 set(message_ids),
-                lambda entry: entry.state in (CLAIMED, HANDLED),
+                lambda entry: entry.state == CLAIMED,
                 PENDING,
             )
 
-    def finish(self, message_ids: Sequence[str], delivered: bool) -> None:
+    def finish(
+        self,
+        session: str,
+        chat_id: str,
+        message_ids: Sequence[str],
+        *,
+        delivered: bool,
+    ) -> None:
         """Settle rows: handled after a delivery, released after silence."""
-        with self._lock:
-            if delivered:
-                self._update(set(message_ids), lambda entry: True, HANDLED)
-            else:
-                self.release(message_ids)
+        if delivered:
+            with self._lock:
+                self._update(
+                    (session, chat_id), set(message_ids), lambda entry: True, HANDLED
+                )
+        else:
+            self.release(session, chat_id, message_ids)
 
     def finish_turn(
         self,
+        session: str,
+        chat_id: str,
         turn_ids: Sequence[str],
         claimed_ids: Sequence[str],
         *,
@@ -184,11 +221,11 @@ class IntakeLedger:
     ) -> None:
         """Settle a run's own ids and every id it claimed while running."""
         if delivered:
-            self.finish([*turn_ids, *claimed_ids], delivered=True)
+            self.finish(session, chat_id, [*turn_ids, *claimed_ids], delivered=True)
         else:
             # Only the claimed ids were this run's to lose; its own turn
             # may already be handled by an earlier run.
-            self.release(claimed_ids)
+            self.release(session, chat_id, claimed_ids)
 
     def _live(self, key: tuple[str, str], now: float | None = None) -> list[IntakeEntry]:
         moment = time.monotonic() if now is None else now
@@ -198,26 +235,20 @@ class IntakeLedger:
         self.store.write(key, entries)
         return entries
 
-    def _find(self, wanted: set[str]) -> list[IntakeEntry]:
-        found: list[IntakeEntry] = []
-        for key in self.store.chat_keys():
-            entries = self.store.read(key)
-            matched = [entry for entry in entries if entry.message_id in wanted]
-            if matched:
-                found.extend(matched)
-        return found
-
     def _update(
-        self, wanted: set[str], matches: Callable[[IntakeEntry], bool], state: str
+        self,
+        key: tuple[str, str],
+        wanted: set[str],
+        matches: Callable[[IntakeEntry], bool],
+        state: str,
     ) -> None:
         if not wanted:
             return
-        for key in self.store.chat_keys():
-            entries = self.store.read(key)
-            changed = False
-            for entry in entries:
-                if entry.message_id in wanted and matches(entry):
-                    entry.state = state
-                    changed = True
-            if changed:
-                self.store.write(key, entries)
+        entries = self._live(key)
+        changed = False
+        for entry in entries:
+            if entry.message_id in wanted and matches(entry):
+                entry.state = state
+                changed = True
+        if changed:
+            self.store.write(key, entries)

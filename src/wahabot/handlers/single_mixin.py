@@ -70,7 +70,7 @@ class SingleMixin(HandlerBase):
         try:
             image = await self.download_captioned_image(image, message_id)
             async with chat_lock(event.session, chat_id):
-                if self.intake.handled(turn_ids):
+                if await self.turn_suppressed(event.session, chat_id, turn_ids):
                     outcome = "superseded"
                     return
                 # Runs in the same chat serialize on its memory and

@@ -151,7 +151,7 @@ class AlbumMixin(HandlerBase):
             addressed=addressed,
         )
         async with chat_lock(event.session, chat_id):
-            if self.intake.handled(turn_ids):
+            if await self.turn_suppressed(event.session, chat_id, turn_ids):
                 return "superseded", None
             ctx = await context_for(event.session, chat_id, self.agent, self.settings)
             with chat_trace_attributes(

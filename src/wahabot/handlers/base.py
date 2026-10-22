@@ -2,6 +2,7 @@
 
 # pyright: reportUninitializedInstanceVariable=false
 
+import asyncio
 import time
 from collections.abc import Sequence
 from typing import Any
@@ -17,6 +18,9 @@ from wahabot.core.access import SessionConfig, SessionConfigReloader
 from wahabot.core.audit import save_run_outcome
 from wahabot.core.waha import WahaClient
 from wahabot.settings import Settings
+
+#: How often a queued run re-checks another run's claim on its turn.
+_CLAIM_POLL_S = 0.1
 
 
 class HandlerBase:
@@ -41,6 +45,24 @@ class HandlerBase:
     async def skip_or_buffer_message(self, *args: Any, **kwargs: Any) -> Any: ...
     def group_message_addressed(self, *args: Any, **kwargs: Any) -> Any: ...
 
+    async def turn_suppressed(
+        self, session: str, chat_id: str, turn_ids: Sequence[str]
+    ) -> bool:
+        """Whether another run already claimed or handled this turn.
+
+        A claim belongs to a run that already released the chat lock and
+        settles or releases it without the lock, so a bounded wait
+        replaces the race where both runs answer the newest turn once
+        each. A claim never outlives its run, so the wait is bounded by
+        the run timeout; past it the turn proceeds as unclaimed.
+        """
+        deadline = time.monotonic() + self.settings.run_timeout
+        while self.intake.claimed(session, chat_id, turn_ids):
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(_CLAIM_POLL_S)
+        return self.intake.handled(session, chat_id, turn_ids)
+
     def finish_run(
         self,
         session: str,
@@ -54,9 +76,15 @@ class HandlerBase:
         """Settle intake and write the one outcome row every run owes."""
         claimed = list(target.claimed_ids) if target is not None else []
         sent = bool(target and (target.sent or target.reacted))
-        delivered = outcome in ("reply", "delivered_via_tool") or sent
+        delivered = outcome in ("reply", "delivered_via_tool", "reaction") or sent
         try:
-            self.intake.finish_turn(turn_ids, claimed, delivered=delivered)
+            self.intake.finish_turn(
+                session,
+                chat_id,
+                turn_ids,
+                claimed,
+                delivered=delivered,
+            )
         except Exception:
             logger.exception("Intake settle failed for {chat_id}", chat_id=chat_id)
         save_run_outcome(

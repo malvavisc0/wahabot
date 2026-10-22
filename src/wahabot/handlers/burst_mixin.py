@@ -362,7 +362,7 @@ class BurstMixin(HandlerBase):
         """Run one merged burst turn under the chat lock."""
         chat_id = buffer.key[1]
         async with chat_lock(merged.session, chat_id):
-            if self.intake.handled(turn_ids):
+            if await self.turn_suppressed(merged.session, chat_id, turn_ids):
                 return "", None
             ctx = await context_for(merged.session, chat_id, self.agent, self.settings)
             with chat_trace_attributes(

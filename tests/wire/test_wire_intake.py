@@ -3,6 +3,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import pytest
+
 from tests.conftest import Bot
 from tests.harness import (
     CHAT_ID,
@@ -20,6 +22,24 @@ def _turn_event(mid: str, body: str) -> dict[str, Any]:
     event = waha_event(mid)
     event["payload"]["body"] = body
     return event
+
+
+def _text_response(text: str) -> dict[str, Any]:
+    """A plain final-text completion for a one-shot reply run."""
+    return {
+        "id": "chatcmpl-smoke-text",
+        "object": "chat.completion",
+        "created": 1788525832,
+        "model": "smoke-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+    }
 
 
 def _run_outcomes(bot: Bot) -> list[dict[str, Any]]:
@@ -212,3 +232,63 @@ def test_repeated_tool_round_records_an_empty_outcome(bot: Bot) -> None:
     outcome = _run_outcomes(bot)[-1]
     assert outcome["outcome"] == "empty"
     assert outcome["delivered_via"] == "silence"
+
+
+def test_unaddressed_group_banter_does_not_supersede_a_reply(bot: Bot) -> None:
+    """Banter that would never wake a run must not stall the answer.
+
+    A message without the bot's name in a `mentioned` group gets no run
+    of its own, so it must also never trip the delivery guard: the
+    addressed turn's reply goes out on the first attempt.
+    """
+    llm = bot.stack.llm
+    a_started = threading.Event()
+
+    async def selector(body: dict[str, Any]) -> dict[str, Any]:
+        if any(message.get("role") == "tool" for message in body["messages"]):
+            return SecondResponse
+        if not a_started.is_set():
+            a_started.set()
+            while len(bot.waha.seen_chats) < 2:
+                await asyncio.sleep(0.02)
+        return FirstResponse
+
+    llm.selector = selector
+    _post_while_running(
+        bot,
+        _turn_event("ADDRA", "kai first question"),
+        _turn_event("ADDRB", "plain banter between others"),
+        a_started,
+    )
+
+    assert _wait(lambda: len(bot.waha.sent) == 1)
+    assert bot.waha.sent[0][2] == "smoke reply one"
+    tool_results = [
+        str(message.get("content", ""))
+        for message in llm.requests[1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert all("Read the newest record" not in result for result in tool_results)
+    outcomes = _run_outcomes(bot)
+    assert {row["outcome"] for row in outcomes} == {"delivered_via_tool"}
+
+
+def test_lone_emoji_reply_records_a_reaction_outcome(
+    bot: Bot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delivered lone-emoji reaction is an outcome of its own.
+
+    The reaction reaches the chat, so the run's outcome row must not
+    read as a silence an incident review would chase as a lost answer.
+    """
+    monkeypatch.setattr("wahabot.handlers.replies.random.random", lambda: 0.0)
+    llm = bot.stack.llm
+    llm.override = _text_response("👍")
+    bot.post(_turn_event("EMOJIA", "kai say hi"))
+
+    assert _wait(lambda: len(bot.waha.reactions) == 1)
+    assert bot.waha.sent == []
+    outcomes = _run_outcomes(bot)
+    assert [row["outcome"] for row in outcomes] == ["reaction"]
+    assert outcomes[-1]["delivered_via"] == "reaction"
+    assert outcomes[-1]["outbound_id"] == ""

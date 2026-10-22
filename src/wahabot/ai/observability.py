@@ -193,10 +193,13 @@ def trace_metadata(
     *,
     message_ids: Sequence[str] = (),
     serial_tokens: Sequence[str] = (),
-    outbound_id: str = "",
     reply_to: str = "",
 ) -> dict[str, str]:
-    """Trace metadata for one run: ids are opaque, serial tokens are not PII."""
+    """Trace metadata for one run: ids are opaque, serial tokens are not PII.
+
+    The outbound id never reaches the traces: it is known only after the
+    run's span closed, so the local audit journal is its home.
+    """
     metadata: dict[str, str] = {}
     opaque_ids = [_opaque(value) for value in message_ids if value]
     if opaque_ids:
@@ -204,25 +207,9 @@ def trace_metadata(
     tokens = [token for token in serial_tokens if token]
     if tokens:
         metadata["wahabot.serial_tokens"] = ",".join(tokens)
-    if outbound_id:
-        metadata["wahabot.outbound_id"] = _opaque(outbound_id)
     if reply_to:
         metadata["wahabot.reply_to"] = _opaque(reply_to)
     return metadata
-
-
-def trace_outbound(outbound_id: str) -> None:
-    """Attach the outbound id to the active span when one is recording."""
-    if not outbound_id:
-        return
-    try:
-        from opentelemetry import trace
-
-        trace.get_current_span().set_attribute(
-            "wahabot.outbound_id", _opaque(outbound_id)
-        )
-    except Exception:
-        return
 
 
 @contextmanager
@@ -231,7 +218,6 @@ def chat_trace_attributes(
     *,
     message_ids: Sequence[str] = (),
     serial_tokens: Sequence[str] = (),
-    outbound_id: str = "",
     reply_to: str = "",
 ) -> Iterator[None]:
     """Group one run's LLM traces under a Langfuse session per chat.
@@ -251,7 +237,6 @@ def chat_trace_attributes(
         metadata = trace_metadata(
             message_ids=message_ids,
             serial_tokens=serial_tokens,
-            outbound_id=outbound_id,
             reply_to=reply_to,
         )
         propagation = propagate_attributes(
