@@ -136,6 +136,26 @@ class IntakeLedger:
                 and (not addressed_only or entry.addressed)
             ]
 
+    def newer(
+        self,
+        session: str,
+        chat_id: str,
+        *,
+        after: float | None = None,
+        exclude: Collection[str] = (),
+        addressed_only: bool = False,
+    ) -> list[IntakeRow]:
+        """Any row newer than a turn, in any state, for send revalidation."""
+        skipped = set(exclude)
+        with self._lock:
+            return [
+                entry
+                for entry in self._live((session, chat_id))
+                if entry.message_id not in skipped
+                and (after is None or entry.at > after)
+                and (not addressed_only or entry.addressed)
+            ]
+
     def claim(
         self,
         session: str,

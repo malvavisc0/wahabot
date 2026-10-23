@@ -237,7 +237,7 @@ def delivery_guard(target: RunTarget) -> str | None:
             + "Do not send in this batch; answer the newest record in your "
             + "next response."
         )
-    newer = target.intake.pending(
+    newer = target.intake.newer(
         target.session,
         target.chat_id,
         after=target.turn_started_at,
