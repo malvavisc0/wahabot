@@ -18,13 +18,8 @@ from wahabot.ai.triage import TriageGate
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.access import SessionConfig, SessionConfigReloader
 from wahabot.core.audit import save_run_outcome
-from wahabot.core.delivery.intents import (
-    FAILED,
-    PREPARED,
-    SENDING,
-    UNKNOWN,
-    IntentStore,
-)
+from wahabot.core.delivery.intents import IntentStore
+from wahabot.core.delivery.model import FAILED, PREPARED, SENDING, UNKNOWN
 from wahabot.core.models import WahaEvent
 from wahabot.core.transport import Transport
 from wahabot.settings import Settings
@@ -127,12 +122,16 @@ class HandlerBase:
         owner = target.owner if target is not None else ""
         sent = bool(target and (target.sent or target.reacted))
         delivered = outcome in ("reply", "delivered_via_tool", "reaction") or sent
-        try:
-            self._settle_run(
-                session, chat_id, turn_ids, claimed, delivered, outcome, owner
-            )
-        except Exception:
-            logger.exception("Intake settle failed for {chat_id}", chat_id=chat_id)
+        # A suppressed run never claimed these rows: another run or an
+        # outbound intent owns them, so settling here would clobber its
+        # claim. It still owes its audit outcome row.
+        if outcome != "superseded" or target is not None:
+            try:
+                self.settle_run(
+                    session, chat_id, turn_ids, claimed, delivered, outcome, owner
+                )
+            except Exception:
+                logger.exception("Intake settle failed for {chat_id}", chat_id=chat_id)
         save_run_outcome(
             self.settings.data_dir,
             session,
@@ -145,7 +144,7 @@ class HandlerBase:
             failure_class=failure_class,
         )
 
-    def _settle_run(
+    def settle_run(
         self,
         session: str,
         chat_id: str,
@@ -156,12 +155,12 @@ class HandlerBase:
         owner: str,
     ) -> None:
         ids = [*turn_ids, *claimed]
-        outstanding = self._settle_sending(ids)
-        if self._has_unknown(outstanding):
-            self._finish_operator_required(session, chat_id, ids)
+        outstanding = self.settle_sending(ids)
+        if self.has_unknown(outstanding):
+            self.finish_operator_required(session, chat_id, ids)
             return
-        if self._retryable(outstanding):
-            self._settle_retryable(
+        if self.retryable(outstanding):
+            self.settle_retryable(
                 session,
                 chat_id,
                 turn_ids,
@@ -172,11 +171,11 @@ class HandlerBase:
                 ids,
             )
             return
-        self._settle_plain(
+        self.settle_plain(
             session, chat_id, turn_ids, claimed, delivered, outcome, owner, ids
         )
 
-    def _settle_sending(self, ids: list[str]) -> list[Any]:
+    def settle_sending(self, ids: list[str]) -> list[Any]:
         outstanding = self.intents.outstanding_for(ids)
         sending = [intent for intent in outstanding if intent.state == SENDING]
         for intent in sending:
@@ -186,14 +185,14 @@ class HandlerBase:
             self.intents.unknown(intent.id, "send outcome was not recorded")
         return self.intents.outstanding_for(ids) if sending else outstanding
 
-    def _has_unknown(self, outstanding: list[Any]) -> bool:
+    def has_unknown(self, outstanding: list[Any]) -> bool:
         return any(
             intent.state == UNKNOWN
             or (intent.state == FAILED and intent.operator_required)
             for intent in outstanding
         )
 
-    def _retryable(self, outstanding: list[Any]) -> list[Any]:
+    def retryable(self, outstanding: list[Any]) -> list[Any]:
         return [
             intent
             for intent in outstanding
@@ -201,7 +200,7 @@ class HandlerBase:
             or (intent.state == FAILED and not intent.operator_required)
         ]
 
-    def _settle_retryable(
+    def settle_retryable(
         self,
         session: str,
         chat_id: str,
@@ -213,16 +212,18 @@ class HandlerBase:
         ids: list[str],
     ) -> None:
         if delivered:
-            self.intents.cancel_retryable_for(ids, "superseded by a confirmed send")
-            self._finish_delivered(session, chat_id, turn_ids, claimed, owner)
+            self.intents.cancel_retryable_for(
+                ids, "superseded by a confirmed send", chat_id=chat_id
+            )
+            self.finish_delivered(session, chat_id, turn_ids, claimed, owner)
             return
         if outcome in ("silence", "empty", "superseded"):
-            self.intents.cancel_retryable_for(ids, outcome)
-            self._finish_silent(session, chat_id, turn_ids, claimed, outcome, owner)
+            self.intents.cancel_retryable_for(ids, outcome, chat_id=chat_id)
+            self.finish_silent(session, chat_id, turn_ids, claimed, outcome, owner)
         # A failed run with a retryable intent leaves the rows in
         # ``delivering``; the intent owns the next attempt.
 
-    def _settle_plain(
+    def settle_plain(
         self,
         session: str,
         chat_id: str,
@@ -234,10 +235,10 @@ class HandlerBase:
         ids: list[str],
     ) -> None:
         if delivered:
-            self._finish_delivered(session, chat_id, turn_ids, claimed, owner)
+            self.finish_delivered(session, chat_id, turn_ids, claimed, owner)
             return
         if outcome in ("silence", "empty", "superseded"):
-            self._finish_silent(session, chat_id, turn_ids, claimed, outcome, owner)
+            self.finish_silent(session, chat_id, turn_ids, claimed, outcome, owner)
             return
         self.intake.fail(
             session,
@@ -247,7 +248,7 @@ class HandlerBase:
             next_attempt_at=time.time() + 60,
         )
 
-    def _finish_delivered(
+    def finish_delivered(
         self,
         session: str,
         chat_id: str,
@@ -264,7 +265,7 @@ class HandlerBase:
             owner=owner,
         )
 
-    def _finish_silent(
+    def finish_silent(
         self,
         session: str,
         chat_id: str,
@@ -284,7 +285,7 @@ class HandlerBase:
             owner=owner,
         )
 
-    def _finish_operator_required(
+    def finish_operator_required(
         self, session: str, chat_id: str, ids: list[str]
     ) -> None:
         self.intake.finish(

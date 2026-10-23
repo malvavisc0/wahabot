@@ -14,6 +14,7 @@ from wahabot.ai.tools.schemas import (
 )
 from wahabot.core.audit import save_action
 from wahabot.core.transport import Transport
+from wahabot.core.transport.context import bind_intake_ids, reset_intake_ids
 from wahabot.settings import Settings
 from wahabot.status import state as _status_state
 
@@ -84,11 +85,18 @@ def forward_escalation(
     if refusal is not None:
         return error(refusal)
     try:
-        sent_id = waha.send_text(
-            session,
-            operator_jid,
-            f"wahabot escalation from {chat_id}:\n{report.strip()}",
-        )
+        # An operator report does not answer the customer turn, so its
+        # intent must not carry the turn's intake ids: a failure here must
+        # neither hold those rows nor be cancelled by the customer reply.
+        token = bind_intake_ids(())
+        try:
+            sent_id = waha.send_text(
+                session,
+                operator_jid,
+                f"wahabot escalation from {chat_id}:\n{report.strip()}",
+            )
+        finally:
+            reset_intake_ids(token)
     except Exception as exc:
         # No confirmed acknowledgment: leave the cooldown unstamped
         # and never claim the operator was notified.

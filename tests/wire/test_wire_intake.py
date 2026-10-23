@@ -307,3 +307,26 @@ def test_silent_row_does_not_replay_after_restart(bot: Bot) -> None:
     asyncio.run(restarted.recovery.startup())
 
     assert restarted.waha.sent == []
+
+
+def test_needs_intake_accepts_only_conversation_events() -> None:
+    from wahabot.core.models import WahaEvent
+    from wahabot.webhook import needs_intake
+
+    def event(kind: str, *, from_me: bool = False) -> WahaEvent:
+        return WahaEvent.model_validate(
+            {
+                **waha_event("NEEDSINTAKE"),
+                "event": kind,
+                "payload": {
+                    **waha_event("NEEDSINTAKE")["payload"],
+                    "fromMe": from_me,
+                },
+            }
+        )
+
+    assert needs_intake(event("message"))
+    assert needs_intake(event("message.any"))
+    assert not needs_intake(event("message.ack"))
+    assert not needs_intake(event("message.revoked"))
+    assert not needs_intake(event("message", from_me=True))

@@ -205,5 +205,8 @@ class SingleMixin(HandlerBase):
         )
         if body is None and image is None and video is None and url_video is None:
             logger.debug("Skipping media/album message {id}", id=event.payload.get("id"))
+            # Nothing to answer, but the row must leave the durable queue or
+            # recovery would retry it every tick forever.
+            self.settle_intake(event, "silent", "no readable content")
             return
         await self.deliver_single_reply(event, config, image, video, url_video)

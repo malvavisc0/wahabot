@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from tests.conftest import Bot
-from tests.harness import CHAT_ID, SecondResponse, waha_event
+from tests.harness import CHAT_ID, FOREIGN_JID, ME_JID, SecondResponse, waha_event
 from tests.wire.support import _audit_entries
 from wahabot.core.models import WahaEvent
 
@@ -159,3 +159,134 @@ def test_recovery_tick_leaves_a_live_inflight_turn_to_its_run(bot: Bot) -> None:
     assert row is not None and row.state == "done" and row.outcome == "delivered"
     assert len(_run_outcomes(bot)) == 1
     assert len([entry for entry in bot.waha.sent if entry[1] == CHAT_ID]) == 1
+
+
+def test_redelivery_after_restart_leaves_the_durable_row_to_recovery(
+    bot: Bot,
+) -> None:
+    event = _turn_event("BACKLOGREDELIVERY", "kai backlog after restart")
+    event["payload"]["timestamp"] = int(time.time() - 600)
+    event["timestamp"] = int(time.time() - 600)
+    message_id = str(event["payload"]["id"])
+    bot.ledger.record(
+        bot.settings.session,
+        CHAT_ID,
+        message_id,
+        "[[08:00 Ana #m1]] text :: backlog",
+        raw_json=json.dumps(event),
+        sender="491555000001@c.us",
+        received_at=time.time() - 600,
+    )
+
+    restarted = bot.restart()
+    restarted.stack.llm.override = SecondResponse
+    restarted.post(event)
+
+    row = restarted.ledger.row(restarted.settings.session, CHAT_ID, message_id)
+    assert row is not None and row.state == "pending"
+    assert row.outcome is None
+
+    asyncio.run(restarted.recovery.startup())
+
+    row = restarted.ledger.row(restarted.settings.session, CHAT_ID, message_id)
+    assert row is not None and row.outcome == "delivered"
+    assert len([entry for entry in restarted.waha.sent if entry[1] == CHAT_ID]) == 1
+
+
+def test_message_without_readable_content_is_settled_silent(bot: Bot) -> None:
+    event = waha_event("NOCONTENT")
+    event["payload"]["from"] = FOREIGN_JID
+    event["payload"]["body"] = ""
+    event["payload"]["_data"]["type"] = "document"
+    message_id = str(event["payload"]["id"])
+
+    bot.post(event)
+
+    row = bot.ledger.row(bot.settings.session, FOREIGN_JID, message_id)
+    assert row is not None and row.state == "done"
+    assert row.outcome == "silent"
+    assert row.reason == "no readable content"
+
+    asyncio.run(bot.recovery.tick())
+    assert row.reason == "no readable content"
+    assert bot.waha.sent == []
+
+
+def test_replay_skips_a_turn_a_live_recovery_owner_is_processing(bot: Bot) -> None:
+    event = _turn_event("REPLAYPROCESSING", "kai live owner")
+    message_id = str(event["payload"]["id"])
+    bot.ledger.record(
+        bot.settings.session,
+        CHAT_ID,
+        message_id,
+        "[[08:00 Ana #m1]] text :: live",
+        raw_json=json.dumps(event),
+        sender="491555000001@c.us",
+        received_at=time.time(),
+    )
+    intent = bot.intents.prepare(
+        session=bot.settings.session,
+        chat_id=CHAT_ID,
+        kind="text",
+        payload={"text": "stale draft"},
+        intake_ids=[message_id],
+    )
+    bot.ledger.claim(bot.settings.session, CHAT_ID, [message_id], owner="live-run")
+
+    asyncio.run(bot.recovery.tick())
+
+    assert bot.waha.sent == []
+    assert bot.intents.get(intent.id).state == "prepared"
+
+
+def test_suppressed_run_does_not_settle_the_delivering_row(bot: Bot) -> None:
+    event = _turn_event("SUPPRESSDELIVER", "kai owned by an intent")
+    message_id = str(event["payload"]["id"])
+    bot.ledger.record(
+        bot.settings.session,
+        CHAT_ID,
+        message_id,
+        "[[08:00 Ana #m1]] text :: owned",
+        raw_json=json.dumps(event),
+        sender="491555000001@c.us",
+        received_at=time.time(),
+    )
+    bot.ledger.hold(bot.settings.session, CHAT_ID, [message_id], "delivery retrying")
+
+    bot.handlers.finish_run(
+        bot.settings.session,
+        CHAT_ID,
+        [message_id],
+        None,
+        "superseded",
+        time.monotonic(),
+    )
+
+    row = bot.ledger.row(bot.settings.session, CHAT_ID, message_id)
+    assert row is not None and row.state == "delivering"
+
+
+def test_escalation_intent_does_not_carry_the_customer_turn_ids(bot: Bot) -> None:
+    from wahabot.ai.tools.whatsapp.escalation import (
+        EscalationChannel,
+        forward_escalation,
+    )
+    from wahabot.core.transport.context import bind_intake_ids, reset_intake_ids
+
+    token = bind_intake_ids(("customer-turn",))
+    try:
+        outcome = forward_escalation(
+            bot.transport,
+            EscalationChannel(),
+            bot.settings,
+            bot.settings.session,
+            CHAT_ID,
+            "a report",
+        )
+    finally:
+        reset_intake_ids(token)
+
+    assert '"ok": true' in outcome
+    intent = bot.intents.recent(1)[0]
+    assert intent.chat_id == ME_JID
+    assert intent.intake_ids == []

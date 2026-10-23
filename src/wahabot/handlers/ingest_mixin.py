@@ -82,16 +82,7 @@ class IngestMixin(HandlerBase):
             )
             return
         chat_id = str(event.payload.get("from", ""))
-        if self.intake.handled(event.session, chat_id, [message_id]):
-            logger.debug("Skipping already handled message {id}", id=message_id)
-            return
-        if self.intake.claimed(event.session, chat_id, [message_id]):
-            logger.debug("Skipping message {id} owned by another run", id=message_id)
-            return
-        if self.intake.is_delivering(event.session, chat_id, [message_id]):
-            logger.debug(
-                "Skipping message {id} owned by an outbound intent", id=message_id
-            )
+        if self.duplicate_or_owned(event, chat_id, message_id):
             return
         if not session_healthy():
             # Before seen_recently: a muted message must not be marked
@@ -110,18 +101,8 @@ class IngestMixin(HandlerBase):
         # Recovery owns a durable row: the live dedup and startup
         # freshness gates would otherwise drop exactly the messages the
         # outage left behind. Provenance gates below still apply.
-        if not recovering.get():
-            if seen_recently(message_id):
-                logger.debug("Skipping duplicate event for message {id}", id=message_id)
-                return
-            if is_stale(event, self.started_at):
-                logger.info(
-                    "Skipping stale message {id} (ts={ts})",
-                    id=message_id,
-                    ts=event.payload.get("timestamp"),
-                )
-                self.settle_intake(event, "silent", "stale")
-                return
+        if not recovering.get() and self.stale_or_duplicate(event, message_id):
+            return
         if not is_replyable(event):
             logger.debug(
                 "Ignoring non-replyable message from {sender}",
@@ -132,6 +113,39 @@ class IngestMixin(HandlerBase):
         # Off the event loop: a rate-limited identity flush writes disk.
         await asyncio.to_thread(learn_identity, event)
         return config
+
+    def duplicate_or_owned(self, event: WahaEvent, chat_id: str, message_id: str) -> bool:
+        """True when another run or outbound intent already owns this message."""
+        if self.intake.handled(event.session, chat_id, [message_id]):
+            logger.debug("Skipping already handled message {id}", id=message_id)
+            return True
+        if self.intake.claimed(event.session, chat_id, [message_id]):
+            logger.debug("Skipping message {id} owned by another run", id=message_id)
+            return True
+        if self.intake.is_delivering(event.session, chat_id, [message_id]):
+            logger.debug(
+                "Skipping message {id} owned by an outbound intent", id=message_id
+            )
+            return True
+        return False
+
+    def stale_or_duplicate(self, event: WahaEvent, message_id: str) -> bool:
+        """True when the live dedup/freshness gate must skip this event."""
+        if seen_recently(message_id):
+            logger.debug("Skipping duplicate event for message {id}", id=message_id)
+            return True
+        if not is_stale(event, self.started_at):
+            return False
+        logger.info(
+            "Skipping stale message {id} (ts={ts})",
+            id=message_id,
+            ts=event.payload.get("timestamp"),
+        )
+        # A durable row belongs to recovery: settling it here would
+        # discard exactly the backlog the outage left behind.
+        if self.intake_row(event) is None:
+            self.settle_intake(event, "silent", "stale")
+        return True
 
     @override
     async def handle_self_command(
@@ -288,20 +302,26 @@ class IngestMixin(HandlerBase):
             message_ids=[row.message_id for row in rows],
         )
 
-    def recovery_outcome(self, rows: list[IntakeRow]) -> str:
-        """Classify the rows after their recovery run settled them."""
-        after = [
+    def reloaded_rows(self, rows: list[IntakeRow]) -> list[IntakeRow]:
+        """The same rows as they are stored now, dropping vanished ids."""
+        return [
             row
             for row in (
                 self.intake.row(row.session, row.chat_id, row.message_id) for row in rows
             )
             if row is not None
         ]
+
+    def recovery_outcome(self, rows: list[IntakeRow]) -> str:
+        """Classify the rows after their recovery run settled them."""
+        after = self.reloaded_rows(rows)
         if any(row.outcome == "operator_required" for row in after):
             return "operator_required"
-        if after and all(row.state == "done" for row in after):
-            return "answered"
-        return "skipped"
+        if not after or not all(row.state == "done" for row in after):
+            return "skipped"
+        if all(row.outcome == "delivered" for row in after):
+            return "delivered"
+        return "answered"
 
     def intake_addressed(
         self,

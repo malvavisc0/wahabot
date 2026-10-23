@@ -65,7 +65,7 @@ class Bursts:
         timer = self._timers.pop(key, None)
         if timer is not None and not timer.done():
             timer.cancel()
-        timer_task = self._spawn(self._flush_later(key, delay))
+        timer_task = self.spawn_buffer(self.flush_later(key, delay))
         if timer_task is not None:
             self._timers[key] = timer_task
         logger.debug(
@@ -81,7 +81,7 @@ class Bursts:
         """True when *chat_id* has any open burst buffer."""
         return any(key[1] == chat_id for key in self._buffers)
 
-    async def _flush_later(self, key: tuple[str, str, str], delay: float) -> None:
+    async def flush_later(self, key: tuple[str, str, str], delay: float) -> None:
         await asyncio.sleep(delay)
         registered = self._timers.get(key)
         if registered is not None and asyncio.current_task() is not registered:
@@ -89,9 +89,9 @@ class Bursts:
         self._timers.pop(key, None)
         buffer = self._buffers.pop(key, None)
         if buffer is not None and buffer.message_ids:
-            self._complete(buffer)
+            self.complete(buffer)
 
-    def _complete(self, buffer: BurstBuffer) -> None:
+    def complete(self, buffer: BurstBuffer) -> None:
         logger.info(
             "Burst complete in {chat_id}: {n} message(s) from {sender}, held {hold:.1f}s",
             chat_id=buffer.key[1],
@@ -99,9 +99,9 @@ class Bursts:
             sender=buffer.sender,
             hold=buffer.hold_seconds(),
         )
-        self._spawn(self.on_complete(buffer))
+        self.spawn_buffer(self.on_complete(buffer))
 
-    def _spawn(self, coro: Awaitable[None]) -> asyncio.Task[None] | None:
+    def spawn_buffer(self, coro: Awaitable[None]) -> asyncio.Task[None] | None:
         try:
             task = asyncio.ensure_future(coro)
         except RuntimeError:

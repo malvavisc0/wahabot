@@ -79,8 +79,8 @@ class Albums:
                 chat_id=key[1],
                 n=expected_images(event),
             )
-            self._consume(container_id)
-            self._spawn(self._flush_later(key))
+            self.consume(container_id)
+            self.spawn_buffer(self.flush_later(key))
             return container_id
         if message_kind(event) not in ("image", "sticker"):
             return None
@@ -88,20 +88,20 @@ class Albums:
         if buffer is None:
             return None
         message_id = str(event.payload.get("id", ""))
-        self._consume(message_id)
+        self.consume(message_id)
         buffer.image_ids.append(message_id)
         if buffer.expected and len(buffer.image_ids) >= buffer.expected:
             self._albums.pop(key, None)
-            self._complete(buffer)
+            self.complete(buffer)
         return buffer.container_id
 
-    async def _flush_later(self, key: tuple[str, str]) -> None:
+    async def flush_later(self, key: tuple[str, str]) -> None:
         await asyncio.sleep(self.flush_timeout_s)
         buffer = self._albums.pop(key, None)
         if buffer is not None:
-            self._complete(buffer)
+            self.complete(buffer)
 
-    def _complete(self, buffer: AlbumBuffer) -> None:
+    def complete(self, buffer: AlbumBuffer) -> None:
         if not buffer.image_ids:
             return
         logger.debug(
@@ -110,9 +110,9 @@ class Albums:
             got=len(buffer.image_ids),
             want=buffer.expected,
         )
-        self._spawn(self.on_complete(buffer))
+        self.spawn_buffer(self.on_complete(buffer))
 
-    def _spawn(self, coro: Awaitable[None]) -> asyncio.Task[None] | None:
+    def spawn_buffer(self, coro: Awaitable[None]) -> asyncio.Task[None] | None:
         try:
             task = asyncio.ensure_future(coro)
         except RuntimeError:
@@ -124,7 +124,7 @@ class Albums:
         task.add_done_callback(self._tasks.discard)
         return task
 
-    def _consume(self, message_id: str) -> None:
+    def consume(self, message_id: str) -> None:
         if message_id in self._consumed:
             return
         self._consumed.add(message_id)

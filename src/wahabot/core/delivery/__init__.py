@@ -1,13 +1,13 @@
 """Delivery intent state helpers."""
 
-from wahabot.core.delivery.intents import (
+from wahabot.core.delivery.intents import IntentStore
+from wahabot.core.delivery.model import (
     FAILED,
     PREPARED,
     SENDING,
     SENT,
     UNKNOWN,
     DeliveryIntent,
-    IntentStore,
 )
 
 __all__ = [
