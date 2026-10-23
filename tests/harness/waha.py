@@ -18,6 +18,7 @@ class RecordingWaha(WahaClient):
             base_url="http://waha.invalid", api_key="waha-key", transport=mock_transport()
         )
         self.sent: list[tuple[str, str, str, list[str] | None]] = []
+        self.forwarded: list[tuple[str, str, str]] = []
         self.sent_images: list[tuple[str, str, dict[str, Any], str | None]] = []
         self.sent_files: list[tuple[str, str, dict[str, Any], str | None]] = []
         self.sent_videos: list[tuple[str, str, dict[str, Any], str | None, bool]] = []
@@ -65,6 +66,12 @@ class RecordingWaha(WahaClient):
     ) -> str:
         self.sent.append((session, chat_id, text, mentions))
         return f"true_{chat_id}_SENT{len(self.sent)}"
+
+    @override
+    def forward_message(self, session: str, chat_id: str, message_id: str) -> str:
+        """Record forwards and confirm them without HTTP."""
+        self.forwarded.append((session, chat_id, message_id))
+        return f"true_{chat_id}_FORWARD{len(self.forwarded)}"
 
     @override
     def send_image(
@@ -169,4 +176,6 @@ class RecordingWaha(WahaClient):
         """Serve the canned PNG (or MP4 for video URLs) for any media fetch."""
         if ".mp4" in url:
             return self.video_bytes
+        if ".oga" in url or ".mp3" in url:
+            return b"smoke-voice-bytes"
         return SMOKE_PNG
