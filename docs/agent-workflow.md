@@ -69,7 +69,10 @@ A small classifier (`wahabot/ai/triage.py`) labels each inbound message
 for adversarial intent, escalation, and whether an unaddressed group
 message should participate. The runtime builds a bounded gate context —
 the enriched message, the last five visible turns, the chat's mute note
-and the current session rules — and never the full transcript.
+and a bounded gate brief (assistant name, timezone, operator,
+participation mode, personal-life exception and current goal) — and
+never the full transcript. Each verdict is one `triage-gate` guardrail
+observation in Langfuse when tracing is on.
 
 - **DMs and addressed turns** start the agent immediately and run the
   gate concurrently. The tool layer awaits its verdict once, bounded by
@@ -277,8 +280,38 @@ Before each run reaches the LLM, the buffered history passes through
    delivery holder (the `sent`/`reacted` latches), so the handler can
    tell a tool-delivered run from a text reply without touching
    run-internal state. The handler sends the text back to the chat
-   through WAHA as a quote-reply to the triggering message
-   (`reply_to`), unless a tool already delivered.
+   through WAHA as a quote-reply to the turn's anchor — the newest
+   record the run claimed after an intake refusal, otherwise the
+   triggering message — unless a tool already delivered. If a newer
+   addressed message arrived during the run, the final text is
+   revalidated before it is stored: the run settles as `superseded`,
+   nothing is written to memory, and the newer turn's own run answers
+   it.
+
+### Send-time revalidation and the intake ledger
+
+`IntakeLedger` (`ai/intake.py`) keeps one chat's accepted inbound
+messages: each row carries the message id, the rendered record, its
+arrival time and whether it would wake a run. A run claims the addressed
+rows newer than its start; `send_message`, `send_media`,
+`forward_message`, `react_to_message` and the final-text path all call
+`delivery_guard` before delivering. A refusal claims the rows it renders
+(newest-first selection within a 1,200-character budget, rendered
+oldest-first), returns their records with the re-read instruction, and
+blocks every remaining delivery call in that tool batch. The next LLM
+round reads the refusal and may retry; a retry that ends without a send
+releases the claims, so the newer message gets its own run. A queued run
+whose addressed rows are already `handled` starts no agent run; one
+whose row is still claimed waits for the active run to settle it,
+bounded by `WAHABOT_RUN_TIMEOUT`.
+
+Only addressed rows take part: unaddressed group chatter, operator-folded
+`fromMe` messages and an album's unaddressed image rows can neither
+supersede a reply nor keep an answered album alive. The intake window is
+`max_age_for_run_timeout(run_timeout)` (30 minutes at the default
+timeout), so a claim cannot expire inside the run that holds it. The
+final-text check runs before `remember`, so a superseded answer is never
+written to chat memory.
 
 ### Run concurrency and the run-scoped target
 
@@ -296,9 +329,10 @@ evicting there would hand the next caller a fresh lock running
 concurrently with the old waiter.
 
 Everything a run needs — session, chat id, the once-per-run
-`sent`/`reacted` delivery latches, and the operator arming flag —
-lives in a `RunTarget` dataclass bound for the run's duration through
-`contextvars` (`bind_target` / `current_target` in
+`sent`/`reacted` delivery latches, the operator arming flag, the intake
+ledger with its claimed records, the final-text anchor and the run
+outcome — lives in a `RunTarget` dataclass bound for the run's duration
+through `contextvars` (`bind_target` / `current_target` in
 `ai/tools/whatsapp.py`). The workflow engine creates every step task
 (and each tool's `asyncio.to_thread` worker) inside the run's
 context, so every tool of a run resolves **its own run's** target:
@@ -467,9 +501,9 @@ Three event flows sit outside the plain message → reply pipeline:
   be healthy and still generating — so the flag stays up and the
   operator gets one alert per slow stretch naming the budget and the
   knob; a success re-arms the latch. Two budgets share that class:
-  the per-request `WAHABOT_LLM_TIMEOUT` (60 s default;
+  the per-request `WAHABOT_LLM_TIMEOUT` (900 s default;
   `APITimeoutError`) and the run-level cap `WAHABOT_RUN_TIMEOUT`
-  (120 s default; `WorkflowTimeoutError` from the broker's timeout
+  (1,200 s default; `WorkflowTimeoutError` from the broker's timeout
   tick) — a run can cross its total budget while every call stayed
   within its own, which is the cap doing its job, not a bug. Both
   classes drop the seen marker so WAHA's redelivery retries the lost
@@ -487,8 +521,10 @@ operator command replies, one `run_outcome` row per run (outcome,
 duration, intake ids, outbound id, delivery path and failure class),
 and `send_failed` rows for sends that raised. A run's outcome is one
 of `reply`, `reaction` (a delivered lone-emoji reaction), `silence`,
-`delivered_via_tool`, `superseded`, `failed` or `empty`. Reply,
-reaction, tool-delivered and silence rows carry the intake ids,
+`delivered_via_tool`, `superseded`, `failed` or `empty`. `superseded`
+covers both a queued run that lost its turn to another run and a final
+text dropped before storage because newer intake owned the answer.
+Reply, reaction, tool-delivered and silence rows carry the intake ids,
 reply-to id, outbound id, delivery path and duration. Records for
 actions that send are written only *after* the send succeeded — a
 failed send never leaves an audit row claiming the chat was answered. Writes are fail-soft (disk errors are logged and
@@ -533,9 +569,9 @@ tracing), and an `atexit` flush covers the server's shutdown.
 ## The built-in tools
 
 The tools bind shared settings and the runtime's WAHA client. Each run
-binds a context-local `RunTarget` for its session, chat, latches, and
-operator flag; concurrent runs do not share those targets. Register them
-with `build_default_tools(waha, settings)`:
+binds a context-local `RunTarget` for its session, chat, latches, intake
+claims and operator flag; concurrent runs do not share those targets.
+Register them with `build_default_tools(waha, settings)`:
 
 ```python
 agent = build_agent(
@@ -792,10 +828,10 @@ literally `handle_llm_input → ToolCallEvent → handle_tool_calls →
 InputEvent → handle_llm_input`. The round limit works *because* of
 this: at the limit the step returns `StopEvent` instead of
 `ToolCallEvent`, so nothing is published that `handle_tool_calls`
-accepts — **no flag the model can talk its way past**. The 120 s
+accepts — **no flag the model can talk its way past**. The 1,200 s
 workflow timeout is enforced independently by a broker timeout tick
 (`WorkflowTimeoutError`), so the two bounds stack: 50 rounds *or*
-120 s, whichever comes first.
+1,200 s, whichever comes first.
 
 ### `ChatMemoryBuffer` trims on read, not on write
 
@@ -852,7 +888,7 @@ and fall back to kwargs, or it will silently see zero.
   (`model_name`, no temperature) — leaving both as `None` and spamming
   OTel "Invalid type NoneType" warnings per LLM call.
   `ObservableOpenAILike.to_payload` exists solely to add those two keys.
-- Workflow runs have a timeout (`WAHABOT_RUN_TIMEOUT`, 120 s by
+- Workflow runs have a timeout (`WAHABOT_RUN_TIMEOUT`, 1,200 s by
   default; 0 disables it), so a runaway tool
   loop cannot hang the webhook forever.
 - The tool loop is also bounded by `WAHABOT_TOOL_ROUND_LIMIT`

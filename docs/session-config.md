@@ -76,7 +76,7 @@ In **1:1 chats** the bot always replies. In **groups** the
 |---|---|
 | `never` | Never reply in groups. |
 | `mentioned` (default) | Reply only when the bot is mentioned by name/regex **or** when someone replies to one of the bot's messages. |
-| `judicious` | Unaddressed group messages go to the triage gate first. The gate sees the message, the last few turns, the chat's mute list and the session rules; only a participation verdict wakes the agent. Addressed messages always run. If the gate is unavailable, unaddressed groups stay silent. |
+| `judicious` | Unaddressed group messages go to the triage gate first. The gate sees the message, the last few turns, the chat's mute list and a bounded gate brief (assistant name, timezone, operator, participation mode, personal-life exception and current goal); only a participation verdict wakes the agent. Addressed messages always run. If the gate is unavailable, unaddressed groups stay silent. |
 
 ### Mention detection
 
