@@ -86,10 +86,9 @@ class Registration:
     recovery: Recovery
 
 
-def webhook_app_state(settings: Settings, recovery: Recovery) -> None:
+def webhook_app_state(recovery: Recovery) -> None:
     """Make the recovery pass visible to the app's lifespan and ticker."""
-    if settings.session:
-        webhook_app.state.recovery = recovery
+    webhook_app.state.recovery = recovery
 
 
 def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration:
@@ -145,7 +144,7 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
         tools=", ".join(sorted(tool.metadata.get_name() for tool in agent.tools)),
     )
     recovery = Recovery(settings, ledger, transport, handlers)
-    webhook_app_state(settings, recovery)
+    webhook_app_state(recovery)
     return Registration(
         agent=agent,
         config_reloader=config_reloader,
