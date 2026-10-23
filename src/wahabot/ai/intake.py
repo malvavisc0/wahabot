@@ -20,8 +20,21 @@ HANDLED = "handled"
 
 #: One chat's intake is small: messages older than this are no longer
 #: relevant to revalidation, and the cap bounds memory under a flood.
-MAX_AGE_S = 900
+#: It must outlive ``Settings.run_timeout``: a run can hold a claim for
+#: its whole wall-clock budget, and an expiring claim would let the
+#: queued run answer the same turn again.
+MAX_AGE_S = 1800
 MAX_MESSAGES = 1000
+
+
+def max_age_for_run_timeout(run_timeout: float) -> float:
+    """The intake window that keeps a claim alive for one full run.
+
+    Claims are stamped at arrival, not at claim time, so a run that
+    started before the message can claim it near its own deadline. The
+    extra margin keeps the row alive slightly past that deadline.
+    """
+    return max(MAX_AGE_S, run_timeout + 300)
 
 
 @dataclass(slots=True)
@@ -38,6 +51,20 @@ class IntakeEntry:
     #: never wake a run (unaddressed group chatter) never supersede a
     #: reply either — they age out unclaimed.
     addressed: bool = True
+
+
+def selected_entries(
+    entries: Sequence[IntakeEntry],
+    wanted: set[str],
+    *,
+    addressed_only: bool,
+) -> list[IntakeEntry]:
+    """The requested entries, optionally only those that would wake a run."""
+    return [
+        entry
+        for entry in entries
+        if entry.message_id in wanted and (not addressed_only or entry.addressed)
+    ]
 
 
 class IntakeStore(Protocol):
@@ -163,17 +190,29 @@ class IntakeLedger:
                 for entry in self._live((session, chat_id))
             )
 
-    def handled(self, session: str, chat_id: str, message_ids: Sequence[str]) -> bool:
-        """Whether every requested id is known and already handled."""
+    def handled(
+        self,
+        session: str,
+        chat_id: str,
+        message_ids: Sequence[str],
+        *,
+        addressed_only: bool = False,
+    ) -> bool:
+        """Whether the requested ids are known and already handled.
+
+        With ``addressed_only`` only rows that would wake a run count:
+        an album's unaddressed image rows never own an answer, so they
+        must not keep an already-answered album run alive.
+        """
         wanted = set(message_ids)
         if not wanted:
             return False
         with self._lock:
-            found = [
-                entry
-                for entry in self._live((session, chat_id))
-                if entry.message_id in wanted
-            ]
+            found = selected_entries(
+                self._live((session, chat_id)), wanted, addressed_only=addressed_only
+            )
+            if addressed_only:
+                return bool(found) and all(entry.state == HANDLED for entry in found)
             return {entry.message_id for entry in found} == wanted and all(
                 entry.state == HANDLED for entry in found
             )

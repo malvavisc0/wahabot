@@ -16,7 +16,12 @@ from wahabot.ai.events import ToolCallEvent
 from wahabot.ai.history import (
     chat_visible_text,
 )
-from wahabot.ai.tools.runcontext import mark_run_outcome
+from wahabot.ai.tools.runcontext import (
+    RunTarget,
+    current_target,
+    delivery_guard,
+    mark_run_outcome,
+)
 from wahabot.ai.workflow.base import AgentBase
 from wahabot.ai.workflow.delivery import SILENCE_TOOL
 from wahabot.ai.workflow.toolkit import (
@@ -124,6 +129,27 @@ class StepMixin(AgentBase):
         await self.collapse_delivery(ctx)
         return event
 
+    def superseding_target(self, visible: str) -> RunTarget | None:
+        """The target whose newer intake owns this final text, if any."""
+        if not visible:
+            return None
+        try:
+            target = current_target()
+        except RuntimeError:
+            return None
+        return target if delivery_guard(target) else None
+
+    async def stop_superseded(self, ctx: Context, target: RunTarget) -> StopEvent:
+        """Drop a stale final text without storing words the chat never saw."""
+        mark_run_outcome("superseded")
+        logger.info(
+            "Superseding final reply for {chat_id}; newer intake owns the turn",
+            chat_id=target.chat_id,
+        )
+        await self.mark_turn_handled(ctx, silent=True)
+        await self.collapse_delivery(ctx)
+        return self.stopped_response()
+
     async def finish_text_round(
         self, ctx: Context, response: ChatResponse, rounds: int
     ) -> ToolCallEvent | StopEvent:
@@ -132,9 +158,12 @@ class StepMixin(AgentBase):
         delivered = self.any_delivery()
         if not delivered:
             response = await self.rewrite_blame(ctx, response)
+        visible = chat_visible_text(str(response.message.content or ""))
+        target = None if delivered else self.superseding_target(visible)
+        if target is not None:
+            return await self.stop_superseded(ctx, target)
         note = str(response.message.content or "").strip() if delivered else ""
         await self.remember(ctx, response, [], skip_text=delivered)
-        visible = chat_visible_text(str(response.message.content or ""))
         silent = not delivered and not visible
         mark_run_outcome(_text_outcome(delivered, visible, after_tools=rounds > 1))
         await self.mark_turn_handled(ctx, silent=silent)

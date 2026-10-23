@@ -87,9 +87,10 @@ async def finish_agent_reply(
 
     Shared post-run decision of the single-message, burst and album
     paths: tool-delivered runs log their dropped final text; silence
-    stays silent; anything else is quote-replied to *message_id* with
+    stays silent; anything else is quote-replied to the turn's anchor
+    (the newest record claimed after a refusal, else *message_id*) with
     the typing presence. A lone emoji is not an answer — *emoji_reaction*
-    converts it into a reaction on *message_id* with ~50 % probability,
+    converts it into a reaction on that anchor with ~50 % probability,
     otherwise it is dropped as silence. The burst path opts in, so a
     burst's lone-emoji answer reacts like a single message's.
 
@@ -103,19 +104,21 @@ async def finish_agent_reply(
     Returns the run outcome for the single per-run row.
     """
 
+    anchor = target.anchor_id if target is not None and target.anchor_id else message_id
+
     async def react_or_silence(emoji: str) -> str:
         """React to a lone emoji, or journal it as silence."""
-        if emoji_reaction and message_id and random.random() < 0.5:
+        if emoji_reaction and anchor and random.random() < 0.5:
             logger.info(
                 "Converting lone emoji to reaction on {mid}: {emoji}",
-                mid=message_id,
+                mid=anchor,
                 emoji=emoji,
             )
             try:
-                await asyncio.to_thread(waha.send_reaction, session, message_id, emoji)
+                await asyncio.to_thread(waha.send_reaction, session, anchor, emoji)
             except Exception as exc:
                 journal_send_failure(
-                    settings, session, chat_id, "send_reaction", message_id, exc
+                    settings, session, chat_id, "send_reaction", anchor, exc
                 )
                 return "failed"
             save_action(
@@ -124,14 +127,14 @@ async def finish_agent_reply(
                 "reaction",
                 chat_id=chat_id,
                 reaction=emoji,
-                message_id=message_id,
+                message_id=anchor,
                 message_ids=list(message_ids),
-                reply_to=message_id,
+                reply_to=anchor,
                 duration_ms=duration_ms,
                 delivered_via="reaction",
             )
             if target is not None:
-                target.reacted = message_id
+                target.reacted = anchor
             return "reaction"
         save_action(
             settings.data_dir,
@@ -196,7 +199,7 @@ async def finish_agent_reply(
                 session,
                 chat_id,
                 reply,
-                message_id,
+                anchor,
                 typing=(
                     settings.typing_presence_min_s,
                     settings.typing_presence_max_s,
@@ -204,7 +207,7 @@ async def finish_agent_reply(
                 prefix=prefix,
             )
         except Exception as exc:
-            journal_send_failure(settings, session, chat_id, "send_text", message_id, exc)
+            journal_send_failure(settings, session, chat_id, "send_text", anchor, exc)
             return "failed"
         if target is not None:
             target.sent = chat_id
@@ -214,10 +217,10 @@ async def finish_agent_reply(
             session,
             "reply",
             chat_id=chat_id,
-            message_id=message_id,
+            message_id=anchor,
             message_ids=list(message_ids),
             outbound_id=sent_id,
-            reply_to=message_id,
+            reply_to=anchor,
             duration_ms=duration_ms,
             delivered_via="text",
             reply=reply,
@@ -226,6 +229,12 @@ async def finish_agent_reply(
 
     if delivered:
         return tool_delivery()
+    if target is not None and target.outcome == "superseded":
+        logger.info(
+            "Superseded final reply for {chat_id}; newer intake owns the turn",
+            chat_id=chat_id,
+        )
+        return "superseded"
     if not reply.strip():
         return silence_delivery()
     if target is not None and delivery_guard(target):

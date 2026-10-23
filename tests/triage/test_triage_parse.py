@@ -498,3 +498,26 @@ def test_hardened_run_denies_media_and_allows_reads() -> None:
 
     assert called.get("read") is True
     assert "media" not in called
+
+
+def test_question_gist_ignores_ask_substrings_in_other_words() -> None:
+    """`task` is not an asking word; a statement gist must still be dropped."""
+    verdict = TriageVerdict(gist="task completed for the customer")
+
+    out = repair_question_gist(verdict, "kannst du das bitte prüfen?")
+
+    assert out.gist == ""
+
+
+def test_question_gist_reads_the_newest_record_in_a_multiline_turn() -> None:
+    """Payload lines and older records cannot hide the newest question."""
+    verdict = TriageVerdict(gist="confirmed next Wednesday")
+
+    out = repair_question_gist(
+        verdict,
+        "[[18:50 Ana #m32]] text :: old statement\n"
+        "[[18:57 Roy #m33]] text :: Dann bleiben wir mit nächsten Mittwoch ja?\n"
+        "| quote=#m32",
+    )
+
+    assert out.gist == ""

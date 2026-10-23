@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -105,6 +106,8 @@ def test_slow_run_refused_send_answers_the_newest_record_once(bot: Bot) -> None:
         f"false_{CHAT_ID}_SLOWB",
     }
     assert replied["outbound_id"].startswith("true_")
+    reply_rows = _audit_entries(bot, "reply", CHAT_ID)
+    assert reply_rows[-1]["reply_to"] == f"false_{CHAT_ID}_SLOWB"
 
 
 def test_final_text_superseded_by_newer_intake_is_not_sent(bot: Bot) -> None:
@@ -135,6 +138,9 @@ def test_final_text_superseded_by_newer_intake_is_not_sent(bot: Bot) -> None:
     assert bot.waha.sent[0][2] == "smoke reply one"
     outcomes = _run_outcomes(bot)
     assert {row["outcome"] for row in outcomes} == {"superseded", "delivered_via_tool"}
+    assert not any(
+        "smoke final answer" in json.dumps(request) for request in llm.requests
+    )
 
 
 def test_silent_run_releases_the_newer_message_for_its_own_run(bot: Bot) -> None:
@@ -292,3 +298,54 @@ def test_lone_emoji_reply_records_a_reaction_outcome(
     assert [row["outcome"] for row in outcomes] == ["reaction"]
     assert outcomes[-1]["delivered_via"] == "reaction"
     assert outcomes[-1]["outbound_id"] == ""
+
+
+def _double_send_response() -> dict[str, Any]:
+    """One model turn that requests two sends in the same tool batch."""
+    response = json.loads(json.dumps(FirstResponse))
+    response["choices"][0]["message"]["tool_calls"].append(
+        {
+            "id": "call_send_2",
+            "type": "function",
+            "function": {
+                "name": "send_message",
+                "arguments": json.dumps(
+                    {"text": "second stale reply", "reason": "keep sending"}
+                ),
+            },
+        }
+    )
+    return response
+
+
+def test_one_refusal_blocks_the_rest_of_the_tool_batch(bot: Bot) -> None:
+    """A second delivery call in the same batch cannot bypass the guard."""
+    llm = bot.stack.llm
+    a_started = threading.Event()
+
+    async def selector(body: dict[str, Any]) -> dict[str, Any]:
+        if any(message.get("role") == "tool" for message in body["messages"]):
+            return SecondResponse
+        if not a_started.is_set():
+            a_started.set()
+            while len(bot.waha.seen_chats) < 2:
+                await asyncio.sleep(0.02)
+        return _double_send_response()
+
+    llm.selector = selector
+    _post_while_running(
+        bot,
+        _turn_event("BATCHA", "kai first question"),
+        _turn_event("BATCHB", "kai newest question"),
+        a_started,
+    )
+
+    assert _wait(lambda: len(bot.waha.sent) == 1)
+    assert bot.waha.sent[0][2] == "smoke final answer"
+    tool_results = [
+        str(message.get("content", ""))
+        for message in llm.requests[-1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert any("Read the newest record" in result for result in tool_results)
+    assert any("this tool round" in result for result in tool_results)

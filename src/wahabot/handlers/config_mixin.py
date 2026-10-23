@@ -67,6 +67,7 @@ class ConfigMixin(HandlerBase):
         """
         current = self.config_reloader.current_config()
         parts = [f"Assistant name: {current.bot_name or 'the assistant'}."]
+        parts.append(f"Timezone: {self.settings.timezone}.")
         if current.operator_name:
             parts.append(f"Human operator: {current.operator_name}.")
         parts.append(_PARTICIPATION_BRIEF.get(current.group_participation, ""))

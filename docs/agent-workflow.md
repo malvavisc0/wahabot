@@ -477,7 +477,7 @@ Three event flows sit outside the plain message → reply pipeline:
 
 ## Audit journal
 
- Every bot action is appended as one JSON object per line to
+Every bot action is appended as one JSON object per line to
 `data/audit/<session>/<YYYY-MM-DD>.jsonl` (`core/audit.py`): tool
 calls (name, capped arguments, outcome read from the tool's `ok`
 envelope — a refused or failed send journals as `failed`, never as a

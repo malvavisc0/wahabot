@@ -1,14 +1,21 @@
+import asyncio
 import json
 import time
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
 from tests.harness import RecordingWaha
-from wahabot.ai.intake import InMemoryIntakeStore, IntakeLedger
+from wahabot.ai.intake import (
+    InMemoryIntakeStore,
+    IntakeLedger,
+    max_age_for_run_timeout,
+)
 from wahabot.ai.tools.whatsapp import (
     RunTarget,
     bind_target,
+    clear_delivery_refusal,
     delivery_guard,
     forward_message,
     react_to_message,
@@ -16,6 +23,7 @@ from wahabot.ai.tools.whatsapp import (
     send_media,
     send_message,
 )
+from wahabot.handlers.base import HandlerBase
 from wahabot.settings import Settings
 
 
@@ -163,7 +171,9 @@ def test_delivery_guard_allows_the_claimed_send_and_leaves_settling_to_the_run()
         turn_started_at=started,
     )
     assert delivery_guard(target) is not None
+    assert target.anchor_id == "B"
 
+    clear_delivery_refusal(target)
     assert delivery_guard(target) is None
     assert not ledger.handled("s", "chat", ["B"])
 
@@ -185,6 +195,7 @@ def test_failed_send_releases_the_claim_for_the_newer_message() -> None:
         turn_started_at=started,
     )
     assert delivery_guard(target) is not None
+    clear_delivery_refusal(target)
     assert delivery_guard(target) is None
 
     ledger.finish_turn("s", "chat", ["A"], target.claimed_ids, delivered=False)
@@ -280,3 +291,81 @@ def test_every_delivery_tool_refuses_a_reply_superseded_by_newer_intake(
     assert envelope["ok"] is False
     assert "Read the newest record" in envelope["error"]
     assert waha.sent == [] and waha.sent_images == [] and waha.reactions == []
+
+
+def test_delivery_guard_blocks_a_second_delivery_in_the_same_round() -> None:
+    ledger = IntakeLedger()
+    started = time.monotonic()
+    ledger.record("s", "chat", "A", "first", at=started)
+    ledger.record("s", "chat", "B", "newest", at=started + 1)
+    target = RunTarget(
+        session="s",
+        chat_id="chat",
+        intake=ledger,
+        turn_ids=["A"],
+        turn_started_at=started,
+    )
+
+    assert delivery_guard(target) is not None
+    second = delivery_guard(target)
+
+    assert second is not None and "this tool round" in second
+    assert target.claimed_ids == ["B"]
+
+
+def test_delivery_guard_claims_and_shows_every_newer_record() -> None:
+    ledger = IntakeLedger()
+    started = time.monotonic()
+    ledger.record("s", "chat", "A", "first", at=started)
+    for i in range(5):
+        ledger.record("s", "chat", f"N{i}", f"record-{i}", at=started + i + 1)
+    target = RunTarget(
+        session="s",
+        chat_id="chat",
+        intake=ledger,
+        turn_ids=["A"],
+        turn_started_at=started,
+    )
+
+    refusal = delivery_guard(target)
+
+    assert refusal is not None
+    for i in range(5):
+        assert f"record-{i}" in refusal
+    assert target.claimed_ids == [f"N{i}" for i in range(5)]
+    assert "left for their own run" not in refusal
+
+
+def test_handled_addressed_only_ignores_unaddressed_album_rows() -> None:
+    ledger = IntakeLedger()
+    ledger.record("s", "chat", "container", "album", addressed=True)
+    ledger.record("s", "chat", "image", "image", addressed=False)
+    ledger.finish("s", "chat", ["container"], delivered=True)
+
+    assert not ledger.handled("s", "chat", ["container", "image"])
+    assert ledger.handled("s", "chat", ["container", "image"], addressed_only=True)
+
+
+def test_intake_window_outlives_a_custom_run_timeout() -> None:
+    assert max_age_for_run_timeout(3600) > 3600
+    assert max_age_for_run_timeout(1) >= 1800
+
+
+class SuppressionHandler(HandlerBase):
+    """Only the state ``turn_suppressed`` needs."""
+
+    def __init__(self, intake: IntakeLedger, run_timeout: float) -> None:
+        self.intake = intake
+        self.settings = SimpleNamespace(run_timeout=run_timeout)
+
+
+def test_turn_suppressed_ignores_unaddressed_album_rows() -> None:
+    ledger = IntakeLedger()
+    ledger.record("s", "chat", "container", "album", addressed=True)
+    ledger.record("s", "chat", "image", "image", addressed=False)
+    ledger.finish("s", "chat", ["container"], delivered=True)
+    handler = SuppressionHandler(ledger, run_timeout=1.0)
+
+    suppressed = asyncio.run(handler.turn_suppressed("s", "chat", ["container", "image"]))
+
+    assert suppressed is True

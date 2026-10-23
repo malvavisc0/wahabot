@@ -6,7 +6,7 @@ from loguru import logger
 
 from wahabot.ai import bursts
 from wahabot.ai.albums import set_completion_handler
-from wahabot.ai.intake import IntakeLedger
+from wahabot.ai.intake import IntakeLedger, max_age_for_run_timeout
 from wahabot.ai.observability import enable_langfuse
 from wahabot.ai.tools import build_default_tools
 from wahabot.ai.tools.whatsapp import EscalationChannel
@@ -101,7 +101,7 @@ def register_agent_handler(
         config_reloader,
         escalation_channel,
         triage,
-        IntakeLedger(),
+        IntakeLedger(max_age_s=max_age_for_run_timeout(settings.run_timeout)),
         time.time(),
     )
     agent = build_agent(

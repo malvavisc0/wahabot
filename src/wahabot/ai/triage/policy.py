@@ -1,3 +1,4 @@
+import re
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -63,7 +64,10 @@ CROSS_SENDER_WHY = (
     "another customer",
 )
 
-QUESTION_GIST_MARKERS = ("ask", "asked", "asks", "question", "whether", "if ")
+QUESTION_GIST_RE = re.compile(
+    r"\b(?:ask|asked|asks|question|questioned|whether|if)\b",
+    re.IGNORECASE,
+)
 
 
 def calm_angry_customer(verdict: TriageVerdict, message: str) -> TriageVerdict:
@@ -102,6 +106,16 @@ def restore_cross_sender_attack(verdict: TriageVerdict, message: str) -> TriageV
     return replace(verdict, adversarial=True)
 
 
+def question_body(message: str) -> str:
+    """The newest rendered record's member text, or the raw message body."""
+    lines = message.rstrip().splitlines()
+    for line in reversed(lines):
+        if line.startswith("[["):
+            _, separator, body = line.partition(" :: ")
+            return body.strip() if separator else ""
+    return message.split(" :: ", 1)[-1].strip()
+
+
 def repair_question_gist(verdict: TriageVerdict, message: str) -> TriageVerdict:
     """Drop a gist that restates a question as a statement.
 
@@ -109,10 +123,10 @@ def repair_question_gist(verdict: TriageVerdict, message: str) -> TriageVerdict:
     (records.mechanical_gist), so a wrong summary can never overwrite
     what the member actually asked.
     """
-    body = message.split(" :: ", 1)[-1].strip()
+    body = question_body(message)
     if not body.endswith("?"):
         return verdict
-    if any(marker in verdict.gist.casefold() for marker in QUESTION_GIST_MARKERS):
+    if QUESTION_GIST_RE.search(verdict.gist):
         return verdict
     return replace(verdict, gist="")
 

@@ -420,3 +420,60 @@ def test_gate_timeout_still_opens_the_observation_marked_error(
 
     assert fake.names == ["triage-gate"]
     assert any(update.get("level") == "ERROR" for update in fake.updates)
+
+
+def test_gate_complete_survives_a_tracing_update_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing observation update never changes the gate's verdict."""
+
+    class BrokenSpan(FakeSpan):
+        def update(self, **fields: Any) -> None:
+            raise RuntimeError("tracing down")
+
+    class BrokenObservations(FakeObservations):
+        @contextmanager
+        def start_as_current_observation(self, **kwargs: Any) -> Iterator[FakeSpan]:
+            self.names.append(str(kwargs.get("name", "")))
+            yield BrokenSpan(self)
+
+    fake = BrokenObservations()
+    monkeypatch.setattr(observability, "_client", fake)
+    gate = TriageGate(
+        gate_settings(tmp_path),
+        transport=gate_transport('{"adversarial": false, "escalate": false}'),
+    )
+
+    result = asyncio.run(gate.complete(_gate_context()))
+
+    assert result == '{"adversarial": false, "escalate": false}'
+    assert fake.names == ["triage-gate"]
+
+
+def test_gate_complete_survives_a_tracing_start_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tracing context that cannot start is skipped, not raised."""
+
+    class RaisingEnter:
+        def __enter__(self) -> Any:
+            raise RuntimeError("tracing down")
+
+        def __exit__(self, *exc: Any) -> None:
+            return None
+
+    class BrokenObservations(FakeObservations):
+        def start_as_current_observation(self, **kwargs: Any) -> RaisingEnter:
+            self.names.append(str(kwargs.get("name", "")))
+            return RaisingEnter()
+
+    fake = BrokenObservations()
+    monkeypatch.setattr(observability, "_client", fake)
+    gate = TriageGate(
+        gate_settings(tmp_path),
+        transport=gate_transport('{"adversarial": false, "escalate": false}'),
+    )
+
+    result = asyncio.run(gate.complete(_gate_context()))
+
+    assert result == '{"adversarial": false, "escalate": false}'
