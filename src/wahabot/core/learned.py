@@ -255,9 +255,9 @@ class RecapMerger:
         """
         while self._pending:
             (session, chat_id), text = self._pending.popitem()
-            async with self._lock_for((session, chat_id)):
+            async with self.lock_for((session, chat_id)):
                 try:
-                    await self._merge(session, chat_id, text)
+                    await self.merge(session, chat_id, text)
                 except Exception as exc:
                     logger.warning(
                         "Recap merge failed for {chat_id}; batch dropped: {exc}",
@@ -265,7 +265,7 @@ class RecapMerger:
                         exc=exc,
                     )
 
-    def _lock_for(self, key: tuple[str, str]) -> asyncio.Lock:
+    def lock_for(self, key: tuple[str, str]) -> asyncio.Lock:
         """The per-chat merge lock, created on first use."""
         lock = self._merge_locks.get(key)
         if lock is None:
@@ -273,7 +273,7 @@ class RecapMerger:
             self._merge_locks[key] = lock
         return lock
 
-    async def _merge(self, session: str, chat_id: str, dropped_text: str) -> None:
+    async def merge(self, session: str, chat_id: str, dropped_text: str) -> None:
         existing = load_learned(self._data_dir, session, chat_id)
         messages = [
             ChatMessage(role=MessageRole.SYSTEM, content=MERGE_PROMPT),

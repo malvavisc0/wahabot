@@ -254,7 +254,7 @@ class SqliteIntakeStore:
         try:
             with transaction(conn):
                 if delivered:
-                    self._complete(
+                    self.complete_rows(
                         conn,
                         [*turn_ids, *claimed_ids],
                         outcome or DELIVERED,
@@ -262,13 +262,13 @@ class SqliteIntakeStore:
                         handled_at,
                     )
                     return
-                self._release_claims(conn, claimed_ids, owner)
+                self.release_claims(conn, claimed_ids, owner)
                 if outcome:
-                    self._complete(conn, turn_ids, outcome, reason, handled_at)
+                    self.complete_rows(conn, turn_ids, outcome, reason, handled_at)
         finally:
             conn.close()
 
-    def _complete(
+    def complete_rows(
         self,
         conn: sqlite3.Connection,
         message_ids: list[str],
@@ -285,7 +285,7 @@ class SqliteIntakeStore:
             (DONE, outcome, reason, handled_at, *message_ids, DONE),
         )
 
-    def _release_claims(
+    def release_claims(
         self,
         conn: sqlite3.Connection,
         claimed_ids: list[str],
@@ -381,20 +381,6 @@ class SqliteIntakeStore:
             limit,
         )
 
-    def mark_notified(self, message_ids: list[str], notified_at: float) -> None:
-        if not message_ids:
-            return
-        marks = ",".join("?" for _ in message_ids)
-        conn = connect(self.path)
-        try:
-            with transaction(conn):
-                conn.execute(
-                    f"UPDATE intake SET notified_at = ? WHERE message_id IN ({marks})",
-                    (notified_at, *message_ids),
-                )
-        finally:
-            conn.close()
-
     def query(
         self, where: str, params: tuple[object, ...], limit: int
     ) -> list[IntakeRow]:
@@ -421,26 +407,6 @@ class SqliteIntakeStore:
                 return int(cursor.rowcount)
         finally:
             conn.close()
-
-    def stats(self) -> dict[str, int]:
-        unfinished_states = (PENDING, PROCESSING, DELIVERING, FAILED)
-        conn = connect(self.path)
-        try:
-            unanswered = conn.execute(
-                "SELECT COUNT(*) FROM intake WHERE state IN (?, ?, ?, ?)",
-                unfinished_states,
-            ).fetchone()[0]
-            done = conn.execute(
-                "SELECT COUNT(*) FROM intake WHERE state = ?", (DONE,)
-            ).fetchone()[0]
-            oldest = conn.execute(
-                "SELECT MIN(received_at) FROM intake WHERE state IN (?, ?, ?, ?)",
-                unfinished_states,
-            ).fetchone()[0]
-        finally:
-            conn.close()
-        age = max(0, int(time.time() - oldest)) if oldest is not None else 0
-        return {"unanswered": int(unanswered), "done": int(done), "oldest_age_s": age}
 
 
 def values(row: IntakeRow) -> tuple[object, ...]:

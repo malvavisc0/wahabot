@@ -114,7 +114,7 @@ class IntakeLedger:
     def read(self, session: str, chat_id: str) -> list[IntakeRow]:
         """Every stored row of one chat, oldest first."""
         with self._lock:
-            return self._all((session, chat_id))
+            return self.store_rows((session, chat_id))
 
     def rows(self, session: str, chat_id: str) -> list[IntakeRow]:
         """Every stored row of one chat, oldest first."""
@@ -135,16 +135,13 @@ class IntakeLedger:
         addressed_only: bool = False,
     ) -> list[IntakeRow]:
         """Pending messages, optionally only those newer than ``after``."""
-        skipped = set(exclude)
-        with self._lock:
-            return [
-                entry
-                for entry in self._live((session, chat_id))
-                if entry.state == PENDING
-                and entry.message_id not in skipped
-                and (after is None or entry.at > after)
-                and (not addressed_only or entry.addressed)
-            ]
+        return self.newer(
+            session,
+            chat_id,
+            after=after,
+            exclude=exclude,
+            addressed_only=addressed_only,
+        )
 
     def newer(
         self,
@@ -160,7 +157,7 @@ class IntakeLedger:
         with self._lock:
             return [
                 entry
-                for entry in self._live((session, chat_id))
+                for entry in self.live_rows((session, chat_id))
                 if entry.state == PENDING
                 and entry.message_id not in skipped
                 and (after is None or entry.at > after)
@@ -200,7 +197,7 @@ class IntakeLedger:
         with self._lock:
             return any(
                 entry.message_id in wanted and entry.state == PROCESSING
-                for entry in self._all((session, chat_id))
+                for entry in self.store_rows((session, chat_id))
             )
 
     def handled(
@@ -359,25 +356,19 @@ class IntakeLedger:
         with self._lock:
             return self.store.unnotified_operator(limit)
 
-    def mark_notified(self, message_ids: Sequence[str]) -> None:
-        """Record that a durable operator notice covers these rows."""
-        with self._lock:
-            self.store.mark_notified(list(message_ids), time.time())
-
-    def stats(self) -> dict[str, int]:
-        """Backlog age and unanswered count for the heartbeat."""
-        with self._lock:
-            return self.store.stats()
-
     def purge(self, retention_days: int) -> int:
         """Drop long-finished rows; unfinished work is never deleted."""
         before = time.time() - retention_days * 86400
         with self._lock:
             return self.store.purge(before)
 
-    def _all(self, key: tuple[str, str]) -> list[IntakeRow]:
+    def store_rows(self, key: tuple[str, str]) -> list[IntakeRow]:
         return self.store.read(key, self.max_messages)
 
-    def _live(self, key: tuple[str, str], now: float | None = None) -> list[IntakeRow]:
+    def live_rows(
+        self, key: tuple[str, str], now: float | None = None
+    ) -> list[IntakeRow]:
         moment = time.monotonic() if now is None else now
-        return [entry for entry in self._all(key) if moment - entry.at <= self.max_age_s]
+        return [
+            entry for entry in self.store_rows(key) if moment - entry.at <= self.max_age_s
+        ]

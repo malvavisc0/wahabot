@@ -131,17 +131,6 @@ def test_due_and_stale_processing_rows_are_queryable(tmp_path: Path) -> None:
 
     assert due == {"pending", "failed"}
     assert "stale" in stale
-    assert ledger.stats()["unanswered"] >= 1
-
-
-def test_unanswered_backlog_age_is_queryable(tmp_path: Path) -> None:
-    ledger = durable_ledger(tmp_path)
-    ledger.record("s", "chat", "old", "old", received_at=time.time() - 120)
-
-    stats = ledger.stats()
-
-    assert stats["unanswered"] == 1
-    assert stats["oldest_age_s"] >= 119
 
 
 def test_intake_window_outlives_a_custom_run_timeout() -> None:

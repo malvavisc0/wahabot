@@ -82,13 +82,15 @@ _registries: dict[str, list[Handler]] = {
 }
 
 
+#: Only real conversation events own a durable turn. ``message.ack``,
+#: ``message.revoked`` and engine variants are dispatched by the catch-all
+#: router but must never become backlog.
+_INTAKE_EVENTS = frozenset({"message", "message.any"})
+
+
 def needs_intake(event: WahaEvent) -> bool:
-    """True for inbound message events that can own a turn."""
-    return (
-        event.event.startswith("message")
-        and event.event != "message.reaction"
-        and not event.payload.get("fromMe")
-    )
+    """True for inbound conversation events that can own a turn."""
+    return event.event in _INTAKE_EVENTS and not event.payload.get("fromMe")
 
 
 def on_event(event_type: str, handler: Handler) -> None:

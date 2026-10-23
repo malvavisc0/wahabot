@@ -1,7 +1,5 @@
 """Process-memory intake storage for tests and single-process callers."""
 
-import time
-
 from wahabot.core.intake.store import (
     CLAIMABLE_STATES,
     DELIVERED,
@@ -23,7 +21,11 @@ class InMemoryIntakeStore:
 
     def read(self, key: tuple[str, str], limit: int | None = None) -> list[IntakeRow]:
         rows = list(self._chats.get(key, {}).values())
-        return rows if limit is None else rows[-max(0, limit) :]
+        if limit is None:
+            return rows
+        if limit <= 0:
+            return []
+        return rows[-limit:]
 
     def get(self, key: tuple[str, str], message_id: str) -> IntakeRow | None:
         return self._chats.get((key[0], key[1]), {}).get(message_id)
@@ -36,7 +38,7 @@ class InMemoryIntakeStore:
         rows[row.message_id] = row
         return row
 
-    def _rows(self, key: tuple[str, str], ids: list[str]) -> list[IntakeRow]:
+    def select_rows(self, key: tuple[str, str], ids: list[str]) -> list[IntakeRow]:
         rows = self._chats.get((key[0], key[1]), {})
         wanted = set(ids)
         return [row for message_id, row in rows.items() if message_id in wanted]
@@ -49,7 +51,7 @@ class InMemoryIntakeStore:
         lease_until: float,
     ) -> list[IntakeRow]:
         claimed: list[IntakeRow] = []
-        for row in self._rows(key, message_ids):
+        for row in self.select_rows(key, message_ids):
             if row.state in CLAIMABLE_STATES:
                 row.state = PROCESSING
                 row.owner = owner
@@ -65,34 +67,34 @@ class InMemoryIntakeStore:
             return False
         found = [
             row
-            for row in self._rows(key, message_ids)
+            for row in self.select_rows(key, message_ids)
             if not addressed_only or row.addressed
         ]
         if addressed_only:
-            return bool(found) and self._all_done(found)
-        return {row.message_id for row in found} == wanted and self._all_done(found)
+            return bool(found) and self.all_done(found)
+        return {row.message_id for row in found} == wanted and self.all_done(found)
 
-    def _all_done(self, rows: list[IntakeRow]) -> bool:
+    def all_done(self, rows: list[IntakeRow]) -> bool:
         return all(row.state == DONE for row in rows)
 
     def release(
         self, key: tuple[str, str], message_ids: list[str], owner: str = ""
     ) -> None:
-        for row in self._rows(key, message_ids):
+        for row in self.select_rows(key, message_ids):
             if row.state == PROCESSING and (not owner or row.owner == owner):
                 row.state = PENDING
                 row.owner = ""
                 row.next_attempt_at = None
 
     def hold(self, key: tuple[str, str], message_ids: list[str], reason: str) -> None:
-        for row in self._rows(key, message_ids):
+        for row in self.select_rows(key, message_ids):
             if row.state != DONE:
                 row.state = DELIVERING
                 row.next_attempt_at = None
                 row.last_error = reason
 
     def is_delivering(self, key: tuple[str, str], message_ids: list[str]) -> bool:
-        return any(row.state == DELIVERING for row in self._rows(key, message_ids))
+        return any(row.state == DELIVERING for row in self.select_rows(key, message_ids))
 
     def delivering_rows(self, limit: int) -> list[IntakeRow]:
         rows = [
@@ -121,7 +123,7 @@ class InMemoryIntakeStore:
         reason: str,
         handled_at: float,
     ) -> None:
-        for row in self._rows(key, message_ids):
+        for row in self.select_rows(key, message_ids):
             if row.state == DONE:
                 continue
             row.state = DONE
@@ -160,7 +162,7 @@ class InMemoryIntakeStore:
         error: str,
         next_attempt_at: float | None,
     ) -> None:
-        for row in self._rows(key, message_ids):
+        for row in self.select_rows(key, message_ids):
             if row.state == DONE:
                 continue
             row.state = FAILED
@@ -171,7 +173,7 @@ class InMemoryIntakeStore:
     def set_burst_key(
         self, key: tuple[str, str], message_ids: list[str], burst_key: str
     ) -> None:
-        for row in self._rows(key, message_ids):
+        for row in self.select_rows(key, message_ids):
             row.burst_key = burst_key
 
     def due(self, now: float, limit: int) -> list[IntakeRow]:
@@ -223,13 +225,6 @@ class InMemoryIntakeStore:
         rows.sort(key=lambda row: row.received_at)
         return rows[:limit]
 
-    def mark_notified(self, message_ids: list[str], notified_at: float) -> None:
-        wanted = set(message_ids)
-        for chat in self._chats.values():
-            for message_id, row in chat.items():
-                if message_id in wanted:
-                    row.notified_at = notified_at
-
     def purge(self, before: float) -> int:
         removed = 0
         for key, rows in list(self._chats.items()):
@@ -240,15 +235,3 @@ class InMemoryIntakeStore:
             if not rows:
                 self._chats.pop(key, None)
         return removed
-
-    def stats(self) -> dict[str, int]:
-        rows = [row for chat in self._chats.values() for row in chat.values()]
-        unfinished = [
-            row for row in rows if row.state in (PENDING, PROCESSING, DELIVERING, FAILED)
-        ]
-        oldest = min((time.time() - row.received_at for row in unfinished), default=0)
-        return {
-            "unanswered": len(unfinished),
-            "done": sum(1 for row in rows if row.state == DONE),
-            "oldest_age_s": max(0, int(oldest)),
-        }

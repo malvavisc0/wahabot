@@ -404,3 +404,42 @@ def test_ambiguous_operator_notice_is_retried(tmp_path: Path) -> None:
 
     assert intents.get(notice.id).state == "sent"
     assert len(client.sent) == 1
+
+
+def test_retry_after_a_retryable_failure_cancels_the_earlier_draft(
+    tmp_path: Path,
+) -> None:
+    _intents, client, transport = stores(tmp_path)
+    client.fail_with = httpx.ConnectError("refused")
+
+    with pytest.raises(httpx.ConnectError):
+        transport.send_text("s", "chat", "operator reply")
+    transport.send_text("s", "chat", "operator reply")
+    transport.recover_intents(now=10**12)
+
+    assert [entry[2] for entry in client.sent] == ["operator reply"]
+
+
+def test_cancel_retryable_is_scoped_to_the_answered_chat(tmp_path: Path) -> None:
+    intents, _client, _transport = stores(tmp_path)
+    customer = intents.prepare(
+        session="s",
+        chat_id="customer",
+        kind="text",
+        payload={"text": "answer"},
+        intake_ids=["m1"],
+    )
+    operator = intents.prepare(
+        session="s",
+        chat_id="operator",
+        kind="text",
+        payload={"text": "escalation"},
+        intake_ids=["m1"],
+    )
+    for intent in (customer, operator):
+        intents.failed(intent.id, "refused", next_attempt_at=time.time())
+
+    intents.cancel_retryable_for(["m1"], "silence", chat_id="customer")
+
+    assert intents.get(customer.id).state == "cancelled"
+    assert intents.get(operator.id).state == "failed"

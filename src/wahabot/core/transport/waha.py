@@ -5,11 +5,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from wahabot.core.delivery.intents import (
-    SENDING,
-    DeliveryIntent,
-    IntentStore,
-)
+from wahabot.core.delivery.intents import IntentStore
+from wahabot.core.delivery.model import SENDING, DeliveryIntent
 from wahabot.core.delivery.send import (
     AMBIGUOUS,
     RETRYABLE,
@@ -27,7 +24,7 @@ class WahaTransport:
         self.client = client
         self.intents = intents
 
-    def _deliver(
+    def deliver(
         self,
         *,
         session: str,
@@ -121,7 +118,7 @@ class WahaTransport:
             "reply_to": reply_to,
             "mentions": mentions,
         }
-        return self._deliver(
+        return self.deliver(
             session=session,
             chat_id=chat_id,
             kind="text",
@@ -138,7 +135,7 @@ class WahaTransport:
         file: dict[str, Any],
         caption: str | None = None,
     ) -> str:
-        return self._deliver(
+        return self.deliver(
             session=session,
             chat_id=chat_id,
             kind="image",
@@ -153,7 +150,7 @@ class WahaTransport:
         file: dict[str, Any],
         caption: str | None = None,
     ) -> str:
-        return self._deliver(
+        return self.deliver(
             session=session,
             chat_id=chat_id,
             kind="file",
@@ -169,7 +166,7 @@ class WahaTransport:
         caption: str | None = None,
         convert: bool = True,
     ) -> str:
-        return self._deliver(
+        return self.deliver(
             session=session,
             chat_id=chat_id,
             kind="video",
@@ -187,7 +184,7 @@ class WahaTransport:
         reply_to: str | None = None,
         convert: bool = True,
     ) -> str:
-        return self._deliver(
+        return self.deliver(
             session=session,
             chat_id=chat_id,
             kind="voice",
@@ -204,7 +201,7 @@ class WahaTransport:
         file: dict[str, Any],
         reply_to: str | None = None,
     ) -> str:
-        return self._deliver(
+        return self.deliver(
             session=session,
             chat_id=chat_id,
             kind="sticker",
@@ -215,7 +212,7 @@ class WahaTransport:
         )
 
     def forward_message(self, session: str, chat_id: str, message_id: str) -> str:
-        return self._deliver(
+        return self.deliver(
             session=session,
             chat_id=chat_id,
             kind="forward",
@@ -226,7 +223,7 @@ class WahaTransport:
     def send_reaction(
         self, session: str, chat_id: str, message_id: str, reaction: str
     ) -> None:
-        self._deliver(
+        self.deliver(
             session=session,
             chat_id=chat_id,
             kind="reaction",
@@ -246,7 +243,7 @@ class WahaTransport:
         moment = time.time() if now is None else now
         replayed: list[str] = []
         for intent in intents.recoverable(moment):
-            recovered = self._recover_one(intents, intent, moment, recover_sending)
+            recovered = self.recover_one(intents, intent, moment, recover_sending)
             if recovered is not None:
                 replayed.append(recovered)
         return replayed
@@ -263,9 +260,9 @@ class WahaTransport:
         if intents is None:
             return None
         moment = time.time() if now is None else now
-        return self._recover_one(intents, intent, moment, recover_sending)
+        return self.recover_one(intents, intent, moment, recover_sending)
 
-    def _recover_one(
+    def recover_one(
         self,
         intents: IntentStore,
         intent: DeliveryIntent,

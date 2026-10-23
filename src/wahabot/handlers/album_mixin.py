@@ -133,8 +133,11 @@ class AlbumMixin(HandlerBase):
         ]
         downloaded = await self.download_album_images(images)
         if not downloaded:
+            # A download failure is transient like any other media failure:
+            # let the run failure path re-queue the album for a bounded retry
+            # instead of dropping it silently.
             logger.debug("Album in {chat_id} yielded no usable images", chat_id=chat_id)
-            return "empty", None
+            return "failed", None
         # Caption before the lock: the vision call must not extend the
         # serialized agent-run section.
         captions = await caption_images(

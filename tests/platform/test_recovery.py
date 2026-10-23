@@ -401,3 +401,20 @@ def test_old_reaction_intent_is_cancelled_by_the_reply_window(bot: Bot) -> None:
     assert bot.intents.get(intent.id).state == "cancelled"
     row = bot.ledger.row(bot.settings.session, CHAT_ID, message_id)
     assert row is not None and row.outcome == "operator_required"
+
+
+def test_failed_delayed_recovery_is_not_announced_every_tick(
+    bot: Bot, monkeypatch: Any
+) -> None:
+    seed_row(bot, "SPAMNOTICE", age_s=31 * 60)
+
+    async def boom(rows: list[Any], *, apology: bool) -> str:
+        raise RuntimeError("llm down")
+
+    monkeypatch.setattr(bot.handlers, "recover_rows", boom)
+    now = time.time()
+
+    run(bot.recovery.tick(now=now))
+    run(bot.recovery.tick(now=now + 61))
+
+    assert bot.waha.sent == []
