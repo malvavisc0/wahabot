@@ -26,7 +26,10 @@ from wahabot.core.notebook import Notebook, notebook_operation
 from wahabot.core.persistence import forget_memory
 from wahabot.core.recovery import Recovery
 from wahabot.core.runs import chat_lock, contexts
+from wahabot.core.scheduler import TicketScheduler
 from wahabot.core.thread_index import forget_thread_index
+from wahabot.core.tickets.store import TicketStore
+from wahabot.core.tickets.translate import TicketTranslator
 from wahabot.core.transport import WahaTransport
 from wahabot.core.waha import WahaClient
 from wahabot.handlers.core import Handlers
@@ -111,6 +114,9 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
     identity.configure(settings.data_dir, settings.session)
     enable_langfuse(settings)
     escalation_channel = EscalationChannel()
+    ticket_store = TicketStore(database.path)
+    ticket_translator = TicketTranslator()
+    scheduler = TicketScheduler(settings, ticket_store, transport, config_reloader)
     triage = (
         TriageGate(settings, transport, channel=escalation_channel)
         if settings.triage_gate and settings.gate_api_base
@@ -129,19 +135,30 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
         ledger,
         time.time(),
         intents,
+        ticket_store,
+        ticket_translator,
+        scheduler,
     )
     agent = build_agent(
         settings,
         tools=build_default_tools(
-            transport, settings, escalation_channel=escalation_channel
+            transport,
+            settings,
+            escalation_channel=escalation_channel,
+            ticket_store=ticket_store,
+            ticket_translator=ticket_translator,
+            ticket_operator_language=config.operator_language,
         ),
         system_prompt=config.system_prompt,
         prompt_renderer=handlers.render_prompt,
         rules_renderer=handlers.render_session_rules,
         gate_rules_renderer=handlers.render_gate_brief,
         triage=triage,
+        ticket_store=ticket_store,
     )
     handlers.agent = agent
+    ticket_translator.bind(lambda prompt: str(agent.llm.complete(prompt).text))
+    webhook_app.state.ticket_scheduler = scheduler
     webhook_app.state.intake_writer = handlers.record_webhook_intake
     on_message(handlers.reply_with_agent)
     logger.info(

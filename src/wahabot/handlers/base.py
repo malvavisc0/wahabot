@@ -21,6 +21,9 @@ from wahabot.core.audit import save_run_outcome
 from wahabot.core.delivery.intents import IntentStore
 from wahabot.core.delivery.model import FAILED, PREPARED, SENDING, UNKNOWN
 from wahabot.core.models import WahaEvent
+from wahabot.core.scheduler import TicketScheduler
+from wahabot.core.tickets.store import TicketStore
+from wahabot.core.tickets.translate import TicketTranslator
 from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 
@@ -39,6 +42,9 @@ class HandlerBase:
     triage: TriageGate | None
     intake: IntakeLedger
     intents: IntentStore
+    ticket_store: TicketStore | None
+    ticket_translator: TicketTranslator | None
+    scheduler: TicketScheduler | None
     bursts: bursts.Bursts
     albums: albums.Albums
     started_at: float
@@ -54,6 +60,11 @@ class HandlerBase:
     async def reply_with_agent(self, *args: Any, **kwargs: Any) -> Any: ...
     async def run_burst(self, *args: Any, **kwargs: Any) -> Any: ...
     async def run_album(self, *args: Any, **kwargs: Any) -> Any: ...
+    async def ticket_gate_events(self, *args: Any, **kwargs: Any) -> Any: ...
+    def ticket_active_id(self, *args: Any, **kwargs: Any) -> Any: ...
+    def finalize_ticket(self, *args: Any, **kwargs: Any) -> Any: ...
+    def pause_after_human_message(self, *args: Any, **kwargs: Any) -> Any: ...
+    async def handle_ticket_route(self, *args: Any, **kwargs: Any) -> Any: ...
     def group_message_addressed(self, *args: Any, **kwargs: Any) -> Any: ...
     def settle_intake(self, event: WahaEvent, outcome: str, reason: str = "") -> None: ...
 
@@ -240,6 +251,9 @@ class HandlerBase:
         if outcome in ("silence", "empty", "superseded"):
             self.finish_silent(session, chat_id, turn_ids, claimed, outcome, owner)
             return
+        if outcome == "operator_owned":
+            self.finish_operator_owned(session, chat_id, turn_ids, claimed, owner)
+            return
         self.intake.fail(
             session,
             chat_id,
@@ -282,6 +296,25 @@ class HandlerBase:
             delivered=False,
             outcome="silent",
             reason=outcome,
+            owner=owner,
+        )
+
+    def finish_operator_owned(
+        self,
+        session: str,
+        chat_id: str,
+        turn_ids: Sequence[str],
+        claimed: list[str],
+        owner: str,
+    ) -> None:
+        self.intake.finish_turn(
+            session,
+            chat_id,
+            turn_ids,
+            claimed,
+            delivered=False,
+            outcome="operator_owned",
+            reason="held for the operator",
             owner=owner,
         )
 

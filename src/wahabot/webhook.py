@@ -51,6 +51,12 @@ async def _recovery_loop(app: FastAPI) -> None:
             await recovery.tick()
         except Exception as exc:
             logger.warning("Intake recovery tick failed: {exc}", exc=exc)
+        scheduler = getattr(app.state, "ticket_scheduler", None)
+        if scheduler is not None:
+            try:
+                await asyncio.to_thread(scheduler.tick)
+            except Exception as exc:
+                logger.warning("Ticket scheduler tick failed: {exc}", exc=exc)
 
 
 @contextlib.asynccontextmanager
