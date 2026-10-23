@@ -25,7 +25,10 @@ placeholder expansion.
 | `bot_name` | `string \| null` | `null` | The bot's display name (e.g. `"Kai"`). Used only as a fallback mention matcher. |
 | `bot_mention_regex` | `string \| null` | `null` | A regex detecting when the bot is addressed in a group. Defaults to a case-insensitive whole-word `@?<bot_name>`. |
 | `group_participation` | `"never" \| "mentioned" \| "judicious"` | `"mentioned"` | How the bot joins group conversations (below). |
-| `reply_window_days` | `integer` | `7` | Recovered rows older than this many days become operator-required work and get no customer reply. Bounds 1–30; hot-reloaded. |
+| `reply_window_days` | `integer` | `7` | Recovered rows older than this many days become operator-required work and get no customer reply. Also bounds an operator relay: older customer chats hold the draft until the customer writes again. Bounds 1–30; hot-reloaded. |
+| `close_after_days` | `integer` | `5` | Days after a ticket is done before it auto-closes; a customer message inside the window reopens it. Bounds 1–365; hot-reloaded. |
+| `pause_after_human_hours` | `integer` | `2` | Hours a human-operator message pauses the assistant in that chat. Bounds 0–168; `0` disables the pause. |
+| `operator_language` | `string` | `""` | Language for operator alerts and confirmations. Empty falls back to English. |
 
 Example:
 
@@ -47,6 +50,28 @@ Example:
 past the window becomes operator-required and the operator gets a notice;
 a row older than `WAHABOT_INTAKE_RECOVERY_MINUTES` (30 minutes by default)
 is still answered, but the reply starts with a short apology.
+
+## Tickets and the operator desk
+
+Every customer 1:1 chat is a ticket. The bot opens it silently, answers
+when it can, and hands it to the operator only when a person must act.
+The operator replies in the "Message yourself" chat: quote any alert (or
+a forwarded attachment) with what was done, or name the ticket
+(`142: refunded`). The bot drafts the customer message in the customer's
+language, refuses a draft that adds an amount, date, time or reference
+the operator did not write, and confirms the ticket state.
+
+Operator commands in the self-chat: `what's open?`, `close 142`,
+`reopen 142`, `pause`, `resume`, `pause <name>`, `resume <name>`.
+`pause` with no name pauses every chat in the session; `resume` clears
+it. A human message typed in a customer chat pauses that chat for
+`pause_after_human_hours`, and messages received while paused are saved
+but never replayed.
+
+Only one ticket per chat can be active at a time. A different issue is
+split into a new ticket only when the current one is `open` or `done`;
+a ticket that is waiting on the operator or the customer must be closed
+by a person first, so that work is never detached.
 
 Use `goal` for what the bot should aim for and `memory` for durable
 facts it should know (people's preferences, standing decisions,
