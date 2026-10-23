@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from loguru import logger
 
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 
 HEALTHY_STATUS = "WORKING"
 
@@ -44,7 +44,7 @@ def set_session_health(status: str) -> None:
     state.healthy = status == HEALTHY_STATUS
 
 
-def own_identity(waha: WahaClient, session: str) -> dict[str, str]:
+def own_identity(waha: Transport, session: str) -> dict[str, str]:
     """The account's own ids (``own_jid``/``own_lid``) from WAHA, or empty.
 
     One fetch shared by every consumer of the account identity: the
@@ -64,7 +64,7 @@ def own_identity(waha: WahaClient, session: str) -> dict[str, str]:
     return {"own_jid": own, "own_lid": str(me.get("lid") or "")}
 
 
-def capture_operator_target(waha: WahaClient, session: str) -> None:
+def capture_operator_target(waha: Transport, session: str) -> None:
     """Remember the bot's own JID as the operator-notification target.
 
     Called at startup and on every session recovery: the first capture

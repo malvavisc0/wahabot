@@ -26,7 +26,7 @@ from wahabot.ai.triage.prompts import (
     TRIAGE_SYSTEM_PROMPT,
 )
 from wahabot.core.audit import save_action
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 
 
@@ -41,7 +41,7 @@ class TriageGate:
     def __init__(
         self,
         settings: Settings,
-        waha: WahaClient | None = None,
+        waha: Transport | None = None,
         channel: EscalationChannel | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:

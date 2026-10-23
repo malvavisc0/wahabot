@@ -13,7 +13,8 @@ from wahabot.ai.tools.url_videos import fetch_url_video, video_urls
 from wahabot.ai.video import caption_video, extract_frames, video_marker
 from wahabot.core.models import WahaEvent
 from wahabot.core.transcribe import fetch_transcript
-from wahabot.core.waha import MediaTooLargeError, WahaClient
+from wahabot.core.transport import Transport
+from wahabot.core.waha import MediaTooLargeError
 from wahabot.settings import Settings
 
 
@@ -23,7 +24,7 @@ def album_message_id(event: WahaEvent) -> str:
 
 
 def download_image(
-    waha: WahaClient, media: dict[str, Any], message_id: str, max_bytes: int
+    waha: Transport, media: dict[str, Any], message_id: str, max_bytes: int
 ) -> dict[str, Any] | None:
     """Download an image's bytes; None keeps the turn text-only on failure."""
     url = str(media.get("url", ""))
@@ -96,7 +97,7 @@ async def video_transcript(settings: Settings, data: bytes, filename: str) -> st
 
 async def prepare_video(
     event: WahaEvent,
-    waha: WahaClient,
+    waha: Transport,
     settings: Settings,
     llm: FunctionCallingLLM,
     semaphore: asyncio.Semaphore | None = None,

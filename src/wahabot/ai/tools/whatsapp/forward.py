@@ -15,10 +15,10 @@ from wahabot.ai.tools.runcontext import (
 from wahabot.ai.tools.schemas import (
     ForwardMessageSchema,
 )
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 
 
-def forward_message(waha: WahaClient) -> BaseTool:
+def forward_message(waha: Transport) -> BaseTool:
     """Build native forwarding from a source message id to a destination JID.
 
     Ordinary runs fence both destination and recognizable source ids;

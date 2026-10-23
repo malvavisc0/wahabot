@@ -35,7 +35,7 @@ from wahabot.ai.turn_records import (
 )
 from wahabot.ai.vision import image_caption, image_noun
 from wahabot.core.models import WahaEvent
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 
 
@@ -44,7 +44,7 @@ async def turn_user_message(
     image: dict[str, Any] | None = None,
     images: list[dict[str, Any]] | None = None,
     settings: Settings | None = None,
-    waha: WahaClient | None = None,
+    waha: Transport | None = None,
     pinned_note: str = "",
     bot_name: str | None = None,
     bot_mention_regex: str | None = None,

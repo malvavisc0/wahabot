@@ -30,12 +30,12 @@ from wahabot.ai.tools.whatsapp.media_files import (
 )
 from wahabot.ai.tools.whatsapp.targets import probe_media_url
 from wahabot.ai.tools.whatsapp.text_send import blame_delivery_error
+from wahabot.core.transport import Transport
 from wahabot.core.tts import synthesize
-from wahabot.core.waha import WahaClient
 from wahabot.settings import Settings
 
 
-def send_media(waha: WahaClient, settings: Settings) -> BaseTool:
+def send_media(waha: Transport, settings: Settings) -> BaseTool:
     """Build the media delivery tool: image, video, file, voice, sticker.
 
     One tool replaces the five old senders: a single ``kind`` argument
@@ -132,7 +132,7 @@ def send_media(waha: WahaClient, settings: Settings) -> BaseTool:
 
 
 def dispatch_media(
-    waha: WahaClient,
+    waha: Transport,
     settings: Settings,
     handler: Callable[..., str],
     kind: str,
@@ -163,7 +163,7 @@ def dispatch_media(
 
 
 def send_media_image(
-    waha: WahaClient,
+    waha: Transport,
     settings: Settings,
     session: str,
     chat_id: str,
@@ -192,7 +192,7 @@ def send_media_image(
 
 
 def send_media_video(
-    waha: WahaClient,
+    waha: Transport,
     settings: Settings,
     session: str,
     chat_id: str,
@@ -221,7 +221,7 @@ def send_media_video(
 
 
 def send_media_file(
-    waha: WahaClient,
+    waha: Transport,
     settings: Settings,
     session: str,
     chat_id: str,
@@ -256,7 +256,7 @@ def send_media_file(
 
 
 def send_media_voice(
-    waha: WahaClient,
+    waha: Transport,
     settings: Settings,
     session: str,
     chat_id: str,
@@ -287,7 +287,7 @@ def send_media_voice(
 
 
 def send_voice_text(
-    waha: WahaClient,
+    waha: Transport,
     settings: Settings,
     session: str,
     chat_id: str,
@@ -323,7 +323,7 @@ def send_voice_text(
 
 
 def send_media_sticker(
-    waha: WahaClient,
+    waha: Transport,
     settings: Settings,
     session: str,
     chat_id: str,

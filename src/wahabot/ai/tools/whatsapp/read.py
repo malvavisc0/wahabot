@@ -30,7 +30,7 @@ from wahabot.ai.tools.whatsapp.targets import resolve_message_token
 from wahabot.ai.turn_records import read_record
 from wahabot.core.identity import AUTHOR_BOT, AUTHOR_OPERATOR, authors, display_name
 from wahabot.core.journal import chat_messages
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 
 
@@ -255,7 +255,7 @@ def resolve_read_chat(
     return chat_id, None
 
 
-def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
+def read_chat(waha: Transport, settings: Settings) -> BaseTool:
     """Build the chat-reading tool: list/search/metadata/recent/resolve.
 
     ``mode`` is required in model calls. List/search inspect a bounded
@@ -319,7 +319,7 @@ def read_chat(waha: WahaClient, settings: Settings) -> BaseTool:
 
 
 def read_chat_directory(
-    waha: WahaClient,
+    waha: Transport,
     target: RunTarget,
     mode: str,
     chat: str | None,
@@ -335,7 +335,7 @@ def read_chat_directory(
 
 
 def read_recent_chats(
-    waha: WahaClient, session: str, target: RunTarget, limit: int | None
+    waha: Transport, session: str, target: RunTarget, limit: int | None
 ) -> str:
     """Newest conversations for operator commands, clamped to at most 30."""
     if not operator_run(target):
@@ -357,9 +357,7 @@ def read_recent_chats(
     return ok(chats=entries)
 
 
-def read_resolve_chat(
-    waha: WahaClient, session: str, target: RunTarget, name: str
-) -> str:
+def read_resolve_chat(waha: Transport, session: str, target: RunTarget, name: str) -> str:
     """Available-name matching: current roster, or chats then contacts.
 
     Operator scope is one page of 200 chats, then 500 contacts only
@@ -391,7 +389,7 @@ def read_resolve_chat(
 
 
 def read_chat_messages(
-    waha: WahaClient,
+    waha: Transport,
     session: str,
     chat_id: str,
     query: str,
@@ -412,7 +410,7 @@ def read_chat_messages(
 
 
 def read_search_messages(
-    waha: WahaClient,
+    waha: Transport,
     session: str,
     chat_id: str,
     query: str,
@@ -435,7 +433,7 @@ def read_search_messages(
 
 
 def read_chat_metadata(
-    waha: WahaClient,
+    waha: Transport,
     session: str,
     chat_id: str,
     query: str,

@@ -19,7 +19,7 @@ from wahabot.ai.tools.runcontext import (
 from wahabot.ai.tools.schemas import (
     ProfilePictureSchema,
 )
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 
 _URL_PROBE_TIMEOUT_S = 10.0
@@ -79,7 +79,7 @@ def probe_media_url(url: str) -> str | None:
     return None
 
 
-def profile_picture_builder(waha: WahaClient) -> BaseTool:
+def profile_picture_builder(waha: Transport) -> BaseTool:
     """Build a tool that fetches a chat's or contact's profile picture URL."""
 
     def get_profile_picture_fn(chat: str | None = None, reason: str = "") -> str:

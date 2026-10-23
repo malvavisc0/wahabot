@@ -13,7 +13,7 @@ from wahabot.ai.tools.schemas import (
     EscalateSchema,
 )
 from wahabot.core.audit import save_action
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 from wahabot.status import state as _status_state
 
@@ -61,7 +61,7 @@ class EscalationChannel:
 
 
 def forward_escalation(
-    waha: WahaClient,
+    waha: Transport,
     channel: EscalationChannel,
     settings: Settings,
     session: str,
@@ -123,9 +123,7 @@ def forward_escalation(
     return ok(chat=chat_id, escalated=True, sent_id=sent_id)
 
 
-def escalate(
-    waha: WahaClient, channel: EscalationChannel, settings: Settings
-) -> BaseTool:
+def escalate(waha: Transport, channel: EscalationChannel, settings: Settings) -> BaseTool:
     """Build a tool that forwards a report from the chat to the operator.
 
     The one sanctioned way a chat run reaches the operator: the target

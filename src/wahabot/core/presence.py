@@ -26,12 +26,12 @@ import time
 
 from loguru import logger
 
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 
 __all__ = ["clear_typing", "mark_seen", "typing_pause"]
 
 
-def mark_seen(waha: WahaClient, session: str, chat_id: str) -> None:
+def mark_seen(waha: Transport, session: str, chat_id: str) -> None:
     """Mark a chat's pending messages as seen; swallow every failure.
 
     Runs inline before the agent run — the read receipt is the
@@ -45,7 +45,7 @@ def mark_seen(waha: WahaClient, session: str, chat_id: str) -> None:
 
 
 def typing_pause(
-    waha: WahaClient,
+    waha: Transport,
     session: str,
     chat_id: str,
     reply: str,
@@ -78,7 +78,7 @@ def typing_pause(
     return True
 
 
-def clear_typing(waha: WahaClient, session: str, chat_id: str) -> None:
+def clear_typing(waha: Transport, session: str, chat_id: str) -> None:
     """Clear the "typing…" indicator; swallow every failure.
 
     The send that follows a successful :func:`typing_pause` normally
