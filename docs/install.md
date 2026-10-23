@@ -31,7 +31,7 @@ Key env vars:
 | `WAHABOT_RUN_TIMEOUT` | Server-side cap on one agent run (s; 0 = unlimited) | `1200` |
 | `WAHABOT_INTAKE_RECOVERY_MINUTES` | Accepted messages older than this are answered with an apology prefix | `30` |
 | `WAHABOT_INTAKE_MAX_ATTEMPTS` | Retry budget for a failed intake row or outbound intent | `5` |
-| `WAHABOT_INTAKE_RETENTION_DAYS` | Prune finished intake rows older than this | `30` |
+| `WAHABOT_INTAKE_RETENTION_DAYS` | Prune finished intake rows and settled intents older than this | `30` |
 | `WAHABOT_TOOL_ROUND_LIMIT` | Max LLM→tool round trips per run (one final tool-free call past the limit) | `50` |
 | `WAHABOT_TELL_TIMEOUT` | How long `wahabot tell` waits for the run to finish (s; 0 = forever) | `30` |
 | `WAHABOT_WEBHOOK_HMAC_KEY` | Shared secret matching WAHA's `hmac.key` | **required** |
@@ -84,6 +84,8 @@ Key env vars:
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Opt-in tracing (see README) | — |
 
 The durable intake and outbound-intent ledger lives in `data/wahabot.db` (SQLite, WAL, numbered migrations applied automatically at startup). Back it up with `notebook.sqlite3`; a fresh database still runs, but accepted messages and pending deliveries from before a restart are lost.
+
+Run one wahabot process per session. The chat lock and intake claim owners are in-process, so multiple workers against the same session are unsupported. The outbound retry policy treats a WAHA 5xx as a definite pre-acceptance failure; verify that assumption against your WAHA version before relying on automatic retries.
 
 ## Quick start
 

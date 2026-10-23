@@ -181,6 +181,11 @@ def stay_silent() -> BaseTool:
     )
 
 
+def _reaction_chat_id(target: Any) -> str:
+    """The chat a reaction belongs to; operator reactions search freely."""
+    return "" if operator_run(target) else str(target.chat_id)
+
+
 def react_to_message(waha: Transport, settings: Settings | None = None) -> BaseTool:
     """Build a tool that reacts to a WhatsApp message.
 
@@ -218,7 +223,7 @@ def react_to_message(waha: Transport, settings: Settings | None = None) -> BaseT
                 return error(delivery_error)
         log_action_reason("react_to_message", reason, message_id=message_id)
         try:
-            waha.send_reaction(session, message_id, reaction)
+            waha.send_reaction(session, _reaction_chat_id(target), message_id, reaction)
         except Exception as exc:
             return send_failed_envelope("react_to_message", message_id, exc)
         target.reacted = message_id

@@ -120,7 +120,9 @@ async def finish_agent_reply(
                 emoji=emoji,
             )
             try:
-                await asyncio.to_thread(waha.send_reaction, session, anchor, emoji)
+                await asyncio.to_thread(
+                    waha.send_reaction, session, chat_id, anchor, emoji
+                )
             except Exception as exc:
                 journal_send_failure(
                     settings, session, chat_id, "send_reaction", anchor, exc

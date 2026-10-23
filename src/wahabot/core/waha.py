@@ -242,7 +242,9 @@ class WahaClient:
                 chunks.append(chunk)
         return b"".join(chunks)
 
-    def send_reaction(self, session: str, message_id: str, reaction: str) -> None:
+    def send_reaction(
+        self, session: str, chat_id: str, message_id: str, reaction: str
+    ) -> None:
         """React to a message (empty reaction removes it), raising for HTTP errors."""
         self._client.put(
             f"{API_PREFIX}/reaction",

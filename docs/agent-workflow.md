@@ -337,7 +337,7 @@ delayed, operator-required or unknown work. Recovered rows older than
 customer send; rows older than `WAHABOT_INTAKE_RECOVERY_MINUTES` are still
 answered, but the text starts with a short apology.
 `WAHABOT_INTAKE_MAX_ATTEMPTS` bounds retries and
-`WAHABOT_INTAKE_RETENTION_DAYS` prunes done rows.
+`WAHABOT_INTAKE_RETENTION_DAYS` prunes done intake rows and settled intents.
 
 ### Run concurrency and the run-scoped target
 

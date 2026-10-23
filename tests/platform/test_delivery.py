@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 from typing import Any
 
@@ -325,3 +326,56 @@ def test_exhausted_retry_is_terminal_and_not_relisted(tmp_path: Path) -> None:
     assert row.state == "done" and row.outcome == "operator_required"
     transport.recover_intents(now=10**12)
     assert client.sent == []
+
+
+def test_reaction_intent_records_the_chat(tmp_path: Path) -> None:
+    intents, client, transport = stores(tmp_path)
+
+    transport.send_reaction("s", "chat", "m1", "ok")
+
+    intent = intents.recent(1)[0]
+    assert intent.kind == "reaction"
+    assert intent.chat_id == "chat"
+    assert client.reactions == [("m1", "ok")]
+
+
+def test_purge_removes_settled_intents_but_keeps_pending_ones(
+    tmp_path: Path,
+) -> None:
+    intents, _client, _transport = stores(tmp_path)
+    sent = intents.prepare(
+        session="s", chat_id="chat", kind="text", payload={"text": "done"}
+    )
+    intents.sending(sent.id)
+    intents.sent(sent.id, "wamid")
+    pending = intents.prepare(
+        session="s", chat_id="chat", kind="text", payload={"text": "pending"}
+    )
+
+    assert intents.purge(time.time() + 10) == 1
+    with pytest.raises(KeyError):
+        intents.get(sent.id)
+    assert intents.get(pending.id).state == "prepared"
+
+
+def test_ambiguous_operator_notice_is_retried(tmp_path: Path) -> None:
+    intents, client, transport = stores(tmp_path)
+    notice = intents.prepare(
+        session="s",
+        chat_id="operator",
+        kind="operator_notice",
+        payload={"text": "wahabot: notice"},
+    )
+    client.fail_with = httpx.ReadTimeout("lost")
+
+    transport.recover_intent(notice, now=time.time())
+
+    failed = intents.get(notice.id)
+    assert failed.state == "failed"
+    assert failed.next_attempt_at is not None
+
+    client.fail_with = None
+    transport.recover_intents(now=time.time() + 10**6)
+
+    assert intents.get(notice.id).state == "sent"
+    assert len(client.sent) == 1
