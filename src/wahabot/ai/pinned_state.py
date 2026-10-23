@@ -58,6 +58,7 @@ CHAT_RULES_HEADING = "## Chat rules\n\n"
 RECAP_HEADING = "## Conversation recap\n\n"
 NOTES_HEADING = "## Notebook facts\n\n"
 RULES_HEADING = "## Session rules\n\n"
+TICKET_HEADING = "## Ticket\n\n"
 RECALL_HEADING = "## Recalled from earlier in this thread\n\n"
 RECALL_PREAMBLE = (
     "Leads, verify before relying on them: older transcript slices, not "
@@ -74,6 +75,7 @@ def render_pinned_block(
     rules: str = "",
     recap: str = "",
     recall: Sequence[str] = (),
+    ticket: str = "",
     token_budget: int,
     tokenizer: Callable[[str], Sequence[Any]] | None = None,
     prompt_prefix: str = "",
@@ -103,8 +105,8 @@ def render_pinned_block(
     rides the prompt.
     """
     notes = merge_notes(required_notes, notes)
-    sections = authoritative_sections(policies, chat_rules, rules, recap)
-    base = authoritative_sections(policies, chat_rules, rules, "")
+    sections = authoritative_sections(policies, chat_rules, rules, recap, ticket)
+    base = authoritative_sections(policies, chat_rules, rules, "", ticket)
     recall_block = recall_section(recall)
     if is_empty(sections, notes, recall_block):
         return ""
@@ -257,6 +259,7 @@ async def pinned_state_block(
     rules: str = "",
     recap: str = "",
     recall: Sequence[str] = (),
+    ticket: str = "",
     required_notes: Sequence[Note] = (),
 ) -> str:
     """Assemble this run's block: fail-soft reads, then one render.
@@ -294,6 +297,7 @@ async def pinned_state_block(
         rules=rules,
         recap=recap,
         recall=recall,
+        ticket=ticket,
         required_notes=required_notes,
         token_budget=token_budget,
         tokenizer=tokenizer,
@@ -320,7 +324,11 @@ async def _read[T](
 
 
 def authoritative_sections(
-    policies: Sequence[Note], chat_rules: Sequence[Note], rules: str, recap: str
+    policies: Sequence[Note],
+    chat_rules: Sequence[Note],
+    rules: str,
+    recap: str,
+    ticket: str = "",
 ) -> list[str]:
     """The block's authoritative sections, empty ones omitted.
 
@@ -331,6 +339,8 @@ def authoritative_sections(
     bullet so a note or summary line can never forge a section heading.
     """
     sections = authority_notes(policies, chat_rules)
+    if ticket.strip():
+        sections.append(TICKET_HEADING + ticket.strip())
     recap_block = recap_section(recap)
     if recap_block:
         sections.append(recap_block)

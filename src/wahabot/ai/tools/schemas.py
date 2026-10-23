@@ -304,3 +304,55 @@ class ProfilePictureSchema(BaseModel):
         ),
     )
     reason: str = Field(default="", description=REASON_DESCRIPTION)
+
+
+class SupportStateSchema(BaseModel):
+    """Read the current ticket and contact state."""
+
+    number: int | None = Field(
+        default=None,
+        description="Operator only: look up a ticket by its number.",
+    )
+    name: str = Field(
+        default="",
+        description="Operator only: look up a ticket by a unique contact name.",
+    )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
+
+
+class UpdateTicketSchema(BaseModel):
+    """Stage ticket values; the runtime applies them after delivery."""
+
+    state: Literal["open", "waiting_customer", "needs_you", "done", "closed"] | None = (
+        Field(default=None, description="New ticket state, when it changes.")
+    )
+    summary: str | None = Field(default=None, description="Short request summary.")
+    details: dict[str, str] | None = Field(
+        default=None, description="Collected facts for the operator."
+    )
+    missing: list[str] | None = Field(
+        default=None, description="What the customer still has to answer."
+    )
+    done_by: Literal["assistant", "operator", "customer"] | None = Field(
+        default=None,
+        description="Who resolved it; operator is operator-only.",
+    )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
+
+
+class HandToOperatorSchema(BaseModel):
+    """Ask the operator to take over this ticket."""
+
+    reason: str = Field(description="Why a person must act, in one or two sentences.")
+    urgent: bool = Field(default=False, description="Mark the ticket urgent.")
+    attach_message_ids: list[str] | None = Field(
+        default=None,
+        description="`#m<n>` tokens or raw ids from this chat to forward.",
+    )
+
+
+class NewTicketSchema(BaseModel):
+    """Split this conversation into a new ticket."""
+
+    summary: str = Field(description="Short summary of the new issue.")
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
