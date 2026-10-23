@@ -369,3 +369,42 @@ def test_turn_suppressed_ignores_unaddressed_album_rows() -> None:
     suppressed = asyncio.run(handler.turn_suppressed("s", "chat", ["container", "image"]))
 
     assert suppressed is True
+
+
+def test_delivery_guard_ignores_newer_rows_settled_silent_or_failed() -> None:
+    ledger = IntakeLedger()
+    started = time.monotonic()
+    ledger.record("s", "chat", "A", "first", at=started)
+    ledger.record("s", "chat", "silent", "stale", at=started + 1)
+    ledger.finish(
+        "s", "chat", ["silent"], delivered=False, outcome="silent", reason="stale"
+    )
+    ledger.record("s", "chat", "failed", "retrying", at=started + 2)
+    ledger.fail("s", "chat", ["failed"], error="crash", next_attempt_at=started + 60)
+    target = RunTarget(
+        session="s",
+        chat_id="chat",
+        intake=ledger,
+        turn_ids=["A"],
+        turn_started_at=started,
+        owner="run-a",
+    )
+
+    assert delivery_guard(target) is None
+    assert target.claimed_ids == []
+
+
+def test_claim_records_the_owner_and_release_is_owner_scoped() -> None:
+    ledger = IntakeLedger()
+    ledger.record("s", "chat", "B", "newest")
+
+    claimed = ledger.claim("s", "chat", ["B"], owner="run-a")
+
+    assert [row.owner for row in claimed] == ["run-a"]
+    assert ledger.row("s", "chat", "B").owner == "run-a"
+
+    ledger.release("s", "chat", ["B"], owner="another-run")
+    assert ledger.row("s", "chat", "B").state == "processing"
+
+    ledger.release("s", "chat", ["B"], owner="run-a")
+    assert ledger.row("s", "chat", "B").state == "pending"

@@ -4,8 +4,10 @@ import time
 
 from wahabot.core.intake.store import (
     DELIVERED,
+    DELIVERING,
     DONE,
     FAILED,
+    OPERATOR_REQUIRED,
     PENDING,
     PROCESSING,
     IntakeRow,
@@ -18,8 +20,12 @@ class InMemoryIntakeStore:
     def __init__(self) -> None:
         self._chats: dict[tuple[str, str], dict[str, IntakeRow]] = {}
 
-    def read(self, key: tuple[str, str]) -> list[IntakeRow]:
-        return list(self._chats.get(key, {}).values())
+    def read(self, key: tuple[str, str], limit: int | None = None) -> list[IntakeRow]:
+        rows = list(self._chats.get(key, {}).values())
+        return rows if limit is None else rows[-max(0, limit) :]
+
+    def get(self, key: tuple[str, str], message_id: str) -> IntakeRow | None:
+        return self._chats.get((key[0], key[1]), {}).get(message_id)
 
     def record(self, row: IntakeRow) -> IntakeRow:
         rows = self._chats.setdefault((row.session, row.chat_id), {})
@@ -68,12 +74,43 @@ class InMemoryIntakeStore:
     def _all_done(self, rows: list[IntakeRow]) -> bool:
         return all(row.state == DONE for row in rows)
 
-    def release(self, key: tuple[str, str], message_ids: list[str]) -> None:
+    def release(
+        self, key: tuple[str, str], message_ids: list[str], owner: str = ""
+    ) -> None:
         for row in self._rows(key, message_ids):
-            if row.state == PROCESSING:
+            if row.state == PROCESSING and (not owner or row.owner == owner):
                 row.state = PENDING
                 row.owner = ""
                 row.next_attempt_at = None
+
+    def hold(self, key: tuple[str, str], message_ids: list[str], reason: str) -> None:
+        for row in self._rows(key, message_ids):
+            if row.state != DONE:
+                row.state = DELIVERING
+                row.next_attempt_at = None
+                row.last_error = reason
+
+    def is_delivering(self, key: tuple[str, str], message_ids: list[str]) -> bool:
+        return any(row.state == DELIVERING for row in self._rows(key, message_ids))
+
+    def delivering_rows(self, limit: int) -> list[IntakeRow]:
+        rows = [
+            row
+            for chat in self._chats.values()
+            for row in chat.values()
+            if row.state == DELIVERING
+        ]
+        rows.sort(key=lambda row: row.received_at)
+        return rows[:limit]
+
+    def reset_delivering(self, message_ids: list[str]) -> None:
+        wanted = set(message_ids)
+        for chat in self._chats.values():
+            for message_id, row in chat.items():
+                if message_id in wanted and row.state == DELIVERING:
+                    row.state = PENDING
+                    row.owner = ""
+                    row.next_attempt_at = None
 
     def finish(
         self,
@@ -84,6 +121,8 @@ class InMemoryIntakeStore:
         handled_at: float,
     ) -> None:
         for row in self._rows(key, message_ids):
+            if row.state == DONE:
+                continue
             row.state = DONE
             row.outcome = outcome
             row.reason = reason
@@ -98,13 +137,18 @@ class InMemoryIntakeStore:
         outcome: str,
         reason: str,
         handled_at: float,
+        owner: str = "",
     ) -> None:
         if delivered:
             self.finish(
-                key, [*turn_ids, *claimed_ids], outcome or DELIVERED, reason, handled_at
+                key,
+                [*turn_ids, *claimed_ids],
+                outcome or DELIVERED,
+                reason,
+                handled_at,
             )
             return
-        self.release(key, claimed_ids)
+        self.release(key, claimed_ids, owner)
         if outcome:
             self.finish(key, turn_ids, outcome, reason, handled_at)
 
@@ -116,6 +160,8 @@ class InMemoryIntakeStore:
         next_attempt_at: float | None,
     ) -> None:
         for row in self._rows(key, message_ids):
+            if row.state == DONE:
+                continue
             row.state = FAILED
             row.attempts += 1
             row.last_error = error
@@ -153,6 +199,36 @@ class InMemoryIntakeStore:
         rows.sort(key=lambda row: row.received_at)
         return rows[:limit]
 
+    def reset_processing(self) -> int:
+        reset = 0
+        for chat in self._chats.values():
+            for row in chat.values():
+                if row.state == PROCESSING:
+                    row.state = PENDING
+                    row.owner = ""
+                    row.next_attempt_at = None
+                    reset += 1
+        return reset
+
+    def unnotified_operator(self, limit: int) -> list[IntakeRow]:
+        rows = [
+            row
+            for chat in self._chats.values()
+            for row in chat.values()
+            if row.state == DONE
+            and row.outcome == OPERATOR_REQUIRED
+            and row.notified_at is None
+        ]
+        rows.sort(key=lambda row: row.received_at)
+        return rows[:limit]
+
+    def mark_notified(self, message_ids: list[str], notified_at: float) -> None:
+        wanted = set(message_ids)
+        for chat in self._chats.values():
+            for message_id, row in chat.items():
+                if message_id in wanted:
+                    row.notified_at = notified_at
+
     def purge(self, before: float) -> int:
         removed = 0
         for key, rows in list(self._chats.items()):
@@ -166,7 +242,9 @@ class InMemoryIntakeStore:
 
     def stats(self) -> dict[str, int]:
         rows = [row for chat in self._chats.values() for row in chat.values()]
-        unfinished = [row for row in rows if row.state in (PENDING, PROCESSING, FAILED)]
+        unfinished = [
+            row for row in rows if row.state in (PENDING, PROCESSING, DELIVERING, FAILED)
+        ]
         oldest = min((time.time() - row.received_at for row in unfinished), default=0)
         return {
             "unanswered": len(unfinished),

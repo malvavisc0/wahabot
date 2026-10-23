@@ -32,7 +32,7 @@ def test_migration_applies_once_and_records_the_version(database: Database) -> N
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
 
-    assert [row[0] for row in versions] == [1]
+    assert [row[0] for row in versions] == [1, 2]
     assert {"intake", "outbound_intents", "schema_migrations"} <= tables
 
 
@@ -51,6 +51,7 @@ def test_migration_creates_the_listed_indexes(database: Database) -> None:
         "intake_burst_key",
         "outbound_state_next_attempt",
         "outbound_chat_created",
+        "intake_operator_notice",
     } <= indexes
 
 
@@ -85,7 +86,7 @@ def test_fresh_data_directory_starts_clean(tmp_path: Path) -> None:
     assert (data_dir / "wahabot.db").exists()
     with database.connect() as conn:
         count = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
-    assert count == 1
+    assert count == 2
 
 
 def test_intake_settings_have_the_documented_defaults() -> None:

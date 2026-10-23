@@ -1,5 +1,6 @@
 import asyncio
 import time
+import uuid
 from collections.abc import Sequence
 from typing import Any
 
@@ -35,6 +36,7 @@ from wahabot.core.notebook import (
 )
 from wahabot.core.recovery.context import apology
 from wahabot.core.transport import Transport
+from wahabot.core.transport.context import bind_intake_ids, reset_intake_ids
 from wahabot.settings import Settings
 
 
@@ -281,12 +283,14 @@ async def handle_message(
         armed=armed,
         typing=typing,
         intake=intake,
+        owner=uuid.uuid4().hex,
         turn_ids=list(turn_ids),
         turn_started_at=(
             time.monotonic() if turn_started_at is None else turn_started_at
         ),
     )
     token = bind_target(target)
+    intake_token = bind_intake_ids(turn_ids)
     try:
         await bind_inbound_image(image, settings, target)
         if not await bind_run_rules(
@@ -315,7 +319,7 @@ async def handle_message(
             return "", target
         result = await run_agent_once(agent, ctx, user_msg, image_blocks, settings)
     finally:
-        await release_run(agent, ctx, token)
+        await release_run(agent, ctx, token, intake_token)
     return final_reply(result), target
 
 
@@ -342,9 +346,14 @@ async def run_agent_once(
 
 
 async def release_run(
-    agent: FunctionCallingAgentWorkflow, ctx: Context | None, token: Any
+    agent: FunctionCallingAgentWorkflow,
+    ctx: Context | None,
+    token: Any,
+    intake_token: Any = None,
 ) -> None:
-    """Cancel any pending gate and unbind this run's delivery target."""
+    """Cancel any pending gate and unbind this run's delivery context."""
     if ctx is not None:
         await agent.cancel_triage(ctx)
     reset_target(token)
+    if intake_token is not None:
+        reset_intake_ids(intake_token)

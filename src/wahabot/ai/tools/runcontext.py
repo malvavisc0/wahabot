@@ -20,6 +20,7 @@ from wahabot.ai.intake import IntakeEntry, IntakeLedger
 from wahabot.ai.tools.envelope import error
 from wahabot.core.echoes import remember_self_echo
 from wahabot.core.jid import chat_from_message_id, same_chat
+from wahabot.core.transport.context import bind_intake_ids
 from wahabot.status import state as _status_state
 
 
@@ -72,6 +73,9 @@ class RunTarget:
     #: Turn-level intake: the ids this run answers, when it started, the
     #: newer ids it claimed after a refusal, and the workflow's outcome.
     intake: IntakeLedger | None = None
+    #: Unique owner of this run's claims; recovery never releases another
+    #: run's claim and stale claims are attributable.
+    owner: str = ""
     turn_ids: list[str] = field(default_factory=list)
     turn_started_at: float = field(default_factory=time.monotonic)
     claimed_ids: list[str] = field(default_factory=list)
@@ -191,13 +195,25 @@ def guard_selection(newer: Sequence[IntakeEntry]) -> list[IntakeEntry]:
     return selected
 
 
-def refuse_newer(target: RunTarget, newer: Sequence[IntakeEntry]) -> str:
+def refuse_newer(target: RunTarget, newer: Sequence[IntakeEntry]) -> str | None:
     """Claim and render the newest records that supersede this run."""
     intake = target.intake
     assert intake is not None
-    shown = guard_selection(newer)
-    intake.claim(target.session, target.chat_id, [entry.message_id for entry in shown])
+    selected = guard_selection(newer)
+    claimed = intake.claim(
+        target.session,
+        target.chat_id,
+        [entry.message_id for entry in selected],
+        owner=target.owner,
+    )
+    owned = {row.message_id for row in claimed}
+    shown = [entry for entry in selected if entry.message_id in owned]
+    if not shown:
+        return None
     target.claimed_ids.extend(entry.message_id for entry in shown)
+    # Later sends in this run answer the claimed newer rows too, so their
+    # intents must carry those ids for crash recovery.
+    bind_intake_ids([*target.turn_ids, *target.claimed_ids])
     target.guard_refused = True
     newest = shown[-1]
     if newest.at >= target.anchor_at:

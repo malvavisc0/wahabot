@@ -30,7 +30,7 @@ from wahabot.core.runs import (
 from wahabot.handlers.base import HandlerBase
 from wahabot.handlers.dedup import forget_seen
 from wahabot.handlers.media import video_frames
-from wahabot.handlers.replies import finish_agent_reply
+from wahabot.handlers.replies import finish_agent_reply_with_intake
 from wahabot.status import (
     classify_llm_failure,
     mark_llm_recovered,
@@ -110,7 +110,8 @@ class SingleMixin(HandlerBase):
             # (once-per-transition notify) outside the chat lock, so
             # the notify send never serializes this chat's next run.
             await mark_llm_recovered(self.waha, event.session)
-            outcome = await finish_agent_reply(
+            outcome = await finish_agent_reply_with_intake(
+                turn_ids,
                 self.waha,
                 event.session,
                 chat_id,

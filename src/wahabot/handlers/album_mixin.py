@@ -31,7 +31,7 @@ from wahabot.core.runs import (
 from wahabot.handlers.base import HandlerBase
 from wahabot.handlers.dedup import forget_seen
 from wahabot.handlers.media import album_message_id, download_image
-from wahabot.handlers.replies import finish_agent_reply
+from wahabot.handlers.replies import finish_agent_reply_with_intake
 from wahabot.status import llm_failure_class
 
 
@@ -188,7 +188,8 @@ class AlbumMixin(HandlerBase):
                 )
             await persist_memory(self.settings, event.session, chat_id, ctx)
         delivered = bool(target.sent or target.reacted)
-        outcome = await finish_agent_reply(
+        outcome = await finish_agent_reply_with_intake(
+            turn_ids,
             self.waha,
             event.session,
             chat_id,

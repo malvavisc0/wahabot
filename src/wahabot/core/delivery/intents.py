@@ -14,6 +14,10 @@ SENDING = "sending"
 SENT = "sent"
 FAILED = "failed"
 UNKNOWN = "unknown"
+CANCELLED = "cancelled"
+
+#: Intake outcomes owned by a delivery intent.
+OPERATOR_REQUIRED = "operator_required"
 
 
 @dataclass(frozen=True)
@@ -60,23 +64,15 @@ class IntentStore:
         conn = connect(self.path)
         try:
             with transaction(conn):
-                conn.execute(
-                    "INSERT INTO outbound_intents ("
-                    + "id, session, intake_ids_json, chat_id, kind, payload_json, "
-                    + "state, transport_message_id, attempts, next_attempt_at, "
-                    + "last_error, operator_required, created_at, updated_at, sent_at"
-                    + ") VALUES (?, ?, ?, ?, ?, ?, ?, '', 0, NULL, '', 0, ?, ?, NULL)",
-                    (
-                        intent_id,
-                        session,
-                        json.dumps(list(intake_ids)),
-                        chat_id,
-                        kind,
-                        json.dumps(payload),
-                        PREPARED,
-                        int(now),
-                        int(now),
-                    ),
+                self._insert(
+                    conn,
+                    intent_id=intent_id,
+                    session=session,
+                    chat_id=chat_id,
+                    kind=kind,
+                    payload=payload,
+                    intake_ids=list(intake_ids),
+                    now=now,
                 )
         finally:
             conn.close()
@@ -94,27 +90,20 @@ class IntentStore:
                 conn.execute(
                     "UPDATE outbound_intents SET state = ?, transport_message_id = ?, "
                     + "next_attempt_at = NULL, last_error = '', updated_at = ?, "
-                    + "sent_at = ? WHERE id = ?",
+                    + "sent_at = ?, operator_required = 0 WHERE id = ?",
                     (SENT, transport_message_id, now, now, intent_id),
                 )
                 row = conn.execute(
-                    "SELECT intake_ids_json FROM outbound_intents WHERE id = ?",
+                    "SELECT intake_ids_json, session FROM outbound_intents WHERE id = ?",
                     (intent_id,),
                 ).fetchone()
                 if row is not None:
                     ids = json.loads(row[0])
                     if ids:
-                        conn.execute(
-                            "UPDATE intake SET state = 'done', outcome = 'delivered', "
-                            + "handled_at = ? WHERE message_id IN ("
-                            + ",".join("?" for _ in ids)
-                            + ")",
-                            (now, *ids),
-                        )
-                conn.execute(
-                    "UPDATE outbound_intents SET operator_required = 0 WHERE id = ?",
-                    (intent_id,),
-                )
+                        self._settle(conn, ids, "delivered", "", now)
+                    self._cancel_retryable(
+                        conn, ids, "superseded by a confirmed send", now
+                    )
         finally:
             conn.close()
 
@@ -144,6 +133,15 @@ class IntentStore:
                         intent_id,
                     ),
                 )
+                ids = self._intake_ids(conn, intent_id)
+                if not ids:
+                    return
+                if operator_required or next_attempt_at is None:
+                    self._settle(
+                        conn, ids, OPERATOR_REQUIRED, "delivery failed", int(now)
+                    )
+                else:
+                    self._hold(conn, ids, "delivery retrying")
         finally:
             conn.close()
 
@@ -159,8 +157,172 @@ class IntentStore:
                     + "updated_at = ? WHERE id = ?",
                     (UNKNOWN, error, now, intent_id),
                 )
+                ids = self._intake_ids(conn, intent_id)
+                if ids:
+                    self._settle(conn, ids, OPERATOR_REQUIRED, "delivery unknown", now)
         finally:
             conn.close()
+
+    def cancel(self, intent_id: str, reason: str) -> None:
+        """Stop an intent that another confirmed delivery superseded."""
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                conn.execute(
+                    "UPDATE outbound_intents SET state = ?, next_attempt_at = NULL, "
+                    + "operator_required = 0, last_error = ?, updated_at = ? "
+                    + "WHERE id = ?",
+                    (CANCELLED, reason, int(time.time()), intent_id),
+                )
+        finally:
+            conn.close()
+
+    def cancel_retryable_for(self, intake_ids: list[str], reason: str) -> None:
+        """Cancel retryable failures whose turn another send answered."""
+        if not intake_ids:
+            return
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                self._cancel_retryable(conn, intake_ids, reason, int(time.time()))
+        finally:
+            conn.close()
+
+    def reconcile_sent_intake(self) -> int:
+        """Finish received rows for intents already confirmed before a crash."""
+        conn = connect(self.path)
+        settled = 0
+        try:
+            with transaction(conn):
+                rows = conn.execute(
+                    "SELECT intake_ids_json FROM outbound_intents WHERE state = ?",
+                    (SENT,),
+                ).fetchall()
+                ids = sorted({mid for row in rows for mid in json.loads(row[0])})
+                if ids:
+                    marks = ",".join("?" for _ in ids)
+                    cursor = conn.execute(
+                        "UPDATE intake SET state = 'done', outcome = 'delivered', "
+                        + "reason = '', handled_at = ? WHERE message_id IN ("
+                        + marks
+                        + ") AND state != 'done'",
+                        (int(time.time()), *ids),
+                    )
+                    settled = int(cursor.rowcount)
+        finally:
+            conn.close()
+        return settled
+
+    def unsettled_intake_ids(self) -> set[str]:
+        """Intake ids still owned by a prepared, sending, failed or unknown intent."""
+        conn = connect(self.path)
+        try:
+            rows = conn.execute(
+                "SELECT intake_ids_json FROM outbound_intents "
+                + "WHERE state IN (?, ?, ?, ?)",
+                (PREPARED, SENDING, FAILED, UNKNOWN),
+            ).fetchall()
+        finally:
+            conn.close()
+        return {message_id for row in rows for message_id in json.loads(row[0])}
+
+    def outstanding_for(self, intake_ids: list[str]) -> list[DeliveryIntent]:
+        """Unsettled intents whose turn includes any of *intake_ids*."""
+        wanted = set(intake_ids)
+        if not wanted:
+            return []
+        conn = connect(self.path)
+        try:
+            rows = conn.execute(
+                "SELECT * FROM outbound_intents WHERE state IN (?, ?, ?, ?) "
+                + "ORDER BY created_at, rowid",
+                (PREPARED, SENDING, FAILED, UNKNOWN),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            intent
+            for intent in (to_intent(row) for row in rows)
+            if wanted.intersection(intent.intake_ids)
+        ]
+
+    def prepend_text(self, intent_id: str, prefix: str) -> DeliveryIntent:
+        """Prefix the text (or caption) a pending intent will send."""
+        if not prefix:
+            return self.get(intent_id)
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                row = conn.execute(
+                    "SELECT kind, payload_json FROM outbound_intents WHERE id = ?",
+                    (intent_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(intent_id)
+                payload = dict(json.loads(row["payload_json"]))
+                if row["kind"] in ("text", "operator_notice"):
+                    text = str(payload.get("text") or "")
+                    if text and not text.startswith(prefix):
+                        payload["text"] = prefix + text
+                elif row["kind"] in ("image", "file", "video"):
+                    caption = payload.get("caption")
+                    if not str(caption or "").startswith(prefix):
+                        payload["caption"] = prefix + str(caption or "")
+                conn.execute(
+                    "UPDATE outbound_intents SET payload_json = ?, updated_at = ? "
+                    + "WHERE id = ?",
+                    (json.dumps(payload), int(time.time()), intent_id),
+                )
+        finally:
+            conn.close()
+        return self.get(intent_id)
+
+    def prepare_notice(
+        self,
+        *,
+        session: str,
+        chat_id: str,
+        text: str,
+        source_intent_ids: list[str] | tuple[str, ...] = (),
+        source_intake_ids: list[str] | tuple[str, ...] = (),
+    ) -> DeliveryIntent:
+        """Insert one durable notice and mark its sources as noticed atomically."""
+        now = time.time()
+        intent_id = uuid.uuid4().hex
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                self._insert(
+                    conn,
+                    intent_id=intent_id,
+                    session=session,
+                    chat_id=chat_id,
+                    kind="operator_notice",
+                    payload={
+                        "text": text,
+                        "source_intent_ids": list(source_intent_ids),
+                        "source_intake_ids": list(source_intake_ids),
+                    },
+                    intake_ids=[],
+                    now=now,
+                )
+                if source_intent_ids:
+                    marks = ",".join("?" for _ in source_intent_ids)
+                    conn.execute(
+                        "UPDATE outbound_intents SET notified_at = ?, updated_at = ? "
+                        + f"WHERE id IN ({marks})",
+                        (int(now), int(now), *source_intent_ids),
+                    )
+                if source_intake_ids:
+                    marks = ",".join("?" for _ in source_intake_ids)
+                    conn.execute(
+                        "UPDATE intake SET notified_at = ? "
+                        + f"WHERE message_id IN ({marks})",
+                        (int(now), *source_intake_ids),
+                    )
+        finally:
+            conn.close()
+        return self.get(intent_id)
 
     def get(self, intent_id: str) -> DeliveryIntent:
         conn = connect(self.path)
@@ -187,13 +349,19 @@ class IntentStore:
         return [to_intent(row) for row in rows]
 
     def recoverable(self, now: float) -> list[DeliveryIntent]:
-        """Prepared, stale-sending and retry-due failed intents."""
+        """Prepared, stale-sending and retry-due failed intents.
+
+        Terminal failures (``next_attempt_at IS NULL``) and cancelled
+        intents are never selected, so exhaustion does not rewrite the
+        same row every tick.
+        """
         conn = connect(self.path)
         try:
             rows = conn.execute(
                 "SELECT * FROM outbound_intents WHERE (state = ? "
-                + "OR (state = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) "
-                + "OR state = ?) AND NOT (kind = 'operator_notice' AND chat_id = '') "
+                + "OR (state = ? AND next_attempt_at IS NOT NULL "
+                + "AND next_attempt_at <= ?) OR state = ?) "
+                + "AND NOT (kind = 'operator_notice' AND chat_id = '') "
                 + "ORDER BY created_at, rowid",
                 (PREPARED, FAILED, int(now), SENDING),
             ).fetchall()
@@ -221,8 +389,8 @@ class IntentStore:
         try:
             rows = conn.execute(
                 "SELECT * FROM outbound_intents WHERE operator_required = 1 "
-                + "AND notified_at IS NULL AND state IN (?, ?) "
-                + "ORDER BY created_at, rowid",
+                + "AND notified_at IS NULL AND kind != 'operator_notice' "
+                + "AND state IN (?, ?) ORDER BY created_at, rowid",
                 (UNKNOWN, FAILED),
             ).fetchall()
         finally:
@@ -282,6 +450,88 @@ class IntentStore:
                 )
         finally:
             conn.close()
+
+    def _insert(
+        self,
+        conn: Any,
+        *,
+        intent_id: str,
+        session: str,
+        chat_id: str,
+        kind: str,
+        payload: dict[str, Any],
+        intake_ids: list[str],
+        now: float,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO outbound_intents ("
+            + "id, session, intake_ids_json, chat_id, kind, payload_json, "
+            + "state, transport_message_id, attempts, next_attempt_at, "
+            + "last_error, operator_required, created_at, updated_at, sent_at"
+            + ") VALUES (?, ?, ?, ?, ?, ?, ?, '', 0, NULL, '', 0, ?, ?, NULL)",
+            (
+                intent_id,
+                session,
+                json.dumps(list(intake_ids)),
+                chat_id,
+                kind,
+                json.dumps(payload),
+                PREPARED,
+                int(now),
+                int(now),
+            ),
+        )
+
+    def _intake_ids(self, conn: Any, intent_id: str) -> list[str]:
+        row = conn.execute(
+            "SELECT intake_ids_json FROM outbound_intents WHERE id = ?",
+            (intent_id,),
+        ).fetchone()
+        if row is None:
+            return []
+        return list(json.loads(row[0]))
+
+    def _settle(
+        self, conn: Any, ids: list[str], outcome: str, reason: str, now: int
+    ) -> None:
+        if not ids:
+            return
+        marks = ",".join("?" for _ in ids)
+        conn.execute(
+            "UPDATE intake SET state = 'done', outcome = ?, reason = ?, handled_at = ? "
+            + f"WHERE message_id IN ({marks}) AND state != 'done'",
+            (outcome, reason, now, *ids),
+        )
+
+    def _hold(self, conn: Any, ids: list[str], reason: str) -> None:
+        if not ids:
+            return
+        marks = ",".join("?" for _ in ids)
+        conn.execute(
+            "UPDATE intake SET state = 'delivering', next_attempt_at = NULL, "
+            + "last_error = ? "
+            + f"WHERE message_id IN ({marks}) AND state != 'done'",
+            (reason, *ids),
+        )
+
+    def _cancel_retryable(
+        self, conn: Any, ids: list[str], reason: str, now: int | float
+    ) -> None:
+        wanted = set(ids)
+        if not wanted:
+            return
+        rows = conn.execute(
+            "SELECT id, intake_ids_json FROM outbound_intents "
+            + "WHERE (state = ? AND operator_required = 0) OR state = ?",
+            (FAILED, PREPARED),
+        ).fetchall()
+        for row in rows:
+            if wanted.intersection(json.loads(row[1])):
+                conn.execute(
+                    "UPDATE outbound_intents SET state = ?, next_attempt_at = NULL, "
+                    + "last_error = ?, updated_at = ? WHERE id = ?",
+                    (CANCELLED, reason, int(now), row[0]),
+                )
 
 
 def to_intent(row: Any) -> DeliveryIntent:

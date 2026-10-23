@@ -9,6 +9,7 @@ from wahabot.core.models import WahaEvent
 
 PENDING = "pending"
 PROCESSING = "processing"
+DELIVERING = "delivering"
 DONE = "done"
 FAILED = "failed"
 
@@ -40,6 +41,7 @@ class IntakeRow:
     owner: str = ""
     reason: str = ""
     handled_at: float | None = None
+    notified_at: float | None = None
 
     @property
     def event(self) -> WahaEvent:
@@ -54,7 +56,9 @@ class IntakeStore(Protocol):
     finish or failure cannot interleave with another run.
     """
 
-    def read(self, key: tuple[str, str]) -> list[IntakeRow]: ...
+    def read(self, key: tuple[str, str], limit: int | None = None) -> list[IntakeRow]: ...
+
+    def get(self, key: tuple[str, str], message_id: str) -> IntakeRow | None: ...
 
     def record(self, row: IntakeRow) -> IntakeRow: ...
 
@@ -70,7 +74,17 @@ class IntakeStore(Protocol):
         self, key: tuple[str, str], message_ids: list[str], addressed_only: bool
     ) -> bool: ...
 
-    def release(self, key: tuple[str, str], message_ids: list[str]) -> None: ...
+    def release(
+        self, key: tuple[str, str], message_ids: list[str], owner: str = ""
+    ) -> None: ...
+
+    def hold(self, key: tuple[str, str], message_ids: list[str], reason: str) -> None: ...
+
+    def is_delivering(self, key: tuple[str, str], message_ids: list[str]) -> bool: ...
+
+    def delivering_rows(self, limit: int) -> list[IntakeRow]: ...
+
+    def reset_delivering(self, message_ids: list[str]) -> None: ...
 
     def finish(
         self,
@@ -90,6 +104,7 @@ class IntakeStore(Protocol):
         outcome: str,
         reason: str,
         handled_at: float,
+        owner: str = "",
     ) -> None: ...
 
     def fail(
@@ -107,6 +122,12 @@ class IntakeStore(Protocol):
     def due(self, now: float, limit: int) -> list[IntakeRow]: ...
 
     def stale_processing(self, before: float, limit: int) -> list[IntakeRow]: ...
+
+    def reset_processing(self) -> int: ...
+
+    def unnotified_operator(self, limit: int) -> list[IntakeRow]: ...
+
+    def mark_notified(self, message_ids: list[str], notified_at: float) -> None: ...
 
     def stats(self) -> dict[str, int]: ...
 

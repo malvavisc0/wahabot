@@ -5,17 +5,17 @@ CREATE TABLE intake (
     sender TEXT NOT NULL,
     raw_json TEXT NOT NULL,
     record TEXT NOT NULL DEFAULT '',
-    received_at INTEGER NOT NULL,
+    received_at REAL NOT NULL,
     state TEXT NOT NULL,
     outcome TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at INTEGER,
+    next_attempt_at REAL,
     last_error TEXT,
     burst_key TEXT,
     addressed INTEGER NOT NULL DEFAULT 1,
     owner TEXT NOT NULL DEFAULT '',
     reason TEXT NOT NULL DEFAULT '',
-    handled_at INTEGER
+    handled_at REAL
 );
 
 CREATE INDEX intake_state_next_attempt ON intake(state, next_attempt_at);
@@ -32,13 +32,13 @@ CREATE TABLE outbound_intents (
     state TEXT NOT NULL,
     transport_message_id TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at INTEGER,
+    next_attempt_at REAL,
     last_error TEXT,
     operator_required INTEGER NOT NULL DEFAULT 0,
-    notified_at INTEGER,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    sent_at INTEGER
+    notified_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    sent_at REAL
 );
 
 CREATE INDEX outbound_state_next_attempt ON outbound_intents(state, next_attempt_at);

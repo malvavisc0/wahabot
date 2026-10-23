@@ -10,7 +10,13 @@ def test_recording_client_satisfies_the_transport_protocol() -> None:
     assert isinstance(RecordingWaha(), Transport)
 
 
-def test_waha_client_satisfies_the_transport_protocol(tmp_path: Path) -> None:
+def test_waha_client_satisfies_the_transport_protocol() -> None:
+    from wahabot.core.waha import WahaClient
+
+    assert isinstance(WahaClient("http://waha.invalid", "k"), Transport)
+
+
+def test_waha_transport_satisfies_the_transport_protocol(tmp_path: Path) -> None:
     from wahabot.core.db import Database
     from wahabot.core.delivery.intents import IntentStore
 

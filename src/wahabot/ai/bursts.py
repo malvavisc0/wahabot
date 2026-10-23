@@ -117,6 +117,8 @@ class Bursts:
         """Drop buffers, timers and cancellation state (test isolation)."""
         for timer in self._timers.values():
             timer.cancel()
+        for task in self._tasks:
+            task.cancel()
         self._timers.clear()
         self._buffers.clear()
         self._tasks.clear()

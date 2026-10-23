@@ -109,6 +109,15 @@ def test_slow_run_refused_send_answers_the_newest_record_once(bot: Bot) -> None:
     assert replied["outbound_id"].startswith("true_")
     reply_rows = _audit_entries(bot, "reply", CHAT_ID)
     assert reply_rows[-1]["reply_to"] == f"false_{CHAT_ID}_SLOWB"
+    # The superseded queued run must not overwrite B's delivered outcome.
+    b_row = bot.ledger.row(bot.settings.session, CHAT_ID, f"false_{CHAT_ID}_SLOWB")
+    assert b_row is not None and b_row.outcome == "delivered"
+    # The final send answers both the original turn and the claimed row.
+    sent_intent = bot.intents.recent(1)[0]
+    assert set(sent_intent.intake_ids) == {
+        f"false_{CHAT_ID}_SLOWA",
+        f"false_{CHAT_ID}_SLOWB",
+    }
 
 
 def test_final_text_superseded_by_newer_intake_is_not_sent(bot: Bot) -> None:

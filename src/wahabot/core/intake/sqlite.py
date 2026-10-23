@@ -7,8 +7,10 @@ from pathlib import Path
 from wahabot.core.db.connection import connect, transaction
 from wahabot.core.intake.store import (
     DELIVERED,
+    DELIVERING,
     DONE,
     FAILED,
+    OPERATOR_REQUIRED,
     PENDING,
     PROCESSING,
     IntakeRow,
@@ -17,7 +19,7 @@ from wahabot.core.intake.store import (
 _COLUMNS = (
     "message_id, session, chat_id, sender, raw_json, record, received_at, state, "
     + "outcome, attempts, next_attempt_at, last_error, burst_key, addressed, owner, "
-    + "reason, handled_at"
+    + "reason, handled_at, notified_at"
 )
 
 
@@ -27,17 +29,37 @@ class SqliteIntakeStore:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def read(self, key: tuple[str, str]) -> list[IntakeRow]:
+    def read(self, key: tuple[str, str], limit: int | None = None) -> list[IntakeRow]:
         conn = connect(self.path)
         try:
-            rows = conn.execute(
-                f"SELECT {_COLUMNS} FROM intake WHERE session = ? AND chat_id = ? "
-                + "ORDER BY received_at, rowid",
-                key,
-            ).fetchall()
+            if limit is None:
+                rows = conn.execute(
+                    f"SELECT {_COLUMNS} FROM intake WHERE session = ? AND chat_id = ? "
+                    + "ORDER BY received_at, rowid",
+                    key,
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"SELECT {_COLUMNS} FROM intake WHERE session = ? AND chat_id = ? "
+                    + "ORDER BY received_at DESC, rowid DESC LIMIT ?",
+                    (*key, max(0, limit)),
+                ).fetchall()
+                rows = list(reversed(rows))
         finally:
             conn.close()
         return [to_row(row) for row in rows]
+
+    def get(self, key: tuple[str, str], message_id: str) -> IntakeRow | None:
+        conn = connect(self.path)
+        try:
+            row = conn.execute(
+                f"SELECT {_COLUMNS} FROM intake "
+                + "WHERE message_id = ? AND session = ? AND chat_id = ?",
+                (message_id, *key),
+            ).fetchone()
+        finally:
+            conn.close()
+        return to_row(row) if row is not None else None
 
     def record(self, row: IntakeRow) -> IntakeRow:
         conn = connect(self.path)
@@ -47,8 +69,9 @@ class SqliteIntakeStore:
                     "INSERT INTO intake ("
                     + "message_id, session, chat_id, sender, raw_json, record, "
                     + "received_at, state, outcome, attempts, next_attempt_at, "
-                    + "last_error, burst_key, addressed, owner, reason, handled_at"
-                    + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    + "last_error, burst_key, addressed, owner, reason, handled_at, "
+                    + "notified_at"
+                    + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     + "ON CONFLICT(message_id) DO NOTHING",
                     values(row),
                 )
@@ -110,7 +133,66 @@ class SqliteIntakeStore:
             str(row["state"]) == DONE for row in rows
         )
 
-    def release(self, key: tuple[str, str], message_ids: list[str]) -> None:
+    def release(
+        self, key: tuple[str, str], message_ids: list[str], owner: str = ""
+    ) -> None:
+        if not message_ids:
+            return
+        marks = ",".join("?" for _ in message_ids)
+        owner_filter = " AND owner = ?" if owner else ""
+        params: tuple[object, ...] = (
+            (PENDING, *message_ids, PROCESSING, owner)
+            if owner
+            else (PENDING, *message_ids, PROCESSING)
+        )
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                conn.execute(
+                    "UPDATE intake SET state = ?, owner = '', next_attempt_at = NULL "
+                    + f"WHERE message_id IN ({marks}) AND state = ?"
+                    + owner_filter,
+                    params,
+                )
+        finally:
+            conn.close()
+
+    def hold(self, key: tuple[str, str], message_ids: list[str], reason: str) -> None:
+        """Mark rows as owned by an outbound intent; do not run them again."""
+        if not message_ids:
+            return
+        marks = ",".join("?" for _ in message_ids)
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                conn.execute(
+                    "UPDATE intake SET state = ?, next_attempt_at = NULL, "
+                    + "last_error = ? "
+                    + f"WHERE message_id IN ({marks}) AND state != ?",
+                    (DELIVERING, reason, *message_ids, DONE),
+                )
+        finally:
+            conn.close()
+
+    def is_delivering(self, key: tuple[str, str], message_ids: list[str]) -> bool:
+        if not message_ids:
+            return False
+        marks = ",".join("?" for _ in message_ids)
+        conn = connect(self.path)
+        try:
+            row = conn.execute(
+                f"SELECT 1 FROM intake WHERE message_id IN ({marks}) AND state = ? "
+                + "LIMIT 1",
+                (*message_ids, DELIVERING),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
+
+    def delivering_rows(self, limit: int) -> list[IntakeRow]:
+        return self.query("state = ?", (DELIVERING,), limit)
+
+    def reset_delivering(self, message_ids: list[str]) -> None:
         if not message_ids:
             return
         marks = ",".join("?" for _ in message_ids)
@@ -120,7 +202,7 @@ class SqliteIntakeStore:
                 conn.execute(
                     "UPDATE intake SET state = ?, owner = '', next_attempt_at = NULL "
                     + f"WHERE message_id IN ({marks}) AND state = ?",
-                    (PENDING, *message_ids, PROCESSING),
+                    (PENDING, *message_ids, DELIVERING),
                 )
         finally:
             conn.close()
@@ -142,8 +224,8 @@ class SqliteIntakeStore:
                 conn.execute(
                     "UPDATE intake SET state = ?, outcome = ?, reason = ?, "
                     + "handled_at = ? "
-                    + f"WHERE message_id IN ({marks})",
-                    (DONE, outcome, reason, handled_at, *message_ids),
+                    + f"WHERE message_id IN ({marks}) AND state != ?",
+                    (DONE, outcome, reason, handled_at, *message_ids, DONE),
                 )
         finally:
             conn.close()
@@ -157,6 +239,7 @@ class SqliteIntakeStore:
         outcome: str,
         reason: str,
         handled_at: float,
+        owner: str = "",
     ) -> None:
         conn = connect(self.path)
         try:
@@ -167,23 +250,39 @@ class SqliteIntakeStore:
                         marks = ",".join("?" for _ in ids)
                         conn.execute(
                             "UPDATE intake SET state = ?, outcome = ?, reason = ?, "
-                            + f"handled_at = ? WHERE message_id IN ({marks})",
-                            (DONE, outcome or DELIVERED, reason, handled_at, *ids),
+                            + f"handled_at = ? WHERE message_id IN ({marks}) "
+                            + "AND state != ?",
+                            (
+                                DONE,
+                                outcome or DELIVERED,
+                                reason,
+                                handled_at,
+                                *ids,
+                                DONE,
+                            ),
                         )
                     return
                 if claimed_ids:
                     marks = ",".join("?" for _ in claimed_ids)
+                    owner_filter = " AND owner = ?" if owner else ""
+                    params: tuple[object, ...] = (
+                        (PENDING, *claimed_ids, PROCESSING, owner)
+                        if owner
+                        else (PENDING, *claimed_ids, PROCESSING)
+                    )
                     conn.execute(
                         "UPDATE intake SET state = ?, owner = '', next_attempt_at = NULL "
-                        + f"WHERE message_id IN ({marks}) AND state = ?",
-                        (PENDING, *claimed_ids, PROCESSING),
+                        + f"WHERE message_id IN ({marks}) AND state = ?"
+                        + owner_filter,
+                        params,
                     )
                 if outcome and turn_ids:
                     marks = ",".join("?" for _ in turn_ids)
                     conn.execute(
                         "UPDATE intake SET state = ?, outcome = ?, reason = ?, "
-                        + f"handled_at = ? WHERE message_id IN ({marks})",
-                        (DONE, outcome, reason, handled_at, *turn_ids),
+                        + f"handled_at = ? WHERE message_id IN ({marks}) "
+                        + "AND state != ?",
+                        (DONE, outcome, reason, handled_at, *turn_ids, DONE),
                     )
         finally:
             conn.close()
@@ -204,8 +303,8 @@ class SqliteIntakeStore:
                 conn.execute(
                     "UPDATE intake SET state = ?, attempts = attempts + 1, "
                     + "last_error = ?, next_attempt_at = ? "
-                    + f"WHERE message_id IN ({marks})",
-                    (FAILED, error, next_attempt_at, *message_ids),
+                    + f"WHERE message_id IN ({marks}) AND state != ?",
+                    (FAILED, error, next_attempt_at, *message_ids, DONE),
                 )
         finally:
             conn.close()
@@ -241,6 +340,41 @@ class SqliteIntakeStore:
             limit,
         )
 
+    def reset_processing(self) -> int:
+        """Return every claim to pending after a restart, without a retry."""
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                cursor = conn.execute(
+                    "UPDATE intake SET state = ?, owner = '', next_attempt_at = NULL "
+                    + "WHERE state = ?",
+                    (PENDING, PROCESSING),
+                )
+                return int(cursor.rowcount)
+        finally:
+            conn.close()
+
+    def unnotified_operator(self, limit: int) -> list[IntakeRow]:
+        return self.query(
+            "state = ? AND outcome = ? AND notified_at IS NULL",
+            (DONE, OPERATOR_REQUIRED),
+            limit,
+        )
+
+    def mark_notified(self, message_ids: list[str], notified_at: float) -> None:
+        if not message_ids:
+            return
+        marks = ",".join("?" for _ in message_ids)
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                conn.execute(
+                    f"UPDATE intake SET notified_at = ? WHERE message_id IN ({marks})",
+                    (notified_at, *message_ids),
+                )
+        finally:
+            conn.close()
+
     def query(
         self, where: str, params: tuple[object, ...], limit: int
     ) -> list[IntakeRow]:
@@ -269,18 +403,19 @@ class SqliteIntakeStore:
             conn.close()
 
     def stats(self) -> dict[str, int]:
+        unfinished_states = (PENDING, PROCESSING, DELIVERING, FAILED)
         conn = connect(self.path)
         try:
             unanswered = conn.execute(
-                "SELECT COUNT(*) FROM intake WHERE state IN (?, ?, ?)",
-                (PENDING, PROCESSING, FAILED),
+                "SELECT COUNT(*) FROM intake WHERE state IN (?, ?, ?, ?)",
+                unfinished_states,
             ).fetchone()[0]
             done = conn.execute(
                 "SELECT COUNT(*) FROM intake WHERE state = ?", (DONE,)
             ).fetchone()[0]
             oldest = conn.execute(
-                "SELECT MIN(received_at) FROM intake WHERE state IN (?, ?, ?)",
-                (PENDING, PROCESSING, FAILED),
+                "SELECT MIN(received_at) FROM intake WHERE state IN (?, ?, ?, ?)",
+                unfinished_states,
             ).fetchone()[0]
         finally:
             conn.close()
@@ -308,6 +443,7 @@ def values(row: IntakeRow) -> tuple[object, ...]:
         row.owner,
         row.reason,
         row.handled_at,
+        row.notified_at,
     )
 
 
@@ -336,4 +472,7 @@ def to_row(row: sqlite3.Row) -> IntakeRow:
         owner=str(row["owner"] or ""),
         reason=str(row["reason"] or ""),
         handled_at=(float(row["handled_at"]) if row["handled_at"] is not None else None),
+        notified_at=(
+            float(row["notified_at"]) if row["notified_at"] is not None else None
+        ),
     )

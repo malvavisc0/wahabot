@@ -46,7 +46,7 @@ from wahabot.handlers.media import (
     prepare_url_video,
     prepare_video,
 )
-from wahabot.handlers.replies import finish_agent_reply
+from wahabot.handlers.replies import finish_agent_reply_with_intake
 from wahabot.status import (
     classify_llm_failure,
     mark_llm_recovered,
@@ -427,7 +427,8 @@ class BurstMixin(HandlerBase):
         # (once-per-transition notify) outside the chat lock — the
         # burst path shares the single-message path's contract.
         await mark_llm_recovered(self.waha, merged.session)
-        outcome = await finish_agent_reply(
+        outcome = await finish_agent_reply_with_intake(
+            turn_ids,
             self.waha,
             merged.session,
             chat_id,

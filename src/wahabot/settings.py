@@ -202,9 +202,9 @@ class Settings(BaseSettings):
     #: processing before startup returns it to pending, the retry cap
     #: before a row becomes operator-required work, and how long
     #: finished rows are retained.
-    intake_recovery_minutes: int = 30
-    intake_max_attempts: int = 5
-    intake_retention_days: int = 30
+    intake_recovery_minutes: int = Field(default=30, ge=1)
+    intake_max_attempts: int = Field(default=5, ge=1, le=50)
+    intake_retention_days: int = Field(default=30, ge=1)
 
     #: OpenAI-compatible image service (base URL, e.g. http://host:9196)
     #: behind the ``generate_image`` tool. Empty disables image
