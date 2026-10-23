@@ -36,6 +36,10 @@ emit webhook events at all — own outbound media does not echo.
   not hang the album forever).
 - A completed album runs the agent **once**, with every image attached
   as `image_blocks` on a single turn — never one run per image.
+- Intake settlement counts only the album's **addressed** records: an
+  answered album container marks the turn handled even though its image
+  rows did not individually address the bot, and those rows cannot
+  reopen the album.
 - An image with no open album buffer is a standalone photo: handled
   directly, unchanged.
 

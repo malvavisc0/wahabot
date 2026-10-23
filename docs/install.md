@@ -26,9 +26,9 @@ Key env vars:
 | `WAHABOT_LLM_REPETITION_PENALTY` | Repetition penalty | `1.0` |
 | `WAHABOT_LLM_REASONING_EFFORT` | Reasoning effort for thinking models (`low`/`medium`/`high`; empty = provider default) | — |
 | `WAHABOT_LLM_AUTO_CACHE` | Ask the gateway to prompt-cache requests (Requesty `auto_cache`; cached-prefix pricing for providers that support it) | `false` |
-| `WAHABOT_LLM_TIMEOUT` | Per-request LLM HTTP timeout (s; client retries disabled) | `60` |
+| `WAHABOT_LLM_TIMEOUT` | Per-request LLM HTTP timeout (s; client retries disabled) | `900` |
 | `WAHABOT_LLM_CONTEXT_WINDOW` | Provider context window for the startup budget warning (`0` = unknown) | `0` |
-| `WAHABOT_RUN_TIMEOUT` | Server-side cap on one agent run (s; 0 = unlimited) | `120` |
+| `WAHABOT_RUN_TIMEOUT` | Server-side cap on one agent run (s; 0 = unlimited) | `1200` |
 | `WAHABOT_TOOL_ROUND_LIMIT` | Max LLM→tool round trips per run (one final tool-free call past the limit) | `50` |
 | `WAHABOT_TELL_TIMEOUT` | How long `wahabot tell` waits for the run to finish (s; 0 = forever) | `30` |
 | `WAHABOT_WEBHOOK_HMAC_KEY` | Shared secret matching WAHA's `hmac.key` | **required** |

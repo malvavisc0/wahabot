@@ -285,16 +285,19 @@ Per chat, the bot keeps a rolling conversation in memory:
 - Memory **mirrors the chat**: what the model's self-history records as
   its own words is exactly what the chat saw. A reply that was never
   delivered — a leaked `stay_silent` token written as text instead of
-  the tool call, an invented error payload, post-delivery chatter — is
-  filtered from storage by the same visibility definition that guards
-  delivery (`chat_visible_text`, applied in `remember`), so the
-  self-history can never re-teach the model its own bugs. (The
-  one-time purge script `scripts/purge_leaked_silence.py` removed the
-  leaked tokens stored by the pre-fix handler.)
+  the tool call, an invented error payload, post-delivery chatter, or a
+  final text superseded by newer intake — never reaches the buffer.
+  Visibility filtering (`chat_visible_text`, applied in `remember`)
+  catches the first cases; the final-text guard runs before `remember`,
+  so a superseded answer is not stored at all. The self-history can
+  never re-teach the model its own bugs. (The one-time purge script
+  `scripts/purge_leaked_silence.py` removed the leaked tokens stored by
+  the pre-fix handler.)
 - Messages the **operator types on the shared account** are stored as
   `[[hh:mm <operator> #m<n>]] …` user records (§1a): memory-only,
-  no run, unless the operator names the bot. A chat with no prior
-  conversation (neither live nor on disk) folds nothing.
+  no run, unless the operator names the bot. They are not recorded in
+  the intake ledger, so they cannot supersede a live run. A chat with
+  no prior conversation (neither live nor on disk) folds nothing.
 - **Old tool calls keep their shape.** Past the two most recent turns,
   history is squeezed: thinking blocks go, tool results keep only their
   verdict, and long tool-call argument values are cut to an 80-char
@@ -417,6 +420,10 @@ dropped.
 `send_message(text)` — the default shape. In groups this is a normal
 message in the chat; the bot's name is whatever WhatsApp shows for the
 account.
+
+The handler's own final reply is quote-replied to the turn's **anchor**:
+the newest record the run was told to answer after an intake refusal,
+or the triggering message when no refusal happened.
 
 ### Quote-replying
 
