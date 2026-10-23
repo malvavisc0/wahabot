@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from wahabot.core.tokens import text_tokens
 
@@ -47,6 +47,9 @@ class SessionConfig(BaseModel):
     bot_mention_regex: str | None = None
     group_participation: str = "mentioned"
     operator_name: str = ""
+    #: How many days after the customer last wrote a reply may still be
+    #: delivered; older work becomes operator-required instead.
+    reply_window_days: int = Field(default=7, ge=1, le=30)
 
 
 def load_session_config(path: Path) -> SessionConfig:
