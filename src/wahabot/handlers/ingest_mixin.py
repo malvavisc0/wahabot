@@ -214,6 +214,12 @@ class IngestMixin(HandlerBase):
             jid_aliases=jid_alias_lookup(event),
         ):
             return
+        if is_operator_event(event) and not operator_wakes:
+            # Operator-typed ``fromMe`` messages are folded into memory,
+            # never run: they must not be ledgered as an addressed turn
+            # that could supersede a live run.
+            await fold_operator_message(event, self.agent, self.settings, body)
+            return
         self.record_intake(
             event, config, operator_wakes=operator_wakes, arrived_at=arrived_at
         )
@@ -229,9 +235,6 @@ class IngestMixin(HandlerBase):
             await asyncio.to_thread(
                 mark_seen, self.waha, event.session, str(event.payload["from"])
             )
-        if is_operator_event(event) and not operator_wakes:
-            await fold_operator_message(event, self.agent, self.settings, body)
-            return
         if buffer_album_message(event, operator_wakes):
             return
         return operator_wakes

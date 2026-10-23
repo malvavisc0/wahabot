@@ -10,12 +10,13 @@ fenced: only operator commands may select other chats.
 import contextvars
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from loguru import logger
 
-from wahabot.ai.intake import IntakeLedger
+from wahabot.ai.intake import IntakeEntry, IntakeLedger
 from wahabot.ai.tools.envelope import error
 from wahabot.core.echoes import remember_self_echo
 from wahabot.core.jid import chat_from_message_id, same_chat
@@ -74,6 +75,15 @@ class RunTarget:
     turn_ids: list[str] = field(default_factory=list)
     turn_started_at: float = field(default_factory=time.monotonic)
     claimed_ids: list[str] = field(default_factory=list)
+    #: Set when a newer intake record superseded this run. Delivery is
+    #: blocked for the rest of the current tool round; the next LLM
+    #: round reads the refusal and may answer the newest record.
+    guard_refused: bool = False
+    #: The newest message this run was told to answer after a refusal;
+    #: final text and a lone-emoji reaction anchor to it, not to the
+    #: older turn that started the run.
+    anchor_id: str = ""
+    anchor_at: float = 0.0
     outcome: str = ""
 
     @classmethod
@@ -148,23 +158,85 @@ def current_target() -> RunTarget:
     return target
 
 
-#: At most this many newer rendered records ride one refusal; the model
-#: needs the newest turn, not a transcript.
-_GUARD_RECORDS = 3
+def clear_delivery_refusal(target: RunTarget | None = None) -> None:
+    """Re-allow delivery at the start of a new model round.
+
+    A refusal blocks the rest of its tool batch: the model has not seen
+    the refusal yet, so a second delivery call in the same batch must
+    not slip through. The next LLM round starts after the refusal was
+    read and may retry.
+    """
+    holder = target if target is not None else _run_target.get()
+    if holder is not None:
+        holder.guard_refused = False
+
+
+#: The rendered-record budget for one refusal. Selection drops whole
+#: records from the oldest end, so every claimed id is shown; nothing is
+#: settled without the model seeing it.
 _GUARD_CHARS = 1200
+
+
+def guard_selection(newer: Sequence[IntakeEntry]) -> list[IntakeEntry]:
+    """The newest records that fit the refusal budget, oldest first."""
+    selected: list[IntakeEntry] = []
+    budget = _GUARD_CHARS
+    for entry in reversed(newer):
+        cost = len(entry.record) + (1 if selected else 0)
+        if selected and cost > budget:
+            break
+        selected.append(entry)
+        budget -= cost
+    selected.reverse()
+    return selected
+
+
+def refuse_newer(target: RunTarget, newer: Sequence[IntakeEntry]) -> str:
+    """Claim and render the newest records that supersede this run."""
+    intake = target.intake
+    assert intake is not None
+    shown = guard_selection(newer)
+    intake.claim(target.session, target.chat_id, [entry.message_id for entry in shown])
+    target.claimed_ids.extend(entry.message_id for entry in shown)
+    target.guard_refused = True
+    newest = shown[-1]
+    if newest.at >= target.anchor_at:
+        target.anchor_id = newest.message_id
+        target.anchor_at = newest.at
+    records = "\n".join(entry.record for entry in shown)
+    if len(records) > _GUARD_CHARS:
+        records = records[:_GUARD_CHARS]
+    remaining = len(newer) - len(shown)
+    if remaining:
+        records = (
+            f"({remaining} older newer record(s) left for their own run)\n" + records
+        )
+    return error(
+        "Newer message(s) arrived while you were answering; this reply "
+        + f"would answer an older turn.\n{records}\n"
+        + "Do not send this reply. Read the newest record and answer it "
+        + "once. If the newest record is media you cannot read (no "
+        + "transcript or captions), end this run instead — its own run "
+        + "will answer it."
+    )
 
 
 def delivery_guard(target: RunTarget) -> str | None:
     """Refuse a send that would answer an older turn than the chat's intake.
 
-    The refusal claims the newer records that would wake a run for this
-    one. A retry after the model has read them is allowed and the run's
-    own delivery settles the claim; a run that ends without a send
-    releases the claims again. Operator runs and turns without intake
-    ids keep their old behaviour.
+    The refusal claims only the records it renders. A retry in the next
+    model round is allowed and the run's own delivery settles the claim;
+    a run that ends without a send releases the claims again. Operator
+    runs and turns without intake ids keep their old behaviour.
     """
     if target.intake is None or target.armed or not target.turn_ids:
         return None
+    if target.guard_refused:
+        return error(
+            "A newer message already superseded this run in this tool round. "
+            + "Do not send in this batch; answer the newest record in your "
+            + "next response."
+        )
     newer = target.intake.pending(
         target.session,
         target.chat_id,
@@ -172,25 +244,7 @@ def delivery_guard(target: RunTarget) -> str | None:
         exclude=[*target.turn_ids, *target.claimed_ids],
         addressed_only=True,
     )
-    if newer:
-        target.intake.claim(
-            target.session, target.chat_id, [entry.message_id for entry in newer]
-        )
-        target.claimed_ids.extend(entry.message_id for entry in newer)
-        shown = newer[-_GUARD_RECORDS:]
-        records = "\n".join(entry.record for entry in shown)[-_GUARD_CHARS:]
-        remaining = len(newer) - len(shown)
-        if remaining:
-            records = f"({remaining} older newer record(s) omitted)\n{records}"
-        return error(
-            "Newer message(s) arrived while you were answering; this reply "
-            + f"would answer an older turn.\n{records}\n"
-            + "Do not send this reply. Read the newest record and answer it "
-            + "once. If the newest record is media you cannot read (no "
-            + "transcript or captions), end this run instead — its own run "
-            + "will answer it."
-        )
-    return None
+    return refuse_newer(target, newer) if newer else None
 
 
 #: Outcomes whose audit path is the outcome itself.

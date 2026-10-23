@@ -29,7 +29,7 @@ import atexit
 import hashlib
 import re
 from collections.abc import AsyncIterator, Iterator, Sequence
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from loguru import logger
@@ -249,28 +249,52 @@ async def observation(
 
     Fail-soft: a tracing error never fails the call it wraps. Yields
     ``None`` when no client is configured or the observation could not
-    start, so callers must guard their ``update`` calls. The span runs
-    as the current OTel observation, so it groups under the active
-    trace (the agent's propagation context when one is recording).
+    start, so callers must use :func:`update_observation` for their
+    ``update`` calls. The span runs as the current OTel observation, so
+    it groups under the active trace (the agent's propagation context
+    when one is recording).
     """
     if _client is None:
         yield None
         return
     try:
-        span = _client.start_as_current_observation(
-            name=name,
-            # Langfuse overloads split the literal per observation kind.
-            as_type=cast("Any", as_type),
-            model=model,
-            input=input,
-            metadata=metadata,
+        manager = cast(
+            AbstractContextManager[Any],
+            _client.start_as_current_observation(
+                name=name,
+                # Langfuse overloads split the literal per observation kind.
+                as_type=cast("Any", as_type),
+                model=model,
+                input=input,
+                metadata=metadata,
+            ),
         )
+        current = manager.__enter__()
     except Exception:
         logger.debug("Langfuse observation failed to start: {name}", name=name)
         yield None
         return
-    with span as current:
+    exc_info: tuple[Any, Any, Any] = (None, None, None)
+    try:
         yield current
+    except BaseException as exc:
+        exc_info = (type(exc), exc, exc.__traceback__)
+        raise
+    finally:
+        try:
+            manager.__exit__(*exc_info)
+        except Exception:
+            logger.debug("Langfuse observation failed to close: {name}", name=name)
+
+
+def update_observation(span: Any, **fields: Any) -> None:
+    """Update an observation fail-soft: tracing never changes a verdict."""
+    if span is None:
+        return
+    try:
+        span.update(**fields)
+    except Exception:
+        logger.debug("Langfuse observation failed to update")
 
 
 @contextmanager

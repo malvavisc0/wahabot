@@ -6,7 +6,11 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from wahabot.ai.observability import masked_chat_id, observation
+from wahabot.ai.observability import (
+    masked_chat_id,
+    observation,
+    update_observation,
+)
 from wahabot.ai.tools.whatsapp import EscalationChannel, forward_escalation
 from wahabot.ai.triage.models import TriageContext, TriageResult, TriageVerdict
 from wahabot.ai.triage.parsing import parse_verdict, render_context
@@ -203,18 +207,17 @@ class TriageGate:
                 except (KeyError, IndexError, TypeError) as exc:
                     raise ValueError("triage response has no message content") from exc
             except Exception as exc:
-                if span is not None:
-                    span.update(level="ERROR", status_message=str(exc))
+                update_observation(span, level="ERROR", status_message=str(exc))
                 raise
-            if span is not None:
-                usage: dict[str, Any] = payload.get("usage") or {}
-                span.update(
-                    output=text,
-                    usage_details={
-                        "input": usage.get("prompt_tokens", 0),
-                        "output": usage.get("completion_tokens", 0),
-                    },
-                )
+            usage: dict[str, Any] = payload.get("usage") or {}
+            update_observation(
+                span,
+                output=text,
+                usage_details={
+                    "input": usage.get("prompt_tokens", 0),
+                    "output": usage.get("completion_tokens", 0),
+                },
+            )
             return text
 
     async def escalate(self, context: TriageContext, verdict: TriageVerdict) -> None:

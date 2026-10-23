@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from wahabot.core.access import SessionConfigReloader
@@ -9,6 +10,7 @@ from wahabot.handlers.config_mixin import GATE_BRIEF_CHARS, ConfigMixin
 class BriefHandler(ConfigMixin):
     def __init__(self, reloader: SessionConfigReloader) -> None:
         self.config_reloader = reloader
+        self.settings = SimpleNamespace(timezone="UTC")
 
 
 def brief_reloader(tmp_path: Path, **overrides: Any) -> SessionConfigReloader:
@@ -33,6 +35,7 @@ def test_gate_brief_names_assistant_operator_mode_and_goal(tmp_path: Path) -> No
     brief = handler.render_gate_brief()
 
     assert "Assistant name: Kai." in brief
+    assert "Timezone: UTC." in brief
     assert "Human operator: Sam." in brief
     assert "judge each message" in brief
     assert "personal life" in brief

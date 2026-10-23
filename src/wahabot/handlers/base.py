@@ -61,7 +61,7 @@ class HandlerBase:
             if time.monotonic() >= deadline:
                 return False
             await asyncio.sleep(_CLAIM_POLL_S)
-        return self.intake.handled(session, chat_id, turn_ids)
+        return self.intake.handled(session, chat_id, turn_ids, addressed_only=True)
 
     def finish_run(
         self,

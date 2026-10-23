@@ -25,6 +25,7 @@ from wahabot.ai.messages import (
 )
 from wahabot.ai.tools.notebook import NOTEBOOK_INSTRUCTIONS
 from wahabot.ai.tools.whatsapp import (
+    clear_delivery_refusal,
     current_target,
 )
 from wahabot.ai.triage import (
@@ -244,6 +245,10 @@ class FunctionCallingAgentWorkflow(
         final answer untouched.
         """
         rounds = await self.next_round(ctx)
+        # A refusal blocks the rest of its tool batch; by the time a new
+        # model round starts the refusal has been read, so a retry may
+        # answer the newer record.
+        clear_delivery_refusal()
         chat_history = await self.populated_history(ctx, ev)
         if self.any_delivery():
             # The delivery already fired: everything from here on can

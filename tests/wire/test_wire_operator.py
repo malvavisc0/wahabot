@@ -28,6 +28,7 @@ from tests.wire.support import (
     requires_ffmpeg,
 )
 from wahabot.ai.history import sanitize_chat_history as _sanitize
+from wahabot.ai.intake import IntakeLedger
 from wahabot.core.persistence import memory_file
 from wahabot.core.runs import contexts as handlers_contexts
 from wahabot.reactions import forget_reaction_notes as _forget_notes
@@ -474,3 +475,21 @@ def test_video_frames_are_bounded_by_video_frames_not_the_image_cap(bot: Bot) ->
     assert image_part_count(caption_requests[0]) == capped.settings.video_frames
     assert len(agent_requests) >= 1
     assert image_part_count(agent_requests[0]) == capped.settings.video_frames
+
+
+def test_folded_operator_message_is_not_ledgered(bot: Bot) -> None:
+    """A folded operator DM never wakes a run, so it cannot supersede one."""
+    llm = bot.stack.llm
+    llm.requests.clear()
+    partner = "491555000004@c.us"
+    dm = make_operator_typed(waha_event("OPFOLD"), partner)
+    dm["payload"]["id"] = f"false_{partner}_OPFOLD"
+    dm["payload"]["_data"]["id"] = {"_serialized": f"false_{partner}_OPFOLD"}
+    dm["payload"]["body"] = "internal note for the team"
+
+    with unittest.mock.patch.object(IntakeLedger, "record") as record:
+        bot.post(dm)
+        time.sleep(0.3)
+
+    record.assert_not_called()
+    assert llm.requests == []
