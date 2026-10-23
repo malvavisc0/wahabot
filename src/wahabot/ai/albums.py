@@ -1,6 +1,7 @@
 """Reassemble WhatsApp media albums into a single agent turn."""
 
 import asyncio
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -10,6 +11,10 @@ from wahabot.ai.messages import message_kind
 from wahabot.core.models import WahaEvent
 
 ALBUM_FLUSH_TIMEOUT_S = 3.0
+
+#: Bound the duplicate-suppression set; the intake ledger is the durable
+#: duplicate authority once a row is done.
+_MAX_CONSUMED = 4096
 
 
 @dataclass
@@ -55,6 +60,7 @@ class Albums:
         self.flush_timeout_s = flush_timeout_s
         self._albums: dict[tuple[str, str], AlbumBuffer] = {}
         self._consumed: set[str] = set()
+        self._consumed_order: deque[str] = deque()
         self._tasks: set[asyncio.Task[None]] = set()
 
     def buffer(self, event: WahaEvent) -> str | None:
@@ -73,7 +79,7 @@ class Albums:
                 chat_id=key[1],
                 n=expected_images(event),
             )
-            self._consumed.add(container_id)
+            self._consume(container_id)
             self._spawn(self._flush_later(key))
             return container_id
         if message_kind(event) not in ("image", "sticker"):
@@ -82,7 +88,7 @@ class Albums:
         if buffer is None:
             return None
         message_id = str(event.payload.get("id", ""))
-        self._consumed.add(message_id)
+        self._consume(message_id)
         buffer.image_ids.append(message_id)
         if buffer.expected and len(buffer.image_ids) >= buffer.expected:
             self._albums.pop(key, None)
@@ -118,6 +124,14 @@ class Albums:
         task.add_done_callback(self._tasks.discard)
         return task
 
+    def _consume(self, message_id: str) -> None:
+        if message_id in self._consumed:
+            return
+        self._consumed.add(message_id)
+        self._consumed_order.append(message_id)
+        while len(self._consumed_order) > _MAX_CONSUMED:
+            self._consumed.discard(self._consumed_order.popleft())
+
     def consumed(self, event: WahaEvent) -> bool:
         """Whether this event already joined an open or completed album."""
         return str(event.payload.get("id", "")) in self._consumed
@@ -128,4 +142,5 @@ class Albums:
             task.cancel()
         self._albums.clear()
         self._consumed.clear()
+        self._consumed_order.clear()
         self._tasks.clear()

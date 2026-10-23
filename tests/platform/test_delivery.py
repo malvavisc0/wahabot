@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -205,4 +206,122 @@ def test_unknown_sends_stay_unknown_even_when_recovery_runs(tmp_path: Path) -> N
     transport.recover_intents(now=10**12)
 
     assert intents.recent(1)[0].state == "unknown"
+    assert client.sent == []
+
+
+def _record(bot_intents: IntentStore, message_id: str) -> Any:
+    from wahabot.ai.intake import IntakeLedger
+    from wahabot.core.intake.sqlite import SqliteIntakeStore
+
+    ledger = IntakeLedger(store=SqliteIntakeStore(bot_intents.path))
+    ledger.record("s", "chat", message_id, "record")
+    return ledger
+
+
+def test_retryable_failure_holds_the_row_and_a_fallback_cancels_it(
+    tmp_path: Path,
+) -> None:
+    from wahabot.core.transport.context import bind_intake_ids, reset_intake_ids
+
+    intents, client, transport = stores(tmp_path)
+    ledger = _record(intents, "m1")
+    client.fail_with = httpx.ConnectError("refused")
+
+    token = bind_intake_ids(("m1",))
+    try:
+        with pytest.raises(httpx.ConnectError):
+            transport.send_text("s", "chat", "first")
+        failed = intents.recent(1)[0]
+        assert failed.state == "failed"
+        assert failed.next_attempt_at is not None
+        assert ledger.row("s", "chat", "m1").state == "delivering"
+
+        transport.send_text("s", "chat", "fallback")
+    finally:
+        reset_intake_ids(token)
+
+    assert ledger.row("s", "chat", "m1").outcome == "delivered"
+    assert intents.get(failed.id).state == "cancelled"
+    assert len(client.sent) == 1
+
+    transport.recover_intents(now=10**12)
+    assert len(client.sent) == 1
+
+
+def test_unknown_send_settles_the_intake_row_operator_required(
+    tmp_path: Path,
+) -> None:
+    from wahabot.core.transport.context import bind_intake_ids, reset_intake_ids
+
+    intents, client, transport = stores(tmp_path)
+    ledger = _record(intents, "m1")
+    client.fail_with = httpx.ReadTimeout("lost")
+
+    token = bind_intake_ids(("m1",))
+    try:
+        with pytest.raises(httpx.ReadTimeout):
+            transport.send_text("s", "chat", "maybe")
+    finally:
+        reset_intake_ids(token)
+
+    row = ledger.row("s", "chat", "m1")
+    assert row.state == "done" and row.outcome == "operator_required"
+    assert intents.recent(1)[0].state == "unknown"
+
+
+def test_remote_accepted_but_unrecorded_local_send_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wahabot.core.transport.context import bind_intake_ids, reset_intake_ids
+
+    intents, client, transport = stores(tmp_path)
+    ledger = _record(intents, "m1")
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("sqlite write failed")
+
+    monkeypatch.setattr(intents, "sent", boom)
+
+    token = bind_intake_ids(("m1",))
+    try:
+        with pytest.raises(RuntimeError):
+            transport.send_text("s", "chat", "accepted remotely")
+    finally:
+        reset_intake_ids(token)
+
+    assert len(client.sent) == 1
+    assert intents.recent(1)[0].state == "unknown"
+    row = ledger.row("s", "chat", "m1")
+    assert row.state == "done" and row.outcome == "operator_required"
+
+    transport.recover_intents(now=10**12)
+    assert len(client.sent) == 1
+
+
+def test_exhausted_retry_is_terminal_and_not_relisted(tmp_path: Path) -> None:
+    from wahabot.core.transport.context import bind_intake_ids, reset_intake_ids
+
+    db = Database(tmp_path / "wahabot.db")
+    db.migrate()
+    intents = IntentStore(db.path, max_attempts=1)
+    client = SpyWaha()
+    transport = WahaTransport(client, intents)
+    ledger = _record(intents, "m1")
+    client.fail_with = httpx.ConnectError("refused")
+
+    token = bind_intake_ids(("m1",))
+    try:
+        with pytest.raises(httpx.ConnectError):
+            transport.send_text("s", "chat", "one attempt")
+    finally:
+        reset_intake_ids(token)
+
+    intent = intents.recent(1)[0]
+    assert intent.state == "failed"
+    assert intent.next_attempt_at is None
+    assert intent.operator_required
+    assert intents.recoverable(10**12) == []
+    row = ledger.row("s", "chat", "m1")
+    assert row.state == "done" and row.outcome == "operator_required"
+    transport.recover_intents(now=10**12)
     assert client.sent == []

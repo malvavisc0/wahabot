@@ -1,6 +1,7 @@
 import asyncio
 import random
 from collections.abc import Sequence
+from typing import Any
 
 import httpx
 from loguru import logger
@@ -17,6 +18,10 @@ from wahabot.core.audit import save_action
 from wahabot.core.echoes import remember_self_echo
 from wahabot.core.models import WahaEvent
 from wahabot.core.transport import Transport
+from wahabot.core.transport.context import (
+    bind_intake_ids,
+    reset_intake_ids,
+)
 from wahabot.settings import Settings
 
 
@@ -249,6 +254,21 @@ async def finish_agent_reply(
 
 
 _SELF_REPLY_RETRY_DELAYS_S = (2.0, 5.0, 0.0)
+
+
+async def finish_agent_reply_with_intake(
+    turn_ids: Sequence[str],
+    *args: Any,
+    **kwargs: Any,
+) -> str:
+    """Finish the final send with this run's intake ids bound."""
+    target = kwargs.get("target")
+    claimed = list(getattr(target, "claimed_ids", ()) or ())
+    token = bind_intake_ids([*turn_ids, *claimed])
+    try:
+        return await finish_agent_reply(*args, **kwargs)
+    finally:
+        reset_intake_ids(token)
 
 
 async def send_self_reply(waha: Transport, command: WahaEvent, reply: str) -> None:

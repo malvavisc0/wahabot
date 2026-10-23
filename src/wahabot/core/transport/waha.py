@@ -1,5 +1,6 @@
 """The WAHA-backed transport, recording an intent around every send."""
 
+import contextlib
 import time
 from collections.abc import Callable
 from typing import Any
@@ -51,7 +52,14 @@ class WahaTransport:
         except Exception as exc:
             self.record_failure(intent, exc)
             raise
-        intents.sent(intent.id, result if isinstance(result, str) else "")
+        try:
+            intents.sent(intent.id, result if isinstance(result, str) else "")
+        except Exception as exc:
+            # The remote side accepted it but the local receipt did not
+            # commit: this is an uncertain outcome, not an unsent message.
+            with contextlib.suppress(Exception):
+                intents.unknown(intent.id, f"local receipt failed: {exc}")
+            raise
         return result
 
     def record_failure(self, intent: DeliveryIntent, exc: Exception) -> None:
@@ -61,11 +69,20 @@ class WahaTransport:
             return
         disposition = classify_send_error(exc)
         if disposition == RETRYABLE:
-            intents.failed(
-                intent.id,
-                str(exc),
-                next_attempt_at=time.time() + backoff_seconds(intent.attempts + 1),
-            )
+            attempts = intent.attempts + 1
+            if attempts >= intents.max_attempts:
+                intents.failed(
+                    intent.id,
+                    str(exc),
+                    next_attempt_at=None,
+                    operator_required=True,
+                )
+            else:
+                intents.failed(
+                    intent.id,
+                    str(exc),
+                    next_attempt_at=time.time() + backoff_seconds(attempts),
+                )
         elif disposition == AMBIGUOUS:
             intents.unknown(intent.id, str(exc))
         else:
@@ -211,6 +228,20 @@ class WahaTransport:
             if recovered is not None:
                 replayed.append(recovered)
         return replayed
+
+    def recover_intent(
+        self,
+        intent: DeliveryIntent,
+        now: float | None = None,
+        *,
+        recover_sending: bool = False,
+    ) -> str | None:
+        """Resume one already-loaded intent (used by the recovery tick)."""
+        intents = self.intents
+        if intents is None:
+            return None
+        moment = time.time() if now is None else now
+        return self._recover_one(intents, intent, moment, recover_sending)
 
     def _recover_one(
         self,

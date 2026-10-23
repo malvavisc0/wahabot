@@ -17,7 +17,13 @@ from wahabot.ai.triage import TriageGate
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.access import SessionConfig, SessionConfigReloader
 from wahabot.core.audit import save_run_outcome
-from wahabot.core.delivery.intents import IntentStore
+from wahabot.core.delivery.intents import (
+    FAILED,
+    PREPARED,
+    SENDING,
+    UNKNOWN,
+    IntentStore,
+)
 from wahabot.core.models import WahaEvent
 from wahabot.core.transport import Transport
 from wahabot.settings import Settings
@@ -83,6 +89,8 @@ class HandlerBase:
             if time.monotonic() >= deadline:
                 return False
             await asyncio.sleep(_CLAIM_POLL_S)
+        if self.intake.is_delivering(session, chat_id, turn_ids):
+            return True
         return self.intake.handled(session, chat_id, turn_ids, addressed_only=True)
 
     def finish_run(
@@ -97,12 +105,77 @@ class HandlerBase:
     ) -> None:
         """Settle intake and write the one outcome row every run owes."""
         claimed = list(target.claimed_ids) if target is not None else []
+        owner = target.owner if target is not None else ""
         sent = bool(target and (target.sent or target.reacted))
         delivered = outcome in ("reply", "delivered_via_tool", "reaction") or sent
+        ids = [*turn_ids, *claimed]
         try:
-            if delivered:
+            outstanding = self.intents.outstanding_for(ids)
+            for intent in outstanding:
+                if intent.state == SENDING:
+                    # The remote call returned or the process survived, but
+                    # the outcome was not durably recorded: treat it as
+                    # unknown rather than retrying it blindly.
+                    self.intents.unknown(intent.id, "send outcome was not recorded")
+            outstanding = self.intents.outstanding_for(ids)
+            unknown = [
+                intent
+                for intent in outstanding
+                if intent.state == UNKNOWN
+                or (intent.state == FAILED and intent.operator_required)
+            ]
+            retryable = [
+                intent
+                for intent in outstanding
+                if intent.state in (PREPARED, SENDING)
+                or (intent.state == FAILED and not intent.operator_required)
+            ]
+            if unknown:
+                # The intent layer settles its own rows; make sure no other
+                # row in this turn is left pending for a fresh run.
+                self.intake.finish(
+                    session,
+                    chat_id,
+                    ids,
+                    delivered=False,
+                    outcome="operator_required",
+                    reason="send outcome unknown",
+                )
+            elif retryable:
+                if delivered:
+                    self.intents.cancel_retryable_for(
+                        ids, "superseded by a confirmed send"
+                    )
+                    self.intake.finish_turn(
+                        session,
+                        chat_id,
+                        turn_ids,
+                        claimed,
+                        delivered=True,
+                        owner=owner,
+                    )
+                elif outcome in ("silence", "empty", "superseded"):
+                    self.intents.cancel_retryable_for(ids, outcome)
+                    self.intake.finish_turn(
+                        session,
+                        chat_id,
+                        turn_ids,
+                        claimed,
+                        delivered=False,
+                        outcome="silent",
+                        reason=outcome,
+                        owner=owner,
+                    )
+                # A failed run with a retryable intent leaves the rows in
+                # ``delivering``; the intent owns the next attempt.
+            elif delivered:
                 self.intake.finish_turn(
-                    session, chat_id, turn_ids, claimed, delivered=True
+                    session,
+                    chat_id,
+                    turn_ids,
+                    claimed,
+                    delivered=True,
+                    owner=owner,
                 )
             elif outcome in ("silence", "empty", "superseded"):
                 self.intake.finish_turn(
@@ -113,12 +186,13 @@ class HandlerBase:
                     delivered=False,
                     outcome="silent",
                     reason=outcome,
+                    owner=owner,
                 )
             else:
                 self.intake.fail(
                     session,
                     chat_id,
-                    [*turn_ids, *claimed],
+                    ids,
                     error=outcome,
                     next_attempt_at=time.time() + 60,
                 )

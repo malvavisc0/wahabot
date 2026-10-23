@@ -106,14 +106,7 @@ class IntakeLedger:
     def row(self, session: str, chat_id: str, message_id: str) -> IntakeRow | None:
         """One stored row, or None when it was never accepted."""
         with self._lock:
-            return next(
-                (
-                    entry
-                    for entry in self._all((session, chat_id))
-                    if entry.message_id == message_id
-                ),
-                None,
-            )
+            return self.store.get((session, chat_id), message_id)
 
     def pending(
         self,
@@ -145,13 +138,14 @@ class IntakeLedger:
         exclude: Collection[str] = (),
         addressed_only: bool = False,
     ) -> list[IntakeRow]:
-        """Any row newer than a turn, in any state, for send revalidation."""
+        """Pending rows newer than a turn, for send revalidation."""
         skipped = set(exclude)
         with self._lock:
             return [
                 entry
                 for entry in self._live((session, chat_id))
-                if entry.message_id not in skipped
+                if entry.state == PENDING
+                and entry.message_id not in skipped
                 and (after is None or entry.at > after)
                 and (not addressed_only or entry.addressed)
             ]
@@ -209,15 +203,23 @@ class IntakeLedger:
                 (session, chat_id), list(message_ids), addressed_only
             )
 
-    def release(self, session: str, chat_id: str, message_ids: Sequence[str]) -> None:
+    def release(
+        self,
+        session: str,
+        chat_id: str,
+        message_ids: Sequence[str],
+        *,
+        owner: str = "",
+    ) -> None:
         """Return rows this run claimed to pending so their own run can answer.
 
         Only claims: a row another run settled by delivering stays
         handled — ``DONE`` means an answer reached the chat, never a
-        suppression left to undo.
+        suppression left to undo. A non-empty owner releases only that
+        run's claims.
         """
         with self._lock:
-            self.store.release((session, chat_id), list(message_ids))
+            self.store.release((session, chat_id), list(message_ids), owner)
 
     def finish(
         self,
@@ -252,6 +254,7 @@ class IntakeLedger:
         delivered: bool,
         outcome: str | None = None,
         reason: str = "",
+        owner: str = "",
     ) -> None:
         """Settle a run's own ids and every id it claimed while running."""
         with self._lock:
@@ -263,7 +266,32 @@ class IntakeLedger:
                 outcome or "",
                 reason,
                 time.time(),
+                owner,
             )
+
+    def hold(
+        self, session: str, chat_id: str, message_ids: Sequence[str], reason: str
+    ) -> None:
+        """Hand rows to an outbound intent so recovery does not rerun them."""
+        with self._lock:
+            self.store.hold((session, chat_id), list(message_ids), reason)
+
+    def is_delivering(
+        self, session: str, chat_id: str, message_ids: Sequence[str]
+    ) -> bool:
+        """True when an outbound intent owns at least one of these rows."""
+        with self._lock:
+            return self.store.is_delivering((session, chat_id), list(message_ids))
+
+    def delivering_rows(self, limit: int = 50) -> list[IntakeRow]:
+        """Rows waiting for an outbound intent."""
+        with self._lock:
+            return self.store.delivering_rows(limit)
+
+    def reset_delivering(self, message_ids: Sequence[str]) -> None:
+        """Requeue rows whose intent was cancelled or already settled."""
+        with self._lock:
+            self.store.reset_delivering(list(message_ids))
 
     def fail(
         self,
@@ -302,6 +330,21 @@ class IntakeLedger:
         with self._lock:
             return self.store.stale_processing(time.time() if now is None else now, limit)
 
+    def reset_processing(self) -> int:
+        """Return every claim to pending at startup without a retry increment."""
+        with self._lock:
+            return self.store.reset_processing()
+
+    def unnotified_operator(self, limit: int = 50) -> list[IntakeRow]:
+        """Operator-required rows whose notice has not been queued yet."""
+        with self._lock:
+            return self.store.unnotified_operator(limit)
+
+    def mark_notified(self, message_ids: Sequence[str]) -> None:
+        """Record that a durable operator notice covers these rows."""
+        with self._lock:
+            self.store.mark_notified(list(message_ids), time.time())
+
     def stats(self) -> dict[str, int]:
         """Backlog age and unanswered count for the heartbeat."""
         with self._lock:
@@ -314,7 +357,7 @@ class IntakeLedger:
             return self.store.purge(before)
 
     def _all(self, key: tuple[str, str]) -> list[IntakeRow]:
-        return self.store.read(key)[-self.max_messages :]
+        return self.store.read(key, self.max_messages)
 
     def _live(self, key: tuple[str, str], now: float | None = None) -> list[IntakeRow]:
         moment = time.monotonic() if now is None else now

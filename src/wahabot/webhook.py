@@ -35,7 +35,13 @@ RECOVERY_TICK_S = 60
 
 
 async def _recovery_loop(app: FastAPI) -> None:
-    """Run the registered recovery pass once a minute."""
+    """Run the startup pass, then one pass a minute."""
+    recovery = getattr(app.state, "recovery", None)
+    if recovery is not None:
+        try:
+            await recovery.startup()
+        except Exception:
+            logger.exception("Intake startup recovery failed")
     while True:
         await asyncio.sleep(RECOVERY_TICK_S)
         recovery = getattr(app.state, "recovery", None)
@@ -49,10 +55,7 @@ async def _recovery_loop(app: FastAPI) -> None:
 
 @contextlib.asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Recover accepted work, keep ticking, then drain on shutdown."""
-    recovery = getattr(app.state, "recovery", None)
-    if recovery is not None:
-        await recovery.startup()
+    """Serve while recovery drains, then stop the ticker on shutdown."""
     task = asyncio.create_task(_recovery_loop(app))
     try:
         yield

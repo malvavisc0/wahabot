@@ -7,16 +7,48 @@ from typing import Protocol, cast
 
 from loguru import logger
 
-from wahabot.core.delivery.intents import DeliveryIntent, IntentStore
+from wahabot.core.delivery.intents import (
+    FAILED as INTENT_FAILED,
+)
+from wahabot.core.delivery.intents import (
+    UNKNOWN as INTENT_UNKNOWN,
+)
+from wahabot.core.delivery.intents import (
+    DeliveryIntent,
+    IntentStore,
+)
 from wahabot.core.intake.store import (
-    FAILED,
+    DONE,
     OPERATOR_REQUIRED,
     PENDING,
     IntakeRow,
 )
-from wahabot.core.transport.waha import WahaTransport
+from wahabot.core.intake.store import (
+    FAILED as ROW_FAILED,
+)
+from wahabot.core.recovery.context import APOLOGY
+from wahabot.core.runs import chat_lock
+from wahabot.core.transport.protocol import Transport
 from wahabot.settings import Settings
 from wahabot.status.state import state
+
+#: One notice can describe at most this many required rows; the rest stay
+#: unnotified and are covered by the next tick.
+_REQUIRED_NOTICE_LIMIT = 50
+
+
+class RecoveryTransport(Transport, Protocol):
+    """The transport surface recovery drives, including intent replay."""
+
+    intents: IntentStore | None
+
+    def recover_intent(
+        self,
+        intent: DeliveryIntent,
+        now: float | None = None,
+        *,
+        recover_sending: bool = False,
+    ) -> str | None: ...
 
 
 class RecoveryRunner(Protocol):
@@ -33,6 +65,21 @@ class RecoveryLedger(Protocol):
     def due(self, now: float, limit: int) -> list[IntakeRow]: ...
 
     def stale_processing(self, now: float, limit: int) -> list[IntakeRow]: ...
+
+    def delivering_rows(self, limit: int) -> list[IntakeRow]: ...
+
+    def reset_delivering(self, message_ids: list[str]) -> None: ...
+
+    def release(
+        self,
+        session: str,
+        chat_id: str,
+        message_ids: list[str],
+        *,
+        owner: str = "",
+    ) -> None: ...
+
+    def reset_processing(self) -> int: ...
 
     def fail(
         self,
@@ -55,6 +102,10 @@ class RecoveryLedger(Protocol):
         reason: str = "",
     ) -> None: ...
 
+    def unnotified_operator(self, limit: int) -> list[IntakeRow]: ...
+
+    def row(self, session: str, chat_id: str, message_id: str) -> IntakeRow | None: ...
+
     def purge(self, retention_days: int) -> int: ...
 
     def stats(self) -> dict[str, int]: ...
@@ -67,7 +118,7 @@ class Recovery:
         self,
         settings: Settings,
         ledger: RecoveryLedger,
-        transport: WahaTransport,
+        transport: RecoveryTransport,
         runner: RecoveryRunner,
         *,
         clock: Callable[[], float] = time.time,
@@ -82,51 +133,103 @@ class Recovery:
         self.intents: IntentStore = transport.intents
 
     async def startup(self) -> None:
-        """Recover after a restart, before the first new event."""
+        """Recover after a restart, before the first periodic tick."""
         self.ledger.purge(self.settings.intake_retention_days)
+        # A confirmed send settles its rows in the same transaction, but a
+        # crash or an older row can still leave a sent intent with pending
+        # intake rows; finish them before anything can re-answer the turn.
+        self.intents.reconcile_sent_intake()
+        # No live run survived the restart: every processing row is stale.
+        # Return it to pending without spending a retry attempt.
+        self.ledger.reset_processing()
+        self._reconcile_delivering()
         await self.tick(startup=True)
 
     async def tick(self, *, startup: bool = False, now: float | None = None) -> None:
         """Run one bounded recovery pass; callable directly by tests."""
         moment = self.clock() if now is None else now
-        await asyncio.to_thread(
-            self.transport.recover_intents, moment, recover_sending=startup
-        )
-        self._reset_stale(moment)
+        self._reconcile_delivering()
         self._flush_operator_notices()
-        await self._notify_unrecorded_sends()
+        await self._recover_intents(moment, startup=startup)
+        self._reset_stale(moment)
         due = self.ledger.due(moment, limit=20)
-        if not due:
-            return
         delayed = 0
-        required = 0
         for group in self._groups(due):
             outcome = await self._recover_group(group, moment)
             if outcome == "delayed":
                 delayed += len(group)
-            elif outcome == "operator_required":
-                required += len(group)
-        if delayed or required:
-            await self._notify_operator(delayed, required, due)
+        await self._notify_operator(delayed, due, moment)
+
+    async def _recover_intents(self, moment: float, *, startup: bool) -> None:
+        """Replay due intents under the same chat locks as live runs."""
+        for intent in self.intents.recoverable(moment):
+            prepared = self._prepare_intent(intent, moment)
+            if prepared is None:
+                continue
+            session, chat_id = self._lock_key(prepared)
+            async with chat_lock(session, chat_id):
+                await asyncio.to_thread(
+                    self.transport.recover_intent,
+                    prepared,
+                    moment,
+                    recover_sending=startup,
+                )
+
+    def _prepare_intent(
+        self, intent: DeliveryIntent, moment: float
+    ) -> DeliveryIntent | None:
+        """Apply the reply-window and apology policy before replaying."""
+        rows = self._intent_rows(intent)
+        if rows:
+            if all(row.state == DONE for row in rows):
+                # Another confirmed send (or a recovery settlement) already
+                # answered the turn. Never replay an old draft over it.
+                self.intents.cancel(intent.id, "intake already settled")
+                return None
+            age = moment - min(row.received_at for row in rows)
+            if age > self.runner.reply_window_days() * 86400:
+                self._require_operator(rows, "outside the reply window")
+                self.intents.cancel(intent.id, "outside the reply window")
+                return None
+            if age > self.settings.intake_recovery_minutes * 60:
+                intent = self.intents.prepend_text(intent.id, APOLOGY)
+        return intent
+
+    def _intent_rows(self, intent: DeliveryIntent) -> list[IntakeRow]:
+        rows: list[IntakeRow] = []
+        if not intent.chat_id:
+            return rows
+        for message_id in intent.intake_ids:
+            row = self.ledger.row(intent.session, intent.chat_id, message_id)
+            if row is not None:
+                rows.append(row)
+        return rows
+
+    def _lock_key(self, intent: DeliveryIntent) -> tuple[str, str]:
+        rows = self._intent_rows(intent)
+        if rows:
+            return (rows[0].session, rows[0].chat_id)
+        return (intent.session, intent.chat_id or "operator")
 
     def _reset_stale(self, now: float) -> None:
         for row in self.ledger.stale_processing(now, limit=50):
-            self.ledger.fail(
+            self.ledger.release(
                 row.session,
                 row.chat_id,
                 [row.message_id],
-                error="stale processing claim",
-                next_attempt_at=now,
+                owner=row.owner,
             )
-            if row.attempts + 1 >= self.settings.intake_max_attempts:
-                self.ledger.finish(
-                    row.session,
-                    row.chat_id,
-                    [row.message_id],
-                    delivered=False,
-                    outcome=OPERATOR_REQUIRED,
-                    reason="retry budget exhausted",
-                )
+
+    def _reconcile_delivering(self) -> None:
+        """Requeue rows whose intent was settled without settling the row."""
+        owned = self.intents.unsettled_intake_ids()
+        stranded = [
+            row.message_id
+            for row in self.ledger.delivering_rows(limit=100)
+            if row.message_id not in owned
+        ]
+        if stranded:
+            self.ledger.reset_delivering(stranded)
 
     def _flush_operator_notices(self) -> None:
         destination = state.operator_jid
@@ -136,7 +239,7 @@ class Recovery:
             self.intents.set_chat(intent.id, destination)
 
     async def _recover_group(self, rows: list[IntakeRow], now: float) -> str:
-        fresh = [row for row in rows if row.state in (PENDING, FAILED)]
+        fresh = [row for row in rows if row.state in (PENDING, ROW_FAILED)]
         if not fresh:
             return "done"
         refusal = self._refuse_group(fresh, now)
@@ -196,32 +299,52 @@ class Recovery:
         groups.sort(key=lambda group: group[0].received_at)
         return groups
 
-    async def _notify_unrecorded_sends(self) -> None:
+    async def _notify_operator(
+        self,
+        delayed: int,
+        rows: list[IntakeRow],
+        moment: float,
+    ) -> None:
+        """Queue and deliver at most one durable notice for this pass."""
+        required_rows = self.ledger.unnotified_operator(_REQUIRED_NOTICE_LIMIT)
         pending = self.intents.unnotified_operator()
-        if not pending:
+        if not delayed and not required_rows and not pending:
             return
-        destination = state.operator_jid
-        drafts = "; ".join(self._draft(intent) for intent in pending[:3])
-        text = (
-            f"wahabot: {len(pending)} send(s) had an unknown outcome and were "
-            f"not retried: {drafts}"
+        parts: list[str] = []
+        if delayed:
+            parts.append(f"{delayed} message(s) delayed by the outage")
+        if required_rows:
+            parts.append(f"{len(required_rows)} message(s) need operator attention")
+        unknown = [intent for intent in pending if intent.state == INTENT_UNKNOWN]
+        failed = [intent for intent in pending if intent.state == INTENT_FAILED]
+        if unknown:
+            drafts = "; ".join(self._draft(intent) for intent in unknown[:3])
+            parts.append(
+                f"{len(unknown)} send(s) had an unknown outcome and were "
+                + f"not retried: {drafts}"
+            )
+        if failed:
+            drafts = "; ".join(self._draft(intent) for intent in failed[:3])
+            parts.append(f"{len(failed)} send(s) could not be delivered: {drafts}")
+        text = "wahabot: " + "; ".join(parts) + "."
+        destination = self._notice_destination(required_rows or rows)
+        notice = self.intents.prepare_notice(
+            session=self.settings.session,
+            chat_id=destination,
+            text=text,
+            source_intent_ids=[intent.id for intent in pending],
+            source_intake_ids=[row.message_id for row in required_rows],
         )
         if not destination:
-            self.intents.prepare(
-                session=self.settings.session,
-                chat_id="",
-                kind="operator_notice",
-                payload={"text": text},
-            )
+            # The notice is durable and waits for the operator JID.
             return
-        try:
+        async with chat_lock(self.settings.session, destination):
             await asyncio.to_thread(
-                self.transport.send_text, self.settings.session, destination, text
+                self.transport.recover_intent,
+                notice,
+                moment,
+                recover_sending=False,
             )
-        except Exception:
-            logger.exception("Operator notice for uncertain sends failed")
-            return
-        self.intents.mark_notified([intent.id for intent in pending])
 
     def _draft(self, intent: DeliveryIntent) -> str:
         payload = intent.payload
@@ -243,37 +366,6 @@ class Recovery:
                 if isinstance(value, str) and value:
                     return value
         return ""
-
-    async def _notify_operator(
-        self, delayed: int, required: int, rows: list[IntakeRow]
-    ) -> None:
-        parts: list[str] = []
-        if delayed:
-            parts.append(f"{delayed} message(s) delayed by the outage")
-        if required:
-            parts.append(f"{required} message(s) need operator attention")
-        text = "wahabot: " + "; ".join(parts) + "."
-        destination = self._notice_destination(rows)
-        if not destination:
-            self.intents.prepare(
-                session=self.settings.session,
-                chat_id="",
-                kind="operator_notice",
-                payload={"text": text},
-            )
-            return
-        try:
-            await asyncio.to_thread(
-                self.transport.send_text, self.settings.session, destination, text
-            )
-        except Exception:
-            logger.exception("Operator recovery notice failed")
-            self.intents.prepare(
-                session=self.settings.session,
-                chat_id=destination,
-                kind="operator_notice",
-                payload={"text": text},
-            )
 
     def unanswered(self) -> int:
         """The queue depth the heartbeat exposes."""

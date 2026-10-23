@@ -88,6 +88,11 @@ class IngestMixin(HandlerBase):
         if self.intake.claimed(event.session, chat_id, [message_id]):
             logger.debug("Skipping message {id} owned by another run", id=message_id)
             return
+        if self.intake.is_delivering(event.session, chat_id, [message_id]):
+            logger.debug(
+                "Skipping message {id} owned by an outbound intent", id=message_id
+            )
+            return
         if not session_healthy():
             # Before seen_recently: a muted message must not be marked
             # seen, so WAHA's redelivery retries it after recovery.
@@ -241,13 +246,11 @@ class IngestMixin(HandlerBase):
 
     async def recover_rows(self, rows: list[IntakeRow], *, apology: bool) -> str:
         """Re-run durable rows through the normal gates and delivery paths."""
+        from wahabot.core.recovery.context import APOLOGY, recovering
         from wahabot.core.recovery.context import apology as apology_var
-        from wahabot.core.recovery.context import recovering
 
         recovering_token = recovering.set(True)
-        apology_token = apology_var.set(
-            "Sorry for the delay, I was offline for a while. " if apology else ""
-        )
+        apology_token = apology_var.set(APOLOGY if apology else "")
         try:
             await self.recover_shape(rows)
         finally:
