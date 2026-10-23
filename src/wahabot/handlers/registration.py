@@ -1,11 +1,10 @@
 """Webhook registration and per-process handler wiring."""
 
 import time
+from dataclasses import dataclass
 
 from loguru import logger
 
-from wahabot.ai import bursts
-from wahabot.ai.albums import set_completion_handler
 from wahabot.ai.intake import IntakeLedger, max_age_for_run_timeout
 from wahabot.ai.observability import enable_langfuse
 from wahabot.ai.tools import build_default_tools
@@ -14,15 +13,21 @@ from wahabot.ai.triage import TriageGate
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
 from wahabot.core import identity
 from wahabot.core.access import SessionConfigReloader, load_session_config
+from wahabot.core.db import Database
+from wahabot.core.delivery.intents import IntentStore
+from wahabot.core.intake.sqlite import SqliteIntakeStore
 from wahabot.core.learned import forget_learned
 from wahabot.core.models import WahaEvent
 from wahabot.core.notebook import Notebook, notebook_operation
 from wahabot.core.persistence import forget_memory
+from wahabot.core.recovery import Recovery
 from wahabot.core.runs import chat_lock, contexts
 from wahabot.core.thread_index import forget_thread_index
+from wahabot.core.transport import WahaTransport
 from wahabot.core.waha import WahaClient
 from wahabot.handlers.core import Handlers
 from wahabot.settings import Settings
+from wahabot.webhook import app as webhook_app
 from wahabot.webhook import on_forget, on_message, on_shutdown
 
 
@@ -67,27 +72,43 @@ def register_forget_handler(
             )
 
 
-def register_agent_handler(
-    settings: Settings, waha: WahaClient
-) -> tuple[FunctionCallingAgentWorkflow, SessionConfigReloader]:
-    """Build the agent and register the reply handler.
+@dataclass(frozen=True)
+class Registration:
+    """The objects one agent registration owns."""
 
-    Returns the built agent and the config reloader so other handlers
-    (the command channel) share the exact same agent and hot-reloaded
-    config instead of building their own.
-    """
+    agent: FunctionCallingAgentWorkflow
+    config_reloader: SessionConfigReloader
+    transport: WahaTransport
+    ledger: IntakeLedger
+    intents: IntentStore
+    database: Database
+    handlers: Handlers
+    recovery: Recovery
+
+
+def webhook_app_state(settings: Settings, recovery: Recovery) -> None:
+    """Make the recovery pass visible to the app's lifespan and ticker."""
+    if settings.session:
+        webhook_app.state.recovery = recovery
+
+
+def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration:
+    """Build the durable platform, agent and reply handler."""
+    database = Database(settings.data_dir / "wahabot.db")
+    database.migrate()
+    intents = IntentStore(database.path, max_attempts=settings.intake_max_attempts)
+    ledger = IntakeLedger(
+        store=SqliteIntakeStore(database.path),
+        max_age_s=max_age_for_run_timeout(settings.run_timeout),
+    )
+    transport = WahaTransport(waha, intents)
     config = load_session_config(settings.access_config)
     config_reloader = SessionConfigReloader(settings.access_config)
     identity.configure(settings.data_dir, settings.session)
     enable_langfuse(settings)
-    if settings.burst_enabled:
-        bursts.configure(settings.burst_inactivity_s, settings.burst_hold_cap_s)
-    else:
-        bursts.set_completion_handler(None)
-
     escalation_channel = EscalationChannel()
     triage = (
-        TriageGate(settings, waha, channel=escalation_channel)
+        TriageGate(settings, transport, channel=escalation_channel)
         if settings.triage_gate and settings.gate_api_base
         else None
     )
@@ -96,17 +117,20 @@ def register_agent_handler(
 
     handlers = Handlers(
         settings,
-        waha,
+        transport,
         config,
         config_reloader,
         escalation_channel,
         triage,
-        IntakeLedger(max_age_s=max_age_for_run_timeout(settings.run_timeout)),
+        ledger,
         time.time(),
+        intents,
     )
     agent = build_agent(
         settings,
-        tools=build_default_tools(waha, settings, escalation_channel=escalation_channel),
+        tools=build_default_tools(
+            transport, settings, escalation_channel=escalation_channel
+        ),
         system_prompt=config.system_prompt,
         prompt_renderer=handlers.render_prompt,
         rules_renderer=handlers.render_session_rules,
@@ -114,12 +138,21 @@ def register_agent_handler(
         triage=triage,
     )
     handlers.agent = agent
-    set_completion_handler(handlers.run_album)
-    if settings.burst_enabled:
-        bursts.set_completion_handler(handlers.run_burst)
+    webhook_app.state.intake_writer = handlers.record_webhook_intake
     on_message(handlers.reply_with_agent)
     logger.info(
         "Agent ready: {tools}",
         tools=", ".join(sorted(tool.metadata.get_name() for tool in agent.tools)),
     )
-    return agent, config_reloader
+    recovery = Recovery(settings, ledger, transport, handlers)
+    webhook_app_state(settings, recovery)
+    return Registration(
+        agent=agent,
+        config_reloader=config_reloader,
+        transport=transport,
+        ledger=ledger,
+        intents=intents,
+        database=database,
+        handlers=handlers,
+        recovery=recovery,
+    )

@@ -1,5 +1,6 @@
 """FastAPI app exposing the WAHA webhook endpoint and agent dispatch."""
 
+import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 
@@ -30,16 +31,42 @@ async def run_shutdown_hooks() -> None:
             logger.warning("Shutdown hook failed: {exc}", exc=exc)
 
 
+RECOVERY_TICK_S = 60
+
+
+async def _recovery_loop(app: FastAPI) -> None:
+    """Run the registered recovery pass once a minute."""
+    while True:
+        await asyncio.sleep(RECOVERY_TICK_S)
+        recovery = getattr(app.state, "recovery", None)
+        if recovery is None:
+            continue
+        try:
+            await recovery.tick()
+        except Exception as exc:
+            logger.warning("Intake recovery tick failed: {exc}", exc=exc)
+
+
 @contextlib.asynccontextmanager
-async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Drain bounded background work as the app shuts down."""
-    yield
-    await run_shutdown_hooks()
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Recover accepted work, keep ticking, then drain on shutdown."""
+    recovery = getattr(app.state, "recovery", None)
+    if recovery is not None:
+        await recovery.startup()
+    task = asyncio.create_task(_recovery_loop(app))
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        await run_shutdown_hooks()
 
 
 app = FastAPI(title="wahabot webhook server", lifespan=_lifespan)
 
 Handler = Callable[[WahaEvent], Awaitable[None]]
+IntakeWriter = Callable[[WahaEvent], Awaitable[None]]
 
 #: Handler registries keyed by event type; ``on_event`` registers,
 #: ``dispatch`` runs every handler of the event's type.
@@ -50,6 +77,15 @@ _registries: dict[str, list[Handler]] = {
     "forget": [],
     "session.status": [],
 }
+
+
+def needs_intake(event: WahaEvent) -> bool:
+    """True for inbound message events that can own a turn."""
+    return (
+        event.event.startswith("message")
+        and event.event != "message.reaction"
+        and not event.payload.get("fromMe")
+    )
 
 
 def on_event(event_type: str, handler: Handler) -> None:
@@ -134,6 +170,13 @@ async def waha_webhook(
     event = parse_event(session, body)
     save_event(settings.journal_dir, session, body)
     log_event(event)
+    writer: IntakeWriter | None = getattr(app.state, "intake_writer", None)
+    if needs_intake(event) and writer is not None:
+        try:
+            await writer(event)
+        except Exception as exc:
+            logger.exception("Intake write failed for {id}", id=event.payload.get("id"))
+            raise HTTPException(status_code=500, detail="Intake write failed") from exc
     await dispatch(event)
     return event
 

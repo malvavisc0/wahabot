@@ -1,10 +1,13 @@
 """Concrete handler object combining the handler mixins."""
 
+from wahabot.ai.albums import Albums
+from wahabot.ai.bursts import Bursts
 from wahabot.ai.intake import IntakeLedger
 from wahabot.ai.tools.whatsapp import EscalationChannel
 from wahabot.ai.triage import TriageGate
 from wahabot.core.access import SessionConfig, SessionConfigReloader
-from wahabot.core.waha import WahaClient
+from wahabot.core.delivery.intents import IntentStore
+from wahabot.core.transport import Transport
 from wahabot.handlers.album_mixin import AlbumMixin
 from wahabot.handlers.burst_mixin import BurstMixin
 from wahabot.handlers.config_mixin import ConfigMixin
@@ -19,13 +22,14 @@ class Handlers(AlbumMixin, BurstMixin, IngestMixin, SingleMixin, ConfigMixin):
     def __init__(
         self,
         settings: Settings,
-        waha: WahaClient,
+        waha: Transport,
         config: SessionConfig,
         config_reloader: SessionConfigReloader,
         escalation_channel: EscalationChannel,
         triage: TriageGate | None,
         intake: IntakeLedger,
         started_at: float,
+        intents: IntentStore,
     ) -> None:
         self.settings = settings
         self.waha = waha
@@ -35,3 +39,11 @@ class Handlers(AlbumMixin, BurstMixin, IngestMixin, SingleMixin, ConfigMixin):
         self.triage = triage
         self.intake = intake
         self.started_at = started_at
+        self.intents = intents
+        self.transport = waha
+        self.bursts = Bursts(
+            settings.burst_inactivity_s,
+            settings.burst_hold_cap_s,
+            self.run_burst,
+        )
+        self.albums = Albums(self.run_album)

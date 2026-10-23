@@ -35,8 +35,6 @@ from tests.harness import (
     smoke_settings,
     write_session_config,
 )
-from wahabot.ai import bursts as bursts_module
-from wahabot.ai.albums import reset as reset_albums
 from wahabot.ai.context import roster_cache
 from wahabot.commands import register_command_handler
 from wahabot.core import identity as identity_module
@@ -109,25 +107,34 @@ class Stack:
         write_session_config(settings)
         settings_module.get_settings.cache_clear()
         waha = RecordingWaha()
-        agent, _reloader = register_agent_handler(settings, waha=waha)
-        register_command_handler(settings, waha, agent)
-        register_reaction_handler(waha, agent, settings)
-        register_forget_handler(settings, agent)
-        seed_health(waha, SESSION)
-        register_session_status_handler(waha, SESSION)
-        return Bot(self, settings, waha, agent)
+        registration = register_agent_handler(settings, waha=waha)
+        register_command_handler(settings, registration.transport, registration.agent)
+        register_reaction_handler(registration.transport, registration.agent, settings)
+        register_forget_handler(settings, registration.agent)
+        seed_health(registration.transport, SESSION)
+        register_session_status_handler(registration.transport, SESSION)
+        return Bot(self, settings, waha, registration)
 
 
 class Bot:
     """One test's isolated bot: settings, recording WAHA, and helpers."""
 
     def __init__(
-        self, stack: Stack, settings: Any, waha: RecordingWaha, agent: Any
+        self, stack: Stack, settings: Any, waha: RecordingWaha, registration: Any
     ) -> None:
         self.stack = stack
         self.settings = settings
         self.waha = waha
-        self.agent = agent
+        self.registration = registration
+        self.bursts = registration.handlers.bursts
+        self.albums = registration.handlers.albums
+        self.agent = registration.agent
+        self.transport = registration.transport
+        self.ledger = registration.ledger
+        self.intents = registration.intents
+        self.database = registration.database
+        self.handlers = registration.handlers
+        self.recovery = registration.recovery
 
     # -- posting ---------------------------------------------------------
 
@@ -168,6 +175,11 @@ class Bot:
         """Tear down and register a new bot with *overrides* applied."""
         return self.stack.register(**overrides)
 
+    def restart(self, **overrides: Any) -> Bot:
+        """Simulate a process restart: same data dir, fresh transport."""
+        overrides.setdefault("data_dir", self.settings.data_dir)
+        return self.stack.register(**overrides)
+
 
 @pytest.fixture(scope="session")
 def stack() -> Iterator[Stack]:
@@ -203,8 +215,6 @@ def _reset_registries() -> Iterator[None]:
     _last_reaction_notes.clear()
     runs_contexts.clear()
     roster_cache.clear()
-    reset_albums()
-    bursts_module.reset()
     set_session_health("WORKING")
     disarm_recovery_poller()
     status_state.llm_healthy = True
@@ -218,8 +228,6 @@ def _reset_registries() -> Iterator[None]:
     _last_reaction_notes.clear()
     runs_contexts.clear()
     roster_cache.clear()
-    reset_albums()
-    bursts_module.reset()
     status_state.llm_healthy = True
     status_state.llm_timeout_notified = False
     disarm_recovery_poller()
@@ -232,3 +240,5 @@ def bot(stack: Stack, _reset_registries: None) -> Iterator[Bot]:
     stack.llm.clear()
     with unittest.mock.patch("wahabot.settings.get_settings", return_value=bot.settings):
         yield bot
+    bot.bursts.reset()
+    bot.albums.reset()

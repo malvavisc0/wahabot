@@ -6,6 +6,8 @@ import httpx
 from loguru import logger
 
 from wahabot.ai import bursts
+from wahabot.ai.albums import AlbumBuffer, is_album_container
+from wahabot.ai.bursts import BurstBuffer
 from wahabot.ai.messages import (
     extract_text,
     is_group_addressed,
@@ -14,14 +16,14 @@ from wahabot.ai.messages import (
     self_command_instruction,
 )
 from wahabot.ai.serials import serial_store
-from wahabot.ai.turn_records import event_record
+from wahabot.ai.turn_records import assign_event_serial, event_record
 from wahabot.core.access import SessionConfig
 from wahabot.core.echoes import is_self_echo
 from wahabot.core.filters import chat_allowed, jid_alias_lookup
 from wahabot.core.inbound import (
-    buffer_album_message,
     self_chat_needs_transcript,
 )
+from wahabot.core.intake.store import IntakeRow
 from wahabot.core.models import WahaEvent
 from wahabot.core.presence import mark_seen
 from wahabot.handlers.base import HandlerBase
@@ -41,14 +43,50 @@ from wahabot.status import (
 
 class IngestMixin(HandlerBase):
     @override
+    def settle_intake(self, event: WahaEvent, outcome: str, reason: str = "") -> None:
+        """Settle this message's intake row without a run."""
+        message_id = str(event.payload.get("id", ""))
+        chat_id = str(event.payload.get("from", ""))
+        if not message_id or not chat_id:
+            return
+        try:
+            self.intake.finish(
+                event.session,
+                chat_id,
+                [message_id],
+                delivered=False,
+                outcome=outcome,
+                reason=reason,
+            )
+        except Exception:
+            logger.exception("Intake settle failed for {id}", id=message_id)
+
+    def intake_row(self, event: WahaEvent):
+        """This event's row, if the webhook accepted it."""
+        message_id = str(event.payload.get("id", ""))
+        chat_id = str(event.payload.get("from", ""))
+        if not message_id or not chat_id:
+            return None
+        return self.intake.row(event.session, chat_id, message_id)
+
+    @override
     async def accept_message(self, event: WahaEvent) -> SessionConfig | None:
         """Check health, dedup and freshness before learning the sender's identity."""
+        from wahabot.core.recovery.context import recovering
+
         message_id = str(event.payload.get("id", ""))
         if not message_id:
             logger.debug(
                 "Skipping message without an id from {chat_id}",
                 chat_id=event.payload.get("from"),
             )
+            return
+        chat_id = str(event.payload.get("from", ""))
+        if self.intake.handled(event.session, chat_id, [message_id]):
+            logger.debug("Skipping already handled message {id}", id=message_id)
+            return
+        if self.intake.claimed(event.session, chat_id, [message_id]):
+            logger.debug("Skipping message {id} owned by another run", id=message_id)
             return
         if not session_healthy():
             # Before seen_recently: a muted message must not be marked
@@ -64,21 +102,27 @@ class IngestMixin(HandlerBase):
             return
         # Hot-path config: picks up whitelist/prompt/mode edits per event.
         config = self.config_reloader.current_config()
-        if seen_recently(message_id):
-            logger.debug("Skipping duplicate event for message {id}", id=message_id)
-            return
-        if is_stale(event, self.started_at):
-            logger.info(
-                "Skipping stale message {id} (ts={ts})",
-                id=message_id,
-                ts=event.payload.get("timestamp"),
-            )
-            return
+        # Recovery owns a durable row: the live dedup and startup
+        # freshness gates would otherwise drop exactly the messages the
+        # outage left behind. Provenance gates below still apply.
+        if not recovering.get():
+            if seen_recently(message_id):
+                logger.debug("Skipping duplicate event for message {id}", id=message_id)
+                return
+            if is_stale(event, self.started_at):
+                logger.info(
+                    "Skipping stale message {id} (ts={ts})",
+                    id=message_id,
+                    ts=event.payload.get("timestamp"),
+                )
+                self.settle_intake(event, "silent", "stale")
+                return
         if not is_replyable(event):
             logger.debug(
                 "Ignoring non-replyable message from {sender}",
                 sender=event.payload.get("from"),
             )
+            self.settle_intake(event, "silent", "not replyable")
             return
         # Off the event loop: a rate-limited identity flush writes disk.
         await asyncio.to_thread(learn_identity, event)
@@ -165,18 +209,8 @@ class IngestMixin(HandlerBase):
         operator_wakes: bool | None,
         arrived_at: float | None = None,
     ) -> None:
-        """Ledger the accepted message, fail-soft.
-
-        Only a message that would wake a run may supersede one:
-        unaddressed group chatter must not stall an answer.
-        """
+        """Ledger an accepted message when the webhook fallback is absent."""
         try:
-            addressed = bool(operator_wakes) or is_group_addressed(
-                event,
-                bot_name=config.bot_name,
-                bot_mention_regex=config.bot_mention_regex,
-                participation=config.group_participation,
-            )
             self.intake.record(
                 event.session,
                 str(event.payload.get("from", "")),
@@ -187,12 +221,125 @@ class IngestMixin(HandlerBase):
                     self.settings.timezone,
                 ),
                 at=time.monotonic() if arrived_at is None else arrived_at,
-                addressed=addressed,
+                addressed=self.intake_addressed(event, config, operator_wakes),
+                raw_json=event.model_dump_json(),
+                sender=str(
+                    event.payload.get("participant") or event.payload.get("from") or ""
+                ),
+                burst_key=(
+                    str(event.payload.get("id", ""))
+                    if is_album_container(event)
+                    else None
+                ),
             )
         except Exception:
-            # The ledger is turn-level memory, not audit: an unexpected
-            # payload must not cost the chat its reply.
             logger.exception("Intake record failed for {id}", id=event.payload.get("id"))
+
+    def reply_window_days(self) -> int:
+        """The chat's configured reply window in days."""
+        return self.config_reloader.current_config().reply_window_days
+
+    async def recover_rows(self, rows: list[IntakeRow], *, apology: bool) -> str:
+        """Re-run durable rows through the normal gates and delivery paths."""
+        from wahabot.core.recovery.context import apology as apology_var
+        from wahabot.core.recovery.context import recovering
+
+        recovering_token = recovering.set(True)
+        apology_token = apology_var.set(
+            "Sorry for the delay, I was offline for a while. " if apology else ""
+        )
+        try:
+            await self.recover_shape(rows)
+        finally:
+            apology_var.reset(apology_token)
+            recovering.reset(recovering_token)
+        return self.recovery_outcome(rows)
+
+    async def recover_shape(self, rows: list[IntakeRow]) -> None:
+        """Reassemble one album, burst or single message and run it."""
+        album_row = next((row for row in rows if is_album_container(row.event)), None)
+        if album_row is not None and len(rows) > 1:
+            await self.run_album(self.recovered_album(rows, album_row.message_id))
+            return
+        if len(rows) > 1 or any(row.burst_key for row in rows):
+            await self.run_burst(self.recovered_burst(rows))
+            return
+        await self.reply_with_agent(rows[0].event)
+
+    def recovered_album(self, rows: list[IntakeRow], container_id: str) -> AlbumBuffer:
+        """Rebuild an album buffer from its durable rows."""
+        return AlbumBuffer(
+            container_id=container_id,
+            session=rows[0].session,
+            chat_id=rows[0].chat_id,
+            expected=len(rows) - 1,
+            image_ids=[row.message_id for row in rows if row.message_id != container_id],
+        )
+
+    def recovered_burst(self, rows: list[IntakeRow]) -> BurstBuffer:
+        """Rebuild a burst buffer from its durable rows."""
+        sender = rows[0].sender or rows[0].chat_id
+        return BurstBuffer(
+            key=(rows[0].session, rows[0].chat_id, sender),
+            sender=sender,
+            message_ids=[row.message_id for row in rows],
+        )
+
+    def recovery_outcome(self, rows: list[IntakeRow]) -> str:
+        """Classify the rows after their recovery run settled them."""
+        after = [
+            row
+            for row in (
+                self.intake.row(row.session, row.chat_id, row.message_id) for row in rows
+            )
+            if row is not None
+        ]
+        if any(row.outcome == "operator_required" for row in after):
+            return "operator_required"
+        if after and all(row.state == "done" for row in after):
+            return "answered"
+        return "skipped"
+
+    def intake_addressed(
+        self,
+        event: WahaEvent,
+        config: SessionConfig,
+        operator_wakes: bool | None,
+    ) -> bool:
+        """Whether this message would wake a run, for delivery guard ordering."""
+        return bool(operator_wakes) or is_group_addressed(
+            event,
+            bot_name=config.bot_name,
+            bot_mention_regex=config.bot_mention_regex,
+            participation=config.group_participation,
+        )
+
+    async def record_webhook_intake(self, event: WahaEvent) -> None:
+        """Persist the accepted message before dispatch; a failure is a 500."""
+        config = self.config_reloader.current_config()
+        operator_wakes = operator_wake(event, config)
+        message_id = str(event.payload.get("id", ""))
+        chat_id = str(event.payload.get("from", ""))
+        if not message_id or not chat_id:
+            return
+        store = serial_store(str(self.settings.data_dir))
+        try:
+            await asyncio.to_thread(assign_event_serial, store, event)
+        except Exception:
+            logger.exception("Serial assignment failed for {id}", id=message_id)
+        self.intake.record(
+            event.session,
+            chat_id,
+            message_id,
+            event_record(store, event, self.settings.timezone),
+            at=time.monotonic(),
+            addressed=self.intake_addressed(event, config, operator_wakes),
+            raw_json=event.model_dump_json(),
+            sender=str(
+                event.payload.get("participant") or event.payload.get("from") or ""
+            ),
+            burst_key=message_id if is_album_container(event) else None,
+        )
 
     @override
     async def prepare_chat_message(
@@ -206,44 +353,76 @@ class IngestMixin(HandlerBase):
         """Apply access gates and fold or buffer turns that need no immediate run."""
         operator_wakes = operator_wake(event, config)
         if operator_wakes is None:
-            return
-        if not chat_allowed(
+            self.settle_intake(event, "silent", "not a waking operator event")
+            return None
+        if not self.chat_access_allowed(event, config):
+            self.settle_intake(event, "silent", "chat not allowed")
+            return None
+        if await self.fold_operator_event(event, config, body, operator_wakes):
+            return None
+        if self.intake_row(event) is None:
+            self.record_intake(
+                event, config, operator_wakes=operator_wakes, arrived_at=arrived_at
+            )
+        await self.mark_seen_for(event, operator_wakes)
+        self.buffer_album_window(event, operator_wakes)
+        return operator_wakes
+
+    def chat_access_allowed(self, event: WahaEvent, config: SessionConfig) -> bool:
+        """Whether the chat whitelist/blacklist lets this event through."""
+        return chat_allowed(
             event,
             config.whitelist,
             config.blacklist,
             jid_aliases=jid_alias_lookup(event),
-        ):
-            return
-        if is_operator_event(event) and not operator_wakes:
-            # Operator-typed ``fromMe`` messages are folded into memory,
-            # never run: they must not be ledgered as an addressed turn
-            # that could supersede a live run.
-            await fold_operator_message(event, self.agent, self.settings, body)
-            return
-        self.record_intake(
-            event, config, operator_wakes=operator_wakes, arrived_at=arrived_at
         )
+
+    async def fold_operator_event(
+        self,
+        event: WahaEvent,
+        config: SessionConfig,
+        body: str | None,
+        operator_wakes: bool,
+    ) -> bool:
+        """Fold a non-waking operator message; True when it was consumed."""
+        if not is_operator_event(event) or operator_wakes:
+            return False
+        await fold_operator_message(event, self.agent, self.settings, body)
+        self.settle_intake(event, "operator_owned", "operator typed")
+        return True
+
+    async def mark_seen_for(self, event: WahaEvent, operator_wakes: bool) -> None:
+        """Send the read receipt for an inbound non-operator message."""
         if (
             self.settings.send_seen
             and not operator_wakes
             and not is_operator_event(event)
         ):
-            # The read receipt answers *their* message, not the bot's
-            # reply. It goes out before any participation decision and
-            # before burst/album buffering, so holding or ignoring a
-            # message never withholds it.
             await asyncio.to_thread(
                 mark_seen, self.waha, event.session, str(event.payload["from"])
             )
-        if buffer_album_message(event, operator_wakes):
+
+    def buffer_album_window(self, event: WahaEvent, operator_wakes: bool) -> None:
+        """Hold an album container or image until its flush completes."""
+        if operator_wakes:
             return
-        return operator_wakes
+        album_key = self.albums.buffer(event)
+        if not album_key:
+            return
+        self.intake.set_burst_key(
+            event.session,
+            str(event.payload.get("from", "")),
+            [str(event.payload.get("id", ""))],
+            album_key,
+        )
 
     @override
     async def skip_or_buffer_message(
         self, event: WahaEvent, config: SessionConfig, operator_wakes: bool
     ) -> bool:
         """Apply group addressing and queue eligible bursts."""
+        if self.albums.consumed(event):
+            return True
         if not operator_wakes and not is_group_addressed(
             event,
             bot_name=config.bot_name,
@@ -253,6 +432,7 @@ class IngestMixin(HandlerBase):
             logger.debug(
                 "Ignoring unaddressed group message {id}", id=event.payload.get("id")
             )
+            self.settle_intake(event, "silent", "unaddressed")
             return True
         if (
             self.settings.burst_enabled
@@ -261,6 +441,12 @@ class IngestMixin(HandlerBase):
         ):
             # Hold for the sender's window; only messages that passed
             # every gate reach here, and albums were handled above.
-            bursts.add_message(event)
-            return True
+            message_id = str(event.payload.get("id", ""))
+            if self.bursts.add(message_id, event):
+                key = bursts.burst_key(event)
+                window_ids = self.bursts.ids(key)
+                self.intake.set_burst_key(
+                    event.session, key[1], window_ids, window_ids[0]
+                )
+                return True
         return False

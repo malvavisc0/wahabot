@@ -33,7 +33,8 @@ from wahabot.core.notebook import (
     RULE_HARD_MUTE,
     RULE_MESSAGE_PREFIX,
 )
-from wahabot.core.waha import WahaClient
+from wahabot.core.recovery.context import apology
+from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 
 
@@ -121,7 +122,7 @@ async def bind_run_rules(
         ):
             await record_handled_turn(agent, ctx, user_msg)
         return False
-    target.prefix = rules.get(RULE_MESSAGE_PREFIX, "")
+    target.prefix = f"{apology.get()}{rules.get(RULE_MESSAGE_PREFIX, '')}"
     return True
 
 
@@ -188,7 +189,7 @@ async def handle_message(
     image: dict[str, Any] | None = None,
     images: list[dict[str, Any]] | None = None,
     settings: Settings | None = None,
-    waha: WahaClient | None = None,
+    waha: Transport | None = None,
     armed: bool = False,
     pinned_note: str = "",
     bot_name: str | None = None,
