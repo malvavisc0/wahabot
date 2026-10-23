@@ -14,6 +14,7 @@ from wahabot.ai.triage import TriageGate, TriageResult
 from wahabot.core.learned import RecapMerger
 from wahabot.core.notebook import Notebook
 from wahabot.core.thread_index import ThreadIndexer
+from wahabot.core.tickets.store import TicketStore
 from wahabot.settings import Settings
 
 
@@ -35,6 +36,7 @@ class AgentBase:
     triage_tasks: dict[int, asyncio.Task[TriageResult]]
     recap_merger: RecapMerger | None
     thread_index: ThreadIndexer | None
+    ticket_store: TicketStore | None
 
     def audit(self, kind: str, **fields: Any) -> None: ...
 

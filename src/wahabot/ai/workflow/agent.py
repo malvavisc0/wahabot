@@ -58,6 +58,7 @@ from wahabot.core.notebook import (
 from wahabot.core.thread_index import (
     ThreadIndexer,
 )
+from wahabot.core.tickets.store import TicketStore
 from wahabot.settings import Settings
 
 __all__ = [
@@ -96,6 +97,7 @@ class FunctionCallingAgentWorkflow(
         rules_renderer: Callable[[], str] | None = None,
         gate_rules_renderer: Callable[[], str] | None = None,
         thread_index: ThreadIndexer | None = None,
+        ticket_store: TicketStore | None = None,
         triage: TriageGate | None = None,
         **kwargs: Any,
     ) -> None:
@@ -126,6 +128,7 @@ class FunctionCallingAgentWorkflow(
         # Thread recall shares the same file family and kill
         # switches. Without an embeddings URL the index is FTS5-only.
         self.thread_index = build_thread_index(settings, thread_index)
+        self.ticket_store = ticket_store
         warn_context_mismatch(
             settings.llm_context_window if settings is not None else 0,
             self.memory_token_limit,
@@ -305,6 +308,7 @@ def build_agent(
     rules_renderer: Callable[[], str] | None = None,
     gate_rules_renderer: Callable[[], str] | None = None,
     triage: TriageGate | None = None,
+    ticket_store: TicketStore | None = None,
 ) -> FunctionCallingAgentWorkflow:
     """Build the function calling agent workflow with the configured LLM.
 
@@ -337,4 +341,5 @@ def build_agent(
         rules_renderer=rules_renderer,
         gate_rules_renderer=gate_rules_renderer,
         triage=triage,
+        ticket_store=ticket_store,
     )

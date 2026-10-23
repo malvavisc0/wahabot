@@ -50,6 +50,7 @@ from wahabot.core.thread_index import (
     OPERATOR_CHAT_ID,
     recall_query,
 )
+from wahabot.core.tickets.pinned import ticket_marker
 from wahabot.core.tokens import text_tokens
 
 
@@ -237,6 +238,7 @@ class MemoryMixin(AgentBase):
             self.notebook is None
             and self.rules_renderer is None
             and self.settings is None
+            and self.ticket_store is None
         ):
             return ""
         target = current_target()
@@ -261,8 +263,23 @@ class MemoryMixin(AgentBase):
             rules=self.rendered_session_rules(),
             recap=recap,
             recall=recall,
+            ticket=self.render_ticket_marker(target),
             required_notes=required_notes,
         )
+
+    def render_ticket_marker(self, target: RunTarget) -> str:
+        """One-line ticket state for this run, or "" when unavailable."""
+        if self.ticket_store is None or not target.chat_id:
+            return ""
+        try:
+            ticket = (
+                self.ticket_store.ticket(target.ticket_id)
+                if target.ticket_id
+                else self.ticket_store.active_ticket(target.chat_id)
+            )
+        except Exception:
+            return ""
+        return ticket_marker(ticket)
 
     @override
     async def ensure_memory(self, ctx: Context) -> ChatMemoryBuffer:

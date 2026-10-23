@@ -167,6 +167,14 @@ def escalate(waha: Transport, channel: EscalationChannel, settings: Settings) ->
             # would only loop the report back to its author.
             refusal = "this run is already an operator command"
             return error(f"{refusal} — report directly in the instruction instead")
+        if target.ticket_id:
+            # A ticket turn has the richer hand_to_operator path (contact,
+            # language, attachments and a durable ticket state). Escalating
+            # here would bypass it and lose the ticket.
+            return error(
+                "ticket chats use hand_to_operator, not escalate: it records the "
+                "ticket, copies attachments and alerts the operator"
+            )
         return forward_escalation(
             waha, channel, settings, target.session, chat_id, report
         )
@@ -177,6 +185,7 @@ def escalate(waha: Transport, channel: EscalationChannel, settings: Settings) ->
         name="escalate",
         description=(
             "Before replying, forward a participant's report to the fixed human operator "
+            "(not in ticket chats: use hand_to_operator there). "
             "for human help, bot problems, complaints, or refusals. "
             "Not for operator commands. Does not consume the reply allowance. "
             "One successful forward per chat per hour. "

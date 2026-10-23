@@ -19,6 +19,7 @@ from wahabot.ai.tools.external import (
 )
 from wahabot.ai.tools.image import image_builder
 from wahabot.ai.tools.notebook import notebook_builder
+from wahabot.ai.tools.tickets import build_ticket_tools
 from wahabot.ai.tools.whatsapp import (
     EscalationChannel,
     escalate,
@@ -30,6 +31,8 @@ from wahabot.ai.tools.whatsapp import (
     send_message,
     stay_silent,
 )
+from wahabot.core.tickets.alerts import Translator
+from wahabot.core.tickets.store import TicketStore
 from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 
@@ -40,6 +43,10 @@ def build_default_tools(
     waha: Transport,
     settings: Settings | None = None,
     escalation_channel: EscalationChannel | None = None,
+    *,
+    ticket_store: TicketStore | None = None,
+    ticket_translator: Translator | None = None,
+    ticket_operator_language: str = "",
 ) -> list[BaseTool]:
     """Build all bundled tools.
 
@@ -69,6 +76,15 @@ def build_default_tools(
     ]
     if settings.shell_tool:
         tools.append(shell_builder(settings))
+    tools.extend(
+        build_ticket_tools(
+            ticket_store,
+            settings,
+            waha,
+            operator_language=ticket_operator_language,
+            translator=ticket_translator,
+        )
+    )
     tools.append(profile_picture_builder(waha))
     if settings.image_api_base:
         tools.extend(image_builder(settings))
