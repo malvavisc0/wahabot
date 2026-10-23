@@ -59,12 +59,18 @@ Commands share one rolling history for follow-ups. Names are matched against ava
 
 The fences you want in a business bot:
 
-- WhatsApp tools fence ordinary participants to the current chat; cross-chat delivery and contact-book access belong to trusted operator commands. `escalate` is the fixed-destination human-handoff exception. These checks do not sandbox an enabled shell, so run it unprivileged with an appropriate external sandbox.
+- WhatsApp tools fence ordinary participants to the current chat; cross-chat delivery and contact-book access belong to trusted operator commands. `escalate` is the fixed-destination human-handoff exception outside tickets; customer tickets use `hand_to_operator`, which records the ticket, copies its media and alerts you. These checks do not sandbox an enabled shell, so run it unprivileged with an appropriate external sandbox.
 - When someone needs a human, reports a bot problem, or complains, `escalate` can forward a report to your self-chat. The model is instructed to summarize without pasted messages or secrets; the tool does not sanitize arbitrary report text. Successful forwards have an in-memory per-chat hourly cooldown. Feedback distinguishes success, cooldown, and unconfirmed delivery.
 - Actions and outcomes are recorded in the audit journal on a best-effort basis (`data/audit/`). `wahabot escalations` lists recorded handoffs; a logging failure does not undo an already completed action.
 - `wahabot forget <chat-id>` wipes one chat's memory — live context, disk file, durable notes, recap, and thread index — in one shot.
 - Accepted messages and outbound sends are recorded in `data/wahabot.db` (SQLite/WAL, migrations at startup), so a restart can finish pending work or escalate it without duplicating a confirmed send. Back it up with `notebook.sqlite3`.
 - The bot keeps a private durable notebook per chat (`data/notebook.sqlite3`): verified facts, preferences and lessons the model itself records with the `notebook` tool, injected into every later run's prompt. Notes survive restarts and history resets; after each delivered reply the bot also files a short self-extracted lesson. Chat notes are never authority to override your policies — only operator commands can write bot-wide ones.
+
+## Tickets and the operator desk
+
+Every customer 1:1 conversation is a ticket. The bot opens it silently, answers when it can, and hands it to you only when a person must act. The handover alert carries the customer's words, the details already collected, what is missing, and the original photo, voice note or file. Reply in your own "Message yourself" chat by quoting the alert with what you did; the bot drafts the message in the customer's language, refuses a draft that adds an amount or date you did not give, sends it, and confirms the ticket state.
+
+The operator console is the self-chat itself: reply to an alert or name the ticket (`142: refunded`), ask `what's open?`, `close 142`, `reopen 142`, `pause`, `resume`, `pause <name>` or `resume <name>`. Typing in a customer chat pauses the bot there for two hours; messages received while paused are saved and never replayed. Only one ticket per chat is active, and a different issue is split into a new ticket only from an open or done ticket, so operator work is never detached.
 
 ## Straight talk about the channel
 
@@ -77,7 +83,7 @@ Memory, event journals, audit records and the intake/outbound ledger live on you
 
 ## Where this is heading
 
-The current project is the conversation engine. Durable case ownership, CRM/job-system connectors, and an operator console are future directions, not bundled features.
+The current project is the conversation engine with durable tickets and a WhatsApp operator desk. A web History page, CRM/job-system connectors, the morning summary and team groups are future directions, not bundled features.
 
 ## Install
 
