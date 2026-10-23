@@ -158,6 +158,10 @@ class AlbumMixin(HandlerBase):
         async with chat_lock(event.session, chat_id):
             if await self.turn_suppressed(event.session, chat_id, turn_ids):
                 return "superseded", None
+            # Own the album's rows before answering them, so the
+            # recovery tick cannot re-run the turn out from under this
+            # live run.
+            owner = self.claim_turn(event.session, chat_id, turn_ids)
             ctx = await context_for(event.session, chat_id, self.agent, self.settings)
             with chat_trace_attributes(
                 chat_id,
@@ -185,6 +189,7 @@ class AlbumMixin(HandlerBase):
                     intake=self.intake,
                     turn_ids=turn_ids,
                     turn_started_at=started,
+                    owner=owner,
                 )
             await persist_memory(self.settings, event.session, chat_id, ctx)
         delivered = bool(target.sent or target.reacted)

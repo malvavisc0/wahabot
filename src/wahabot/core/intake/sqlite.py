@@ -6,6 +6,7 @@ from pathlib import Path
 
 from wahabot.core.db.connection import connect, transaction
 from wahabot.core.intake.store import (
+    CLAIMABLE_STATES,
     DELIVERED,
     DELIVERING,
     DONE,
@@ -62,6 +63,10 @@ class SqliteIntakeStore:
         return to_row(row) if row is not None else None
 
     def record(self, row: IntakeRow) -> IntakeRow:
+        # message_id is the global dedup key: WAHA ids embed the chat
+        # JID and the bot runs a single session, so the same id cannot
+        # legitimately appear under a second (session, chat_id); the
+        # first write wins and later redeliveries read it back.
         conn = connect(self.path)
         try:
             with transaction(conn):
@@ -90,16 +95,20 @@ class SqliteIntakeStore:
         owner: str,
         lease_until: float,
     ) -> list[IntakeRow]:
+        # CLAIMABLE_STATES (pending plus failed-awaiting-retry): a run
+        # that re-runs a failed row must own it too or the recovery
+        # tick would see it as due work and answer twice.
         if not message_ids:
             return []
         marks = ",".join("?" for _ in message_ids)
+        claimable = ",".join("?" for _ in CLAIMABLE_STATES)
         conn = connect(self.path)
         try:
             with transaction(conn):
                 conn.execute(
                     "UPDATE intake SET state = ?, owner = ?, next_attempt_at = ? "
-                    + f"WHERE message_id IN ({marks}) AND state = ?",
-                    (PROCESSING, owner, lease_until, *message_ids, PENDING),
+                    + f"WHERE message_id IN ({marks}) AND state IN ({claimable})",
+                    (PROCESSING, owner, lease_until, *message_ids, *CLAIMABLE_STATES),
                 )
                 rows = conn.execute(
                     f"SELECT {_COLUMNS} FROM intake WHERE message_id IN ({marks}) "

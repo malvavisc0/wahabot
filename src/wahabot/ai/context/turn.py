@@ -184,6 +184,24 @@ async def prepare_turn_state(
         await ctx.store.set("turn_direct", event.event != "command" and not group)
 
 
+def durable_run_owner(
+    intake: IntakeLedger | None, turn_ids: Sequence[str], owner: str
+) -> str:
+    """Resolve the one owner a run's claims and target share.
+
+    A durable run (``intake`` plus ``turn_ids``) starts only with the
+    owner its ``claim_turn`` recorded — raising on a missing owner
+    keeps the claim, the target and the owner-scoped settle attached to
+    the same run by construction. Every other shape mints a fresh
+    owner, so this stays the only minting site.
+    """
+    if not intake or not turn_ids:
+        return owner or uuid.uuid4().hex
+    if not owner:
+        raise ValueError("a durable run needs the owner its claim_turn recorded")
+    return owner
+
+
 async def handle_message(
     event: WahaEvent,
     agent: FunctionCallingAgentWorkflow,
@@ -203,6 +221,7 @@ async def handle_message(
     intake: IntakeLedger | None = None,
     turn_ids: Sequence[str] = (),
     turn_started_at: float | None = None,
+    owner: str = "",
 ) -> tuple[str, RunTarget]:
     """Run the agent workflow over an incoming message event.
 
@@ -245,7 +264,14 @@ async def handle_message(
     message text are fetched too (see ``wahabot.ai.tools.url_images``), so a
     bare link like "look at this https://host/pic.png" shows the model
     the picture as well.
+
+    A durable run (``intake`` plus ``turn_ids``) must pass the
+    ``owner`` that claimed its turn rows (``claim_turn``);
+    :func:`durable_run_owner` raises on a missing one so the claim,
+    the target and the settle stay attached to one run by construction
+    instead of by threading discipline.
     """
+    run_owner = durable_run_owner(intake, turn_ids, owner)
     chat_id = str(event.payload.get("from", ""))
     logger.info("Agent handling message from {chat_id}", chat_id=chat_id)
     newest_event = record_entries[-1].event if record_entries else event
@@ -283,7 +309,7 @@ async def handle_message(
         armed=armed,
         typing=typing,
         intake=intake,
-        owner=uuid.uuid4().hex,
+        owner=run_owner,
         turn_ids=list(turn_ids),
         turn_started_at=(
             time.monotonic() if turn_started_at is None else turn_started_at

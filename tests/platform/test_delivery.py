@@ -139,7 +139,7 @@ def test_uncertain_timeout_is_unknown_and_never_retried(tmp_path: Path) -> None:
     assert intent.state == "unknown"
     assert intent.next_attempt_at is None
     assert intent.operator_required
-    assert intents.recover_due(now=10**12) == []
+    assert intents.recoverable(10**12) == []
 
 
 def test_recovery_resumes_a_prepared_intent_exactly_once(tmp_path: Path) -> None:
@@ -356,6 +356,31 @@ def test_purge_removes_settled_intents_but_keeps_pending_ones(
     with pytest.raises(KeyError):
         intents.get(sent.id)
     assert intents.get(pending.id).state == "prepared"
+
+
+def test_purge_removes_a_terminal_operator_notice(tmp_path: Path) -> None:
+    """A definitively failed notice is historical, never notified.
+
+    ``unnotified_operator`` excludes the notice kind, so its
+    ``notified_at`` can never be set — without the terminal-clause these
+    rows would be retained forever.
+    """
+    intents, _client, _transport = stores(tmp_path)
+    notice = intents.prepare(
+        session="s",
+        chat_id="operator",
+        kind="operator_notice",
+        payload={"text": "wahabot: notice"},
+    )
+    intents.sending(notice.id)
+    intents.failed(
+        notice.id, "400 bad request", next_attempt_at=None, operator_required=True
+    )
+
+    assert intents.get(notice.id).notified_at is None
+    assert intents.purge(time.time() + 10) == 1
+    with pytest.raises(KeyError):
+        intents.get(notice.id)
 
 
 def test_ambiguous_operator_notice_is_retried(tmp_path: Path) -> None:

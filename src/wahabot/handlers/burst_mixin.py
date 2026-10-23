@@ -369,6 +369,10 @@ class BurstMixin(HandlerBase):
         async with chat_lock(merged.session, chat_id):
             if await self.turn_suppressed(merged.session, chat_id, turn_ids):
                 return "", None
+            # Own the burst's rows before answering them, so the
+            # recovery tick cannot re-run the turn out from under this
+            # live run.
+            owner = self.claim_turn(merged.session, chat_id, turn_ids)
             ctx = await context_for(merged.session, chat_id, self.agent, self.settings)
             with chat_trace_attributes(
                 chat_id,
@@ -398,6 +402,7 @@ class BurstMixin(HandlerBase):
                     intake=self.intake,
                     turn_ids=turn_ids,
                     turn_started_at=started,
+                    owner=owner,
                 )
             await persist_memory(self.settings, merged.session, chat_id, ctx)
         return reply, target

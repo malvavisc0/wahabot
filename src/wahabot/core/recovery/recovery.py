@@ -18,13 +18,10 @@ from wahabot.core.delivery.intents import (
     IntentStore,
 )
 from wahabot.core.intake.store import (
+    CLAIMABLE_STATES,
     DONE,
     OPERATOR_REQUIRED,
-    PENDING,
     IntakeRow,
-)
-from wahabot.core.intake.store import (
-    FAILED as ROW_FAILED,
 )
 from wahabot.core.recovery.context import APOLOGY
 from wahabot.core.runs import chat_lock
@@ -142,7 +139,11 @@ class Recovery:
         cutoff = self.clock() - self.settings.intake_retention_days * 86400
         self.intents.purge(cutoff)
         # No live run survived the restart: every processing row is stale.
-        # Return it to pending without spending a retry attempt.
+        # Return it to pending without spending a retry attempt. This is
+        # correct only because nothing above this point awaits: a claim
+        # taken by a webhook run between the lifespan task starting and
+        # this reset would be silently returned to pending while its run
+        # still answered. Keep every statement above synchronous.
         self.ledger.reset_processing()
         self._reconcile_delivering()
         await self.tick(startup=True)
@@ -241,7 +242,7 @@ class Recovery:
             self.intents.set_chat(intent.id, destination)
 
     async def _recover_group(self, rows: list[IntakeRow], now: float) -> str:
-        fresh = [row for row in rows if row.state in (PENDING, ROW_FAILED)]
+        fresh = [row for row in rows if row.state in CLAIMABLE_STATES]
         if not fresh:
             return "done"
         refusal = self._refuse_group(fresh, now)

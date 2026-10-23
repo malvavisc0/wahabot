@@ -1,11 +1,12 @@
 """Turn-level authority over accepted inbound messages.
 
 The seen cache is a fast duplicate check; this ledger survives the gap
-between accepting a message and its run finishing. A run claims messages
-that arrive after it started, so a stale reply cannot overtake them, and
-a queued run waits for an active claim instead of racing it. Storage is
-injectable: the default is process memory, and the durable store keeps
-the same read/write surface in SQLite.
+between accepting a message and its run finishing. A run claims its own
+turn rows and messages that arrive after it started, so a stale reply
+cannot overtake them — and the recovery tick cannot answer a turn a live
+run is still answering. A queued run waits for an active claim instead
+of racing it. Storage is injectable: the default is process memory, and
+the durable store keeps the same read/write surface in SQLite.
 """
 
 import threading
@@ -34,6 +35,11 @@ MAX_MESSAGES = 1000
 #: How long a claimed row stays a live run's before recovery may reset it.
 CLAIM_LEASE_S = 1800
 
+#: Both the intake window and the claim lease outlive ``run_timeout``
+#: by this shared margin — the lease undercutting the window would let
+#: recovery release a live run's claims mid-run.
+RUN_TIMEOUT_MARGIN_S = 300
+
 
 def max_age_for_run_timeout(run_timeout: float) -> float:
     """The intake window that keeps a claim alive for one full run.
@@ -42,7 +48,18 @@ def max_age_for_run_timeout(run_timeout: float) -> float:
     started before the message can claim it near its own deadline. The
     extra margin keeps the row alive slightly past that deadline.
     """
-    return max(MAX_AGE_S, run_timeout + 300)
+    return max(MAX_AGE_S, run_timeout + RUN_TIMEOUT_MARGIN_S)
+
+
+def claim_lease_for_run_timeout(run_timeout: float) -> float:
+    """How long a claim may outlive the run that holds it.
+
+    A run claims its own turn rows when it starts, so recovery's stale
+    sweep must not release a live run's claims mid-run: the lease
+    outlives ``run_timeout`` by the same shared margin the intake
+    window uses, so it always covers a whole run.
+    """
+    return max(CLAIM_LEASE_S, run_timeout + RUN_TIMEOUT_MARGIN_S)
 
 
 class IntakeLedger:
@@ -158,17 +175,19 @@ class IntakeLedger:
         *,
         owner: str = "",
     ) -> list[IntakeRow]:
-        """Claim pending rows for the run that is about to answer them."""
-        wanted = set(message_ids)
+        """Claim the rows the run that is about to answer them owns.
+
+        Claiming runs entirely in the store's one transaction — no chat
+        read first: the claim is a per-run-start hot path, the stores
+        filter by id and state themselves, and both callers pass ids
+        that are inside the intake window by construction
+        (``refuse_newer`` passes ``newer()``'s filtered rows,
+        ``claim_turn`` the run's own fresh turn rows).
+        """
         with self._lock:
-            pending = [
-                entry.message_id
-                for entry in self._all((session, chat_id))
-                if entry.message_id in wanted and entry.state == PENDING
-            ]
             return self.store.claim(
                 (session, chat_id),
-                pending,
+                list(message_ids),
                 owner,
                 time.time() + self.claim_lease_s,
             )
