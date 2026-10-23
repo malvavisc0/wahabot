@@ -136,7 +136,7 @@ def test_waha_wire_shapes() -> None:
         SESSION, CHAT_ID, {"url": "https://x.invalid/a.mp4"}, "video", convert=False
     )
     wire_waha.forward_message(SESSION, CHAT_ID, "false_message")
-    wire_waha.send_reaction(SESSION, "false_message", "")
+    wire_waha.send_reaction(SESSION, "chat", "false_message", "")
     wire_waha.send_voice(
         SESSION, CHAT_ID, {"mimetype": "audio/mpeg", "url": "https://x.invalid/a.mp3"}
     )

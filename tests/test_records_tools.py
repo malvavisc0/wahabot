@@ -79,7 +79,9 @@ class Waha:
         self.calls.append(("send", chat_id, text, reply_to, mentions))
         return "SENT"
 
-    def send_reaction(self, session: str, message_id: str, reaction: str) -> None:
+    def send_reaction(
+        self, session: str, chat_id: str, message_id: str, reaction: str
+    ) -> None:
         self.calls.append(("react", message_id, reaction))
 
     def send_seen(self, session: str, chat_id: str) -> None:

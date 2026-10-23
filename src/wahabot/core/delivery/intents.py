@@ -318,6 +318,26 @@ class IntentStore:
             conn.close()
         return self.get(intent_id)
 
+    def purge(self, before: float) -> int:
+        """Prune settled intents older than *before*.
+
+        Sent/cancelled rows and notified operator-required outcomes are
+        historical; prepared, sending, retryable failed and unnoticed
+        unknown rows stay.
+        """
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                cursor = conn.execute(
+                    "DELETE FROM outbound_intents WHERE updated_at < ? AND ("
+                    + "state IN (?, ?) OR (state IN (?, ?) "
+                    + "AND operator_required = 1 AND notified_at IS NOT NULL))",
+                    (before, SENT, CANCELLED, FAILED, UNKNOWN),
+                )
+                return int(cursor.rowcount)
+        finally:
+            conn.close()
+
     def get(self, intent_id: str) -> DeliveryIntent:
         conn = connect(self.path)
         try:

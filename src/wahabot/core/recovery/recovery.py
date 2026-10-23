@@ -139,6 +139,8 @@ class Recovery:
         # crash or an older row can still leave a sent intent with pending
         # intake rows; finish them before anything can re-answer the turn.
         self.intents.reconcile_sent_intake()
+        cutoff = self.clock() - self.settings.intake_retention_days * 86400
+        self.intents.purge(cutoff)
         # No live run survived the restart: every processing row is stale.
         # Return it to pending without spending a retry attempt.
         self.ledger.reset_processing()

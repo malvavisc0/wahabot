@@ -84,7 +84,25 @@ class WahaTransport:
                     next_attempt_at=time.time() + backoff_seconds(attempts),
                 )
         elif disposition == AMBIGUOUS:
-            intents.unknown(intent.id, str(exc))
+            if intent.kind == "operator_notice":
+                # A notice is idempotent and losing it is worse than a
+                # duplicate: retry it with the same bounded backoff.
+                attempts = intent.attempts + 1
+                if attempts >= intents.max_attempts:
+                    intents.failed(
+                        intent.id,
+                        str(exc),
+                        next_attempt_at=None,
+                        operator_required=True,
+                    )
+                else:
+                    intents.failed(
+                        intent.id,
+                        str(exc),
+                        next_attempt_at=time.time() + backoff_seconds(attempts),
+                    )
+            else:
+                intents.unknown(intent.id, str(exc))
         else:
             intents.failed(
                 intent.id, str(exc), next_attempt_at=None, operator_required=True
@@ -205,13 +223,17 @@ class WahaTransport:
             call=lambda: self.client.forward_message(session, chat_id, message_id),
         )
 
-    def send_reaction(self, session: str, message_id: str, reaction: str) -> None:
+    def send_reaction(
+        self, session: str, chat_id: str, message_id: str, reaction: str
+    ) -> None:
         self._deliver(
             session=session,
-            chat_id="",
+            chat_id=chat_id,
             kind="reaction",
             payload={"message_id": message_id, "reaction": reaction},
-            call=lambda: self.client.send_reaction(session, message_id, reaction),
+            call=lambda: self.client.send_reaction(
+                session, chat_id, message_id, reaction
+            ),
         )
 
     def recover_intents(
@@ -320,7 +342,7 @@ class WahaTransport:
             return self.client.forward_message(session, chat_id, payload["message_id"])
         if intent.kind == "reaction":
             return self.client.send_reaction(
-                session, payload["message_id"], payload["reaction"]
+                session, chat_id, payload["message_id"], payload["reaction"]
             )
         raise ValueError(f"cannot replay intent kind {intent.kind!r}")
 

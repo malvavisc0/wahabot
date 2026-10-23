@@ -132,7 +132,9 @@ class RecordingWaha(WahaClient):
         self.seen_chats.append((session, chat_id))
 
     @override
-    def send_reaction(self, session: str, message_id: str, reaction: str) -> None:
+    def send_reaction(
+        self, session: str, chat_id: str, message_id: str, reaction: str
+    ) -> None:
         self.reactions.append((message_id, reaction))
 
     @override

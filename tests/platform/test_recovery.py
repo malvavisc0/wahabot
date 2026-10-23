@@ -383,3 +383,21 @@ def test_startup_requeues_a_delivering_row_without_an_intent(bot: Bot) -> None:
     row = bot.ledger.row(bot.settings.session, CHAT_ID, message_id)
     assert row is not None and row.outcome == "delivered"
     assert len([entry for entry in bot.waha.sent if entry[1] == CHAT_ID]) == 1
+
+
+def test_old_reaction_intent_is_cancelled_by_the_reply_window(bot: Bot) -> None:
+    message_id = seed_row(bot, "OLDREACTION", age_s=9 * 86400)
+    intent = bot.intents.prepare(
+        session=bot.settings.session,
+        chat_id=CHAT_ID,
+        kind="reaction",
+        payload={"message_id": message_id, "reaction": "ok"},
+        intake_ids=[message_id],
+    )
+
+    run(bot.recovery.tick())
+
+    assert all(chat != CHAT_ID for _session, chat, *_rest in bot.waha.sent)
+    assert bot.intents.get(intent.id).state == "cancelled"
+    row = bot.ledger.row(bot.settings.session, CHAT_ID, message_id)
+    assert row is not None and row.outcome == "operator_required"
