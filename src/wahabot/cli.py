@@ -188,11 +188,11 @@ def serve(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     seed_health(waha, settings.session)
-    agent, _config_reloader = register_agent_handler(settings, waha=waha)
-    register_reaction_handler(waha, agent, settings)
-    register_command_handler(settings, waha, agent)
-    register_session_status_handler(waha, settings.session)
-    register_forget_handler(settings, agent)
+    registration = register_agent_handler(settings, waha=waha)
+    register_reaction_handler(registration.transport, registration.agent, settings)
+    register_command_handler(settings, registration.transport, registration.agent)
+    register_session_status_handler(registration.transport, settings.session)
+    register_forget_handler(settings, registration.agent)
     (settings.journal_dir / settings.session).mkdir(parents=True, exist_ok=True)
     uvicorn.run(
         "wahabot.webhook:app",

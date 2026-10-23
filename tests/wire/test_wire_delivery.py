@@ -477,3 +477,57 @@ def test_muted_command_probes_recovery(bot: Bot) -> None:
         ),
         timeout=5,
     )
+
+
+def test_uncertain_send_is_unknown_and_never_retried(bot: Bot) -> None:
+    bot.stack.llm.override = SecondResponse
+    original = bot.waha.send_text
+    calls = {"n": 0}
+
+    def uncertain(*args: Any, **kwargs: Any) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadTimeout("response lost")
+        return original(*args, **kwargs)
+
+    bot.waha.send_text = uncertain  # type: ignore[method-assign]
+    event = waha_event("UNCERTAIN")
+    event["payload"]["body"] = "kai an uncertain send"
+
+    bot.post(event)
+
+    intents = [item for item in bot.intents.recent(20) if item.chat_id == CHAT_ID]
+    assert intents and intents[0].state == "unknown"
+    assert intents[0].operator_required
+    asyncio.run(bot.recovery.tick())
+    assert bot.intents.get(intents[0].id).state == "unknown"
+    assert not [entry for entry in bot.waha.sent if entry[1] == CHAT_ID]
+
+
+def test_definite_send_failure_is_retried_once_when_due(bot: Bot) -> None:
+    bot.stack.llm.override = SecondResponse
+    original = bot.waha.send_text
+    calls = {"n": 0}
+
+    def refused(*args: Any, **kwargs: Any) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("refused")
+        return original(*args, **kwargs)
+
+    bot.waha.send_text = refused  # type: ignore[method-assign]
+    event = waha_event("DEFINITE")
+    event["payload"]["body"] = "kai a definite failure"
+
+    bot.post(event)
+
+    intents = [item for item in bot.intents.recent(20) if item.chat_id == CHAT_ID]
+    assert intents and intents[0].state == "failed"
+    assert intents[0].next_attempt_at is not None
+    row = bot.ledger.row(bot.settings.session, CHAT_ID, str(event["payload"]["id"]))
+    assert row.state != "done" or row.outcome != "delivered"
+
+    bot.transport.recover_intents(now=time.time() + 10**6)
+
+    assert bot.intents.get(intents[0].id).state == "sent"
+    assert [entry[1] for entry in bot.waha.sent].count(CHAT_ID) == 1

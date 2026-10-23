@@ -54,6 +54,7 @@ from wahabot.status import (
 
 
 class BurstMixin(HandlerBase):
+    @override
     async def run_burst(self, buffer: bursts.BurstBuffer) -> None:
         """Run the agent once over a completed burst, all messages joined.
 
@@ -64,13 +65,16 @@ class BurstMixin(HandlerBase):
         reprocesses them through the normal path — a burst never
         disappears, mirroring the single-message and album paths.
         """
-        turn_ids = list(buffer.ids())
+        events = self.load_events(buffer.key[0], buffer.key[1], buffer.ids())
+        turn_ids = [str(event.payload.get("id", "")) for event in events]
         started = time.monotonic()
         target: RunTarget | None = None
         outcome = "failed"
         failure_class = ""
         try:
-            outcome, target = await self.deliver_burst_reply(buffer, started)
+            if not events:
+                return
+            outcome, target = await self.deliver_burst_reply(buffer, events, started)
         except Exception as exc:
             # Same failure policy as a single turn: a permanent budget
             # error keeps the seen markers, everything else drops them so
@@ -312,6 +316,7 @@ class BurstMixin(HandlerBase):
     async def merge_burst(
         self,
         buffer: bursts.BurstBuffer,
+        messages: list[WahaEvent],
     ) -> tuple[WahaEvent, list[RecordEntry]] | None:
         """Merge a burst into one turn; None when it has no usable content.
 
@@ -319,16 +324,16 @@ class BurstMixin(HandlerBase):
         message; the merged event is only the run's anchor, with no welded
         text and no inherited quote.
         """
-        if not buffer.messages:
+        if not messages:
             return None
-        _, entries = await self.merge_burst_parts(buffer.messages)
+        _, entries = await self.merge_burst_parts(messages)
         if not entries:
             logger.debug(
                 "Burst in {chat_id} yielded no usable content",
                 chat_id=buffer.key[1],
             )
             return None
-        return self.burst_anchor(buffer.messages[-1]), entries
+        return self.burst_anchor(messages[-1]), entries
 
     def mark_addressed_entry(
         self, entries: list[RecordEntry], current: SessionConfig
@@ -398,7 +403,7 @@ class BurstMixin(HandlerBase):
         return reply, target
 
     async def deliver_burst_reply(
-        self, buffer: bursts.BurstBuffer, started: float
+        self, buffer: bursts.BurstBuffer, messages: list[WahaEvent], started: float
     ) -> tuple[str, RunTarget | None]:
         """Prepare each buffered message's media, run the agent once.
 
@@ -406,13 +411,13 @@ class BurstMixin(HandlerBase):
         every message's body. Media rides as image blocks; quote/reply
         targets the LAST buffered message (the natural reply anchor).
         """
-        merged_burst = await self.merge_burst(buffer)
+        merged_burst = await self.merge_burst(buffer, messages)
         if merged_burst is None:
             return "empty", None
         merged, entries = merged_burst
         chat_id = buffer.key[1]
         message_id = str(merged.payload.get("id", ""))
-        turn_ids = list(buffer.ids())
+        turn_ids = [str(event.payload.get("id", "")) for event in messages]
         reply, target = await self.run_burst_turn(
             buffer, merged, entries, turn_ids=turn_ids, started=started
         )

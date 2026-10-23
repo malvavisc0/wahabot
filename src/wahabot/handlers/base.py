@@ -9,6 +9,7 @@ from typing import Any
 
 from loguru import logger
 
+from wahabot.ai import albums, bursts
 from wahabot.ai.intake import IntakeLedger
 from wahabot.ai.tools.runcontext import delivery_path
 from wahabot.ai.tools.whatsapp import EscalationChannel, RunTarget
@@ -16,7 +17,9 @@ from wahabot.ai.triage import TriageGate
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.access import SessionConfig, SessionConfigReloader
 from wahabot.core.audit import save_run_outcome
-from wahabot.core.waha import WahaClient
+from wahabot.core.delivery.intents import IntentStore
+from wahabot.core.models import WahaEvent
+from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 
 #: How often a queued run re-checks another run's claim on its turn.
@@ -27,12 +30,15 @@ class HandlerBase:
     """Per-registration state shared by every handler mixin."""
 
     settings: Settings
-    waha: WahaClient
+    waha: Transport
     config: SessionConfig
     config_reloader: SessionConfigReloader
     escalation_channel: EscalationChannel
     triage: TriageGate | None
     intake: IntakeLedger
+    intents: IntentStore
+    bursts: bursts.Bursts
+    albums: albums.Albums
     started_at: float
     agent: FunctionCallingAgentWorkflow
 
@@ -43,7 +49,23 @@ class HandlerBase:
     async def handle_self_command(self, *args: Any, **kwargs: Any) -> Any: ...
     async def prepare_chat_message(self, *args: Any, **kwargs: Any) -> Any: ...
     async def skip_or_buffer_message(self, *args: Any, **kwargs: Any) -> Any: ...
+    async def reply_with_agent(self, *args: Any, **kwargs: Any) -> Any: ...
+    async def run_burst(self, *args: Any, **kwargs: Any) -> Any: ...
+    async def run_album(self, *args: Any, **kwargs: Any) -> Any: ...
     def group_message_addressed(self, *args: Any, **kwargs: Any) -> Any: ...
+    def settle_intake(self, event: WahaEvent, outcome: str, reason: str = "") -> None: ...
+
+    def load_events(
+        self, session: str, chat_id: str, message_ids: Sequence[str]
+    ) -> list[WahaEvent]:
+        """Reconstruct the not-yet-settled events of one intake window."""
+        events: list[WahaEvent] = []
+        for message_id in message_ids:
+            row = self.intake.row(session, chat_id, message_id)
+            if row is None or row.state == "done" or not row.raw_json:
+                continue
+            events.append(row.event)
+        return events
 
     async def turn_suppressed(
         self, session: str, chat_id: str, turn_ids: Sequence[str]
@@ -78,13 +100,28 @@ class HandlerBase:
         sent = bool(target and (target.sent or target.reacted))
         delivered = outcome in ("reply", "delivered_via_tool", "reaction") or sent
         try:
-            self.intake.finish_turn(
-                session,
-                chat_id,
-                turn_ids,
-                claimed,
-                delivered=delivered,
-            )
+            if delivered:
+                self.intake.finish_turn(
+                    session, chat_id, turn_ids, claimed, delivered=True
+                )
+            elif outcome in ("silence", "empty", "superseded"):
+                self.intake.finish_turn(
+                    session,
+                    chat_id,
+                    turn_ids,
+                    claimed,
+                    delivered=False,
+                    outcome="silent",
+                    reason=outcome,
+                )
+            else:
+                self.intake.fail(
+                    session,
+                    chat_id,
+                    [*turn_ids, *claimed],
+                    error=outcome,
+                    next_attempt_at=time.time() + 60,
+                )
         except Exception:
             logger.exception("Intake settle failed for {chat_id}", chat_id=chat_id)
         save_run_outcome(

@@ -169,6 +169,7 @@ class SingleMixin(HandlerBase):
                 failure_class,
             )
 
+    @override
     async def reply_with_agent(self, event: WahaEvent) -> None:
         """Run the agent over an incoming message and send its reply via WAHA."""
         # Arrival order, not processing order: identity flushes and media

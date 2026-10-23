@@ -120,8 +120,10 @@ def test_burst_refuses_unresolvable_sender() -> None:
     from wahabot.ai import bursts
 
     async def scenario() -> None:
-        bursts.reset()
-        bursts.configure(inactivity_s=0.2, hold_cap_s=5.0)
+        async def complete(_buffer: bursts.BurstBuffer) -> None:
+            return None
+
+        buffers = bursts.Bursts(0.2, 5.0, complete)
         event = WahaEvent(
             id="e-no-sender",
             timestamp=1,
@@ -130,13 +132,13 @@ def test_burst_refuses_unresolvable_sender() -> None:
             me={},
             payload={"id": "m1", "from": CHAT_ID, "body": "leak"},
         )
-        assert bursts.add_message(event) is False
-        assert not bursts.pending(CHAT_ID)
+        assert buffers.add("m1", event) is False
+        assert not buffers.pending(CHAT_ID)
         await asyncio.sleep(0.3)
-        assert not bursts.pending(CHAT_ID)
+        assert not buffers.pending(CHAT_ID)
+        buffers.reset()
 
     asyncio.run(scenario())
-    bursts.reset()
 
 
 def test_escalation_cli_rows(tmp_path: Path) -> None:

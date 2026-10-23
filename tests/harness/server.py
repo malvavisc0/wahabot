@@ -100,3 +100,5 @@ def reset_handlers() -> None:
     for registry in webhook_module._registries.values():  # pyright: ignore[reportPrivateUsage]
         registry.clear()
     webhook_module._shutdown_hooks.clear()  # pyright: ignore[reportPrivateUsage]
+    if hasattr(webhook_module.app.state, "intake_writer"):
+        delattr(webhook_module.app.state, "intake_writer")

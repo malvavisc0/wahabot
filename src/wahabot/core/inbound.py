@@ -1,6 +1,5 @@
 """Shared routing and media gates for inbound message workflows."""
 
-from wahabot.ai.albums import add_album_image, is_album_container, start_album
 from wahabot.ai.messages import bot_jids, conversation_jid, message_kind
 from wahabot.core.echoes import is_self_echo
 from wahabot.core.models import WahaEvent
@@ -19,16 +18,6 @@ def self_chat_needs_transcript(
         and conversation_jid(event) in bot_jids(event)
         and not is_self_echo(str(event.payload.get("id", "")))
     )
-
-
-def buffer_album_message(event: WahaEvent, operator_wakes: bool) -> bool:
-    """Buffer an album container or image unless the operator requested a run."""
-    if operator_wakes:
-        return False
-    if is_album_container(event):
-        start_album(event)
-        return True
-    return message_kind(event) in ("image", "sticker") and add_album_image(event)
 
 
 def can_prepare_video(event: WahaEvent, settings: Settings) -> bool:

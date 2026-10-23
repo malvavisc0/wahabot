@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Any
+from typing import Any, override
 
 from loguru import logger
 
@@ -22,6 +22,7 @@ from wahabot.ai.turn_records import (
     serial_tokens_for,
 )
 from wahabot.ai.vision import caption_images
+from wahabot.core.models import WahaEvent
 from wahabot.core.runs import (
     chat_lock,
     context_for,
@@ -35,6 +36,7 @@ from wahabot.status import llm_failure_class
 
 
 class AlbumMixin(HandlerBase):
+    @override
     async def run_album(self, buffer: AlbumBuffer) -> None:
         """Run the agent once over a completed album, all images attached.
 
@@ -49,17 +51,20 @@ class AlbumMixin(HandlerBase):
         message's seen marker is dropped so WAHA's redelivery can
         retry the album, mirroring the single-message path.
         """
-        chat_id = str(buffer.container.payload.get("from", ""))
-        turn_ids = [
-            album_message_id(buffer.container),
-            *(str(image.payload.get("id", "")) for image in buffer.images),
-        ]
+        chat_id = buffer.chat_id
+        containers = self.load_events(buffer.session, chat_id, [buffer.container_id])
+        images = self.load_events(buffer.session, chat_id, buffer.image_ids)
+        turn_ids = [str(event.payload.get("id", "")) for event in [*containers, *images]]
         started = time.monotonic()
         target: RunTarget | None = None
         outcome = "failed"
         failure_class = ""
         try:
-            outcome, target = await self.deliver_album_reply(buffer, started)
+            if not containers or not images:
+                return
+            outcome, target = await self.deliver_album_reply(
+                containers[0], images, started
+            )
         except ContextBudgetError:
             # The album's images can never fit the budget; keep every
             # seen marker or redelivery retries the album forever.
@@ -70,14 +75,14 @@ class AlbumMixin(HandlerBase):
             )
             failure_class = "budget"
         except Exception as exc:
-            for image_event in buffer.images:
+            for image_event in images:
                 forget_seen(str(image_event.payload.get("id", "")))
-            forget_seen(str(buffer.container.payload.get("id", "")))
+            forget_seen(buffer.container_id)
             failure_class = llm_failure_class(exc)
             logger.exception("Failed to handle album in {chat_id}", chat_id=chat_id)
         finally:
             self.finish_run(
-                buffer.container.session,
+                buffer.session,
                 chat_id,
                 turn_ids,
                 target,
@@ -86,7 +91,9 @@ class AlbumMixin(HandlerBase):
                 failure_class,
             )
 
-    async def download_album_images(self, buffer: AlbumBuffer) -> list[dict[str, Any]]:
+    async def download_album_images(
+        self, images: list[WahaEvent]
+    ) -> list[dict[str, Any]]:
         """An album's images, downloaded and capped for the vision model.
 
         The vision cap applies at collection time: images past
@@ -95,7 +102,7 @@ class AlbumMixin(HandlerBase):
         waste.
         """
         downloaded: list[dict[str, Any]] = []
-        for image_event in buffer.images:
+        for image_event in images:
             if (
                 self.settings.vision_max_images > 0
                 and len(downloaded) >= self.settings.vision_max_images
@@ -116,16 +123,15 @@ class AlbumMixin(HandlerBase):
         return downloaded
 
     async def deliver_album_reply(
-        self, buffer: AlbumBuffer, started: float
+        self, event: WahaEvent, images: list[WahaEvent], started: float
     ) -> tuple[str, RunTarget | None]:
         """Download an album's images, run the agent once, send its reply."""
-        event = buffer.container
         chat_id = str(event.payload.get("from", ""))
         turn_ids = [
             album_message_id(event),
-            *(str(image.payload.get("id", "")) for image in buffer.images),
+            *(str(image.payload.get("id", "")) for image in images),
         ]
-        downloaded = await self.download_album_images(buffer)
+        downloaded = await self.download_album_images(images)
         if not downloaded:
             logger.debug("Album in {chat_id} yielded no usable images", chat_id=chat_id)
             return "empty", None
@@ -138,15 +144,14 @@ class AlbumMixin(HandlerBase):
             image["caption"] = caption
         current = self.config_reloader.current_config()
         addressed = any(
-            self.group_message_addressed(member, current)
-            for member in (buffer.container, *buffer.images)
+            self.group_message_addressed(member, current) for member in (event, *images)
         )
         gate_first = not addressed and current.group_participation == "judicious"
         entry = RecordEntry(
             event=event,
             body=str(event.payload.get("body", "")).strip(),
             images=downloaded,
-            omitted=max(0, len(buffer.images) - len(downloaded)),
+            omitted=max(0, len(images) - len(downloaded)),
             album=True,
             addressed=addressed,
         )
