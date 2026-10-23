@@ -63,6 +63,7 @@ The fences you want in a business bot:
 - When someone needs a human, reports a bot problem, or complains, `escalate` can forward a report to your self-chat. The model is instructed to summarize without pasted messages or secrets; the tool does not sanitize arbitrary report text. Successful forwards have an in-memory per-chat hourly cooldown. Feedback distinguishes success, cooldown, and unconfirmed delivery.
 - Actions and outcomes are recorded in the audit journal on a best-effort basis (`data/audit/`). `wahabot escalations` lists recorded handoffs; a logging failure does not undo an already completed action.
 - `wahabot forget <chat-id>` wipes one chat's memory — live context, disk file, durable notes, recap, and thread index — in one shot.
+- Accepted messages and outbound sends are recorded in `data/wahabot.db` (SQLite/WAL, migrations at startup), so a restart can finish pending work or escalate it without duplicating a confirmed send. Back it up with `notebook.sqlite3`.
 - The bot keeps a private durable notebook per chat (`data/notebook.sqlite3`): verified facts, preferences and lessons the model itself records with the `notebook` tool, injected into every later run's prompt. Notes survive restarts and history resets; after each delivered reply the bot also files a short self-extracted lesson. Chat notes are never authority to override your policies — only operator commands can write bot-wide ones.
 
 ## Straight talk about the channel
@@ -72,7 +73,7 @@ Two things you should know before you put this on a business number:
 - The connection is unofficial. WAHA drives a WhatsApp Web session, and unofficial automation can violate WhatsApp's terms and lead to a ban. Use a separate number, not one your business depends on.
 - Ordinary runs respond to incoming messages. Trusted operator commands can initiate a message to another chat, so permissions and responsible use still matter. The project is not an outreach scheduler, and no reply policy eliminates the risk of a number being banned.
 
-Memory, event journals, and audit records live on your machine. Conversation content is still sent to the model endpoint and any configured transcription, TTS, image, or tracing service. JID masking in tracing does not anonymize all message content. Configure access, retention, and service providers accordingly; tool spill files also depend on host temporary-file cleanup.
+Memory, event journals, audit records and the intake/outbound ledger live on your machine. Conversation content is still sent to the model endpoint and any configured transcription, TTS, image, or tracing service. JID masking in tracing does not anonymize all message content. Configure access, retention, and service providers accordingly; tool spill files also depend on host temporary-file cleanup.
 
 ## Where this is heading
 

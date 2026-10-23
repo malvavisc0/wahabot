@@ -29,6 +29,9 @@ Key env vars:
 | `WAHABOT_LLM_TIMEOUT` | Per-request LLM HTTP timeout (s; client retries disabled) | `900` |
 | `WAHABOT_LLM_CONTEXT_WINDOW` | Provider context window for the startup budget warning (`0` = unknown) | `0` |
 | `WAHABOT_RUN_TIMEOUT` | Server-side cap on one agent run (s; 0 = unlimited) | `1200` |
+| `WAHABOT_INTAKE_RECOVERY_MINUTES` | Accepted messages older than this are answered with an apology prefix | `30` |
+| `WAHABOT_INTAKE_MAX_ATTEMPTS` | Retry budget for a failed intake row or outbound intent | `5` |
+| `WAHABOT_INTAKE_RETENTION_DAYS` | Prune finished intake rows older than this | `30` |
 | `WAHABOT_TOOL_ROUND_LIMIT` | Max LLM→tool round trips per run (one final tool-free call past the limit) | `50` |
 | `WAHABOT_TELL_TIMEOUT` | How long `wahabot tell` waits for the run to finish (s; 0 = forever) | `30` |
 | `WAHABOT_WEBHOOK_HMAC_KEY` | Shared secret matching WAHA's `hmac.key` | **required** |
@@ -37,7 +40,7 @@ Key env vars:
 | `WAHABOT_HOST` / `WAHABOT_PORT` | Webhook server bind | `0.0.0.0:8080` |
 | `WAHABOT_LOG_LEVEL` | loguru level | `INFO` |
 | `WAHABOT_SESSION` | WAHA session name | `default` |
-| `WAHABOT_DATA_DIR` | Root for session configs, memory, the notebook and the event journal | `data` |
+| `WAHABOT_DATA_DIR` | Root for session configs, memory, the notebook, the event journal and the intake/outbound ledger | `data` |
 | `WAHABOT_TIMEZONE` | TZ for the prompt's date/time placeholders | `UTC` |
 | `WAHABOT_MEMORY_TOKEN_LIMIT` | Per-chat rolling memory budget | `8000` |
 | `WAHABOT_MEMORY_PERSIST` | Persist per-chat memory to `data/memory/` (survives restarts/LRU evictions) | `true` |
@@ -79,6 +82,8 @@ Key env vars:
 | `WAHABOT_SHELL_TIMEOUT` | Shell execution deadline (s, minimum 1), plus bounded cleanup | `30` |
 | `WAHABOT_SHELL_MAX_OUTPUT` | Inline bytes per shell output stream (minimum 200; overflow attempts a file spill) | `2000` |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Opt-in tracing (see README) | — |
+
+The durable intake and outbound-intent ledger lives in `data/wahabot.db` (SQLite, WAL, numbered migrations applied automatically at startup). Back it up with `notebook.sqlite3`; a fresh database still runs, but accepted messages and pending deliveries from before a restart are lost.
 
 ## Quick start
 

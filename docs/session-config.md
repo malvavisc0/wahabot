@@ -25,6 +25,7 @@ placeholder expansion.
 | `bot_name` | `string \| null` | `null` | The bot's display name (e.g. `"Kai"`). Used only as a fallback mention matcher. |
 | `bot_mention_regex` | `string \| null` | `null` | A regex detecting when the bot is addressed in a group. Defaults to a case-insensitive whole-word `@?<bot_name>`. |
 | `group_participation` | `"never" \| "mentioned" \| "judicious"` | `"mentioned"` | How the bot joins group conversations (below). |
+| `reply_window_days` | `integer` | `7` | Recovered rows older than this many days become operator-required work and get no customer reply. Bounds 1–30; hot-reloaded. |
 
 Example:
 
@@ -37,9 +38,15 @@ Example:
   "system_prompt": "You are Kai, a friend in this WhatsApp group... Today is {{date}}. Current time {{time}} ({{tz}}).",
   "bot_name": "Kai",
   "bot_mention_regex": "(?i)(?<![a-z@])@?k[aā]i(?![a-z])",
-  "group_participation": "judicious"
+  "group_participation": "judicious",
+  "reply_window_days": 7
 }
 ```
+
+`reply_window_days` bounds recovery of accepted messages. A recovered row
+past the window becomes operator-required and the operator gets a notice;
+a row older than `WAHABOT_INTAKE_RECOVERY_MINUTES` (30 minutes by default)
+is still answered, but the reply starts with a short apology.
 
 Use `goal` for what the bot should aim for and `memory` for durable
 facts it should know (people's preferences, standing decisions,
