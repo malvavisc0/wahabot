@@ -195,11 +195,11 @@ def guard_selection(newer: Sequence[IntakeEntry]) -> list[IntakeEntry]:
     return selected
 
 
-def refuse_newer(target: RunTarget, newer: Sequence[IntakeEntry]) -> str | None:
-    """Claim and render the newest records that supersede this run."""
+def _claim_selected(
+    target: RunTarget, selected: Sequence[IntakeEntry]
+) -> list[IntakeEntry]:
     intake = target.intake
     assert intake is not None
-    selected = guard_selection(newer)
     claimed = intake.claim(
         target.session,
         target.chat_id,
@@ -207,7 +207,23 @@ def refuse_newer(target: RunTarget, newer: Sequence[IntakeEntry]) -> str | None:
         owner=target.owner,
     )
     owned = {row.message_id for row in claimed}
-    shown = [entry for entry in selected if entry.message_id in owned]
+    return [entry for entry in selected if entry.message_id in owned]
+
+
+def _refusal_records(shown: Sequence[IntakeEntry], remaining: int) -> str:
+    records = "\n".join(entry.record for entry in shown)
+    if len(records) > _GUARD_CHARS:
+        records = records[:_GUARD_CHARS]
+    if remaining:
+        records = (
+            f"({remaining} older newer record(s) left for their own run)\n" + records
+        )
+    return records
+
+
+def refuse_newer(target: RunTarget, newer: Sequence[IntakeEntry]) -> str | None:
+    """Claim and render the newest records that supersede this run."""
+    shown = _claim_selected(target, guard_selection(newer))
     if not shown:
         return None
     target.claimed_ids.extend(entry.message_id for entry in shown)
@@ -219,14 +235,7 @@ def refuse_newer(target: RunTarget, newer: Sequence[IntakeEntry]) -> str | None:
     if newest.at >= target.anchor_at:
         target.anchor_id = newest.message_id
         target.anchor_at = newest.at
-    records = "\n".join(entry.record for entry in shown)
-    if len(records) > _GUARD_CHARS:
-        records = records[:_GUARD_CHARS]
-    remaining = len(newer) - len(shown)
-    if remaining:
-        records = (
-            f"({remaining} older newer record(s) left for their own run)\n" + records
-        )
+    records = _refusal_records(shown, len(newer) - len(shown))
     return error(
         "Newer message(s) arrived while you were answering; this reply "
         + f"would answer an older turn.\n{records}\n"

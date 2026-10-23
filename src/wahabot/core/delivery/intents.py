@@ -259,15 +259,9 @@ class IntentStore:
                 ).fetchone()
                 if row is None:
                     raise KeyError(intent_id)
-                payload = dict(json.loads(row["payload_json"]))
-                if row["kind"] in ("text", "operator_notice"):
-                    text = str(payload.get("text") or "")
-                    if text and not text.startswith(prefix):
-                        payload["text"] = prefix + text
-                elif row["kind"] in ("image", "file", "video"):
-                    caption = payload.get("caption")
-                    if not str(caption or "").startswith(prefix):
-                        payload["caption"] = prefix + str(caption or "")
+                payload = _prefix_payload(
+                    str(row["kind"]), dict(json.loads(row["payload_json"])), prefix
+                )
                 conn.execute(
                     "UPDATE outbound_intents SET payload_json = ?, updated_at = ? "
                     + "WHERE id = ?",
@@ -532,6 +526,18 @@ class IntentStore:
                     + "last_error = ?, updated_at = ? WHERE id = ?",
                     (CANCELLED, reason, int(now), row[0]),
                 )
+
+
+def _prefix_payload(kind: str, payload: dict[str, Any], prefix: str) -> dict[str, Any]:
+    if kind in ("text", "operator_notice"):
+        text = str(payload.get("text") or "")
+        if text and not text.startswith(prefix):
+            payload["text"] = prefix + text
+    elif kind in ("image", "file", "video"):
+        caption = payload.get("caption")
+        if not str(caption or "").startswith(prefix):
+            payload["caption"] = prefix + str(caption or "")
+    return payload
 
 
 def to_intent(row: Any) -> DeliveryIntent:

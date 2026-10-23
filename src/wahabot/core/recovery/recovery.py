@@ -310,23 +310,11 @@ class Recovery:
         pending = self.intents.unnotified_operator()
         if not delayed and not required_rows and not pending:
             return
-        parts: list[str] = []
-        if delayed:
-            parts.append(f"{delayed} message(s) delayed by the outage")
-        if required_rows:
-            parts.append(f"{len(required_rows)} message(s) need operator attention")
-        unknown = [intent for intent in pending if intent.state == INTENT_UNKNOWN]
-        failed = [intent for intent in pending if intent.state == INTENT_FAILED]
-        if unknown:
-            drafts = "; ".join(self._draft(intent) for intent in unknown[:3])
-            parts.append(
-                f"{len(unknown)} send(s) had an unknown outcome and were "
-                + f"not retried: {drafts}"
-            )
-        if failed:
-            drafts = "; ".join(self._draft(intent) for intent in failed[:3])
-            parts.append(f"{len(failed)} send(s) could not be delivered: {drafts}")
-        text = "wahabot: " + "; ".join(parts) + "."
+        text = (
+            "wahabot: "
+            + "; ".join(self._notice_parts(delayed, required_rows, pending))
+            + "."
+        )
         destination = self._notice_destination(required_rows or rows)
         notice = self.intents.prepare_notice(
             session=self.settings.session,
@@ -335,9 +323,47 @@ class Recovery:
             source_intent_ids=[intent.id for intent in pending],
             source_intake_ids=[row.message_id for row in required_rows],
         )
-        if not destination:
-            # The notice is durable and waits for the operator JID.
-            return
+        if destination:
+            await self._deliver_notice(notice, destination, moment)
+
+    def _notice_parts(
+        self,
+        delayed: int,
+        required_rows: list[IntakeRow],
+        pending: list[DeliveryIntent],
+    ) -> list[str]:
+        parts: list[str] = []
+        if delayed:
+            parts.append(f"{delayed} message(s) delayed by the outage")
+        if required_rows:
+            parts.append(f"{len(required_rows)} message(s) need operator attention")
+        parts.extend(self._intent_notice_parts(pending))
+        return parts
+
+    def _intent_notice_parts(self, pending: list[DeliveryIntent]) -> list[str]:
+        unknown = [intent for intent in pending if intent.state == INTENT_UNKNOWN]
+        failed = [intent for intent in pending if intent.state == INTENT_FAILED]
+        parts: list[str] = []
+        if unknown:
+            parts.append(
+                self._format_intents(
+                    unknown, "had an unknown outcome and were not retried"
+                )
+            )
+        if failed:
+            parts.append(self._format_intents(failed, "could not be delivered"))
+        return parts
+
+    def _format_intents(self, intents: list[DeliveryIntent], label: str) -> str:
+        drafts = "; ".join(self._draft(intent) for intent in intents[:3])
+        return f"{len(intents)} send(s) {label}: {drafts}"
+
+    async def _deliver_notice(
+        self,
+        notice: DeliveryIntent,
+        destination: str,
+        moment: float,
+    ) -> None:
         async with chat_lock(self.settings.session, destination):
             await asyncio.to_thread(
                 self.transport.recover_intent,
