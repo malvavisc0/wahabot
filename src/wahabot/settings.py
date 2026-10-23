@@ -198,6 +198,14 @@ class Settings(BaseSettings):
     #: ceiling): a sender cannot defer the bot's response indefinitely.
     burst_hold_cap_s: float = 30.0
 
+    #: Durable intake recovery: how long a claimed row may stay
+    #: processing before startup returns it to pending, the retry cap
+    #: before a row becomes operator-required work, and how long
+    #: finished rows are retained.
+    intake_recovery_minutes: int = 30
+    intake_max_attempts: int = 5
+    intake_retention_days: int = 30
+
     #: OpenAI-compatible image service (base URL, e.g. http://host:9196)
     #: behind the ``generate_image`` tool. Empty disables image
     #: generation entirely (the tool is not registered).
