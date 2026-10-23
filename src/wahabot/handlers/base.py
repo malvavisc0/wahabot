@@ -108,94 +108,10 @@ class HandlerBase:
         owner = target.owner if target is not None else ""
         sent = bool(target and (target.sent or target.reacted))
         delivered = outcome in ("reply", "delivered_via_tool", "reaction") or sent
-        ids = [*turn_ids, *claimed]
         try:
-            outstanding = self.intents.outstanding_for(ids)
-            for intent in outstanding:
-                if intent.state == SENDING:
-                    # The remote call returned or the process survived, but
-                    # the outcome was not durably recorded: treat it as
-                    # unknown rather than retrying it blindly.
-                    self.intents.unknown(intent.id, "send outcome was not recorded")
-            outstanding = self.intents.outstanding_for(ids)
-            unknown = [
-                intent
-                for intent in outstanding
-                if intent.state == UNKNOWN
-                or (intent.state == FAILED and intent.operator_required)
-            ]
-            retryable = [
-                intent
-                for intent in outstanding
-                if intent.state in (PREPARED, SENDING)
-                or (intent.state == FAILED and not intent.operator_required)
-            ]
-            if unknown:
-                # The intent layer settles its own rows; make sure no other
-                # row in this turn is left pending for a fresh run.
-                self.intake.finish(
-                    session,
-                    chat_id,
-                    ids,
-                    delivered=False,
-                    outcome="operator_required",
-                    reason="send outcome unknown",
-                )
-            elif retryable:
-                if delivered:
-                    self.intents.cancel_retryable_for(
-                        ids, "superseded by a confirmed send"
-                    )
-                    self.intake.finish_turn(
-                        session,
-                        chat_id,
-                        turn_ids,
-                        claimed,
-                        delivered=True,
-                        owner=owner,
-                    )
-                elif outcome in ("silence", "empty", "superseded"):
-                    self.intents.cancel_retryable_for(ids, outcome)
-                    self.intake.finish_turn(
-                        session,
-                        chat_id,
-                        turn_ids,
-                        claimed,
-                        delivered=False,
-                        outcome="silent",
-                        reason=outcome,
-                        owner=owner,
-                    )
-                # A failed run with a retryable intent leaves the rows in
-                # ``delivering``; the intent owns the next attempt.
-            elif delivered:
-                self.intake.finish_turn(
-                    session,
-                    chat_id,
-                    turn_ids,
-                    claimed,
-                    delivered=True,
-                    owner=owner,
-                )
-            elif outcome in ("silence", "empty", "superseded"):
-                self.intake.finish_turn(
-                    session,
-                    chat_id,
-                    turn_ids,
-                    claimed,
-                    delivered=False,
-                    outcome="silent",
-                    reason=outcome,
-                    owner=owner,
-                )
-            else:
-                self.intake.fail(
-                    session,
-                    chat_id,
-                    ids,
-                    error=outcome,
-                    next_attempt_at=time.time() + 60,
-                )
+            self._settle_run(
+                session, chat_id, turn_ids, claimed, delivered, outcome, owner
+            )
         except Exception:
             logger.exception("Intake settle failed for {chat_id}", chat_id=chat_id)
         save_run_outcome(
@@ -208,4 +124,155 @@ class HandlerBase:
             outbound_id=target.sent_id if target is not None else "",
             delivered_via=delivery_path(outcome, target),
             failure_class=failure_class,
+        )
+
+    def _settle_run(
+        self,
+        session: str,
+        chat_id: str,
+        turn_ids: Sequence[str],
+        claimed: list[str],
+        delivered: bool,
+        outcome: str,
+        owner: str,
+    ) -> None:
+        ids = [*turn_ids, *claimed]
+        outstanding = self._settle_sending(ids)
+        if self._has_unknown(outstanding):
+            self._finish_operator_required(session, chat_id, ids)
+            return
+        if self._retryable(outstanding):
+            self._settle_retryable(
+                session,
+                chat_id,
+                turn_ids,
+                claimed,
+                delivered,
+                outcome,
+                owner,
+                ids,
+            )
+            return
+        self._settle_plain(
+            session, chat_id, turn_ids, claimed, delivered, outcome, owner, ids
+        )
+
+    def _settle_sending(self, ids: list[str]) -> list[Any]:
+        outstanding = self.intents.outstanding_for(ids)
+        sending = [intent for intent in outstanding if intent.state == SENDING]
+        for intent in sending:
+            # The remote call returned or the process survived, but the
+            # outcome was not durably recorded: treat it as unknown rather
+            # than retrying it blindly.
+            self.intents.unknown(intent.id, "send outcome was not recorded")
+        return self.intents.outstanding_for(ids) if sending else outstanding
+
+    def _has_unknown(self, outstanding: list[Any]) -> bool:
+        return any(
+            intent.state == UNKNOWN
+            or (intent.state == FAILED and intent.operator_required)
+            for intent in outstanding
+        )
+
+    def _retryable(self, outstanding: list[Any]) -> list[Any]:
+        return [
+            intent
+            for intent in outstanding
+            if intent.state in (PREPARED, SENDING)
+            or (intent.state == FAILED and not intent.operator_required)
+        ]
+
+    def _settle_retryable(
+        self,
+        session: str,
+        chat_id: str,
+        turn_ids: Sequence[str],
+        claimed: list[str],
+        delivered: bool,
+        outcome: str,
+        owner: str,
+        ids: list[str],
+    ) -> None:
+        if delivered:
+            self.intents.cancel_retryable_for(ids, "superseded by a confirmed send")
+            self._finish_delivered(session, chat_id, turn_ids, claimed, owner)
+            return
+        if outcome in ("silence", "empty", "superseded"):
+            self.intents.cancel_retryable_for(ids, outcome)
+            self._finish_silent(session, chat_id, turn_ids, claimed, outcome, owner)
+        # A failed run with a retryable intent leaves the rows in
+        # ``delivering``; the intent owns the next attempt.
+
+    def _settle_plain(
+        self,
+        session: str,
+        chat_id: str,
+        turn_ids: Sequence[str],
+        claimed: list[str],
+        delivered: bool,
+        outcome: str,
+        owner: str,
+        ids: list[str],
+    ) -> None:
+        if delivered:
+            self._finish_delivered(session, chat_id, turn_ids, claimed, owner)
+            return
+        if outcome in ("silence", "empty", "superseded"):
+            self._finish_silent(session, chat_id, turn_ids, claimed, outcome, owner)
+            return
+        self.intake.fail(
+            session,
+            chat_id,
+            ids,
+            error=outcome,
+            next_attempt_at=time.time() + 60,
+        )
+
+    def _finish_delivered(
+        self,
+        session: str,
+        chat_id: str,
+        turn_ids: Sequence[str],
+        claimed: list[str],
+        owner: str,
+    ) -> None:
+        self.intake.finish_turn(
+            session,
+            chat_id,
+            turn_ids,
+            claimed,
+            delivered=True,
+            owner=owner,
+        )
+
+    def _finish_silent(
+        self,
+        session: str,
+        chat_id: str,
+        turn_ids: Sequence[str],
+        claimed: list[str],
+        outcome: str,
+        owner: str,
+    ) -> None:
+        self.intake.finish_turn(
+            session,
+            chat_id,
+            turn_ids,
+            claimed,
+            delivered=False,
+            outcome="silent",
+            reason=outcome,
+            owner=owner,
+        )
+
+    def _finish_operator_required(
+        self, session: str, chat_id: str, ids: list[str]
+    ) -> None:
+        self.intake.finish(
+            session,
+            chat_id,
+            ids,
+            delivered=False,
+            outcome="operator_required",
+            reason="send outcome unknown",
         )

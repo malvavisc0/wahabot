@@ -245,47 +245,58 @@ class SqliteIntakeStore:
         try:
             with transaction(conn):
                 if delivered:
-                    ids = [*turn_ids, *claimed_ids]
-                    if ids:
-                        marks = ",".join("?" for _ in ids)
-                        conn.execute(
-                            "UPDATE intake SET state = ?, outcome = ?, reason = ?, "
-                            + f"handled_at = ? WHERE message_id IN ({marks}) "
-                            + "AND state != ?",
-                            (
-                                DONE,
-                                outcome or DELIVERED,
-                                reason,
-                                handled_at,
-                                *ids,
-                                DONE,
-                            ),
-                        )
+                    self._complete(
+                        conn,
+                        [*turn_ids, *claimed_ids],
+                        outcome or DELIVERED,
+                        reason,
+                        handled_at,
+                    )
                     return
-                if claimed_ids:
-                    marks = ",".join("?" for _ in claimed_ids)
-                    owner_filter = " AND owner = ?" if owner else ""
-                    params: tuple[object, ...] = (
-                        (PENDING, *claimed_ids, PROCESSING, owner)
-                        if owner
-                        else (PENDING, *claimed_ids, PROCESSING)
-                    )
-                    conn.execute(
-                        "UPDATE intake SET state = ?, owner = '', next_attempt_at = NULL "
-                        + f"WHERE message_id IN ({marks}) AND state = ?"
-                        + owner_filter,
-                        params,
-                    )
-                if outcome and turn_ids:
-                    marks = ",".join("?" for _ in turn_ids)
-                    conn.execute(
-                        "UPDATE intake SET state = ?, outcome = ?, reason = ?, "
-                        + f"handled_at = ? WHERE message_id IN ({marks}) "
-                        + "AND state != ?",
-                        (DONE, outcome, reason, handled_at, *turn_ids, DONE),
-                    )
+                self._release_claims(conn, claimed_ids, owner)
+                if outcome:
+                    self._complete(conn, turn_ids, outcome, reason, handled_at)
         finally:
             conn.close()
+
+    def _complete(
+        self,
+        conn: sqlite3.Connection,
+        message_ids: list[str],
+        outcome: str,
+        reason: str,
+        handled_at: float,
+    ) -> None:
+        if not message_ids:
+            return
+        marks = ",".join("?" for _ in message_ids)
+        conn.execute(
+            "UPDATE intake SET state = ?, outcome = ?, reason = ?, handled_at = ? "
+            + f"WHERE message_id IN ({marks}) AND state != ?",
+            (DONE, outcome, reason, handled_at, *message_ids, DONE),
+        )
+
+    def _release_claims(
+        self,
+        conn: sqlite3.Connection,
+        claimed_ids: list[str],
+        owner: str,
+    ) -> None:
+        if not claimed_ids:
+            return
+        marks = ",".join("?" for _ in claimed_ids)
+        owner_filter = " AND owner = ?" if owner else ""
+        params: tuple[object, ...] = (
+            (PENDING, *claimed_ids, PROCESSING, owner)
+            if owner
+            else (PENDING, *claimed_ids, PROCESSING)
+        )
+        conn.execute(
+            "UPDATE intake SET state = ?, owner = '', next_attempt_at = NULL "
+            + f"WHERE message_id IN ({marks}) AND state = ?"
+            + owner_filter,
+            params,
+        )
 
     def fail(
         self,
