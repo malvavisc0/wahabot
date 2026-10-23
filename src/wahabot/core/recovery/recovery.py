@@ -3,7 +3,7 @@
 import asyncio
 import time
 from collections.abc import Callable
-from typing import Protocol
+from typing import Protocol, cast
 
 from loguru import logger
 
@@ -229,17 +229,19 @@ class Recovery:
             return str(payload["text"])[:80]
         file = payload.get("file")
         if isinstance(file, dict):
-            return str(file.get("url") or file.get("id") or "attachment")
+            reference = cast(dict[str, object], file)
+            return str(reference.get("url") or reference.get("id") or "attachment")
         return intent.kind
 
     def _notice_destination(self, rows: list[IntakeRow]) -> str:
         if state.operator_jid:
             return state.operator_jid
         for row in rows:
-            me = row.event.me or {}
+            me: dict[str, object] = dict(row.event.me or {})
             for key in ("id", "lid"):
-                if me.get(key):
-                    return str(me[key])
+                value = me.get(key)
+                if isinstance(value, str) and value:
+                    return value
         return ""
 
     async def _notify_operator(
