@@ -7,7 +7,8 @@ import httpx
 from loguru import logger
 
 from wahabot.core.models import WahaEvent
-from wahabot.core.waha import MediaTooLargeError, WahaClient, media_with_url
+from wahabot.core.transport import Transport
+from wahabot.core.waha import MediaTooLargeError, media_with_url
 from wahabot.settings import Settings
 
 
@@ -44,7 +45,7 @@ def fetch_transcript(settings: Settings, audio: bytes, filename: str) -> str:
 
 
 async def transcribe_voice_note(
-    event: WahaEvent, waha: WahaClient, settings: Settings
+    event: WahaEvent, waha: Transport, settings: Settings
 ) -> str | None:
     """Transcribe a voice note's audio; None on any failure.
 

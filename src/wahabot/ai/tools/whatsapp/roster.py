@@ -9,7 +9,7 @@ from wahabot.ai.tools.envelope import error, ok
 from wahabot.core.identity import display_name
 from wahabot.core.identity import names as name_book
 from wahabot.core.jid import roster_entries
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 from wahabot.status import state as _status_state
 
 
@@ -35,7 +35,7 @@ def summarize_chat(
 
 
 def sender_names(
-    waha: WahaClient, session: str, chat_id: str, limit: int = 100
+    waha: Transport, session: str, chat_id: str, limit: int = 100
 ) -> dict[str, str]:
     """JID → recent display label, from at most *limit* messages (default 100).
 
@@ -175,7 +175,7 @@ def dangling_mentions(text: str, roster: list[str]) -> list[str]:
     ]
 
 
-def chat_roster(waha: WahaClient, session: str, chat_id: str) -> list[str]:
+def chat_roster(waha: Transport, session: str, chat_id: str) -> list[str]:
     """Best-effort participant JIDs; may be empty for DMs or unreadable chats.
 
     Two sources, both fail-soft — the roster only enriches mentions, so
@@ -239,7 +239,7 @@ def roster_name_index(roster: list[str], own: set[str]) -> dict[str, set[str]]:
 
 
 def prepare_mentions(
-    waha: WahaClient, session: str, text: str, roster: list[str]
+    waha: Transport, session: str, text: str, roster: list[str]
 ) -> tuple[str, list[str]]:
     """Rewrite *text*'s mention tokens into the shape WhatsApp tags.
 
@@ -295,7 +295,7 @@ def ordered_merge(explicit: list[str], resolved: list[str]) -> list[str]:
 
 
 def resolve_explicit_mentions(
-    waha: WahaClient,
+    waha: Transport,
     session: str,
     chat_id: str,
     mentions: list[str],
@@ -339,7 +339,7 @@ def resolve_one_mention(mention: str, members: list[dict[str, str]]) -> tuple[st
 
 
 def resolve_in_current_chat(
-    waha: WahaClient, session: str, chat_id: str, name: str
+    waha: Transport, session: str, chat_id: str, name: str
 ) -> str:
     """Match a name — or digits/JID — against the current chat's members.
 

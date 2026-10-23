@@ -27,7 +27,7 @@ from loguru import logger
 
 from wahabot.ai.messages import jid_string
 from wahabot.ai.tools.whatsapp import slim_message
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 
 __all__ = ["chat_context_note", "resolve_last_message"]
 
@@ -49,7 +49,7 @@ class ResolvedChat:
 
 
 def resolve_last_message(
-    waha: WahaClient, session: str, instruction: str
+    waha: Transport, session: str, instruction: str
 ) -> ResolvedChat | None:
     """The chat an operator command names, with its real last message.
 
@@ -91,7 +91,7 @@ def resolve_last_message(
     return outcome
 
 
-def named_chats(waha: WahaClient, session: str, instruction: str) -> list[dict[str, Any]]:
+def named_chats(waha: Transport, session: str, instruction: str) -> list[dict[str, Any]]:
     """Chat/contact entries whose name literally appears in *instruction*.
 
     The operator's whole chat list is the search space (contacts as

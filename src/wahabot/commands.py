@@ -36,7 +36,7 @@ from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.audit import save_action, save_run_outcome
 from wahabot.core.models import WahaEvent
 from wahabot.core.runs import chat_lock, context_for, persist_memory
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 from wahabot.status import (
     classify_llm_failure,
@@ -70,7 +70,7 @@ def pin_serial(resolved: ResolvedChat | None, settings: Settings, session: str) 
     return registry.serial_for(str(resolved.last_message.get("id", "")))
 
 
-def chat_display_name(waha: WahaClient, session: str, chat_id: str) -> str:
+def chat_display_name(waha: Transport, session: str, chat_id: str) -> str:
     """A chat's display name for operator notices; the bare JID if unknown.
 
     The name alone is the notice: the raw JID is a LID-shaped opaque
@@ -106,7 +106,7 @@ async def run_command(
     event: WahaEvent,
     agent: FunctionCallingAgentWorkflow,
     settings: Settings,
-    waha: WahaClient,
+    waha: Transport,
 ) -> str:
     """Run the agent over the command instruction, on the operator context.
 
@@ -209,7 +209,7 @@ async def run_command_turn(
     agent: FunctionCallingAgentWorkflow,
     ctx: Context,
     settings: Settings,
-    waha: WahaClient,
+    waha: Transport,
     pinned_note: str,
 ) -> tuple[str, RunTarget, ContextBudgetError | None]:
     """Run one operator-command turn, classifying its failures.
@@ -256,7 +256,7 @@ def command_reply(
     settings: Settings,
     reply: str,
     target: RunTarget,
-    waha: WahaClient,
+    waha: Transport,
     budget_error: ContextBudgetError | None = None,
 ) -> str:
     """Journal the command's outcome and return its operator-facing text."""
@@ -308,7 +308,7 @@ def command_reply(
 
 def register_command_handler(
     settings: Settings,
-    waha: WahaClient,
+    waha: Transport,
     agent: FunctionCallingAgentWorkflow,
 ) -> None:
     """Register the webhook command handler around the shared agent.

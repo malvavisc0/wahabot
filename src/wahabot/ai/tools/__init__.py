@@ -30,14 +30,14 @@ from wahabot.ai.tools.whatsapp import (
     send_message,
     stay_silent,
 )
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 
 __all__ = ["build_default_tools"]
 
 
 def build_default_tools(
-    waha: WahaClient,
+    waha: Transport,
     settings: Settings | None = None,
     escalation_channel: EscalationChannel | None = None,
 ) -> list[BaseTool]:

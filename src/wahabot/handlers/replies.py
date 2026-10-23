@@ -16,7 +16,7 @@ from wahabot.ai.tools.whatsapp import (
 from wahabot.core.audit import save_action
 from wahabot.core.echoes import remember_self_echo
 from wahabot.core.models import WahaEvent
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 
 
@@ -70,7 +70,7 @@ def journal_send_failure(
 
 
 async def finish_agent_reply(
-    waha: WahaClient,
+    waha: Transport,
     session: str,
     chat_id: str,
     message_id: str,
@@ -251,7 +251,7 @@ async def finish_agent_reply(
 _SELF_REPLY_RETRY_DELAYS_S = (2.0, 5.0, 0.0)
 
 
-async def send_self_reply(waha: WahaClient, command: WahaEvent, reply: str) -> None:
+async def send_self_reply(waha: Transport, command: WahaEvent, reply: str) -> None:
     """Deliver a self-chat command's final text back to the operator.
 
     The command ran on a fresh context with no chat of its own; its

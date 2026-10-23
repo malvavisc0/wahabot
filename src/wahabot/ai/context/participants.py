@@ -12,7 +12,7 @@ from wahabot.core.notebook import (
     Notebook,
     notebook_operation,
 )
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 
 ROSTER_TTL_S = 3600
 
@@ -24,7 +24,7 @@ roster_cache: TtlCache[tuple[str, str], dict[str, str]] = TtlCache(
 
 
 def participant_names(
-    waha: WahaClient | None, session: str, chat_id: str
+    waha: Transport | None, session: str, chat_id: str
 ) -> dict[str, str]:
     """JID → display name for a chat's participants, cached per chat.
 
@@ -46,7 +46,7 @@ def participant_names(
 
 
 def fetch_participant_names(
-    waha: WahaClient, session: str, chat_id: str
+    waha: Transport, session: str, chat_id: str
 ) -> dict[str, str]:
     """The roster's names plus names on recent messages (uncached)."""
     try:

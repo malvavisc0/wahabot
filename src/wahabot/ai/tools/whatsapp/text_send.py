@@ -35,7 +35,7 @@ from wahabot.ai.tools.whatsapp.targets import (
     resolve_message_token,
 )
 from wahabot.core.presence import clear_typing, typing_pause
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 
 
@@ -49,7 +49,7 @@ def blame_delivery_error(text: str) -> str | None:
     )
 
 
-def send_message(waha: WahaClient, settings: Settings | None = None) -> BaseTool:
+def send_message(waha: Transport, settings: Settings | None = None) -> BaseTool:
     """Build a tool that sends a WhatsApp text message.
 
     Sends to the current chat by default; an operator-command run may
@@ -181,7 +181,7 @@ def stay_silent() -> BaseTool:
     )
 
 
-def react_to_message(waha: WahaClient, settings: Settings | None = None) -> BaseTool:
+def react_to_message(waha: Transport, settings: Settings | None = None) -> BaseTool:
     """Build a tool that reacts to a WhatsApp message.
 
     One successful reaction change (including removal) per run.
@@ -253,7 +253,7 @@ def apply_chat_prefix(text: str, prefix: str) -> str:
 
 
 def deliver_chat_text(
-    waha: WahaClient,
+    waha: Transport,
     session: str,
     chat_id: str,
     text: str,

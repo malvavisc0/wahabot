@@ -3,11 +3,11 @@ import asyncio
 from loguru import logger
 
 from wahabot.core.echoes import remember_self_echo
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 from wahabot.status.state import state
 
 
-async def notify_operator(waha: WahaClient, session: str, message: str) -> None:
+async def notify_operator(waha: Transport, session: str, message: str) -> None:
     """Best-effort WhatsApp message to the bot's own account.
 
     The operator reads it in the "Message yourself" chat. Fails soft:
@@ -20,7 +20,7 @@ async def notify_operator(waha: WahaClient, session: str, message: str) -> None:
         logger.warning("Operator notification failed: {exc}", exc=exc)
 
 
-async def send_operator_notify(waha: WahaClient, session: str, message: str) -> str:
+async def send_operator_notify(waha: Transport, session: str, message: str) -> str:
     """Send one operator notification; raises on failure (the retry loop).
 
     Split from :func:`notify_operator` so the recovery path can

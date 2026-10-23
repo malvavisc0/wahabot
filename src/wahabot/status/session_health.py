@@ -3,7 +3,7 @@ from typing import Any
 
 from loguru import logger
 
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 from wahabot.status.notify import notify_operator, send_operator_notify
 from wahabot.status.state import (
     HEALTHY_STATUS,
@@ -25,7 +25,7 @@ _recovery_task: asyncio.Task[None] | None = None
 _probe_lock = asyncio.Lock()
 
 
-def seed_health(waha: WahaClient, session: str) -> str:
+def seed_health(waha: Transport, session: str) -> str:
     """Seed the health flag and operator target from WAHA.
 
     Called once at startup: the transition tracker is only as good as
@@ -65,7 +65,7 @@ def seed_health(waha: WahaClient, session: str) -> str:
     return status
 
 
-def register_session_status_handler(waha: WahaClient, session: str) -> None:
+def register_session_status_handler(waha: Transport, session: str) -> None:
     """Watch ``session.status`` events: mute/unmute, notify on transitions.
 
     Going down also arms the active recovery poller
@@ -123,7 +123,7 @@ def session_down_message(status: str) -> str:
     )
 
 
-async def session_recovered(waha: WahaClient, session: str) -> None:
+async def session_recovered(waha: Transport, session: str) -> None:
     """Run the once-per-recovery duties; safe from any trigger.
 
     The event path, the poller and the message-triggered probe can all
@@ -144,7 +144,7 @@ async def session_recovered(waha: WahaClient, session: str) -> None:
     disarm_recovery_poller()
 
 
-def arm_recovery_poller(waha: WahaClient, session: str) -> None:
+def arm_recovery_poller(waha: Transport, session: str) -> None:
     """Poll WAHA for the session status until it reports ``WORKING``.
 
     The active half of recovery: while muted, ask the source of truth
@@ -174,7 +174,7 @@ def disarm_recovery_poller() -> None:
 NOTIFY_BACKOFF_S = _NOTIFY_BACKOFF_S
 
 
-async def _poll_until_recovered(waha: WahaClient, session: str) -> None:
+async def _poll_until_recovered(waha: Transport, session: str) -> None:
     """The poller loop: probe, sleep, repeat; exits on recovery."""
     try:
         while not session_healthy():
@@ -190,7 +190,7 @@ async def _poll_until_recovered(waha: WahaClient, session: str) -> None:
         logger.exception("Session recovery poller crashed")
 
 
-async def probe_session_recovery(waha: WahaClient, session: str) -> bool:
+async def probe_session_recovery(waha: Transport, session: str) -> bool:
     """Ask WAHA directly whether the session is back; recover if so.
 
     The cheap probe behind both triggers: the poller's interval and a
@@ -215,7 +215,7 @@ async def probe_session_recovery(waha: WahaClient, session: str) -> bool:
     return True
 
 
-async def notify_recovery(waha: WahaClient, session: str) -> None:
+async def notify_recovery(waha: Transport, session: str) -> None:
     """The recovery notify, retried — a racing send must not lose it.
 
     The session just went ``WORKING``; WhatsApp's own reconnect can
@@ -241,7 +241,7 @@ async def notify_recovery(waha: WahaClient, session: str) -> None:
     logger.warning("{message}", message=message)
 
 
-async def _try_send_recovery_notify(waha: WahaClient, session: str) -> bool:
+async def _try_send_recovery_notify(waha: Transport, session: str) -> bool:
     """One recovery-notify send attempt; True when it landed."""
     message = (
         "WhatsApp session recovered — the bot is answering again; held"

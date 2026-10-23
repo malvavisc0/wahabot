@@ -2,7 +2,7 @@ import openai
 from llama_index.core.workflow import WorkflowTimeoutError
 from loguru import logger
 
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 from wahabot.status.notify import notify_operator
 from wahabot.status.state import state
 
@@ -70,7 +70,7 @@ def run_timed_out(exc: Exception) -> bool:
     return isinstance(exc, (WorkflowTimeoutError, TimeoutError))
 
 
-async def mark_llm_unreachable(waha: WahaClient, session: str, exc: Exception) -> None:
+async def mark_llm_unreachable(waha: Transport, session: str, exc: Exception) -> None:
     """Flip the LLM health flag down and notify the operator once.
 
     Called from the failure handlers of the chat and command paths on
@@ -104,7 +104,7 @@ def llm_failure_class(exc: Exception) -> str:
 
 
 async def classify_llm_failure(
-    waha: WahaClient,
+    waha: Transport,
     session: str,
     exc: Exception,
     timeout_s: float,
@@ -135,7 +135,7 @@ async def classify_llm_failure(
 
 
 async def mark_llm_timed_out(
-    waha: WahaClient, session: str, exc: Exception, timeout_s: float
+    waha: Transport, session: str, exc: Exception, timeout_s: float
 ) -> None:
     """Notify the operator that an LLM call timed out (once per slow stretch).
 
@@ -165,7 +165,7 @@ async def mark_llm_timed_out(
 
 
 async def mark_run_timed_out(
-    waha: WahaClient, session: str, exc: Exception, run_timeout_s: int
+    waha: Transport, session: str, exc: Exception, run_timeout_s: int
 ) -> None:
     """Notify the operator that a run hit the run-timeout cap.
 
@@ -194,7 +194,7 @@ async def mark_run_timed_out(
         await notify_operator(waha, session, message)
 
 
-async def mark_llm_recovered(waha: WahaClient, session: str) -> None:
+async def mark_llm_recovered(waha: Transport, session: str) -> None:
     """Flip the LLM health flag back up and notify the operator once.
 
     Called after any run completes against the provider: the first

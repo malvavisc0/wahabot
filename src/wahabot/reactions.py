@@ -42,7 +42,7 @@ from wahabot.core.identity import AUTHOR_BOT, authors, display_name
 from wahabot.core.jid import is_own_message_id
 from wahabot.core.models import WahaEvent
 from wahabot.core.runs import chat_lock, context_for, persist_memory
-from wahabot.core.waha import WahaClient
+from wahabot.core.transport import Transport
 from wahabot.handlers import append_to_memory
 from wahabot.settings import Settings
 from wahabot.webhook import on_reaction
@@ -55,7 +55,7 @@ __all__ = ["is_own_message_id", "register_reaction_handler"]
 
 
 def register_reaction_handler(
-    waha: WahaClient,
+    waha: Transport,
     agent: FunctionCallingAgentWorkflow,
     settings: Settings,
 ) -> None:
@@ -138,7 +138,7 @@ def register_reaction_handler(
         )
 
 
-async def reaction_sender(waha: WahaClient, event: WahaEvent, chat_id: str) -> str:
+async def reaction_sender(waha: Transport, event: WahaEvent, chat_id: str) -> str:
     """Resolve a reactor to the same name-and-JID shape as a sender tag."""
     names = await asyncio.to_thread(participant_names, waha, event.session, chat_id)
     sender = str(event.payload.get("participant") or event.payload.get("from") or "")
@@ -225,7 +225,7 @@ def reaction_targets_bot(target_id: str) -> bool:
 
 
 def fetch_target(
-    waha: WahaClient, session: str, chat_id: str, target_id: str
+    waha: Transport, session: str, chat_id: str, target_id: str
 ) -> dict[str, Any] | None:
     """Fetch the reacted-to message, or None if it cannot be retrieved.
 
