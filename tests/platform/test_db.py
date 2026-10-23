@@ -32,8 +32,18 @@ def test_migration_applies_once_and_records_the_version(database: Database) -> N
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
 
-    assert [row[0] for row in versions] == [1, 2]
-    assert {"intake", "outbound_intents", "schema_migrations"} <= tables
+    assert [row[0] for row in versions] == [1, 2, 3]
+    assert {
+        "intake",
+        "outbound_intents",
+        "schema_migrations",
+        "contacts",
+        "tickets",
+        "ticket_events",
+        "attachments",
+        "translations",
+        "session_state",
+    } <= tables
 
 
 def test_migration_creates_the_listed_indexes(database: Database) -> None:
@@ -52,6 +62,12 @@ def test_migration_creates_the_listed_indexes(database: Database) -> None:
         "outbound_state_next_attempt",
         "outbound_chat_created",
         "intake_operator_notice",
+        "tickets_chat_state",
+        "tickets_state_updated",
+        "tickets_one_active_per_chat",
+        "ticket_events_ticket_at",
+        "attachments_ticket",
+        "attachments_message",
     } <= indexes
 
 
@@ -86,7 +102,7 @@ def test_fresh_data_directory_starts_clean(tmp_path: Path) -> None:
     assert (data_dir / "wahabot.db").exists()
     with database.connect() as conn:
         count = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
-    assert count == 2
+    assert count == 3
 
 
 def test_intake_settings_have_the_documented_defaults() -> None:

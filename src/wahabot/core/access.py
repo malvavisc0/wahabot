@@ -50,6 +50,15 @@ class SessionConfig(BaseModel):
     #: How many days after the customer last wrote a reply may still be
     #: delivered; older work becomes operator-required instead.
     reply_window_days: int = Field(default=7, ge=1, le=30)
+    #: How many days after a ticket is done it can be reopened by a new
+    #: customer message; after that it closes and the next message opens
+    #: a new ticket linked to it.
+    close_after_days: int = Field(default=5, ge=1, le=365)
+    #: How many hours a human-operator message pauses the assistant in
+    #: that chat.
+    pause_after_human_hours: int = Field(default=2, ge=0, le=168)
+    #: Operator-facing alert language; empty falls back to English.
+    operator_language: str = ""
 
 
 def load_session_config(path: Path) -> SessionConfig:
