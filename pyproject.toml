@@ -108,4 +108,10 @@ ignore_names = [
     "has_pending",
     # Note dataclass fields read via asdict() and the notebook views.
     "created_at", "updated_at",
+    # More dataclass/audit surfaces read via SQL strings, and the
+    # sqlite3.Row factory enabling name-based row["column"] reads.
+    "sent_at", "row_factory",
+    # Test-only accessors on the intent/transport surfaces (recent
+    # intents, bulk recovery drains); tests/ is outside vulture's scan.
+    "recent", "recover_intents",
 ]

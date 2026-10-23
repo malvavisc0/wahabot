@@ -297,7 +297,10 @@ SQLite/WAL with numbered migrations); every outbound send first records an
 the message id, rendered record, arrival time, addressed flag and state
 (`pending`, `processing`, `delivering`, `done`, `failed`).
 
-A run's own rows stay pending while it runs. `send_message`, `send_media`,
+A run claims its own turn rows when it starts (still under the chat
+lock, with a lease that outlives `WAHABOT_RUN_TIMEOUT`) so the recovery
+tick — whose due work is pending and failed rows only — can never
+re-answer a turn a live run is answering. `send_message`, `send_media`,
 `forward_message`, `react_to_message` and the final-text path all call
 `delivery_guard` before delivering. The guard queries only pending rows
 newer than the run's start and claims them under the run's owner; done,
@@ -323,7 +326,9 @@ Only addressed rows take part: unaddressed group chatter, operator-folded
 `fromMe` messages and an album's unaddressed image rows can neither
 supersede a reply nor keep an answered album alive. The intake window is
 `max_age_for_run_timeout(run_timeout)` (30 minutes at the default timeout),
-so a claim cannot expire inside the run that holds it. The final-text check
+so a claim cannot expire inside the run that holds it; the claim lease
+(`claim_lease_for_run_timeout(run_timeout)`) keeps recovery's stale sweep
+from releasing a live run's claims the same way. The final-text check
 runs before `remember`, so a superseded answer is never written to chat
 memory.
 

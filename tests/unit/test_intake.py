@@ -10,6 +10,7 @@ from tests.harness import RecordingWaha
 from wahabot.ai.intake import (
     InMemoryIntakeStore,
     IntakeLedger,
+    claim_lease_for_run_timeout,
     max_age_for_run_timeout,
 )
 from wahabot.ai.tools.whatsapp import (
@@ -349,6 +350,42 @@ def test_handled_addressed_only_ignores_unaddressed_album_rows() -> None:
 def test_intake_window_outlives_a_custom_run_timeout() -> None:
     assert max_age_for_run_timeout(3600) > 3600
     assert max_age_for_run_timeout(1) >= 1800
+
+
+def test_claim_lease_outlives_a_custom_run_timeout() -> None:
+    """Recovery's stale sweep must not release a live run's claims."""
+    assert claim_lease_for_run_timeout(3600) > 3600
+    assert claim_lease_for_run_timeout(1) >= 1800
+    # The lease may never undercut the intake window: a shorter lease
+    # would let recovery release a live run's claims mid-run.
+    for run_timeout in (1, 60, 1800, 3600, 7200):
+        assert claim_lease_for_run_timeout(run_timeout) >= max_age_for_run_timeout(
+            run_timeout
+        )
+
+
+def test_handle_message_requires_the_claim_turn_owner() -> None:
+    """A durable run refuses to start without its claim_turn owner.
+
+    The claims and the target must share one owner or the owner-scoped
+    settle would release claims a live run still holds.
+    """
+    from tests.harness import waha_event
+    from wahabot.ai.context.turn import handle_message
+    from wahabot.core.models import WahaEvent
+
+    event = WahaEvent.model_validate(waha_event("OWNERLESS"))
+    ledger = IntakeLedger()
+
+    with pytest.raises(ValueError):
+        asyncio.run(
+            handle_message(
+                event,
+                cast(Any, None),
+                intake=ledger,
+                turn_ids=["false_1234567890-1234567890@g.us_OWNERLESS"],
+            )
+        )
 
 
 class SuppressionHandler(HandlerBase):

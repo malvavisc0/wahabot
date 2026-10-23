@@ -3,7 +3,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from wahabot.ai.intake import IntakeLedger, max_age_for_run_timeout
+from wahabot.ai.intake import (
+    IntakeLedger,
+    claim_lease_for_run_timeout,
+    max_age_for_run_timeout,
+)
 from wahabot.core.db import Database
 from wahabot.core.intake.sqlite import SqliteIntakeStore
 
@@ -143,6 +147,37 @@ def test_unanswered_backlog_age_is_queryable(tmp_path: Path) -> None:
 def test_intake_window_outlives_a_custom_run_timeout() -> None:
     assert max_age_for_run_timeout(3600) > 3600
     assert max_age_for_run_timeout(1) >= 1800
+
+
+def test_claim_lease_outlives_a_custom_run_timeout() -> None:
+    """Recovery's stale sweep must not release a live run's claims."""
+    assert claim_lease_for_run_timeout(3600) > 3600
+    assert claim_lease_for_run_timeout(1) >= 1800
+    # The lease may never undercut the intake window: a shorter lease
+    # would let recovery release a live run's claims mid-run.
+    for run_timeout in (1, 60, 1800, 3600, 7200):
+        assert claim_lease_for_run_timeout(run_timeout) >= max_age_for_run_timeout(
+            run_timeout
+        )
+
+
+def test_claim_takes_back_a_failed_row_for_its_re_run(tmp_path: Path) -> None:
+    """Claims cover failed rows too: a recovery re-run owns its retry.
+
+    Without this the recovery tick would still see a failed row as due
+    work while a slower re-run answered it.
+    """
+    ledger = durable_ledger(tmp_path)
+    ledger.record("s", "chat", "m1", "one")
+    ledger.fail("s", "chat", ["m1"], error="waha down", next_attempt_at=time.time() - 1)
+
+    claimed = ledger.claim("s", "chat", ["m1"], owner="re-run")
+
+    assert [row.message_id for row in claimed] == ["m1"]
+    row = ledger.row("s", "chat", "m1")
+    assert row.state == "processing"
+    assert row.owner == "re-run"
+    assert ledger.due(time.time()) == []
 
 
 def test_retention_purges_long_finished_rows_only(tmp_path: Path) -> None:

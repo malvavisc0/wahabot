@@ -13,6 +13,12 @@ DELIVERING = "delivering"
 DONE = "done"
 FAILED = "failed"
 
+#: The states a run may claim a row in: fresh work plus rows awaiting
+#: their bounded retry. Every claim filter and recovery's fresh-row gate
+#: read this set — a copy drifting from it lets a live run's claimable
+#: row stay visible to the recovery tick as due work.
+CLAIMABLE_STATES = (PENDING, FAILED)
+
 DELIVERED = "delivered"
 SILENT = "silent"
 OPERATOR_OWNED = "operator_owned"

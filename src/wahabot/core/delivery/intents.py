@@ -323,7 +323,10 @@ class IntentStore:
 
         Sent/cancelled rows and notified operator-required outcomes are
         historical; prepared, sending, retryable failed and unnoticed
-        unknown rows stay.
+        unknown rows stay. A terminal operator notice is historical
+        too: ``unnotified_operator`` excludes the notice kind, so its
+        ``notified_at`` can never be set — without this clause a
+        definitively failed notice would be retained forever.
         """
         conn = connect(self.path)
         try:
@@ -331,8 +334,10 @@ class IntentStore:
                 cursor = conn.execute(
                     "DELETE FROM outbound_intents WHERE updated_at < ? AND ("
                     + "state IN (?, ?) OR (state IN (?, ?) "
-                    + "AND operator_required = 1 AND notified_at IS NOT NULL))",
-                    (before, SENT, CANCELLED, FAILED, UNKNOWN),
+                    + "AND operator_required = 1 AND notified_at IS NOT NULL) "
+                    + "OR (kind = 'operator_notice' AND state IN (?, ?) "
+                    + "AND next_attempt_at IS NULL))",
+                    (before, SENT, CANCELLED, FAILED, UNKNOWN, FAILED, UNKNOWN),
                 )
                 return int(cursor.rowcount)
         finally:
@@ -378,20 +383,6 @@ class IntentStore:
                 + "AND NOT (kind = 'operator_notice' AND chat_id = '') "
                 + "ORDER BY created_at, rowid",
                 (PREPARED, FAILED, int(now), SENDING),
-            ).fetchall()
-        finally:
-            conn.close()
-        return [to_intent(row) for row in rows]
-
-    def recover_due(self, now: float) -> list[DeliveryIntent]:
-        """Due definite failures only; unknown and sending never qualify."""
-        conn = connect(self.path)
-        try:
-            rows = conn.execute(
-                "SELECT * FROM outbound_intents WHERE state = ? "
-                + "AND next_attempt_at IS NOT NULL AND next_attempt_at <= ? "
-                + "ORDER BY created_at, rowid",
-                (FAILED, int(now)),
             ).fetchall()
         finally:
             conn.close()

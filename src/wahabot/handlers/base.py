@@ -4,6 +4,7 @@
 
 import asyncio
 import time
+import uuid
 from collections.abc import Sequence
 from typing import Any
 
@@ -78,11 +79,13 @@ class HandlerBase:
     ) -> bool:
         """Whether another run already claimed or handled this turn.
 
-        A claim belongs to a run that already released the chat lock and
-        settles or releases it without the lock, so a bounded wait
-        replaces the race where both runs answer the newest turn once
-        each. A claim never outlives its run, so the wait is bounded by
-        the run timeout; past it the turn proceeds as unclaimed.
+        A claim belongs to a run that starts by claiming its own turn
+        rows (``claim_turn``) or a later message it revalidated into
+        (``refuse_newer``); the claim settles or releases without the
+        chat lock, so a bounded wait replaces the race where both runs
+        answer the newest turn once each. A claim never outlives its
+        run, so the wait is bounded by the run timeout; past it the
+        turn proceeds as unclaimed.
         """
         deadline = time.monotonic() + self.settings.run_timeout
         while self.intake.claimed(session, chat_id, turn_ids):
@@ -92,6 +95,22 @@ class HandlerBase:
         if self.intake.is_delivering(session, chat_id, turn_ids):
             return True
         return self.intake.handled(session, chat_id, turn_ids, addressed_only=True)
+
+    def claim_turn(self, session: str, chat_id: str, turn_ids: Sequence[str]) -> str:
+        """Claim the turn's intake rows under a fresh owner.
+
+        Called by every run path (single, burst, album, recovery
+        re-run) right after ``turn_suppressed`` clears, still under the
+        chat lock: the live run owns its rows until it settles, so the
+        60-second recovery tick's due work (pending and failed rows
+        only) can never re-answer a turn a live run is answering. Pass
+        the returned owner back into ``handle_message`` (a durable run
+        without it raises) so the target, the claims and the settle
+        agree on the owner by construction.
+        """
+        owner = uuid.uuid4().hex
+        self.intake.claim(session, chat_id, list(turn_ids), owner=owner)
+        return owner
 
     def finish_run(
         self,

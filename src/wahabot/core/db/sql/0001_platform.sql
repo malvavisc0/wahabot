@@ -1,3 +1,6 @@
+-- message_id is the global dedup key: WAHA ids embed the chat JID and
+-- the bot runs a single session, so the same id cannot legitimately
+-- appear under a second (session, chat_id); the first write wins.
 CREATE TABLE intake (
     message_id TEXT PRIMARY KEY,
     session TEXT NOT NULL,

@@ -73,6 +73,10 @@ class SingleMixin(HandlerBase):
                 if await self.turn_suppressed(event.session, chat_id, turn_ids):
                     outcome = "superseded"
                     return
+                # Own the turn before it is answered: while this run is
+                # live, the row is a claim (not pending), so the
+                # recovery tick never pulls it back as due work.
+                owner = self.claim_turn(event.session, chat_id, turn_ids)
                 # Runs in the same chat serialize on its memory and
                 # timeline; runs in different chats proceed in parallel
                 # (each binds its own run target inside the workflow).
@@ -103,6 +107,7 @@ class SingleMixin(HandlerBase):
                         intake=self.intake,
                         turn_ids=turn_ids,
                         turn_started_at=started,
+                        owner=owner,
                     )
                 await persist_memory(self.settings, event.session, chat_id, ctx)
                 delivered = bool(target.sent or target.reacted)

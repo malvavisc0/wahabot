@@ -3,6 +3,7 @@
 import time
 
 from wahabot.core.intake.store import (
+    CLAIMABLE_STATES,
     DELIVERED,
     DELIVERING,
     DONE,
@@ -49,7 +50,7 @@ class InMemoryIntakeStore:
     ) -> list[IntakeRow]:
         claimed: list[IntakeRow] = []
         for row in self._rows(key, message_ids):
-            if row.state == PENDING:
+            if row.state in CLAIMABLE_STATES:
                 row.state = PROCESSING
                 row.owner = owner
                 row.next_attempt_at = lease_until

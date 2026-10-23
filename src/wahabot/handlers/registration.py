@@ -5,7 +5,11 @@ from dataclasses import dataclass
 
 from loguru import logger
 
-from wahabot.ai.intake import IntakeLedger, max_age_for_run_timeout
+from wahabot.ai.intake import (
+    IntakeLedger,
+    claim_lease_for_run_timeout,
+    max_age_for_run_timeout,
+)
 from wahabot.ai.observability import enable_langfuse
 from wahabot.ai.tools import build_default_tools
 from wahabot.ai.tools.whatsapp import EscalationChannel
@@ -99,6 +103,7 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
     ledger = IntakeLedger(
         store=SqliteIntakeStore(database.path),
         max_age_s=max_age_for_run_timeout(settings.run_timeout),
+        claim_lease_s=claim_lease_for_run_timeout(settings.run_timeout),
     )
     transport = WahaTransport(waha, intents)
     config = load_session_config(settings.access_config)
