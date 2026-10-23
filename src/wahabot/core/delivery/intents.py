@@ -62,10 +62,10 @@ class IntentStore:
             with transaction(conn):
                 conn.execute(
                     "INSERT INTO outbound_intents ("
-                    "id, session, intake_ids_json, chat_id, kind, payload_json, "
-                    "state, transport_message_id, attempts, next_attempt_at, "
-                    "last_error, operator_required, created_at, updated_at, sent_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, '', 0, NULL, '', 0, ?, ?, NULL)",
+                    + "id, session, intake_ids_json, chat_id, kind, payload_json, "
+                    + "state, transport_message_id, attempts, next_attempt_at, "
+                    + "last_error, operator_required, created_at, updated_at, sent_at"
+                    + ") VALUES (?, ?, ?, ?, ?, ?, ?, '', 0, NULL, '', 0, ?, ?, NULL)",
                     (
                         intent_id,
                         session,
@@ -93,8 +93,8 @@ class IntentStore:
             with transaction(conn):
                 conn.execute(
                     "UPDATE outbound_intents SET state = ?, transport_message_id = ?, "
-                    "next_attempt_at = NULL, last_error = '', updated_at = ?, "
-                    "sent_at = ? WHERE id = ?",
+                    + "next_attempt_at = NULL, last_error = '', updated_at = ?, "
+                    + "sent_at = ? WHERE id = ?",
                     (SENT, transport_message_id, now, now, intent_id),
                 )
                 row = conn.execute(
@@ -106,7 +106,7 @@ class IntentStore:
                     if ids:
                         conn.execute(
                             "UPDATE intake SET state = 'done', outcome = 'delivered', "
-                            "handled_at = ? WHERE message_id IN ("
+                            + "handled_at = ? WHERE message_id IN ("
                             + ",".join("?" for _ in ids)
                             + ")",
                             (now, *ids),
@@ -133,8 +133,8 @@ class IntentStore:
             with transaction(conn):
                 conn.execute(
                     "UPDATE outbound_intents SET state = ?, attempts = attempts + 1, "
-                    "next_attempt_at = ?, last_error = ?, operator_required = ?, "
-                    "updated_at = ? WHERE id = ?",
+                    + "next_attempt_at = ?, last_error = ?, operator_required = ?, "
+                    + "updated_at = ? WHERE id = ?",
                     (
                         FAILED,
                         int(next_attempt_at) if next_attempt_at is not None else None,
@@ -155,8 +155,8 @@ class IntentStore:
             with transaction(conn):
                 conn.execute(
                     "UPDATE outbound_intents SET state = ?, attempts = attempts + 1, "
-                    "next_attempt_at = NULL, last_error = ?, operator_required = 1, "
-                    "updated_at = ? WHERE id = ?",
+                    + "next_attempt_at = NULL, last_error = ?, operator_required = 1, "
+                    + "updated_at = ? WHERE id = ?",
                     (UNKNOWN, error, now, intent_id),
                 )
         finally:
@@ -179,7 +179,7 @@ class IntentStore:
         try:
             rows = conn.execute(
                 "SELECT * FROM outbound_intents ORDER BY created_at DESC, rowid DESC "
-                "LIMIT ?",
+                + "LIMIT ?",
                 (limit,),
             ).fetchall()
         finally:
@@ -192,9 +192,9 @@ class IntentStore:
         try:
             rows = conn.execute(
                 "SELECT * FROM outbound_intents WHERE (state = ? "
-                "OR (state = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) "
-                "OR state = ?) AND NOT (kind = 'operator_notice' AND chat_id = '') "
-                "ORDER BY created_at, rowid",
+                + "OR (state = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) "
+                + "OR state = ?) AND NOT (kind = 'operator_notice' AND chat_id = '') "
+                + "ORDER BY created_at, rowid",
                 (PREPARED, FAILED, int(now), SENDING),
             ).fetchall()
         finally:
@@ -207,8 +207,8 @@ class IntentStore:
         try:
             rows = conn.execute(
                 "SELECT * FROM outbound_intents WHERE state = ? "
-                "AND next_attempt_at IS NOT NULL AND next_attempt_at <= ? "
-                "ORDER BY created_at, rowid",
+                + "AND next_attempt_at IS NOT NULL AND next_attempt_at <= ? "
+                + "ORDER BY created_at, rowid",
                 (FAILED, int(now)),
             ).fetchall()
         finally:
@@ -221,8 +221,8 @@ class IntentStore:
         try:
             rows = conn.execute(
                 "SELECT * FROM outbound_intents WHERE operator_required = 1 "
-                "AND notified_at IS NULL AND state IN (?, ?) "
-                "ORDER BY created_at, rowid",
+                + "AND notified_at IS NULL AND state IN (?, ?) "
+                + "ORDER BY created_at, rowid",
                 (UNKNOWN, FAILED),
             ).fetchall()
         finally:
@@ -238,7 +238,7 @@ class IntentStore:
             with transaction(conn):
                 conn.execute(
                     "UPDATE outbound_intents SET notified_at = ?, updated_at = ? "
-                    f"WHERE id IN ({marks})",
+                    + f"WHERE id IN ({marks})",
                     (int(time.time()), int(time.time()), *intent_ids),
                 )
         finally:
@@ -250,7 +250,7 @@ class IntentStore:
         try:
             rows = conn.execute(
                 "SELECT * FROM outbound_intents WHERE kind = 'operator_notice' "
-                "AND state = ? AND chat_id = '' ORDER BY created_at, rowid",
+                + "AND state = ? AND chat_id = '' ORDER BY created_at, rowid",
                 (PREPARED,),
             ).fetchall()
         finally:
@@ -263,7 +263,7 @@ class IntentStore:
             with transaction(conn):
                 conn.execute(
                     "UPDATE outbound_intents SET chat_id = ?, updated_at = ? "
-                    "WHERE id = ?",
+                    + "WHERE id = ?",
                     (chat_id, int(time.time()), intent_id),
                 )
         finally:

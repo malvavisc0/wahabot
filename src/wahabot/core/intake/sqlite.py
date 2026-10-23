@@ -16,8 +16,8 @@ from wahabot.core.intake.store import (
 
 _COLUMNS = (
     "message_id, session, chat_id, sender, raw_json, record, received_at, state, "
-    "outcome, attempts, next_attempt_at, last_error, burst_key, addressed, owner, "
-    "reason, handled_at"
+    + "outcome, attempts, next_attempt_at, last_error, burst_key, addressed, owner, "
+    + "reason, handled_at"
 )
 
 
@@ -32,7 +32,7 @@ class SqliteIntakeStore:
         try:
             rows = conn.execute(
                 f"SELECT {_COLUMNS} FROM intake WHERE session = ? AND chat_id = ? "
-                "ORDER BY received_at, rowid",
+                + "ORDER BY received_at, rowid",
                 key,
             ).fetchall()
         finally:
@@ -45,11 +45,11 @@ class SqliteIntakeStore:
             with transaction(conn):
                 conn.execute(
                     "INSERT INTO intake ("
-                    "message_id, session, chat_id, sender, raw_json, record, "
-                    "received_at, state, outcome, attempts, next_attempt_at, "
-                    "last_error, burst_key, addressed, owner, reason, handled_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(message_id) DO NOTHING",
+                    + "message_id, session, chat_id, sender, raw_json, record, "
+                    + "received_at, state, outcome, attempts, next_attempt_at, "
+                    + "last_error, burst_key, addressed, owner, reason, handled_at"
+                    + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    + "ON CONFLICT(message_id) DO NOTHING",
                     values(row),
                 )
                 stored = conn.execute(
@@ -75,12 +75,12 @@ class SqliteIntakeStore:
             with transaction(conn):
                 conn.execute(
                     "UPDATE intake SET state = ?, owner = ?, next_attempt_at = ? "
-                    f"WHERE message_id IN ({marks}) AND state = ?",
+                    + f"WHERE message_id IN ({marks}) AND state = ?",
                     (PROCESSING, owner, lease_until, *message_ids, PENDING),
                 )
                 rows = conn.execute(
                     f"SELECT {_COLUMNS} FROM intake WHERE message_id IN ({marks}) "
-                    "AND state = ? AND owner = ? ORDER BY received_at, rowid",
+                    + "AND state = ? AND owner = ? ORDER BY received_at, rowid",
                     (*message_ids, PROCESSING, owner),
                 ).fetchall()
         finally:
@@ -119,7 +119,7 @@ class SqliteIntakeStore:
             with transaction(conn):
                 conn.execute(
                     "UPDATE intake SET state = ?, owner = '', next_attempt_at = NULL "
-                    f"WHERE message_id IN ({marks}) AND state = ?",
+                    + f"WHERE message_id IN ({marks}) AND state = ?",
                     (PENDING, *message_ids, PROCESSING),
                 )
         finally:
@@ -141,8 +141,8 @@ class SqliteIntakeStore:
             with transaction(conn):
                 conn.execute(
                     "UPDATE intake SET state = ?, outcome = ?, reason = ?, "
-                    "handled_at = ? "
-                    f"WHERE message_id IN ({marks})",
+                    + "handled_at = ? "
+                    + f"WHERE message_id IN ({marks})",
                     (DONE, outcome, reason, handled_at, *message_ids),
                 )
         finally:
@@ -167,7 +167,7 @@ class SqliteIntakeStore:
                         marks = ",".join("?" for _ in ids)
                         conn.execute(
                             "UPDATE intake SET state = ?, outcome = ?, reason = ?, "
-                            f"handled_at = ? WHERE message_id IN ({marks})",
+                            + f"handled_at = ? WHERE message_id IN ({marks})",
                             (DONE, outcome or DELIVERED, reason, handled_at, *ids),
                         )
                     return
@@ -175,14 +175,14 @@ class SqliteIntakeStore:
                     marks = ",".join("?" for _ in claimed_ids)
                     conn.execute(
                         "UPDATE intake SET state = ?, owner = '', next_attempt_at = NULL "
-                        f"WHERE message_id IN ({marks}) AND state = ?",
+                        + f"WHERE message_id IN ({marks}) AND state = ?",
                         (PENDING, *claimed_ids, PROCESSING),
                     )
                 if outcome and turn_ids:
                     marks = ",".join("?" for _ in turn_ids)
                     conn.execute(
                         "UPDATE intake SET state = ?, outcome = ?, reason = ?, "
-                        f"handled_at = ? WHERE message_id IN ({marks})",
+                        + f"handled_at = ? WHERE message_id IN ({marks})",
                         (DONE, outcome, reason, handled_at, *turn_ids),
                     )
         finally:
@@ -203,8 +203,8 @@ class SqliteIntakeStore:
             with transaction(conn):
                 conn.execute(
                     "UPDATE intake SET state = ?, attempts = attempts + 1, "
-                    "last_error = ?, next_attempt_at = ? "
-                    f"WHERE message_id IN ({marks})",
+                    + "last_error = ?, next_attempt_at = ? "
+                    + f"WHERE message_id IN ({marks})",
                     (FAILED, error, next_attempt_at, *message_ids),
                 )
         finally:
@@ -229,7 +229,7 @@ class SqliteIntakeStore:
     def due(self, now: float, limit: int) -> list[IntakeRow]:
         return self.query(
             "state = ? OR (state = ? AND "
-            "(next_attempt_at IS NULL OR next_attempt_at <= ?))",
+            + "(next_attempt_at IS NULL OR next_attempt_at <= ?))",
             (PENDING, FAILED, now),
             limit,
         )
@@ -249,7 +249,7 @@ class SqliteIntakeStore:
         try:
             rows = conn.execute(
                 f"SELECT {_COLUMNS} FROM intake WHERE {where} "
-                "ORDER BY received_at, rowid LIMIT ?",
+                + "ORDER BY received_at, rowid LIMIT ?",
                 (*params, limit),
             ).fetchall()
         finally:

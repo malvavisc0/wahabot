@@ -32,7 +32,7 @@ def migrate(path: Path | str, sql_dir: Path = MIGRATIONS_DIR) -> None:
     try:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
-            "version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)"
+            + "version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)"
         )
         applied = {
             int(row[0]) for row in conn.execute("SELECT version FROM schema_migrations")
