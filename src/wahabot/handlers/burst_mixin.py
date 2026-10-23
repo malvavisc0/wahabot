@@ -386,6 +386,7 @@ class BurstMixin(HandlerBase):
                 reply_to=str(merged.payload.get("id", "")),
             ):
                 current = self.config_reloader.current_config()
+                ticket_id = self.ticket_active_id(chat_id)
                 addressed = self.mark_addressed_entry(entries, current)
                 gate_first = not addressed and current.group_participation == "judicious"
                 reply, target = await handle_message(
@@ -403,6 +404,8 @@ class BurstMixin(HandlerBase):
                     turn_ids=turn_ids,
                     turn_started_at=started,
                     owner=owner,
+                    ticket_store=self.ticket_store,
+                    ticket_id=ticket_id,
                 )
             await persist_memory(self.settings, merged.session, chat_id, ctx)
         return reply, target
@@ -423,6 +426,8 @@ class BurstMixin(HandlerBase):
         chat_id = buffer.key[1]
         message_id = str(merged.payload.get("id", ""))
         turn_ids = [str(event.payload.get("id", "")) for event in messages]
+        if await self.ticket_gate_events([entry.event for entry in entries]):
+            return "operator_owned", None
         reply, target = await self.run_burst_turn(
             buffer, merged, entries, turn_ids=turn_ids, started=started
         )
@@ -447,6 +452,7 @@ class BurstMixin(HandlerBase):
             message_ids=turn_ids,
             duration_ms=int((time.monotonic() - started) * 1000),
         )
+        self.finalize_ticket(target, outcome)
         # Post-reply memory jobs outside the chat lock: the recap merge
         # and the embedding drain must never hold the chat's next run.
         await self.agent.merge_learned()

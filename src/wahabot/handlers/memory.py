@@ -206,3 +206,56 @@ def learn_identity(event: WahaEvent) -> None:
         sender = jid_string(payload.get("from"))
     name = str(data.get("notifyName") or payload.get("notifyName") or "")
     identity.names.learn(sender, name)
+
+
+async def remember_customer_message(
+    event: WahaEvent,
+    agent: FunctionCallingAgentWorkflow,
+    settings: Settings,
+    body: str | None,
+) -> Context | None:
+    """Store a customer message in memory without starting a run.
+
+    Used while a chat is paused or waiting on the operator: the message
+    is saved for history, but the assistant must not answer or replay it.
+    """
+    chat_id = str(event.payload.get("from", ""))
+    if not chat_id or not body:
+        return None
+    registry = serial_store(str(settings.data_dir)).for_chat(event.session, chat_id)
+    content, _, _ = await asyncio.to_thread(
+        render_entries,
+        [RecordEntry(event=event, body=body)],
+        registry=registry,
+        names={},
+        tz_name=settings.timezone,
+    )
+    ctx = await append_to_memory(
+        event.session,
+        chat_id,
+        agent,
+        settings,
+        ChatMessage(role=MessageRole.USER, content=content),
+    )
+    await persist_memory(settings, event.session, chat_id, ctx)
+    return ctx
+
+
+async def remember_sent_relay(
+    session: str,
+    chat_id: str,
+    agent: FunctionCallingAgentWorkflow,
+    settings: Settings,
+    text: str,
+) -> None:
+    """Append a sent operator relay to the customer chat buffer."""
+    if not text.strip():
+        return
+    ctx = await append_to_memory(
+        session,
+        chat_id,
+        agent,
+        settings,
+        ChatMessage(role=MessageRole.ASSISTANT, content=text),
+    )
+    await persist_memory(settings, session, chat_id, ctx)

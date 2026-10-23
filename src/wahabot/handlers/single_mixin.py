@@ -63,6 +63,7 @@ class SingleMixin(HandlerBase):
         addressed = self.group_message_addressed(event, config)
         gate_first = not addressed and config.group_participation == "judicious"
         turn_ids = [message_id]
+        ticket_id = self.ticket_active_id(chat_id)
         started = time.monotonic()
         target: RunTarget | None = None
         outcome = "failed"
@@ -108,6 +109,8 @@ class SingleMixin(HandlerBase):
                         turn_ids=turn_ids,
                         turn_started_at=started,
                         owner=owner,
+                        ticket_store=self.ticket_store,
+                        ticket_id=ticket_id,
                     )
                 await persist_memory(self.settings, event.session, chat_id, ctx)
                 delivered = bool(target.sent or target.reacted)
@@ -130,6 +133,7 @@ class SingleMixin(HandlerBase):
                 message_ids=turn_ids,
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
+            self.finalize_ticket(target, outcome)
             # Post-reply memory jobs outside the chat lock: the recap
             # merge and the embedding drain must never hold this
             # chat's next run.
@@ -203,10 +207,23 @@ class SingleMixin(HandlerBase):
         body, video, url_video = await self.prepare_message_videos(
             event, body, stamp_body=False
         )
+        if await self.ticket_or_content_gate(event, body, image, video, url_video):
+            return
+        await self.deliver_single_reply(event, config, image, video, url_video)
+
+    async def ticket_or_content_gate(
+        self,
+        event: WahaEvent,
+        body: str | None,
+        image: dict[str, Any] | None,
+        video: dict[str, Any] | None,
+        url_video: dict[str, Any] | None,
+    ) -> bool:
+        """Settle empty turns and ticket-handled turns before a run."""
         if body is None and image is None and video is None and url_video is None:
             logger.debug("Skipping media/album message {id}", id=event.payload.get("id"))
             # Nothing to answer, but the row must leave the durable queue or
             # recovery would retry it every tick forever.
             self.settle_intake(event, "silent", "no readable content")
-            return
-        await self.deliver_single_reply(event, config, image, video, url_video)
+            return True
+        return await self.ticket_gate_events([event])

@@ -1,0 +1,505 @@
+"""Ticket routing, pause handling and the operator reply loop."""
+
+import asyncio
+import time
+from typing import Any, override
+
+from loguru import logger
+
+from wahabot.ai.messages import bot_jids, jid_string
+from wahabot.ai.tools.runcontext import RunTarget
+from wahabot.commands import build_command_event
+from wahabot.core.audit import save_action
+from wahabot.core.models import WahaEvent
+from wahabot.core.notebook import AUTHOR_OPERATOR, KIND_FACT
+from wahabot.core.runs import chat_lock
+from wahabot.core.tickets.attachments import persist_event_attachments
+from wahabot.core.tickets.lifecycle import (
+    Inbound,
+    close_ticket,
+    finalize_delivery,
+    is_thanks_only,
+    record_inbound,
+    reopen_ticket,
+    split_ticket,
+)
+from wahabot.core.tickets.models import (
+    Actor,
+    EventKind,
+    Ticket,
+    TicketState,
+    TicketUpdate,
+)
+from wahabot.core.tickets.replies import (
+    ReplyOutcome,
+    decision_fact,
+    deliver_held,
+    handle_operator_reply,
+)
+from wahabot.core.tickets.router import (
+    Route,
+    RouteKind,
+    ask_which_ticket,
+    is_self_chat_event,
+    whats_open_text,
+)
+from wahabot.core.tickets.store import TicketStore
+from wahabot.handlers.base import HandlerBase
+from wahabot.handlers.memory import remember_customer_message, remember_sent_relay
+from wahabot.handlers.replies import send_self_reply
+
+
+def inbound_words(events: list[WahaEvent]) -> tuple[WahaEvent, str]:
+    """The event carrying text and the combined body for a ticket event."""
+    bodies = [
+        str(event.payload.get("body", "") or "").strip()
+        for event in events
+        if str(event.payload.get("body", "") or "").strip()
+    ]
+    content = next(
+        (event for event in events if str(event.payload.get("body", "") or "").strip()),
+        events[0],
+    )
+    return content, "\n".join(bodies)
+
+
+def finalize_split(store: TicketStore, ticket: Ticket, summary: str) -> None:
+    """Create the staged split ticket after the old one is finalized."""
+    if not summary:
+        return
+    refreshed = store.ticket(ticket.id)
+    if refreshed is not None:
+        split_ticket(store, refreshed, summary)
+
+
+GLOBAL_PAUSE_FOREVER = -1
+
+_HOLDING_REPLY = "Thanks — your message is still with the team. Someone will reply here."
+
+
+class TicketMixin(HandlerBase):
+    """Ticket lifecycle hooks shared by the single, burst and album paths."""
+
+    @override
+    async def ticket_gate_events(self, events: list[WahaEvent]) -> bool:
+        """Record inbound events and handle paused, operator and thanks turns.
+
+        Returns True when the turn needs no assistant run. The ticket is
+        recorded for every customer 1:1 message, including paused ones.
+        """
+        if not events or not self.ticket_turn_is_customer(events[0]):
+            return False
+        inbound = await asyncio.to_thread(self.ticket_note_events, events)
+        store = self.ticket_store
+        if inbound is None or store is None:
+            return False
+        if await self.ticket_thanks_turn(events, inbound):
+            return True
+        if await self.ticket_deliver_held(inbound):
+            refreshed = store.ticket(inbound.ticket.id)
+            if refreshed is not None:
+                inbound.ticket = refreshed
+        return await self.ticket_handled_without_run(events, inbound)
+
+    async def ticket_handled_without_run(
+        self, events: list[WahaEvent], inbound: Inbound
+    ) -> bool:
+        """Pause, handover and operator-solved turns skip the agent run."""
+        if self.ticket_paused(events[0].session, inbound):
+            await self.ticket_remember_and_settle(events, "operator_owned", "paused")
+            return True
+        if inbound.ticket.state == TicketState.NEEDS_YOU.value:
+            await self.ticket_needs_you_turn(events, inbound)
+            return True
+        if inbound.operator_solved:
+            await self.ticket_operator_reask(events, inbound)
+            return True
+        return False
+
+    def ticket_turn_is_customer(self, event: WahaEvent) -> bool:
+        """Whether the turn belongs to a 1:1 customer chat."""
+        chat = str(event.payload.get("from", ""))
+        return (
+            bool(chat)
+            and not chat.endswith("@g.us")
+            and not event.payload.get("fromMe")
+            and not is_self_chat_event(event)
+        )
+
+    def ticket_note_events(self, events: list[WahaEvent]) -> Inbound | None:
+        """Create/reopen the ticket and store every event's attachments."""
+        store = self.ticket_store
+        if store is None:
+            return None
+        content, body = inbound_words(events)
+        config = self.config_reloader.current_config()
+        inbound = record_inbound(
+            store,
+            content,
+            message_ids=[str(event.payload.get("id", "")) for event in events],
+            close_after_days=config.close_after_days,
+            body=body,
+        )
+        for event in events:
+            persist_event_attachments(
+                store, self.waha, inbound.ticket, event, self.settings
+            )
+        return inbound
+
+    async def ticket_thanks_turn(self, events: list[WahaEvent], inbound: Inbound) -> bool:
+        """Keep a done ticket done for a bare thanks and react instead."""
+        if not inbound.reopened or not is_thanks_only(inbound.body):
+            return False
+        store = self.ticket_store
+        if store is None:
+            return False
+        ticket = store.ticket(inbound.ticket.id)
+        if ticket is None:
+            return False
+        store.update_ticket(
+            ticket.id,
+            TicketUpdate(
+                state=TicketState.DONE.value,
+                done_by=inbound.previous_done_by or "assistant",
+            ),
+            actor=Actor.CUSTOMER.value,
+            kind=EventKind.STATE.value,
+            body="customer thanked; ticket stays done",
+        )
+        message_id = str(events[0].payload.get("id", ""))
+        try:
+            self.waha.send_reaction(events[0].session, ticket.chat_id, message_id, "👍")
+        except Exception as exc:
+            logger.warning("Thank-you reaction failed: {exc}", exc=exc)
+        await self.ticket_remember_and_settle(events, "silent", "thanks")
+        return True
+
+    async def ticket_deliver_held(self, inbound: Inbound) -> bool:
+        """Send a held operator draft on the next customer message."""
+        if self.ticket_store is None:
+            return False
+        outcome = await deliver_held(
+            self.ticket_store,
+            self.waha,
+            inbound.ticket.chat_id,
+            inbound.ticket,
+            inbound.contact,
+            remember=self.ticket_remember_relay(inbound.ticket),
+        )
+        return outcome is not None and outcome.sent
+
+    async def ticket_needs_you_turn(
+        self, events: list[WahaEvent], inbound: Inbound
+    ) -> None:
+        """Hold the customer with a short reply and nudge once per interval."""
+        await self.ticket_send_holding(events, inbound.ticket.chat_id)
+        if self.scheduler is not None:
+            await asyncio.to_thread(self.scheduler.nudge, int(time.time()))
+        await self.ticket_remember_and_settle(events, "operator_owned", "needs_you")
+
+    async def ticket_operator_reask(
+        self, events: list[WahaEvent], inbound: Inbound
+    ) -> None:
+        """Alert the operator again when a solved ticket reopens."""
+        try:
+            await asyncio.to_thread(self.ticket_send_alert, inbound)
+        except Exception as exc:
+            logger.warning("Reopened ticket alert failed: {exc}", exc=exc)
+            await self.ticket_send_holding(events, inbound.ticket.chat_id)
+        await self.ticket_remember_and_settle(
+            events, "operator_owned", "operator solved re-ask"
+        )
+
+    async def ticket_send_holding(self, events: list[WahaEvent], chat_id: str) -> None:
+        """Send the holding reply, never failing the turn on a send error."""
+        try:
+            await asyncio.to_thread(
+                self.waha.send_text, events[0].session, chat_id, _HOLDING_REPLY
+            )
+        except Exception as exc:
+            logger.warning(
+                "Holding reply failed for {chat}: {exc}", chat=chat_id, exc=exc
+            )
+
+    def ticket_send_alert(self, inbound: Inbound) -> None:
+        """Send the alert for a reopened operator-solved ticket."""
+        from wahabot.core.tickets.alerts import operator_language, send_alert
+        from wahabot.status.state import state as status_state
+
+        store = self.ticket_store
+        if store is None or not status_state.operator_jid:
+            raise RuntimeError("no operator target")
+        send_alert(
+            store,
+            self.waha,
+            self.settings.session,
+            status_state.operator_jid,
+            inbound.ticket,
+            inbound.contact,
+            language=operator_language(
+                self.config_reloader.current_config().operator_language,
+                inbound.contact.language,
+            ),
+            translator=self.ticket_translator,
+        )
+
+    async def ticket_remember_and_settle(
+        self, events: list[WahaEvent], outcome: str, reason: str
+    ) -> None:
+        """Save the customer messages to memory and settle their intake rows."""
+        await self.ticket_remember_events(events)
+        ids = [str(event.payload.get("id", "")) for event in events]
+        self.intake.finish(
+            events[0].session,
+            str(events[0].payload.get("from", "")),
+            ids,
+            delivered=False,
+            outcome=outcome,
+            reason=reason,
+        )
+
+    async def ticket_remember_events(self, events: list[WahaEvent]) -> None:
+        """Append non-empty customer bodies to the chat buffer."""
+        for event in events:
+            body = str(event.payload.get("body", "") or "").strip()
+            if not body:
+                continue
+            async with chat_lock(event.session, str(event.payload.get("from", ""))):
+                await remember_customer_message(event, self.agent, self.settings, body)
+
+    def ticket_remember_relay(self, ticket: Ticket) -> Any:
+        """The memory callback for an operator relay to one ticket."""
+
+        async def remember(text: str) -> None:
+            await remember_sent_relay(
+                self.settings.session, ticket.chat_id, self.agent, self.settings, text
+            )
+
+        return remember
+
+    @override
+    def ticket_active_id(self, chat_id: str) -> int:
+        """The chat's active ticket id, or 0 when tickets are unavailable."""
+        if self.ticket_store is None:
+            return 0
+        ticket = self.ticket_store.active_ticket(chat_id)
+        return ticket.id if ticket is not None else 0
+
+    @override
+    def finalize_ticket(self, target: RunTarget | None, outcome: str) -> None:
+        """Apply staged ticket values after a confirmed assistant delivery."""
+        if target is None or target.ticket_store is None or not target.ticket_id:
+            return
+        if outcome not in ("reply", "delivered_via_tool") and not target.sent:
+            return
+        store = target.ticket_store
+        ticket = store.ticket(target.ticket_id)
+        if ticket is None:
+            return
+        try:
+            finalize_delivery(
+                store,
+                ticket.id,
+                target.ticket_update or TicketUpdate(),
+                delivered=True,
+            )
+            finalize_split(store, ticket, target.ticket_split)
+        except Exception:
+            logger.exception("Ticket finalize failed for {number}", number=ticket.number)
+
+    def ticket_paused(self, session: str, inbound: Inbound) -> bool:
+        """Whether the customer chat or the whole session is paused."""
+        now = int(time.time())
+        if (
+            inbound.contact.paused_until is not None
+            and inbound.contact.paused_until > now
+        ):
+            return True
+        store = self.ticket_store
+        if store is None:
+            return False
+        global_until = store.session_paused_until(session)
+        return global_until is not None and (
+            global_until == GLOBAL_PAUSE_FOREVER or global_until > now
+        )
+
+    @override
+    def pause_after_human_message(self, event: WahaEvent, config: Any) -> None:
+        """Pause a customer chat after a human operator typed there."""
+        if self.ticket_store is None or not event.payload.get("fromMe"):
+            return
+        if str(event.payload.get("source", "")) != "app":
+            return
+        chat = str(event.payload.get("from", ""))
+        if not chat or chat.endswith("@g.us"):
+            return
+        if jid_string(chat) in bot_jids(event):
+            return
+        hours = config.pause_after_human_hours
+        if hours <= 0:
+            return
+        contact = self.ticket_store.upsert_contact(chat)
+        until = int(time.time()) + hours * 3600
+        self.ticket_store.set_contact_paused(contact.chat_id, until)
+
+    @override
+    async def handle_ticket_route(
+        self, event: WahaEvent, route: Route, config: Any
+    ) -> bool:
+        """Handle one parsed self-chat command; always answers the operator."""
+        if self.ticket_store is None:
+            return False
+        if route.kind in (RouteKind.QUOTE_REPLY, RouteKind.TICKET_REPLY):
+            await self.ticket_reply_route(event, route, config)
+            return True
+        if route.kind == RouteKind.WHATS_OPEN:
+            await self.ticket_send_operator(event, whats_open_text(self.ticket_store))
+            return True
+        if route.kind in (RouteKind.CLOSE, RouteKind.REOPEN):
+            await self.ticket_state_route(event, route)
+            return True
+        if route.kind in (RouteKind.PAUSE, RouteKind.RESUME):
+            await self.ticket_pause_route(event, route, config)
+            return True
+        if route.kind == RouteKind.ASK:
+            text = route.text or ask_which_ticket(route.candidates)
+            await self.ticket_send_operator(event, text)
+            return True
+        return False
+
+    async def ticket_reply_route(
+        self, event: WahaEvent, route: Route, config: Any
+    ) -> None:
+        """Run the classify/draft/verify/send loop for one operator reply."""
+        store = self.ticket_store
+        if store is None:
+            return
+        ticket = store.ticket(route.ticket.id) if route.ticket is not None else None
+        if ticket is None:
+            await self.ticket_send_operator(event, "No matching ticket found.")
+            return
+        if ticket.state == TicketState.CLOSED.value:
+            await self.ticket_send_operator(
+                event, f"Ticket {ticket.number} is closed; reopen it first."
+            )
+            return
+        contact = store.contact_by_id(ticket.contact_id)
+        if contact is None:
+            await self.ticket_send_operator(event, "The ticket has no contact record.")
+            return
+        async with chat_lock(event.session, ticket.chat_id):
+            outcome = await handle_operator_reply(
+                store,
+                self.waha,
+                event.session,
+                ticket,
+                contact,
+                route.text,
+                complete=self.ticket_complete,
+                reply_window_days=config.reply_window_days,
+                remember=self.ticket_remember_relay(ticket),
+            )
+            if outcome.sent:
+                await self.ticket_write_fact(event, ticket, route.text, outcome)
+        text = await self.ticket_confirmation(outcome, config)
+        await self.ticket_send_operator(event, text)
+
+    def ticket_complete(self, prompt: str) -> str:
+        """The synchronous model completion the reply loop uses."""
+        return str(self.agent.llm.complete(prompt).text)
+
+    async def ticket_write_fact(
+        self,
+        event: WahaEvent,
+        ticket: Ticket,
+        operator_text: str,
+        outcome: ReplyOutcome,
+    ) -> None:
+        """Store the operator's decision as a chat-scoped typed fact."""
+        if self.agent.notebook is None:
+            return
+        key = f"ticket-{ticket.number}-decision"
+        text = decision_fact(ticket, operator_text, outcome.draft)
+        await asyncio.to_thread(
+            self.agent.notebook.write,
+            event.session,
+            ticket.chat_id,
+            key,
+            text,
+            kind=KIND_FACT,
+            author_kind=AUTHOR_OPERATOR,
+        )
+
+    async def ticket_confirmation(self, outcome: ReplyOutcome, config: Any) -> str:
+        """The operator-facing confirmation in the configured language."""
+        language = (config.operator_language or "en").strip() or "en"
+        if language == "en" or self.ticket_translator is None:
+            return outcome.confirmation
+        try:
+            return await asyncio.to_thread(
+                self.ticket_translator, outcome.confirmation, language
+            )
+        except Exception:
+            return outcome.confirmation
+
+    async def ticket_state_route(self, event: WahaEvent, route: Route) -> None:
+        """Close or reopen a numbered ticket."""
+        if route.ticket is None:
+            await self.ticket_send_operator(event, "No ticket with that number.")
+            return
+        store = self.ticket_store
+        if store is None:
+            return
+        try:
+            if route.kind == RouteKind.CLOSE:
+                close_ticket(store, route.ticket)
+                message = f"Closed {route.ticket.number}."
+            else:
+                reopen_ticket(store, route.ticket)
+                message = f"Reopened {route.ticket.number}."
+        except ValueError as exc:
+            message = str(exc)
+        save_action(
+            self.settings.data_dir,
+            event.session,
+            "ticket_command",
+            ticket=route.ticket.number,
+            command=route.kind.value,
+        )
+        await self.ticket_send_operator(event, message)
+
+    async def ticket_pause_route(
+        self, event: WahaEvent, route: Route, config: Any
+    ) -> None:
+        """Pause or resume one contact, or the whole session."""
+        store = self.ticket_store
+        if store is None:
+            return
+        if route.contact is not None:
+            if route.kind == RouteKind.PAUSE:
+                until = int(time.time()) + config.pause_after_human_hours * 3600
+                store.set_contact_paused(route.contact.chat_id, until)
+                message = f"Paused {route.contact.display}."
+            else:
+                store.set_contact_paused(route.contact.chat_id, None)
+                message = f"Resumed {route.contact.display}."
+        else:
+            until = GLOBAL_PAUSE_FOREVER if route.kind == RouteKind.PAUSE else None
+            store.set_session_paused(event.session, until)
+            message = (
+                "Paused all customer chats." if until else "Resumed all customer chats."
+            )
+        save_action(
+            self.settings.data_dir,
+            event.session,
+            "ticket_command",
+            command=route.kind.value,
+        )
+        await self.ticket_send_operator(event, message)
+
+    async def ticket_send_operator(self, event: WahaEvent, text: str) -> None:
+        """Send a command answer back to the operator's self-chat."""
+        command = WahaEvent.model_validate(build_command_event(event.session, text))
+        command.payload["reply_chat_id"] = str(event.payload.get("from", ""))
+        command.payload["reply_to"] = str(event.payload.get("id", ""))
+        await send_self_reply(self.waha, command, text)

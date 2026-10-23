@@ -26,6 +26,7 @@ from wahabot.core.inbound import (
 from wahabot.core.intake.store import IntakeRow
 from wahabot.core.models import WahaEvent
 from wahabot.core.presence import mark_seen
+from wahabot.core.tickets.router import RouteKind, is_self_chat_event, route_message
 from wahabot.handlers.base import HandlerBase
 from wahabot.handlers.dedup import forget_seen, is_stale, seen_recently
 from wahabot.handlers.memory import (
@@ -39,6 +40,15 @@ from wahabot.status import (
     probe_session_recovery,
     session_healthy,
 )
+
+
+def routed_event(event: WahaEvent, instruction: str) -> WahaEvent:
+    """A shallow copy whose body is the operator instruction for routing."""
+    if instruction == str(event.payload.get("body", "")):
+        return event
+    routed = event.model_copy(deep=True)
+    routed.payload["body"] = instruction
+    return routed
 
 
 class IngestMixin(HandlerBase):
@@ -162,6 +172,8 @@ class IngestMixin(HandlerBase):
             # behind the chat gates. The transcript becomes the body;
             # the mention check below runs on it like typed text.
             body = await self.transcribe_message(event, body)
+        if await self.handle_self_ticket_route(event, body, config, message_id):
+            return True, None
         instruction = (
             None
             if is_self_echo(message_id)
@@ -381,6 +393,7 @@ class IngestMixin(HandlerBase):
         if not self.chat_access_allowed(event, config):
             self.settle_intake(event, "silent", "chat not allowed")
             return None
+        self.pause_after_human_message(event, config)
         if await self.fold_operator_event(event, config, body, operator_wakes):
             return None
         if self.intake_row(event) is None:
@@ -390,6 +403,31 @@ class IngestMixin(HandlerBase):
         await self.mark_seen_for(event, operator_wakes)
         self.buffer_album_window(event, operator_wakes)
         return operator_wakes
+
+    async def handle_self_ticket_route(
+        self, event: WahaEvent, body: str | None, config: SessionConfig, message_id: str
+    ) -> bool:
+        """Route a ticket command typed in the operator console."""
+        if (
+            self.ticket_store is None
+            or not is_self_chat_event(event)
+            or is_self_echo(message_id)
+        ):
+            return False
+        instruction = (
+            self_command_instruction(
+                event,
+                bot_name=config.bot_name,
+                bot_mention_regex=config.bot_mention_regex,
+            )
+            or body
+            or ""
+        )
+        route = route_message(self.ticket_store, routed_event(event, instruction))
+        if route.kind == RouteKind.NONE:
+            return False
+        await self.handle_ticket_route(event, route, config)
+        return True
 
     def chat_access_allowed(self, event: WahaEvent, config: SessionConfig) -> bool:
         """Whether the chat whitelist/blacklist lets this event through."""
