@@ -6,10 +6,15 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from wahabot.ai.observability import masked_chat_id, observation
 from wahabot.ai.tools.whatsapp import EscalationChannel, forward_escalation
 from wahabot.ai.triage.models import TriageContext, TriageResult, TriageVerdict
 from wahabot.ai.triage.parsing import parse_verdict, render_context
-from wahabot.ai.triage.policy import calm_angry_customer, restore_cross_sender_attack
+from wahabot.ai.triage.policy import (
+    calm_angry_customer,
+    repair_question_gist,
+    restore_cross_sender_attack,
+)
 from wahabot.ai.triage.prompts import (
     ESCALATION_CONCURRENCY,
     GATE_RETRY_S,
@@ -142,6 +147,7 @@ class TriageGate:
             return TriageResult.fallback(failed=True)
         verdict = calm_angry_customer(verdict, context.message)
         verdict = restore_cross_sender_attack(verdict, context.message)
+        verdict = repair_question_gist(verdict, context.message)
         if context.side_thread:
             # A reply to another member's message is not a turn for the
             # assistant. This fence is code-owned: a gate verdict cannot
@@ -159,21 +165,57 @@ class TriageGate:
         return TriageResult(verdict)
 
     async def complete(self, context: TriageContext) -> str:
-        """POST one request and return the assistant's text."""
+        """POST one request and return the assistant's text.
+
+        The gate call is a bare ``httpx`` client, so the LlamaIndex
+        instrumentor never saw it: each verdict runs as its own Langfuse
+        observation, marked ``guardrail`` so gate calls stay out of
+        LLM spend unless asked for. Failures mark the observation
+        ``ERROR`` and re-raise; the caller's fallback owns the verdict.
+        """
         if not self.url:
             raise ValueError("triage gate has no API base")
-        async with httpx.AsyncClient(
-            timeout=self.timeout, transport=self.transport
-        ) as client:
-            response = await client.post(
-                self.url, json=self.payload(context), headers=self.headers()
-            )
-            response.raise_for_status()
-            payload = response.json()
-        try:
-            return str(payload["choices"][0]["message"]["content"])
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ValueError("triage response has no message content") from exc
+        body = self.payload(context)
+        async with observation(
+            "triage-gate",
+            as_type="guardrail",
+            model=self.model,
+            input={
+                "system": body["messages"][0]["content"],
+                "user": body["messages"][1]["content"],
+            },
+            metadata={
+                "chat_id": masked_chat_id(context.chat_id),
+                "session": context.session,
+            },
+        ) as span:
+            try:
+                async with httpx.AsyncClient(
+                    timeout=self.timeout, transport=self.transport
+                ) as client:
+                    response = await client.post(
+                        self.url, json=body, headers=self.headers()
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                try:
+                    text = str(payload["choices"][0]["message"]["content"])
+                except (KeyError, IndexError, TypeError) as exc:
+                    raise ValueError("triage response has no message content") from exc
+            except Exception as exc:
+                if span is not None:
+                    span.update(level="ERROR", status_message=str(exc))
+                raise
+            if span is not None:
+                usage: dict[str, Any] = payload.get("usage") or {}
+                span.update(
+                    output=text,
+                    usage_details={
+                        "input": usage.get("prompt_tokens", 0),
+                        "output": usage.get("completion_tokens", 0),
+                    },
+                )
+            return text
 
     async def escalate(self, context: TriageContext, verdict: TriageVerdict) -> None:
         """Forward a code-written escalation off the event loop."""

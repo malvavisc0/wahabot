@@ -30,6 +30,7 @@ class AgentBase:
     settings: Settings | None
     notebook: Notebook | None
     rules_renderer: Callable[[], str] | None
+    gate_rules_renderer: Callable[[], str] | None
     triage: TriageGate | None
     triage_tasks: dict[int, asyncio.Task[TriageResult]]
     recap_merger: RecapMerger | None
@@ -40,6 +41,8 @@ class AgentBase:
     def system_message(self) -> ChatMessage | None: ...
 
     def rendered_session_rules(self) -> str: ...
+
+    def rendered_gate_rules(self) -> str: ...
 
     def stored_triage_result(self, *args: Any, **kwargs: Any) -> Any: ...
     def with_image(self, *args: Any, **kwargs: Any) -> Any: ...

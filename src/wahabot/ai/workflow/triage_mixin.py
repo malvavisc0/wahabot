@@ -62,7 +62,7 @@ class TriageMixin(AgentBase):
             message=INBOUND_ID_RE.sub("", message).strip()[:TRIAGE_MESSAGE_CHARS],
             turns=format_turns(messages),
             mute=mute,
-            rules=self.rendered_session_rules(),
+            rules=self.rendered_gate_rules(),
             group=target.chat_id.endswith("@g.us"),
             addressed=addressed,
             quoted_other=quoted_other,

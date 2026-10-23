@@ -28,9 +28,9 @@ keeping every knob in one place.
 import atexit
 import hashlib
 import re
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncIterator, Iterator, Sequence
+from contextlib import asynccontextmanager, contextmanager
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from loguru import logger
 
@@ -39,7 +39,26 @@ from wahabot.settings import Settings
 if TYPE_CHECKING:
     from langfuse import Langfuse
 
-__all__ = ["chat_trace_attributes", "enable_langfuse", "flush"]
+__all__ = [
+    "chat_trace_attributes",
+    "enable_langfuse",
+    "flush",
+    "masked_chat_id",
+    "observation",
+]
+
+#: The observation types Langfuse accepts for a started observation.
+ObservationType = Literal[
+    "generation",
+    "embedding",
+    "span",
+    "agent",
+    "tool",
+    "chain",
+    "retriever",
+    "evaluator",
+    "guardrail",
+]
 
 #: The configured client, or None while tracing is disabled.
 _client: Langfuse | None = None
@@ -189,6 +208,11 @@ def _opaque(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()[:16]
 
 
+def masked_chat_id(chat_id: str) -> str:
+    """A stable, non-reversible chat id for span metadata."""
+    return _opaque(chat_id)
+
+
 def trace_metadata(
     *,
     message_ids: Sequence[str] = (),
@@ -210,6 +234,43 @@ def trace_metadata(
     if reply_to:
         metadata["wahabot.reply_to"] = _opaque(reply_to)
     return metadata
+
+
+@asynccontextmanager
+async def observation(
+    name: str,
+    *,
+    as_type: ObservationType = "generation",
+    model: str | None = None,
+    input: Any = None,
+    metadata: Any = None,
+) -> AsyncIterator[Any]:
+    """One Langfuse observation; a no-op when tracing is off.
+
+    Fail-soft: a tracing error never fails the call it wraps. Yields
+    ``None`` when no client is configured or the observation could not
+    start, so callers must guard their ``update`` calls. The span runs
+    as the current OTel observation, so it groups under the active
+    trace (the agent's propagation context when one is recording).
+    """
+    if _client is None:
+        yield None
+        return
+    try:
+        span = _client.start_as_current_observation(
+            name=name,
+            # Langfuse overloads split the literal per observation kind.
+            as_type=cast("Any", as_type),
+            model=model,
+            input=input,
+            metadata=metadata,
+        )
+    except Exception:
+        logger.debug("Langfuse observation failed to start: {name}", name=name)
+        yield None
+        return
+    with span as current:
+        yield current
 
 
 @contextmanager

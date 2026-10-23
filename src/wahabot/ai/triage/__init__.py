@@ -17,6 +17,7 @@ from wahabot.ai.triage.policy import (
     enrich_recall_query,
     format_turns,
     is_tool_allowed,
+    repair_question_gist,
     restore_cross_sender_attack,
 )
 from wahabot.ai.triage.prompts import (
@@ -41,6 +42,7 @@ __all__ = [
     "is_tool_allowed",
     "parse_verdict",
     "render_context",
+    "repair_question_gist",
     "restore_cross_sender_attack",
     "result_from_dict",
     "result_to_dict",

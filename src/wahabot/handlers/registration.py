@@ -110,6 +110,7 @@ def register_agent_handler(
         system_prompt=config.system_prompt,
         prompt_renderer=handlers.render_prompt,
         rules_renderer=handlers.render_session_rules,
+        gate_rules_renderer=handlers.render_gate_brief,
         triage=triage,
     )
     handlers.agent = agent
