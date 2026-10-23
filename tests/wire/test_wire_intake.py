@@ -74,7 +74,7 @@ def test_slow_run_refused_send_answers_the_newest_record_once(bot: Bot) -> None:
             return SecondResponse
         if not a_started.is_set():
             a_started.set()
-            while len(bot.waha.seen_chats) < 2:
+            while len(bot.ledger.rows(bot.settings.session, CHAT_ID)) < 2:
                 await asyncio.sleep(0.02)
         return FirstResponse
 
@@ -129,7 +129,7 @@ def test_final_text_superseded_by_newer_intake_is_not_sent(bot: Bot) -> None:
     async def selector(body: dict[str, Any]) -> dict[str, Any]:
         if not a_started.is_set():
             a_started.set()
-            while len(bot.waha.seen_chats) < 2:
+            while len(bot.ledger.rows(bot.settings.session, CHAT_ID)) < 2:
                 await asyncio.sleep(0.02)
             return SecondResponse
         if any(message.get("role") == "tool" for message in body["messages"]):
@@ -161,7 +161,7 @@ def test_silent_run_releases_the_newer_message_for_its_own_run(bot: Bot) -> None
     async def selector(body: dict[str, Any]) -> dict[str, Any]:
         if not a_started.is_set():
             a_started.set()
-            while len(bot.waha.seen_chats) < 2:
+            while len(bot.ledger.rows(bot.settings.session, CHAT_ID)) < 2:
                 await asyncio.sleep(0.02)
             return tool_call_response(
                 "stay_silent",
@@ -265,7 +265,7 @@ def test_unaddressed_group_banter_does_not_supersede_a_reply(bot: Bot) -> None:
             return SecondResponse
         if not a_started.is_set():
             a_started.set()
-            while len(bot.waha.seen_chats) < 2:
+            while len(bot.ledger.rows(bot.settings.session, CHAT_ID)) < 2:
                 await asyncio.sleep(0.02)
         return FirstResponse
 
@@ -338,7 +338,7 @@ def test_one_refusal_blocks_the_rest_of_the_tool_batch(bot: Bot) -> None:
             return SecondResponse
         if not a_started.is_set():
             a_started.set()
-            while len(bot.waha.seen_chats) < 2:
+            while len(bot.ledger.rows(bot.settings.session, CHAT_ID)) < 2:
                 await asyncio.sleep(0.02)
         return _double_send_response()
 
