@@ -288,30 +288,56 @@ Before each run reaches the LLM, the buffered history passes through
    nothing is written to memory, and the newer turn's own run answers
    it.
 
-### Send-time revalidation and the intake ledger
+### Send-time revalidation and the durable intake ledger
 
-`IntakeLedger` (`ai/intake.py`) keeps one chat's accepted inbound
-messages: each row carries the message id, the rendered record, its
-arrival time and whether it would wake a run. A run claims the addressed
-rows newer than its start; `send_message`, `send_media`,
+`IntakeLedger` (`ai/intake.py`) owns the durable inbound ledger for one
+chat. Accepted `message*` rows live in `data/wahabot.db` (`intake`,
+SQLite/WAL with numbered migrations); every outbound send first records an
+`outbound_intents` row carrying the intake ids it answers. A row carries
+the message id, rendered record, arrival time, addressed flag and state
+(`pending`, `processing`, `delivering`, `done`, `failed`).
+
+A run's own rows stay pending while it runs. `send_message`, `send_media`,
 `forward_message`, `react_to_message` and the final-text path all call
-`delivery_guard` before delivering. A refusal claims the rows it renders
-(newest-first selection within a 1,200-character budget, rendered
-oldest-first), returns their records with the re-read instruction, and
-blocks every remaining delivery call in that tool batch. The next LLM
-round reads the refusal and may retry; a retry that ends without a send
-releases the claims, so the newer message gets its own run. A queued run
-whose addressed rows are already `handled` starts no agent run; one
-whose row is still claimed waits for the active run to settle it,
-bounded by `WAHABOT_RUN_TIMEOUT`.
+`delivery_guard` before delivering. The guard queries only pending rows
+newer than the run's start and claims them under the run's owner; done,
+failed, silent and intent-owned (`delivering`) rows cannot supersede a
+reply. A refusal renders the claimed rows (newest-first selection within a
+1,200-character budget, rendered oldest-first), returns their records with
+the re-read instruction, and blocks every remaining delivery call in that
+tool batch. The next LLM round reads the refusal and may retry; a retry
+that ends without a send releases the claims, so the newer message gets its
+own run. A queued run whose addressed rows are already `handled` starts no
+agent run; one whose row is still claimed waits for the active run to
+settle it, bounded by `WAHABOT_RUN_TIMEOUT`; one whose row is `delivering`
+is skipped because an outbound intent owns the next attempt.
+
+A confirmed send settles its intake rows `delivered`, finishes the intent
+`sent`, and cancels the turn's remaining retryable intents. A definite
+retryable failure moves the rows to `delivering` and leaves the retry to
+the intent (bounded backoff). A timeout or other ambiguous outcome makes
+the intent `unknown` and the rows `operator_required`; terminal failures do
+the same. Those outcomes are never retried automatically.
 
 Only addressed rows take part: unaddressed group chatter, operator-folded
 `fromMe` messages and an album's unaddressed image rows can neither
 supersede a reply nor keep an answered album alive. The intake window is
-`max_age_for_run_timeout(run_timeout)` (30 minutes at the default
-timeout), so a claim cannot expire inside the run that holds it. The
-final-text check runs before `remember`, so a superseded answer is never
-written to chat memory.
+`max_age_for_run_timeout(run_timeout)` (30 minutes at the default timeout),
+so a claim cannot expire inside the run that holds it. The final-text check
+runs before `remember`, so a superseded answer is never written to chat
+memory.
+
+Recovery runs on startup and every 60 seconds. Startup releases every
+`processing` claim (the previous process is gone) without spending an
+attempt and finishes rows for intents already `sent`. The tick replays due
+intents under the same chat lock as live runs, re-runs pending/failed rows
+in their burst or album shape, and prepares one durable operator notice for
+delayed, operator-required or unknown work. Recovered rows older than
+`reply_window_days` in the session config become operator-required with no
+customer send; rows older than `WAHABOT_INTAKE_RECOVERY_MINUTES` are still
+answered, but the text starts with a short apology.
+`WAHABOT_INTAKE_MAX_ATTEMPTS` bounds retries and
+`WAHABOT_INTAKE_RETENTION_DAYS` prunes done rows.
 
 ### Run concurrency and the run-scoped target
 
@@ -329,10 +355,11 @@ evicting there would hand the next caller a fresh lock running
 concurrently with the old waiter.
 
 Everything a run needs — session, chat id, the once-per-run
-`sent`/`reacted` delivery latches, the operator arming flag, the intake
-ledger with its claimed records, the final-text anchor and the run
-outcome — lives in a `RunTarget` dataclass bound for the run's duration
-through `contextvars` (`bind_target` / `current_target` in
+`sent`/`reacted` delivery latches, the operator arming flag, the run
+owner and bound intake ids, the intake ledger with its claimed records,
+the final-text anchor and the run outcome — lives in a `RunTarget`
+dataclass bound for the run's duration through `contextvars`
+(`bind_target` / `current_target` in
 `ai/tools/whatsapp.py`). The workflow engine creates every step task
 (and each tool's `asyncio.to_thread` worker) inside the run's
 context, so every tool of a run resolves **its own run's** target:
