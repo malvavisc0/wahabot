@@ -22,7 +22,7 @@ from wahabot.core.waha import WahaClient
 class WahaTransport:
     """Delegate to ``WahaClient`` while persisting each outbound intent."""
 
-    def __init__(self, client: WahaClient, intents: IntentStore) -> None:
+    def __init__(self, client: WahaClient, intents: IntentStore | None = None) -> None:
         self.client = client
         self.intents = intents
 
@@ -35,35 +35,41 @@ class WahaTransport:
         payload: dict[str, Any],
         call: Callable[[], Any],
     ) -> Any:
-        intent = self.intents.prepare(
+        intents = self.intents
+        if intents is None:
+            return call()
+        intent = intents.prepare(
             session=session,
             chat_id=chat_id,
             kind=kind,
             payload=payload,
             intake_ids=list(current_intake_ids()),
         )
-        self.intents.sending(intent.id)
+        intents.sending(intent.id)
         try:
             result = call()
         except Exception as exc:
             self.record_failure(intent, exc)
             raise
-        self.intents.sent(intent.id, result if isinstance(result, str) else "")
+        intents.sent(intent.id, result if isinstance(result, str) else "")
         return result
 
     def record_failure(self, intent: DeliveryIntent, exc: Exception) -> None:
         """Persist the failed or unknown state for one intent."""
+        intents = self.intents
+        if intents is None:
+            return
         disposition = classify_send_error(exc)
         if disposition == RETRYABLE:
-            self.intents.failed(
+            intents.failed(
                 intent.id,
                 str(exc),
                 next_attempt_at=time.time() + backoff_seconds(intent.attempts + 1),
             )
         elif disposition == AMBIGUOUS:
-            self.intents.unknown(intent.id, str(exc))
+            intents.unknown(intent.id, str(exc))
         else:
-            self.intents.failed(
+            intents.failed(
                 intent.id, str(exc), next_attempt_at=None, operator_required=True
             )
 
@@ -195,28 +201,30 @@ class WahaTransport:
         self, now: float | None = None, *, recover_sending: bool = True
     ) -> list[str]:
         """Resume prepared intents, schedule due failures, settle sendings."""
+        intents = self.intents
+        if intents is None:
+            return []
         moment = time.time() if now is None else now
         replayed: list[str] = []
-        for intent in self.intents.recoverable(moment):
-            recovered = self._recover_one(intent, moment, recover_sending)
+        for intent in intents.recoverable(moment):
+            recovered = self._recover_one(intents, intent, moment, recover_sending)
             if recovered is not None:
                 replayed.append(recovered)
         return replayed
 
     def _recover_one(
         self,
+        intents: IntentStore,
         intent: DeliveryIntent,
         moment: float,
         recover_sending: bool,
     ) -> str | None:
         if intent.state == SENDING:
             if recover_sending:
-                self.intents.unknown(
-                    intent.id, "process stopped while the send was in flight"
-                )
+                intents.unknown(intent.id, "process stopped while the send was in flight")
             return None
-        if intent.state == "failed" and self.intents.exhausted(intent):
-            self.intents.failed(
+        if intent.state == "failed" and intents.exhausted(intent):
+            intents.failed(
                 intent.id,
                 intent.last_error,
                 next_attempt_at=None,
@@ -227,13 +235,13 @@ class WahaTransport:
             intent.next_attempt_at is None or intent.next_attempt_at > moment
         ):
             return None
-        self.intents.sending(intent.id)
+        intents.sending(intent.id)
         try:
             result = self.replay(intent)
         except Exception as exc:
             self.record_failure(intent, exc)
             return None
-        self.intents.sent(intent.id, result if isinstance(result, str) else "")
+        intents.sent(intent.id, result if isinstance(result, str) else "")
         return intent.id
 
     def replay(self, intent: DeliveryIntent) -> Any:
