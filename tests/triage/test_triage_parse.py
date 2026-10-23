@@ -33,6 +33,7 @@ from wahabot.ai.triage import (
     is_tool_allowed,
     parse_verdict,
     render_context,
+    repair_question_gist,
     restore_cross_sender_attack,
     result_from_dict,
     result_to_dict,
@@ -185,6 +186,38 @@ def test_cross_sender_probe_is_restored_when_the_model_names_it() -> None:
     )
 
     assert restored.adversarial is True
+
+
+def test_question_gist_is_dropped() -> None:
+    """A gist that restates a question as a statement never reaches the ledger."""
+    verdict = TriageVerdict(
+        participate=False,
+        why="human plans, not for the assistant",
+        gist="confirmed next Wednesday reservation",
+    )
+
+    out = repair_question_gist(
+        verdict, "[[18:57 Roy #m33]] text :: Dann bleiben wir mit nächsten Mittwoch ja?"
+    )
+
+    assert out.gist == ""
+    assert out.participate is False
+
+
+def test_question_gist_with_an_asking_word_stays() -> None:
+    verdict = TriageVerdict(gist="asked whether next Wednesday is confirmed")
+
+    kept = repair_question_gist(verdict, "so, next Wednesday, yes?")
+
+    assert kept.gist == "asked whether next Wednesday is confirmed"
+
+
+def test_statement_gist_is_never_dropped() -> None:
+    verdict = TriageVerdict(gist="confirmed next Wednesday reservation")
+
+    kept = repair_question_gist(verdict, "next Wednesday works for us.")
+
+    assert kept.gist == "confirmed next Wednesday reservation"
 
 
 def test_triage_result_roundtrips_through_json() -> None:

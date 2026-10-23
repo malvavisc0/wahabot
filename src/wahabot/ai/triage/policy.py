@@ -63,6 +63,8 @@ CROSS_SENDER_WHY = (
     "another customer",
 )
 
+QUESTION_GIST_MARKERS = ("ask", "asked", "asks", "question", "whether", "if ")
+
 
 def calm_angry_customer(verdict: TriageVerdict, message: str) -> TriageVerdict:
     """Undo an adversarial read that is really an angry support request.
@@ -98,6 +100,21 @@ def restore_cross_sender_attack(verdict: TriageVerdict, message: str) -> TriageV
     if not any(marker in why for marker in CROSS_SENDER_WHY):
         return verdict
     return replace(verdict, adversarial=True)
+
+
+def repair_question_gist(verdict: TriageVerdict, message: str) -> TriageVerdict:
+    """Drop a gist that restates a question as a statement.
+
+    An empty gist is safe: the ledger falls back to the message body
+    (records.mechanical_gist), so a wrong summary can never overwrite
+    what the member actually asked.
+    """
+    body = message.split(" :: ", 1)[-1].strip()
+    if not body.endswith("?"):
+        return verdict
+    if any(marker in verdict.gist.casefold() for marker in QUESTION_GIST_MARKERS):
+        return verdict
+    return replace(verdict, gist="")
 
 
 def format_turns(

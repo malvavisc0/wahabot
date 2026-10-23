@@ -1,9 +1,12 @@
 import asyncio
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
 from llama_index.core.llms.function_calling import FunctionCallingLLM
@@ -19,12 +22,17 @@ from tests.triage.support import (
     SESSION,
     FakeGate,
     Sentinel,
+    gate_settings,
+    gate_transport,
     message_event,
 )
 from tests.wire.support import _wait
+from wahabot.ai import observability
 from wahabot.ai.context import handle_message
 from wahabot.ai.messages import TURN_HANDLED_KWARG
 from wahabot.ai.triage import (
+    TriageContext,
+    TriageGate,
     TriageResult,
     TriageVerdict,
     parse_verdict,
@@ -351,3 +359,64 @@ def test_load_gate_labels_reads_recorded_verdicts(tmp_path: Path) -> None:
 
     assert labels["case-a"] == GateLabel(adversarial=True, participate=False)
     assert labels["case-b"] == GateLabel(escalate=True)
+
+
+class FakeSpan:
+    def __init__(self, observations: FakeObservations) -> None:
+        self.observations = observations
+
+    def update(self, **fields: Any) -> None:
+        self.observations.updates.append(fields)
+
+
+class FakeObservations:
+    """A stand-in for the Langfuse client's observation API."""
+
+    def __init__(self) -> None:
+        self.names: list[str] = []
+        self.updates: list[dict[str, Any]] = []
+
+    @contextmanager
+    def start_as_current_observation(self, **kwargs: Any) -> Iterator[FakeSpan]:
+        self.names.append(str(kwargs.get("name", "")))
+        yield FakeSpan(self)
+
+
+def _gate_context() -> TriageContext:
+    return TriageContext(session=SESSION, chat_id=GROUP, message="kai check the gate")
+
+
+def test_gate_complete_opens_one_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each verdict call is one visible observation named triage-gate."""
+    fake = FakeObservations()
+    monkeypatch.setattr(observability, "_client", fake)
+    gate = TriageGate(
+        gate_settings(tmp_path),
+        transport=gate_transport('{"adversarial": false, "escalate": false}'),
+    )
+
+    result = asyncio.run(gate.complete(_gate_context()))
+
+    assert fake.names == ["triage-gate"]
+    assert any(update.get("output") == result for update in fake.updates)
+
+
+def test_gate_timeout_still_opens_the_observation_marked_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timed-out gate call is one observation, marked ERROR, then re-raised."""
+
+    def refused(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("gate too slow")
+
+    fake = FakeObservations()
+    monkeypatch.setattr(observability, "_client", fake)
+    gate = TriageGate(gate_settings(tmp_path), transport=httpx.MockTransport(refused))
+
+    with pytest.raises(httpx.ReadTimeout):
+        asyncio.run(gate.complete(_gate_context()))
+
+    assert fake.names == ["triage-gate"]
+    assert any(update.get("level") == "ERROR" for update in fake.updates)

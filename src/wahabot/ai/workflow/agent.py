@@ -93,6 +93,7 @@ class FunctionCallingAgentWorkflow(
         settings: Settings | None = None,
         notebook: Notebook | None = None,
         rules_renderer: Callable[[], str] | None = None,
+        gate_rules_renderer: Callable[[], str] | None = None,
         thread_index: ThreadIndexer | None = None,
         triage: TriageGate | None = None,
         **kwargs: Any,
@@ -108,6 +109,7 @@ class FunctionCallingAgentWorkflow(
         self.settings = settings
         self.notebook = notebook
         self.rules_renderer = rules_renderer
+        self.gate_rules_renderer = gate_rules_renderer
         self.triage = triage
         self.triage_tasks: dict[int, asyncio.Task[TriageResult]] = {}
         # Tier 1: the per-chat rolling recap. Only a
@@ -178,6 +180,17 @@ class FunctionCallingAgentWorkflow(
             return self.rules_renderer().strip()
         except Exception:
             logger.warning("Session rules rendering failed; continuing without rules")
+            return ""
+
+    @override
+    def rendered_gate_rules(self) -> str:
+        """The gate brief line, or ""; the gate never fails on its brief."""
+        if self.gate_rules_renderer is None:
+            return ""
+        try:
+            return self.gate_rules_renderer().strip()
+        except Exception:
+            logger.warning("Gate rules rendering failed; continuing without them")
             return ""
 
     @step
@@ -285,6 +298,7 @@ def build_agent(
     system_prompt: str = "",
     prompt_renderer: Callable[[], str] | None = None,
     rules_renderer: Callable[[], str] | None = None,
+    gate_rules_renderer: Callable[[], str] | None = None,
     triage: TriageGate | None = None,
 ) -> FunctionCallingAgentWorkflow:
     """Build the function calling agent workflow with the configured LLM.
@@ -292,7 +306,9 @@ def build_agent(
     ``prompt_renderer`` (optional) returns the freshly rendered system
     prompt on every run, so date/time placeholders and config edits stay
     current for the life of the process. ``rules_renderer`` (optional)
-    feeds the pinned state block's session rules the same way.
+    feeds the pinned state block's session rules the same way;
+    ``gate_rules_renderer`` (optional) feeds the triage gate's bounded
+    brief instead of the agent's rules.
     """
     if not system_prompt:
         raise ValueError("build_agent requires a system_prompt")
@@ -314,5 +330,6 @@ def build_agent(
         settings=settings,
         notebook=Notebook(settings.data_dir),
         rules_renderer=rules_renderer,
+        gate_rules_renderer=gate_rules_renderer,
         triage=triage,
     )
