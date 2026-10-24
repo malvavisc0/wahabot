@@ -1,6 +1,7 @@
 """Customer JID identity, aliases and LID-to-phone resolution."""
 
 from collections.abc import Callable
+from typing import cast
 
 from loguru import logger
 
@@ -21,7 +22,7 @@ _ALIAS_KEYS = (
 def jid_text(value: object) -> str:
     """A JID from a plain string or a WAHA ``{_serialized: ...}`` object."""
     if isinstance(value, dict):
-        return str(value.get("_serialized") or "")
+        return str(cast("dict[str, object]", value).get("_serialized") or "")
     return str(value or "")
 
 
@@ -48,12 +49,14 @@ def alias_jids(event: WahaEvent) -> list[str]:
     data = event.payload.get("_data")
     if not isinstance(data, dict):
         return []
+    fields = cast("dict[str, object]", data)
     found: list[str] = []
-    for container in (data, data.get("key")):
+    for container in (fields, fields.get("key")):
         if not isinstance(container, dict):
             continue
+        values = cast("dict[str, object]", container)
         for key in _ALIAS_KEYS:
-            value = container.get(key)
+            value = values.get(key)
             if value:
                 found.append(jid_text(value))
     return found
