@@ -14,7 +14,11 @@ from wahabot.core.audit import save_action
 from wahabot.core.models import WahaEvent
 from wahabot.core.notebook import AUTHOR_OPERATOR, KIND_FACT
 from wahabot.core.runs import chat_lock
-from wahabot.core.tickets.alerts import operator_language, send_alert
+from wahabot.core.tickets.alerts import (
+    operator_language,
+    send_alert,
+    translate_cached,
+)
 from wahabot.core.tickets.attachments import persist_event_attachments
 from wahabot.core.tickets.lifecycle import (
     Inbound,
@@ -197,7 +201,9 @@ class TicketMixin(HandlerBase):
         self, events: list[WahaEvent], inbound: Inbound
     ) -> None:
         """Hold the customer with a short reply and nudge once per interval."""
-        await self.ticket_send_holding(events, inbound.ticket.chat_id)
+        await self.ticket_send_holding(
+            events, inbound.ticket.chat_id, inbound.contact.language
+        )
         if self.scheduler is not None:
             await asyncio.to_thread(self.scheduler.nudge, int(time.time()))
         await self.ticket_remember_and_settle(events, "operator_owned", "needs_you")
@@ -212,17 +218,36 @@ class TicketMixin(HandlerBase):
         except Exception as exc:
             logger.warning("Reopened ticket alert failed: {exc}", exc=exc)
         if not delivered:
-            await self.ticket_send_holding(events, inbound.ticket.chat_id)
+            await self.ticket_send_holding(
+                events, inbound.ticket.chat_id, inbound.contact.language
+            )
         await self.ticket_remember_and_settle(
             events, "operator_owned", "operator solved re-ask"
         )
 
-    async def ticket_send_holding(self, events: list[WahaEvent], chat_id: str) -> None:
-        """Send the holding reply, never failing the turn on a send error."""
+    async def ticket_send_holding(
+        self, events: list[WahaEvent], chat_id: str, language: str = ""
+    ) -> None:
+        """Send the holding reply in the customer's language, fail-soft.
+
+        The text is fixed, so the translation is cached by source hash:
+        one model call per language for the bot's lifetime.
+        """
+        text = _HOLDING_REPLY
+        store = self.ticket_store
+        if store is not None and language and language != "en":
+            try:
+                text = await asyncio.to_thread(
+                    translate_cached,
+                    store,
+                    _HOLDING_REPLY,
+                    language,
+                    self.ticket_translator,
+                )
+            except Exception as exc:
+                logger.warning("Holding translation failed: {exc}", exc=exc)
         try:
-            await asyncio.to_thread(
-                self.waha.send_text, events[0].session, chat_id, _HOLDING_REPLY
-            )
+            await asyncio.to_thread(self.waha.send_text, events[0].session, chat_id, text)
         except Exception as exc:
             logger.warning(
                 "Holding reply failed for {chat}: {exc}", chat=chat_id, exc=exc

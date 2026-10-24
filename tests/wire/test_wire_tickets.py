@@ -17,6 +17,8 @@ from wahabot.core.tickets.models import text_field
 
 CUSTOMER = "491555000001@c.us"
 
+SPANISH_HOLDING = "Sigue con el equipo. Alguien te escribirá aquí."
+
 
 def text_response(text: str) -> dict[str, object]:
     return {
@@ -48,6 +50,8 @@ def selector_for(
             return text_response(f'{{"kind": "{kind}"}}')
         if "Draft one WhatsApp message" in text:
             return text_response(draft)
+        if "Translate the following text" in text:
+            return text_response(SPANISH_HOLDING)
         if any(text_field(message, "role") == "tool" for message in entries):
             return text_response("the team has this")
         if "HANDOVER" in text:
@@ -360,3 +364,70 @@ def test_operator_command_can_look_up_a_ticket(bot: Bot) -> None:
         if text_field(message, "role") == "tool"
     )
     assert "Smoke Sender" in tool_text
+
+
+def test_holding_reply_is_translated_into_the_customers_language(bot: Bot) -> None:
+    handover_bot(bot)
+    bot.handlers.ticket_store.upsert_contact(CUSTOMER, language="es")
+    bot.waha.sent.clear()
+
+    bot.post(customer_event("ES_NEWS", "¿novedades?"))
+
+    assert _wait(
+        lambda: any(
+            entry[1] == CUSTOMER and entry[2] == SPANISH_HOLDING
+            for entry in bot.waha.sent
+        )
+    )
+    assert not any(
+        "message is still with the team" in entry[2] for entry in bot.waha.sent
+    )
+
+
+def test_media_only_message_opens_a_ticket_and_stores_the_file(bot: Bot) -> None:
+    running = bot.rebuild(vision=False)
+    photo = image_event()
+    photo["payload"]["from"] = CUSTOMER
+    photo["payload"]["participant"] = CUSTOMER
+    photo["payload"]["id"] = f"false_{CUSTOMER}_SILENT_PHOTO"
+    photo["payload"]["_data"]["id"] = {"_serialized": f"false_{CUSTOMER}_SILENT_PHOTO"}
+    photo["payload"]["body"] = ""
+    running.post(photo)
+
+    store = running.handlers.ticket_store
+    assert _wait(lambda: len(store.chat_tickets(CUSTOMER, limit=10)) == 1)
+    ticket = store.chat_tickets(CUSTOMER, limit=10)[0]
+    assert _wait(lambda: len(store.attachments(ticket.id)) == 1)
+    assert store.attachments(ticket.id)[0].kind == "image"
+    assert running.waha.sent == []
+    assert _wait(
+        lambda: (
+            running.ledger.row(
+                running.settings.session, CUSTOMER, f"false_{CUSTOMER}_SILENT_PHOTO"
+            ).outcome
+            == "silent"
+        )
+    )
+
+
+def test_media_only_burst_opens_a_ticket_and_stores_the_file(bot: Bot) -> None:
+    running = bot.rebuild(burst_enabled=True, burst_inactivity_s=60.0, vision=False)
+    photo = image_event()
+    photo["payload"]["from"] = CUSTOMER
+    photo["payload"]["participant"] = CUSTOMER
+    photo["payload"]["id"] = f"false_{CUSTOMER}_MEDIA_BURST"
+    photo["payload"]["_data"]["id"] = {"_serialized": f"false_{CUSTOMER}_MEDIA_BURST"}
+    photo["payload"]["body"] = ""
+    running.post(photo)
+    assert running.waha.sent == []
+    running.bursts.reset()
+
+    restarted = running.restart(vision=False)
+    asyncio.run(restarted.recovery.startup())
+
+    store = restarted.handlers.ticket_store
+    assert _wait(lambda: len(store.chat_tickets(CUSTOMER, limit=10)) == 1)
+    ticket = store.chat_tickets(CUSTOMER, limit=10)[0]
+    assert _wait(lambda: len(store.attachments(ticket.id)) == 1)
+    assert store.attachments(ticket.id)[0].kind == "image"
+    assert restarted.waha.sent == []
