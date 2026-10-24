@@ -306,6 +306,13 @@ class ProfilePictureSchema(BaseModel):
     reason: str = Field(default="", description=REASON_DESCRIPTION)
 
 
+class SearchKnowledgeSchema(BaseModel):
+    """Search the customer-maintained published answers."""
+
+    query: str = Field(description="What the customer is asking about.")
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
+
+
 class SupportStateSchema(BaseModel):
     """Read the current ticket and contact state."""
 

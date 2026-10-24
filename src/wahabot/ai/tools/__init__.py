@@ -10,6 +10,8 @@ for all of them, and ``envelope`` the unified JSON envelope
 (``mode``), and the two niche research tools were dropped.
 """
 
+from collections.abc import Callable
+
 from llama_index.core.tools import BaseTool
 
 from wahabot.ai.tools.external import (
@@ -18,8 +20,10 @@ from wahabot.ai.tools.external import (
     web_search_builder,
 )
 from wahabot.ai.tools.image import image_builder
+from wahabot.ai.tools.knowledge import search_knowledge
 from wahabot.ai.tools.notebook import notebook_builder
-from wahabot.ai.tools.tickets import OperatorLanguage, build_ticket_tools
+from wahabot.ai.tools.ticket_common import OperatorLanguage
+from wahabot.ai.tools.tickets import build_ticket_tools
 from wahabot.ai.tools.whatsapp import (
     EscalationChannel,
     escalate,
@@ -31,6 +35,8 @@ from wahabot.ai.tools.whatsapp import (
     send_message,
     stay_silent,
 )
+from wahabot.core.answers.service import AnswerService
+from wahabot.core.schedule.models import OpeningState
 from wahabot.core.tickets.alerts import Translator
 from wahabot.core.tickets.store import TicketStore
 from wahabot.core.transport import Transport
@@ -47,6 +53,10 @@ def build_default_tools(
     ticket_store: TicketStore | None = None,
     ticket_translator: Translator | None = None,
     ticket_operator_language: OperatorLanguage = "",
+    answer_service: AnswerService | None = None,
+    ticket_schedule: Callable[[], OpeningState] | None = None,
+    ticket_night_number: Callable[[], str] | None = None,
+    ticket_away_message: Callable[[], str] | None = None,
 ) -> list[BaseTool]:
     """Build all bundled tools.
 
@@ -73,6 +83,7 @@ def build_default_tools(
         forward_message(waha),
         web_search_builder(settings),
         visit_url_builder(settings),
+        search_knowledge(answer_service),
     ]
     if settings.shell_tool:
         tools.append(shell_builder(settings))
@@ -83,6 +94,9 @@ def build_default_tools(
             waha,
             operator_language=ticket_operator_language,
             translator=ticket_translator,
+            schedule=ticket_schedule,
+            night_number=ticket_night_number,
+            away_message=ticket_away_message,
         )
     )
     tools.append(profile_picture_builder(waha))

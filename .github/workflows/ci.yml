@@ -28,6 +28,14 @@ jobs:
           python-version: "3.14"
           enable-cache: true
 
+      # Document extraction is exercised for real (PDF text, scanned-page
+      # OCR, DOCX conversion), matching the binaries the Docker image ships.
+      - name: Install document tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            poppler-utils tesseract-ocr tesseract-ocr-eng pandoc
+
       - name: Sync dependencies
         run: uv sync --locked
 

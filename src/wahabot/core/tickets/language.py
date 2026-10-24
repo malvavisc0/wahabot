@@ -259,3 +259,10 @@ def detect_language(text: str) -> str:
     if not words:
         return ""
     return strong_language(words) or best_language(language_scores(words))
+
+
+def operator_language_for(
+    configured: str, detected: str = "", default: str = "en"
+) -> str:
+    """The operator-facing language: setting, then detection, then English."""
+    return (configured or detected or default).strip() or default

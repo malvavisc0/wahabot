@@ -8,11 +8,13 @@ from dataclasses import dataclass, field
 
 from loguru import logger
 
+from wahabot.core.answers.service import AnswerService
 from wahabot.core.tickets.facts import (
     fact_tokens,
     mismatch_tokens,
     omitted_tokens,
 )
+from wahabot.core.tickets.language import detect_language
 from wahabot.core.tickets.models import (
     Actor,
     Contact,
@@ -38,15 +40,17 @@ Remember = Callable[[str], Awaitable[None]]
 
 RESOLUTION = "resolution"
 INSTRUCTION = "instruction"
+ANSWER = "answer"
 AMBIGUOUS = "ambiguous"
-KINDS = frozenset({RESOLUTION, INSTRUCTION, AMBIGUOUS})
+KINDS = frozenset({RESOLUTION, INSTRUCTION, ANSWER, AMBIGUOUS})
 
 _CLASSIFY_PROMPT = (
     "Classify one operator reply for a support ticket. Return strict JSON only: "
-    '{{"kind": "resolution"|"instruction"|"ambiguous"}}. '
-    "resolution means the operator says what was done or decided for the customer. "
+    '{{"kind": "resolution"|"instruction"|"answer"|"ambiguous"}}. '
+    "resolution means the operator did a business action for the customer. "
     "instruction means the operator asks the customer to do or answer something. "
-    "ambiguous means neither is clear.\n\nOperator reply:\n{text}"
+    "answer means the operator explains something, with no business action. "
+    "ambiguous means none is clear.\n\nOperator reply:\n{text}"
 )
 
 _DRAFT_PROMPT = (
@@ -63,11 +67,63 @@ class ReplyOutcome:
     """The operator-facing result of one routed reply."""
 
     confirmation: str
+    detected: str = ""
     sent: bool = False
     kind: str = AMBIGUOUS
     draft: str = ""
+    save_ticket: int | None = None
     mismatches: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
+
+
+def should_offer_save(kind: str) -> bool:
+    """Whether an answer-shaped reply may be saved as a published answer."""
+    return kind == ANSWER
+
+
+SAVE_HINT_PREFIX = "Should I answer this myself next time?"
+_SAVE_HINT_SUFFIX = re.compile(
+    r"\n" + re.escape(SAVE_HINT_PREFIX) + r" Reply save \d+\.\s*$"
+)
+
+
+def save_hint(ticket_number: int) -> str:
+    """The one-line save offer, with the literal command preserved."""
+    return f"{SAVE_HINT_PREFIX} Reply save {ticket_number}."
+
+
+def strip_save_hint(confirmation: str) -> str:
+    """Remove a trailing save offer so it can be rebuilt after translation."""
+    return _SAVE_HINT_SUFFIX.sub("", confirmation).rstrip()
+
+
+def localized_confirmation(
+    outcome: ReplyOutcome,
+    language: str,
+    translator: Callable[[str, str], str] | None,
+) -> str:
+    """Translate the human confirmation while keeping the save command literal."""
+    base = (
+        strip_save_hint(outcome.confirmation)
+        if outcome.save_ticket is not None
+        else outcome.confirmation
+    )
+    if language == "en" or translator is None:
+        translated = base
+    else:
+        try:
+            translated = translator(base, language)
+        except Exception:
+            translated = base
+    if outcome.save_ticket is None:
+        return translated
+    hint = SAVE_HINT_PREFIX
+    if language != "en" and translator is not None:
+        try:
+            hint = translator(SAVE_HINT_PREFIX, language) or SAVE_HINT_PREFIX
+        except Exception:
+            hint = SAVE_HINT_PREFIX
+    return f"{translated}\n{hint} Reply save {outcome.save_ticket}."
 
 
 def parse_kind(raw: str) -> str:
@@ -122,9 +178,9 @@ def customer_words(store: TicketStore, ticket: Ticket) -> str:
     return event.body if event is not None else ticket.summary
 
 
-def held_payload(kind: str, draft: str) -> str:
+def held_payload(kind: str, draft: str, question: str = "") -> str:
     """Store the held draft with the classification that will resume it."""
-    return json.dumps({"kind": kind, "draft": draft})
+    return json.dumps({"kind": kind, "draft": draft, "question": question})
 
 
 def read_held(body: str) -> tuple[str, str]:
@@ -139,9 +195,20 @@ def read_held(body: str) -> tuple[str, str]:
     return (kind if kind in KINDS else RESOLUTION, text_field(value, "draft"))
 
 
+def held_question(body: str, fallback: str) -> str:
+    """The customer message a held draft answered, or the current one."""
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError:
+        return fallback
+    if not isinstance(value, dict):
+        return fallback
+    return text_field(value, "question") or fallback
+
+
 def confirmation(contact: Contact, ticket: Ticket, kind: str, draft: str) -> str:
     """The short confirmation that names recipient and ticket state."""
-    if kind == RESOLUTION:
+    if kind in (RESOLUTION, ANSWER):
         return f"Sent to {contact.display}: {draft} Ticket {ticket.number} done."
     return f"Asked {contact.display}: {draft} Ticket {ticket.number} waiting for them."
 
@@ -186,7 +253,7 @@ def hold_outcome(
         ticket.id,
         Actor.OPERATOR.value,
         EventKind.HELD.value,
-        held_payload(kind, draft),
+        held_payload(kind, draft, customer_words(store, ticket)),
         at=moment,
     )
     if contact.last_inbound_at is None:
@@ -249,6 +316,7 @@ async def handle_operator_reply(
     complete: Completer,
     reply_window_days: int,
     remember: Remember | None = None,
+    answer_service: AnswerService | None = None,
     now: int | None = None,
 ) -> ReplyOutcome:
     """Classify, draft, verify and deliver one operator reply."""
@@ -278,7 +346,7 @@ async def handle_operator_reply(
     held = hold_outcome(store, ticket, contact, kind, draft, moment, reply_window_days)
     if held is not None:
         return held
-    return await relay_outcome(
+    outcome = await relay_outcome(
         store,
         waha,
         session,
@@ -290,6 +358,32 @@ async def handle_operator_reply(
         moment,
         remember,
     )
+    outcome.detected = detect_language(operator_text)
+    if outcome.sent and should_offer_save(kind) and answer_service is not None:
+        offer_answer_candidate(answer_service, store, ticket, outcome)
+    return outcome
+
+
+def offer_answer_candidate(
+    service: AnswerService,
+    store: TicketStore,
+    ticket: Ticket,
+    outcome: ReplyOutcome,
+    *,
+    question: str | None = None,
+) -> None:
+    """Store the unsaved candidate and add the one-line save offer."""
+    try:
+        service.offer_candidate(
+            ticket.id,
+            customer_words(store, ticket) if question is None else question,
+            outcome.draft,
+        )
+    except Exception as exc:
+        logger.warning("Answer candidate was not stored: {exc}", exc=exc)
+        return
+    outcome.save_ticket = ticket.number
+    outcome.confirmation = f"{outcome.confirmation}\n{save_hint(ticket.number)}"
 
 
 def send_reply(
@@ -320,12 +414,9 @@ def send_reply(
         [sent_id],
         at=moment,
     )
-    state = (
-        TicketState.DONE.value
-        if kind == RESOLUTION
-        else TicketState.WAITING_CUSTOMER.value
-    )
-    done_by = DoneBy.OPERATOR.value if kind == RESOLUTION else None
+    resolved = kind in (RESOLUTION, ANSWER)
+    state = TicketState.DONE.value if resolved else TicketState.WAITING_CUSTOMER.value
+    done_by = DoneBy.OPERATOR.value if resolved else None
     store.update_ticket(
         ticket.id,
         TicketUpdate(state=state, done_by=done_by),
@@ -334,6 +425,7 @@ def send_reply(
         body=operator_text or draft,
         at=moment,
     )
+    store.cancel_notices(ticket.id, moment)
     return True
 
 
@@ -358,6 +450,7 @@ async def deliver_held_event(
     event: TicketEvent,
     moment: int,
     remember: Remember | None,
+    answer_service: AnswerService | None = None,
 ) -> ReplyOutcome:
     """Deliver one held draft and report its outcome."""
     kind, draft = read_held(event.body)
@@ -369,12 +462,21 @@ async def deliver_held_event(
         )
     if remember is not None:
         await remember(draft)
-    return ReplyOutcome(
+    outcome = ReplyOutcome(
         confirmation=confirmation(contact, ticket, kind, draft),
         sent=True,
         kind=kind,
         draft=draft,
     )
+    if should_offer_save(kind) and answer_service is not None:
+        offer_answer_candidate(
+            answer_service,
+            store,
+            ticket,
+            outcome,
+            question=held_question(event.body, customer_words(store, ticket)),
+        )
+    return outcome
 
 
 async def deliver_held(
@@ -385,6 +487,7 @@ async def deliver_held(
     contact: Contact,
     *,
     remember: Remember | None = None,
+    answer_service: AnswerService | None = None,
     now: int | None = None,
 ) -> ReplyOutcome | None:
     """Send every held draft that followed the last confirmed relay."""
@@ -395,7 +498,15 @@ async def deliver_held(
     outcome: ReplyOutcome | None = None
     for event in pending:
         outcome = await deliver_held_event(
-            store, waha, session, ticket, contact, event, moment, remember
+            store,
+            waha,
+            session,
+            ticket,
+            contact,
+            event,
+            moment,
+            remember,
+            answer_service,
         )
         if not outcome.sent:
             return outcome

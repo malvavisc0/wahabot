@@ -22,7 +22,7 @@ from wahabot.core.tickets.alerts import (
 )
 from wahabot.core.tickets.attachments import persist_event_attachments
 from wahabot.core.tickets.identity import phone_alias
-from wahabot.core.tickets.language import detect_language
+from wahabot.core.tickets.language import detect_language, operator_language_for
 from wahabot.core.tickets.lifecycle import (
     GLOBAL_PAUSE_FOREVER,
     Inbound,
@@ -52,6 +52,7 @@ from wahabot.core.tickets.replies import (
     decision_fact,
     deliver_held,
     handle_operator_reply,
+    localized_confirmation,
 )
 from wahabot.core.tickets.router import (
     Route,
@@ -87,7 +88,7 @@ class TicketMixin(HandlerBase):
             return False
         if await self.ticket_thanks_turn(events, inbound):
             return True
-        if await self.ticket_deliver_held(inbound):
+        if await self.ticket_deliver_held(inbound, events[0]):
             refreshed = store.ticket(inbound.ticket.id)
             if refreshed is not None:
                 inbound.ticket = refreshed
@@ -173,7 +174,7 @@ class TicketMixin(HandlerBase):
         await self.ticket_remember_and_settle(events, "silent", "thanks")
         return True
 
-    async def ticket_deliver_held(self, inbound: Inbound) -> bool:
+    async def ticket_deliver_held(self, inbound: Inbound, event: WahaEvent) -> bool:
         """Send a held operator draft on the next customer message."""
         if self.ticket_store is None:
             return False
@@ -184,8 +185,18 @@ class TicketMixin(HandlerBase):
             inbound.ticket,
             inbound.contact,
             remember=self.ticket_remember_relay(inbound.ticket),
+            answer_service=self.answer_service,
         )
-        return outcome is not None and outcome.sent
+        if outcome is None or not outcome.sent:
+            return False
+        if outcome.save_ticket is not None:
+            config = self.config_reloader.current_config()
+            try:
+                confirmation = await self.ticket_confirmation(outcome, config)
+                await self.ticket_send_operator(event, confirmation)
+            except Exception as exc:
+                logger.warning("Held-draft confirmation failed: {exc}", exc=exc)
+        return True
 
     async def ticket_needs_you_turn(
         self, events: list[WahaEvent], inbound: Inbound
@@ -403,6 +414,9 @@ class TicketMixin(HandlerBase):
         if route.kind == RouteKind.WHATS_OPEN:
             await self.ticket_send_operator(event, whats_open_text(self.ticket_store))
             return True
+        if route.kind == RouteKind.SAVE:
+            await self.ticket_save_answer(event, route)
+            return True
         if route.kind in (RouteKind.CLOSE, RouteKind.REOPEN):
             await self.ticket_state_route(event, route)
             return True
@@ -414,6 +428,22 @@ class TicketMixin(HandlerBase):
             await self.ticket_send_operator(event, text)
             return True
         return False
+
+    async def ticket_save_answer(self, event: WahaEvent, route: Route) -> None:
+        """Save the newest answer candidate, or say there is none."""
+        service = self.answer_service
+        if service is None:
+            await self.ticket_send_operator(event, "Teaching is not available.")
+            return
+        ticket_id = route.ticket.id if route.ticket is not None else None
+        saved = service.save_latest_candidate(ticket_id)
+        if saved is None:
+            where = f" for ticket {route.ticket.number}" if route.ticket else ""
+            await self.ticket_send_operator(event, f"There is nothing to save{where}.")
+            return
+        await self.ticket_send_operator(
+            event, f"Saved answer {saved.id}: {saved.question}"
+        )
 
     async def ticket_reply_route(
         self, event: WahaEvent, route: Route, config: SessionConfig
@@ -446,6 +476,7 @@ class TicketMixin(HandlerBase):
                 complete=self.ticket_complete,
                 reply_window_days=config.reply_window_days,
                 remember=self.ticket_remember_relay(ticket),
+                answer_service=self.answer_service,
             )
             if outcome.sent:
                 await self.ticket_write_fact(event, ticket, route.text, outcome)
@@ -482,15 +513,10 @@ class TicketMixin(HandlerBase):
         self, outcome: ReplyOutcome, config: SessionConfig
     ) -> str:
         """The operator-facing confirmation in the configured language."""
-        language = (config.operator_language or "en").strip() or "en"
-        if language == "en" or self.ticket_translator is None:
-            return outcome.confirmation
-        try:
-            return await asyncio.to_thread(
-                self.ticket_translator, outcome.confirmation, language
-            )
-        except Exception:
-            return outcome.confirmation
+        language = operator_language_for(config.operator_language, outcome.detected)
+        return await asyncio.to_thread(
+            localized_confirmation, outcome, language, self.ticket_translator
+        )
 
     async def ticket_state_route(self, event: WahaEvent, route: Route) -> None:
         """Close or reopen a numbered ticket."""

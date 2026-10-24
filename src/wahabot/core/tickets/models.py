@@ -131,6 +131,7 @@ class Attachment:
     sha256: str = ""
     path: str = ""
     derived_text: str = ""
+    page_count: int = 0
 
 
 @dataclass(slots=True)

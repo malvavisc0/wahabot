@@ -17,6 +17,7 @@ from wahabot.ai.tools.whatsapp import EscalationChannel, RunTarget
 from wahabot.ai.triage import TriageGate
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.access import SessionConfig, SessionConfigReloader
+from wahabot.core.answers.service import AnswerService
 from wahabot.core.audit import save_run_outcome
 from wahabot.core.delivery.intents import IntentStore
 from wahabot.core.delivery.model import FAILED, PREPARED, SENDING, UNKNOWN
@@ -57,6 +58,7 @@ class HandlerBase:
     ticket_store: TicketStore | None
     ticket_translator: TicketTranslator | None
     scheduler: TicketScheduler | None
+    answer_service: AnswerService | None
     bursts: bursts.Bursts
     albums: albums.Albums
     started_at: float

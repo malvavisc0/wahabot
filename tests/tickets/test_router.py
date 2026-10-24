@@ -174,3 +174,25 @@ def test_unique_name_without_an_active_ticket_asks(store: TicketStore) -> None:
 
     assert route.kind == RouteKind.ASK
     assert "No active ticket" in route.text
+
+
+def test_bare_save_routes_to_the_save_command(store: TicketStore) -> None:
+    route = route_message(store, operator_event("save"))
+    assert route.kind == RouteKind.SAVE
+    assert route.ticket is None
+
+
+def test_save_with_a_ticket_number_targets_that_ticket(store: TicketStore) -> None:
+    _contact, ticket = make_ticket(store, CUSTOMER, "Smoke Sender", "m1")
+
+    route = route_message(store, operator_event(f"save {ticket.number}"))
+
+    assert route.kind == RouteKind.SAVE
+    assert route.ticket is not None and route.ticket.id == ticket.id
+
+
+def test_save_with_an_unknown_ticket_asks(store: TicketStore) -> None:
+    route = route_message(store, operator_event("save 999"))
+
+    assert route.kind == RouteKind.ASK
+    assert "999" in route.text

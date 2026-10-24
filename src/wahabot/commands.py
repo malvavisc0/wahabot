@@ -237,6 +237,7 @@ async def run_command_turn(
             settings=settings,
             waha=waha,
             armed=True,
+            surface="operator",
             pinned_note=pinned_note,
             ticket_store=ticket_store,
         )
@@ -247,7 +248,15 @@ async def run_command_turn(
             limit=settings.memory_token_limit,
             exc=exc,
         )
-        return "", RunTarget(session=event.session, chat_id=OPERATOR_CHAT_ID), exc
+        return (
+            "",
+            RunTarget(
+                session=event.session,
+                chat_id=OPERATOR_CHAT_ID,
+                surface="operator",
+            ),
+            exc,
+        )
     except Exception as exc:
         await classify_llm_failure(
             waha, event.session, exc, settings.llm_timeout, settings.run_timeout

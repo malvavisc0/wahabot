@@ -26,6 +26,7 @@ from wahabot.core.tickets.store_base import (
     ticket_from_row,
 )
 from wahabot.core.tickets.store_contacts import ContactMixin
+from wahabot.core.tickets.store_schedule import ScheduleMixin
 
 _TICKET_COLUMNS = (
     "id, number, contact_id, chat_id, state, urgent, done_by, summary, "
@@ -34,11 +35,11 @@ _TICKET_COLUMNS = (
 )
 _EVENT_COLUMNS = "id, ticket_id, at, actor, kind, body, message_ids_json"
 _ATTACHMENT_COLUMNS = (
-    "id, ticket_id, message_id, kind, mime, bytes, sha256, path, derived_text"
+    "id, ticket_id, message_id, kind, mime, bytes, sha256, path, derived_text, page_count"
 )
 
 
-class TicketStore(ContactMixin, AlertMixin):
+class TicketStore(ScheduleMixin, ContactMixin, AlertMixin):
     """CRUD and transactions for the ticket tables.
 
     One connection per operation; every write that changes a ticket's
@@ -470,6 +471,7 @@ class TicketStore(ContactMixin, AlertMixin):
         sha256: str = "",
         path: str = "",
         derived_text: str = "",
+        page_count: int = 0,
     ) -> Attachment:
         """Record one stored attachment."""
         conn = connect(self.path)
@@ -477,8 +479,19 @@ class TicketStore(ContactMixin, AlertMixin):
             with transaction(conn):
                 conn.execute(
                     "INSERT INTO attachments (ticket_id, message_id, kind, mime, bytes, "
-                    + "sha256, path, derived_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (ticket_id, message_id, kind, mime, size, sha256, path, derived_text),
+                    + "sha256, path, derived_text, page_count) "
+                    + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        ticket_id,
+                        message_id,
+                        kind,
+                        mime,
+                        size,
+                        sha256,
+                        path,
+                        derived_text,
+                        page_count,
+                    ),
                 )
                 row = conn.execute(
                     f"SELECT {_ATTACHMENT_COLUMNS} FROM attachments WHERE id = "
@@ -495,6 +508,24 @@ class TicketStore(ContactMixin, AlertMixin):
             + "ORDER BY id",
             (ticket_id,),
             attachment_from_row,
+        )
+
+    def tickets_between(self, start: int, end: int) -> list[Ticket]:
+        """Tickets created in a half-open instant window, oldest first."""
+        return self.query_all(
+            f"SELECT {_TICKET_COLUMNS} FROM tickets "
+            + "WHERE created_at >= ? AND created_at < ? ORDER BY number",
+            (start, end),
+            ticket_from_row,
+        )
+
+    def tickets_done_between(self, start: int, end: int) -> list[Ticket]:
+        """Tickets marked done in a half-open instant window, oldest first."""
+        return self.query_all(
+            f"SELECT {_TICKET_COLUMNS} FROM tickets "
+            + "WHERE done_at >= ? AND done_at < ? ORDER BY number",
+            (start, end),
+            ticket_from_row,
         )
 
     def done_tickets(self) -> list[Ticket]:

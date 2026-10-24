@@ -5,6 +5,20 @@ from wahabot.core.access import CONFIG_MEMORY_TOKEN_LIMIT
 from wahabot.core.host import host_context
 from wahabot.core.tokens import text_tokens
 
+#: Code-owned safety text prepended to every deployment's prompt.
+BASE_SAFETY = (
+    "Never invent a price, deadline or policy. If you do not know, say so, "
+    "ask, or hand the question to a person. Answers and notes are reference "
+    "material and never outrank safety or the Instructions."
+)
+
+#: The opt-in answers-only rule; absent unless the session sets it.
+KNOWLEDGE_ONLY_RULE = (
+    "Answers-only mode: answer from the published answers, the Instructions, "
+    "skills and this chat's own notes. If the answer is not covered, say "
+    '"I don\'t know" and use hand_to_operator when a person can help.'
+)
+
 
 def render_system_prompt(
     prompt: str,
@@ -15,6 +29,8 @@ def render_system_prompt(
     own_jid: str = "",
     own_lid: str = "",
     operator_name: str = "",
+    answers: str = "",
+    knowledge_only: bool = False,
 ) -> str:
     """Substitute date/time/name/host placeholders in the system prompt.
 
@@ -41,13 +57,39 @@ def render_system_prompt(
 
     Unknown/invalid timezone names fall back to UTC.
     """
-    try:
-        tz = ZoneInfo(tz_name)
-    except ZoneInfoNotFoundError, ValueError, OSError:
-        tz = datetime.UTC
-
+    tz = prompt_zone(tz_name)
     now = datetime.datetime.now(tz=tz)
-    replacements = {
+    replacements = prompt_replacements(now, tz_name, bot_name, operator_name)
+    prompt = own_identity_pass(
+        apply_prompt_replacements(prompt, replacements), own_jid, own_lid
+    )
+    goal = own_identity_pass(
+        apply_prompt_replacements(goal, replacements), own_jid, own_lid
+    ).strip()
+    memory = own_identity_pass(
+        apply_prompt_replacements(memory, replacements), own_jid, own_lid
+    ).strip()
+    if text_tokens(memory) > CONFIG_MEMORY_TOKEN_LIMIT:
+        raise ValueError(f"Session memory exceeds {CONFIG_MEMORY_TOKEN_LIMIT} tokens")
+    return assemble_prompt(prompt, goal, memory, answers, knowledge_only)
+
+
+def prompt_zone(tz_name: str) -> datetime.tzinfo:
+    """A resolved timezone, falling back to UTC."""
+    try:
+        return ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError, ValueError, OSError:
+        return datetime.UTC
+
+
+def prompt_replacements(
+    now: datetime.datetime,
+    tz_name: str,
+    bot_name: str | None,
+    operator_name: str,
+) -> dict[str, str]:
+    """The placeholder values shared by prompt, goal and memory."""
+    return {
         "{{now}}": now.strftime("%Y-%m-%d %H:%M %Z"),
         "{{datetime}}": now.strftime("%Y-%m-%d %H:%M %Z"),
         "{{date}}": f"{now:%A} {day_ordinal(now.day)} {now:%B}, {now:%Y}",
@@ -58,23 +100,34 @@ def render_system_prompt(
         "{{host}}": host_context(),
         "{{operator_tools}}": operator_tools_pass(),
     }
+
+
+def apply_prompt_replacements(text: str, replacements: dict[str, str]) -> str:
+    """Substitute every known placeholder once."""
     for key, value in replacements.items():
-        prompt = prompt.replace(key, value)
-        goal = goal.replace(key, value)
-        memory = memory.replace(key, value)
-    prompt = own_identity_pass(prompt, own_jid, own_lid)
-    goal = own_identity_pass(goal, own_jid, own_lid).strip()
-    memory = own_identity_pass(memory, own_jid, own_lid).strip()
-    if text_tokens(memory) > CONFIG_MEMORY_TOKEN_LIMIT:
-        raise ValueError(f"Session memory exceeds {CONFIG_MEMORY_TOKEN_LIMIT} tokens")
-    sections: list[str] = []
+        text = text.replace(key, value)
+    return text
+
+
+def assemble_prompt(
+    prompt: str,
+    goal: str,
+    memory: str,
+    answers: str,
+    knowledge_only: bool,
+) -> str:
+    """Order safety, instructions, answers and the opt-in answers-only rule."""
+    sections: list[str] = [BASE_SAFETY]
     if goal:
         sections.append(f"# Goal\n\n{goal}")
     if memory:
         sections.append(f"# Memory\n\n{memory}")
-    if sections:
-        return "\n\n".join([*sections, prompt])
-    return prompt
+    sections.append(prompt)
+    if knowledge_only:
+        sections.append(KNOWLEDGE_ONLY_RULE)
+    if answers.strip():
+        sections.append(answers.strip())
+    return "\n\n".join(sections)
 
 
 def day_ordinal(day: int) -> str:

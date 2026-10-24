@@ -26,12 +26,15 @@ from wahabot.ai.context import (
     roster_cache,
     sender_tag,
 )
+from wahabot.ai.context.prompt import BASE_SAFETY
 from wahabot.ai.history import (
     chat_visible_text,
 )
 from wahabot.core.models import WahaEvent
 from wahabot.core.waha import WahaClient
 from wahabot.settings import Settings
+
+SAFETY = BASE_SAFETY + "\n\n"
 
 
 def test_every_tool_takes_a_reason() -> None:
@@ -404,31 +407,34 @@ def test_render_system_prompt_drops_own_jid_line_when_unknown() -> None:
 
 def test_render_system_prompt_substitutes_operator_name() -> None:
     out = render_system_prompt("Defer to {{operator_name}}.", operator_name="Ada")
-    assert out == "Defer to Ada."
+    assert out == SAFETY + "Defer to Ada."
 
 
 def test_render_system_prompt_operator_name_empty_falls_back() -> None:
     out = render_system_prompt("Defer to {{operator_name}}.")
-    assert out == "Defer to the operator."
+    assert out == SAFETY + "Defer to the operator."
     out = render_system_prompt("Defer to {{operator_name}}.", operator_name="  ")
-    assert out == "Defer to the operator."
+    assert out == SAFETY + "Defer to the operator."
 
 
 def test_render_system_prompt_operator_name_in_goal() -> None:
     out = render_system_prompt(
         "Rules.", goal="Serve {{operator_name}}", operator_name="Ada"
     )
-    assert out.startswith("# Goal\n\nServe Ada\n\n")
+    assert out.startswith(SAFETY + "# Goal\n\nServe Ada\n\n")
 
 
 def test_render_system_prompt_memory_section() -> None:
     out = render_system_prompt("Rules.", goal="Goal.", memory="Never mention X.")
-    assert out == "# Goal\n\nGoal.\n\n# Memory\n\nNever mention X.\n\nRules."
+    assert out == SAFETY + "# Goal\n\nGoal.\n\n# Memory\n\nNever mention X.\n\nRules."
 
 
 def test_render_system_prompt_memory_empty_omitted() -> None:
-    assert render_system_prompt("Rules.", goal="Goal.") == "# Goal\n\nGoal.\n\nRules."
-    assert render_system_prompt("Rules.", memory="   ") == "Rules."
+    assert (
+        render_system_prompt("Rules.", goal="Goal.")
+        == SAFETY + "# Goal\n\nGoal.\n\nRules."
+    )
+    assert render_system_prompt("Rules.", memory="   ") == SAFETY + "Rules."
 
 
 def test_render_system_prompt_memory_placeholders() -> None:
@@ -436,7 +442,7 @@ def test_render_system_prompt_memory_placeholders() -> None:
     with unittest.mock.patch("wahabot.ai.context.prompt.datetime.datetime") as clock:
         clock.now.return_value = now
         out = render_system_prompt("Rules.", memory="Today is {{date}}.", tz_name="UTC")
-    assert out == "# Memory\n\nToday is Wednesday 14th October, 2026.\n\nRules."
+    assert out == SAFETY + "# Memory\n\nToday is Wednesday 14th October, 2026.\n\nRules."
     assert "{{date}}" not in out
 
 
@@ -451,7 +457,7 @@ def test_render_system_prompt_memory_identity_placeholders() -> None:
         own_lid=lid,
     )
     assert out == (
-        f"# Goal\n\nAccount {jid}.\n\n# Memory\n\n"
+        SAFETY + f"# Goal\n\nAccount {jid}.\n\n# Memory\n\n"
         f"Account {jid} and {lid}: `{jid}` or `{lid}`.\n\nRules."
     )
     assert "{{own_" not in out
@@ -464,7 +470,7 @@ def test_render_system_prompt_memory_unknown_identity() -> None:
             "Account {{own_jid}}.\nLID {{own_lid}}.\nIDs {{own_identities}}.\nKeep this."
         ),
     )
-    assert out == "# Memory\n\nKeep this.\n\nRules."
+    assert out == SAFETY + "# Memory\n\nKeep this.\n\nRules."
 
 
 def test_render_system_prompt_rejects_oversized_memory() -> None:

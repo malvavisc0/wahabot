@@ -1,47 +1,36 @@
 """Ticket tools: support state, updates, handover and splitting."""
 
 from collections.abc import Callable
-from dataclasses import replace
 
 from llama_index.core.tools import BaseTool, FunctionTool
 
 from wahabot.ai.tools.envelope import error, ok
+from wahabot.ai.tools.handover import hand_to_operator
 from wahabot.ai.tools.runcontext import (
     RunTarget,
     current_target,
-    fenced_message_id,
     log_action_reason,
     operator_run,
 )
 from wahabot.ai.tools.schemas import (
-    HandToOperatorSchema,
     NewTicketSchema,
     SupportStateSchema,
     UpdateTicketSchema,
 )
-from wahabot.ai.tools.whatsapp.targets import resolve_message_token
-from wahabot.core.tickets.alerts import (
-    AlertResult,
-    Translator,
-    alert_intent_key,
-    operator_language,
-    send_alert,
+from wahabot.ai.tools.ticket_common import (
+    OperatorLanguage,
+    merge_update,
+    ticket_context,
 )
+from wahabot.core.schedule.models import OpeningState
+from wahabot.core.teams.groups import team_capability_error
+from wahabot.core.tickets.alerts import Translator
 from wahabot.core.tickets.attachments import attachment_metadata
-from wahabot.core.tickets.models import (
-    Actor,
-    Contact,
-    DoneBy,
-    EventKind,
-    Ticket,
-    TicketState,
-    TicketUpdate,
-)
+from wahabot.core.tickets.models import Contact, DoneBy, Ticket, TicketState
 from wahabot.core.tickets.router import contacts_named
 from wahabot.core.tickets.store import TicketStore
 from wahabot.core.transport import Transport
 from wahabot.settings import Settings
-from wahabot.status.state import state as status_state
 
 _ALLOWED_STATES = frozenset(
     {
@@ -53,21 +42,6 @@ _ALLOWED_STATES = frozenset(
     }
 )
 _CUSTOMER_DONE_BY = frozenset({"assistant", "customer"})
-
-OperatorLanguage = str | Callable[[], str]
-
-
-def ticket_context(
-    store: TicketStore | None, ticket_id: int, chat_id: str
-) -> tuple[Ticket | None, Contact | None]:
-    """The current ticket and contact for a run, falling back to the chat."""
-    if store is None:
-        return None, None
-    ticket = store.ticket(ticket_id) if ticket_id else store.active_ticket(chat_id)
-    if ticket is None:
-        ticket = store.latest_ticket(chat_id)
-    contact = store.contact_by_id(ticket.contact_id) if ticket is not None else None
-    return ticket, contact
 
 
 def support_payload(
@@ -131,6 +105,8 @@ def support_state() -> BaseTool:
         if store is None:
             return error("tickets are not available for this run")
         log_action_reason("support_state", reason, number=number, name=name)
+        if target.surface == "team_group":
+            return team_support_payload(store, number, name)
         ticket: Ticket | None = None
         contact: Contact | None = None
         if operator_run(target) and (number is not None or name.strip()):
@@ -148,6 +124,30 @@ def support_state() -> BaseTool:
             "missing items and attachment metadata. Customer runs see only their "
             "own chat; operator runs may look up a ticket by number or unique name."
         ),
+    )
+
+
+def team_support_payload(store: TicketStore, number: int | None, name: str) -> str:
+    """Read-only ticket facts for a team-group run: open work or one lookup."""
+    if number is not None or name.strip():
+        ticket, contact = lookup_ticket(store, number, name)
+        return ok(**support_payload(store, ticket, contact))
+    return ok(
+        open_tickets=[
+            {
+                "number": ticket.number,
+                "person": (
+                    contact.display
+                    if (contact := store.contact_by_id(ticket.contact_id)) is not None
+                    else "unknown"
+                ),
+                "state": ticket.state,
+                "urgent": ticket.urgent,
+                "done_by": ticket.done_by,
+                "updated_at": ticket.updated_at,
+            }
+            for ticket in store.tickets_in_states()
+        ]
     )
 
 
@@ -179,27 +179,14 @@ def update_ticket() -> BaseTool:
         reason: str = "",
     ) -> str:
         target = current_target()
+        if refusal := team_capability_error(target, "ticket_write"):
+            return error(refusal)
         store: TicketStore | None = target.ticket_store
         if store is None:
             return error("tickets are not available for this run")
-        if state is not None and state not in _ALLOWED_STATES:
-            return error(f"unknown ticket state {state!r}")
-        if state == TicketState.NEEDS_YOU.value:
-            return error(
-                "use hand_to_operator for needs_you; it stages and alerts the operator"
-            )
-        if target.ticket_split and state in (
-            TicketState.WAITING_CUSTOMER.value,
-            TicketState.NEEDS_YOU.value,
-            TicketState.CLOSED.value,
-        ):
-            return error(
-                "a split ticket ends done; it cannot also be waiting, needs_you or closed"
-            )
-        if done_by is not None and not done_by_allowed(
-            done_by, target_operator=operator_run(target)
-        ):
-            return error("done_by=operator is reserved for operator runs")
+        staging_error = update_staging_error(target, state, done_by)
+        if staging_error:
+            return error(staging_error)
         ticket, _ = ticket_context(store, target.ticket_id, target.chat_id)
         if ticket is None:
             return error("no ticket exists for this chat")
@@ -227,6 +214,27 @@ def update_ticket() -> BaseTool:
     )
 
 
+def update_staging_error(
+    target: RunTarget, state: str | None, done_by: str | None
+) -> str | None:
+    """Validate a staged update before touching the ticket."""
+    if state is not None and state not in _ALLOWED_STATES:
+        return f"unknown ticket state {state!r}"
+    if state == TicketState.NEEDS_YOU.value:
+        return "use hand_to_operator for needs_you; it stages and alerts the operator"
+    if target.ticket_split and state in (
+        TicketState.WAITING_CUSTOMER.value,
+        TicketState.NEEDS_YOU.value,
+        TicketState.CLOSED.value,
+    ):
+        return "a split ticket ends done; it cannot also be waiting, needs_you or closed"
+    if done_by is not None and not done_by_allowed(
+        done_by, target_operator=operator_run(target)
+    ):
+        return "done_by=operator is reserved for operator runs"
+    return None
+
+
 def done_by_allowed(done_by: str, *, target_operator: bool) -> bool:
     """Whether this run may stage the given resolver."""
     if done_by in _CUSTOMER_DONE_BY:
@@ -234,307 +242,13 @@ def done_by_allowed(done_by: str, *, target_operator: bool) -> bool:
     return target_operator and done_by == DoneBy.OPERATOR.value
 
 
-def merged_details(
-    base: dict[str, object] | None, details: dict[str, str] | None
-) -> dict[str, object] | None:
-    """Merge a partial details dict into the run's staged dict."""
-    if details is None:
-        return base
-    return {**(base or {}), **details}
-
-
-def merged_missing(base: list[str] | None, missing: list[str] | None) -> list[str] | None:
-    """Add missing items while allowing an explicit empty list to clear them."""
-    if missing is None:
-        return base
-    if not missing:
-        return []
-    return list({item: None for item in [*(base or []), *missing]})
-
-
-def merge_update(
-    existing: TicketUpdate | None,
-    *,
-    state: str | None = None,
-    summary: str | None = None,
-    details: dict[str, str] | None = None,
-    missing: list[str] | None = None,
-    done_by: str | None = None,
-) -> TicketUpdate:
-    """Merge newly staged values into the run's update."""
-    base = existing or TicketUpdate()
-    return TicketUpdate(
-        state=state if state is not None else base.state,
-        summary=summary if summary is not None else base.summary,
-        details=merged_details(base.details, details),
-        missing=merged_missing(base.missing, missing),
-        done_by=done_by if done_by is not None else base.done_by,
-        urgent=base.urgent,
-    )
-
-
-def handover_preflight(
-    target: RunTarget, settings: Settings, attach_message_ids: list[str]
-) -> tuple[TicketStore, Ticket, Contact, list[str]] | str:
-    """Validate the run, ticket, attachments and operator target."""
-    store: TicketStore | None = target.ticket_store
-    if store is None:
-        return error("tickets are not available for this run")
-    ticket, contact = ticket_context(store, target.ticket_id, target.chat_id)
-    if ticket is None or contact is None:
-        return error("no ticket exists for this chat")
-    if ticket.state == TicketState.CLOSED.value:
-        return error("ticket is closed; reopen it before handing over")
-    selected, selection_error = resolve_attach_ids(
-        attach_message_ids, target.chat_id, target.session, settings, target
-    )
-    if selection_error:
-        return error(selection_error)
-    if status_state.operator_jid == "":
-        return error("no operator target is known; the alert was not sent")
-    return store, ticket, contact, selected
-
-
-def staged_ticket(ticket: Ticket, target: RunTarget, urgent: bool) -> Ticket:
-    """The ticket as the alert should show it, including this run's stages."""
-    update = target.ticket_update
-    details = dict(ticket.details)
-    if update is not None and update.details is not None:
-        details.update(update.details)
-    return replace(
-        ticket,
-        summary=(
-            update.summary
-            if update is not None and update.summary is not None
-            else ticket.summary
-        ),
-        details=details,
-        missing=(
-            list(update.missing)
-            if update is not None and update.missing is not None
-            else list(ticket.missing)
-        ),
-        urgent=urgent
-        or (update.urgent if update is not None else False)
-        or ticket.urgent,
-    )
-
-
-def persist_handover_values(store: TicketStore, ticket: Ticket) -> None:
-    """Make the values the operator saw durable before the run ends."""
-    store.update_ticket(
-        ticket.id,
-        TicketUpdate(
-            summary=ticket.summary,
-            details=ticket.details,
-            missing=ticket.missing,
-            urgent=ticket.urgent,
-        ),
-        actor=Actor.ASSISTANT.value,
-        kind=EventKind.STATE.value,
-        body="handover details",
-    )
-
-
-def stage_handover(target: RunTarget, ticket: Ticket, urgent: bool) -> None:
-    """Stage needs_you only after the transport confirmed the alert."""
-    target.ticket_id = ticket.id
-    staged = merge_update(target.ticket_update, state=TicketState.NEEDS_YOU.value)
-    target.ticket_update = replace(staged, urgent=urgent or ticket.urgent)
-
-
-def send_handover_alert(
-    store: TicketStore,
-    waha: Transport,
-    target: RunTarget,
-    ticket: Ticket,
-    contact: Contact,
-    view: Ticket,
-    selected: list[str] | None,
-    language_value: str,
-    translator: Translator | None,
-    *,
-    urgent: bool,
-    suffix: str,
-    label: str,
-) -> str:
-    """Send one handover alert and stage needs_you unless it was a duplicate."""
-    try:
-        result = send_alert(
-            store,
-            waha,
-            target.session,
-            status_state.operator_jid,
-            view,
-            contact,
-            language=operator_language(language_value),
-            translator=translator,
-            only_message_ids=selected,
-            alert_key=alert_intent_key(store, ticket, suffix),
-        )
-    except Exception as exc:
-        return error(f"{label} alert failed — the operator was not notified: {exc}")
-    if result.pending:
-        persist_handover_values(store, view)
-        stage_handover(target, view, urgent)
-        return ok(
-            ticket=ticket.number,
-            state=TicketState.NEEDS_YOU.value,
-            alert_ids=[],
-            pending=True,
-        )
-    if not result.delivered:
-        return error(f"{label} alert returned no message id; not confirmed")
-    persist_handover_values(store, view)
-    stage_handover(target, view, urgent)
-    return handover_envelope(view, result)
-
-
-def duplicate_handover(
-    store: TicketStore,
-    waha: Transport,
-    target: RunTarget,
-    ticket: Ticket,
-    contact: Contact,
-    view: Ticket,
-    selected: list[str] | None,
-    language_value: str,
-    translator: Translator | None,
-    urgent: bool,
-) -> str:
-    """Escalate an already-alerted ticket, or confirm nothing is new."""
-    if urgent and not ticket.urgent:
-        return send_handover_alert(
-            store,
-            waha,
-            target,
-            ticket,
-            contact,
-            view,
-            selected,
-            language_value,
-            translator,
-            urgent=urgent,
-            suffix="urgent",
-            label="urgent",
-        )
-    persist_handover_values(store, view)
-    stage_handover(target, ticket, urgent)
-    return ok(ticket=ticket.number, state=ticket.state, alert_ids=[], duplicate=True)
-
-
-def hand_to_operator(
-    settings: Settings,
-    waha: Transport,
-    language: OperatorLanguage = "",
-    translator: Translator | None = None,
-) -> BaseTool:
-    """Build the handover tool that stages needs_you and sends the alert."""
-
-    def hand_to_operator_fn(
-        reason: str, urgent: bool = False, attach_message_ids: list[str] | None = None
-    ) -> str:
-        target = current_target()
-        prepared = handover_preflight(target, settings, attach_message_ids or [])
-        if isinstance(prepared, str):
-            return prepared
-        store, ticket, contact, selected = prepared
-        language_value = language() if callable(language) else language
-        log_action_reason("hand_to_operator", reason, ticket=ticket.number)
-        view = staged_ticket(ticket, target, urgent)
-        if no_new_handover(store, ticket):
-            return duplicate_handover(
-                store,
-                waha,
-                target,
-                ticket,
-                contact,
-                view,
-                selected,
-                language_value,
-                translator,
-                urgent,
-            )
-        return send_handover_alert(
-            store,
-            waha,
-            target,
-            ticket,
-            contact,
-            view,
-            selected,
-            language_value,
-            translator,
-            urgent=urgent,
-            suffix="handover",
-            label="handover",
-        )
-
-    return FunctionTool.from_defaults(
-        fn=hand_to_operator_fn,
-        fn_schema=HandToOperatorSchema,
-        name="hand_to_operator",
-        description=(
-            "Hand this ticket to the operator: stage needs_you, copy the listed "
-            "attachments and send the alert. If the ticket is already needs_you, "
-            "only new information is sent. There is no cooldown and no silent drop."
-        ),
-    )
-
-
-def no_new_handover(store: TicketStore, ticket: Ticket) -> bool:
-    """Whether a needs-you ticket has nothing new since its last alert.
-
-    A recovered or retried run calls the tool again with the same
-    customer message; re-alerting would page the operator twice for one
-    event. A genuinely newer customer message still goes out.
-    """
-    if ticket.state != TicketState.NEEDS_YOU.value:
-        return False
-    alert = store.last_event(ticket.id, EventKind.ALERT.value)
-    customer = store.last_event(ticket.id, EventKind.CUSTOMER_MESSAGE.value)
-    return alert is not None and (customer is None or customer.id <= alert.id)
-
-
-def handover_envelope(ticket: Ticket, result: AlertResult) -> str:
-    """The confirmed handover's tool envelope."""
-    return ok(
-        ticket=ticket.number,
-        state=TicketState.NEEDS_YOU.value,
-        alert_ids=result.message_ids,
-        attachments_failed=result.failed_attachments,
-    )
-
-
-def resolve_attach_ids(
-    message_ids: list[str],
-    chat_id: str,
-    session: str,
-    settings: Settings,
-    target: RunTarget,
-) -> tuple[list[str], str | None]:
-    """Resolve `#m<n>` tokens and refuse paths or foreign ids."""
-    resolved: list[str] = []
-    for value in message_ids:
-        if "/" in value or "\\" in value:
-            return [], "raw file paths are invalid; pass a message id or #m<n> token"
-        token, token_error = resolve_message_token(
-            value, session=session, chat_id=chat_id, settings=settings, allow_search=False
-        )
-        if token_error:
-            return [], token_error
-        _, fence_error = fenced_message_id(token, target)
-        if fence_error:
-            return [], fence_error
-        resolved.append(token)
-    return resolved, None
-
-
 def new_ticket() -> BaseTool:
     """Build the split tool that stages a new ticket after delivery."""
 
     def new_ticket_fn(summary: str, reason: str = "") -> str:
         target = current_target()
+        if refusal := team_capability_error(target, "ticket_write"):
+            return error(refusal)
         store: TicketStore | None = target.ticket_store
         if store is None:
             return error("tickets are not available for this run")
@@ -576,6 +290,9 @@ def build_ticket_tools(
     *,
     operator_language: OperatorLanguage = "",
     translator: Translator | None = None,
+    schedule: Callable[[], OpeningState] | None = None,
+    night_number: Callable[[], str] | None = None,
+    away_message: Callable[[], str] | None = None,
 ) -> list[BaseTool]:
     """The ticket toolset, or [] when no ticket store is wired."""
     if store is None:
@@ -583,6 +300,14 @@ def build_ticket_tools(
     return [
         support_state(),
         update_ticket(),
-        hand_to_operator(settings, waha, operator_language, translator),
+        hand_to_operator(
+            settings,
+            waha,
+            operator_language,
+            translator,
+            schedule=schedule,
+            night_number=night_number,
+            away_message=away_message,
+        ),
         new_ticket(),
     ]

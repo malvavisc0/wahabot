@@ -11,6 +11,18 @@ from wahabot.ai.messages import (
 )
 from wahabot.ai.tools.url_videos import fetch_url_video, video_urls
 from wahabot.ai.video import caption_video, extract_frames, video_marker
+from wahabot.core.documents.extract import extract_bytes, is_document
+from wahabot.core.documents.limits import (
+    DOCUMENT_MARKER_KEY,
+    DOCUMENT_TEXT_KEY,
+    STATUS_UNREADABLE,
+    DocumentLimits,
+    DocumentText,
+    document_marker,
+    document_text_payload,
+    mark_document_failure,
+    unreadable_notice,
+)
 from wahabot.core.models import WahaEvent
 from wahabot.core.transcribe import fetch_transcript
 from wahabot.core.transport import Transport
@@ -72,6 +84,61 @@ def first_frame_png(data: bytes) -> bytes:
         buffer = io.BytesIO()
         img.convert("RGB").save(buffer, format="PNG")
         return buffer.getvalue()
+
+
+async def prepare_document_event(
+    event: WahaEvent, waha: Transport, settings: Settings
+) -> None:
+    """Extract a group document before the run; no-op for other messages.
+
+    Customer DMs go through the ticket attachment path, which extracts
+    and persists at the same time. This covers a document shared in a
+    listed team group or any other group turn.
+    """
+    raw_media = event.payload.get("media")
+    if not isinstance(raw_media, dict):
+        return
+    media = cast(dict[str, Any], raw_media)
+    mime = str(media.get("mimetype") or "")
+    filename = str(media.get("filename") or "")
+    url = str(media.get("url") or "")
+    if not url or not is_document(mime, filename):
+        return
+    try:
+        data = await asyncio.to_thread(waha.download_media, url, settings.max_file_bytes)
+    except Exception as exc:
+        logger.warning(
+            "Document download failed for {id}: {exc}",
+            id=str(event.payload.get("id", "")),
+            exc=exc,
+        )
+        mark_document_failure(
+            event, filename, mime, too_large=isinstance(exc, MediaTooLargeError)
+        )
+        return
+    try:
+        result = await asyncio.to_thread(
+            extract_bytes,
+            data,
+            mime,
+            filename,
+            DocumentLimits.from_settings(settings),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Document extraction failed for {id}: {exc}",
+            id=str(event.payload.get("id", "")),
+            exc=exc,
+        )
+        result = DocumentText(
+            text="",
+            status=STATUS_UNREADABLE,
+            notice=unreadable_notice(filename),
+            filename=filename,
+            mime=mime,
+        )
+    event.payload[DOCUMENT_MARKER_KEY] = document_marker(result)
+    event.payload[DOCUMENT_TEXT_KEY] = document_text_payload(result)
 
 
 async def video_transcript(settings: Settings, data: bytes, filename: str) -> str:
