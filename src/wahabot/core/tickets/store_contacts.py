@@ -66,7 +66,10 @@ class ContactMixin(StoreBase):
                         + "language = COALESCE(NULLIF(?, ''), language), "
                         + "external_user_ref = COALESCE(NULLIF(?, ''), "
                         + "external_user_ref), "
-                        + "last_inbound_at = COALESCE(?, last_inbound_at) "
+                        + "last_inbound_at = CASE "
+                        + "WHEN ? IS NULL THEN last_inbound_at "
+                        + "WHEN last_inbound_at IS NULL OR ? > last_inbound_at THEN ? "
+                        + "ELSE last_inbound_at END "
                         + "WHERE id = ?",
                         (
                             chat_id,
@@ -75,6 +78,8 @@ class ContactMixin(StoreBase):
                             display_name,
                             language,
                             external_user_ref,
+                            last_inbound_at,
+                            last_inbound_at,
                             last_inbound_at,
                             contact_id,
                         ),
@@ -118,6 +123,45 @@ class ContactMixin(StoreBase):
         """Set or clear one contact's pause deadline."""
         self.execute(
             "UPDATE contacts SET paused_until = ? WHERE chat_id = ?", (until, chat_id)
+        )
+
+    def set_contact_language(self, contact_id: int, language: str) -> None:
+        """Store a detected customer language once."""
+        self.execute(
+            "UPDATE contacts SET language = ? WHERE id = ?", (language, contact_id)
+        )
+
+    def set_chat_paused(self, chat_id: str, until: int | None) -> None:
+        """Set or clear a pause keyed by the chat, not a contact row."""
+        if until is None:
+            self.execute("DELETE FROM chat_pauses WHERE chat_id = ?", (chat_id,))
+            return
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                conn.execute(
+                    "INSERT INTO chat_pauses (chat_id, paused_until) VALUES (?, ?) "
+                    + "ON CONFLICT(chat_id) DO UPDATE SET "
+                    + "paused_until = excluded.paused_until",
+                    (chat_id, until),
+                )
+        finally:
+            conn.close()
+
+    def chat_paused_until(self, chat_id: str) -> int | None:
+        """A chat-keyed pause deadline, when one is set."""
+        return self.query_one(
+            "SELECT paused_until FROM chat_pauses WHERE chat_id = ?",
+            (chat_id,),
+            lambda item: int(item["paused_until"]),
+        )
+
+    def paused_chats(self) -> list[tuple[str, int]]:
+        """Every chat-keyed pause, oldest deadline first."""
+        return self.query_all(
+            "SELECT chat_id, paused_until FROM chat_pauses ORDER BY paused_until",
+            (),
+            lambda item: (str(item["chat_id"]), int(item["paused_until"])),
         )
 
     def translation(self, source_hash: str, target_lang: str) -> str | None:

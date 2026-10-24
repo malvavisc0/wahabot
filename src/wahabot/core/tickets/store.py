@@ -16,7 +16,9 @@ from wahabot.core.tickets.models import (
     TicketState,
     TicketUpdate,
     json_list,
+    json_object,
 )
+from wahabot.core.tickets.store_alerts import AlertMixin
 from wahabot.core.tickets.store_base import (
     attachment_from_row,
     contact_from_row,
@@ -36,7 +38,7 @@ _ATTACHMENT_COLUMNS = (
 )
 
 
-class TicketStore(ContactMixin):
+class TicketStore(ContactMixin, AlertMixin):
     """CRUD and transactions for the ticket tables.
 
     One connection per operation; every write that changes a ticket's
@@ -206,8 +208,10 @@ class TicketStore(ContactMixin):
             fields.append("summary = ?")
             params.append(update.summary)
         if update.details is not None:
+            merged = json_object(current["details_json"])
+            merged.update(update.details)
             fields.append("details_json = ?")
-            params.append(json.dumps(update.details, sort_keys=True))
+            params.append(json.dumps(merged, sort_keys=True))
         if update.missing is not None:
             fields.append("missing_json = ?")
             params.append(json.dumps(update.missing))
@@ -236,8 +240,8 @@ class TicketStore(ContactMixin):
             fields.extend(["done_at = ?", "closed_at = NULL"])
             params.append(moment)
         elif update.state == TicketState.CLOSED.value:
-            fields.extend(["closed_at = ?", "done_at = COALESCE(done_at, ?)"])
-            params.extend([moment, moment])
+            fields.append("closed_at = ?")
+            params.append(moment)
         elif update.state in ACTIVE_STATES and current["state"] in ACTIVE_STATES:
             return
         elif update.state in ACTIVE_STATES:
@@ -383,6 +387,66 @@ class TicketStore(ContactMixin):
                 )
         finally:
             conn.close()
+
+    def record_alert(
+        self,
+        ticket_id: int,
+        message_ids: Iterable[str],
+        text: str,
+        *,
+        alert_key: str = "",
+        at: int | None = None,
+    ) -> Ticket:
+        """Record a confirmed alert and move the ticket to needs_you atomically."""
+        moment = self.now() if at is None else at
+        ids = list(message_ids)
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                current = conn.execute(
+                    f"SELECT {_TICKET_COLUMNS} FROM tickets WHERE id = ?", (ticket_id,)
+                ).fetchone()
+                if current is None:
+                    raise KeyError(f"ticket {ticket_id} not found")
+                stored = json_list(str(current["alert_message_ids_json"]))
+                for message_id in ids:
+                    if message_id and message_id not in stored:
+                        stored.append(message_id)
+                conn.execute(
+                    "UPDATE tickets SET alert_message_ids_json = ? WHERE id = ?",
+                    (json.dumps(stored), ticket_id),
+                )
+                self.apply_update(
+                    conn,
+                    current,
+                    TicketUpdate(state=TicketState.NEEDS_YOU.value),
+                    moment,
+                )
+                self.insert_event(
+                    conn,
+                    ticket_id,
+                    Actor.ASSISTANT.value,
+                    EventKind.ALERT.value,
+                    text,
+                    (),
+                    moment,
+                )
+                self.insert_event(
+                    conn,
+                    ticket_id,
+                    Actor.ASSISTANT.value,
+                    EventKind.STATE.value,
+                    "alert sent to the operator",
+                    (),
+                    moment,
+                )
+                self.mark_alert_sent(conn, alert_key, ids[0] if ids else "", moment)
+                row = conn.execute(
+                    f"SELECT {_TICKET_COLUMNS} FROM tickets WHERE id = ?", (ticket_id,)
+                ).fetchone()
+        finally:
+            conn.close()
+        return ticket_from_row(row)
 
     def ticket_for_alert_message(self, message_id: str) -> Ticket | None:
         """The ticket whose alert or forwarded message carries *message_id*."""

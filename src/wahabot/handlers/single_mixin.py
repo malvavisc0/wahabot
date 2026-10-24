@@ -63,7 +63,7 @@ class SingleMixin(HandlerBase):
         addressed = self.group_message_addressed(event, config)
         gate_first = not addressed and config.group_participation == "judicious"
         turn_ids = [message_id]
-        ticket_id = self.ticket_active_id(chat_id)
+        ticket_id = self.ticket_active_id(str(event.payload.get("from", "") or chat_id))
         started = time.monotonic()
         target: RunTarget | None = None
         outcome = "failed"
@@ -133,7 +133,7 @@ class SingleMixin(HandlerBase):
                 message_ids=turn_ids,
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
-            self.finalize_ticket(target, outcome)
+            self.finalize_ticket(target, outcome, reply)
             # Post-reply memory jobs outside the chat lock: the recap
             # merge and the embedding drain must never hold this
             # chat's next run.

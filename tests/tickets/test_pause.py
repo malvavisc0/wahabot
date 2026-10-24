@@ -184,3 +184,60 @@ def test_age_hours_uses_the_configured_zone() -> None:
     assert age_hours(0, 26 * HOUR, "UTC") == 26
     assert age_hours(0, 26 * HOUR, "America/New_York") == 26
     assert age_hours(0, 26 * HOUR, "Not/AZone") == 26
+
+
+def test_chat_pause_releases_only_after_the_customer_is_quiet(
+    store: TicketStore, settings: Settings
+) -> None:
+    store.upsert_contact(CUSTOMER, last_inbound_at=1000)
+    store.set_chat_paused(CUSTOMER, 1000 + 2 * HOUR)
+    scheduler, _ = scheduler_for(store, settings, SessionConfig(system_prompt="x"))
+
+    scheduler.tick(now=1000 + 3 * HOUR)
+    assert store.chat_paused_until(CUSTOMER) is None
+
+    store.set_chat_paused(CUSTOMER, 1000 + 2 * HOUR)
+    store.upsert_contact(CUSTOMER, last_inbound_at=1000 + HOUR + HOUR // 2)
+    scheduler.tick(now=1000 + 3 * HOUR)
+    assert store.chat_paused_until(CUSTOMER) is not None
+
+
+def test_stale_open_and_waiting_tickets_close_without_touching_needs_you(
+    store: TicketStore, settings: Settings
+) -> None:
+    contact = store.upsert_contact(CUSTOMER, last_inbound_at=1000)
+    open_ticket = store.create_ticket(contact.id, CUSTOMER, at=1000)
+    waiting = store.create_ticket(contact.id, "491555000002@c.us", at=1000)
+    store.update_ticket(
+        waiting.id,
+        TicketUpdate(state=TicketState.WAITING_CUSTOMER.value),
+        at=1000,
+    )
+    needs = store.create_ticket(contact.id, "491555000003@c.us", at=1000)
+    store.update_ticket(
+        needs.id, TicketUpdate(state=TicketState.NEEDS_YOU.value), at=1000
+    )
+    scheduler, _ = scheduler_for(store, settings, SessionConfig(system_prompt="x"))
+
+    scheduler.tick(now=1000 + 6 * DAY)
+
+    assert store.ticket(open_ticket.id).state == TicketState.CLOSED.value
+    assert store.ticket(waiting.id).state == TicketState.CLOSED.value
+    assert store.ticket(needs.id).state == TicketState.NEEDS_YOU.value
+
+
+def test_scheduler_retries_a_queued_alert(store: TicketStore, settings: Settings) -> None:
+    from tests.harness import ME_JID
+    from wahabot.core.tickets.alerts import ALERT_RECONCILE_GRACE_S
+
+    contact = store.upsert_contact(CUSTOMER, last_inbound_at=1000)
+    ticket = store.create_ticket(contact.id, CUSTOMER, at=1000)
+    store.claim_alert("queued", ticket.id, "default", ME_JID, "queued alert", at=1000)
+    scheduler, waha = scheduler_for(store, settings, SessionConfig(system_prompt="x"))
+
+    scheduler.tick(now=1000 + ALERT_RECONCILE_GRACE_S + 1)
+
+    assert len(waha.sent) == 1
+    assert waha.sent[0][2] == "queued alert"
+    stored = store.ticket(ticket.id)
+    assert stored is not None and stored.state == TicketState.NEEDS_YOU.value

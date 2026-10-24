@@ -32,6 +32,17 @@ from wahabot.settings import Settings
 _CLAIM_POLL_S = 0.1
 
 
+def run_delivered(target: RunTarget | None, outcome: str) -> bool:
+    """Whether a run has a confirmed delivery worth finalizing."""
+    if target is None:
+        return False
+    return (
+        outcome in ("reply", "delivered_via_tool")
+        or bool(target.sent)
+        or bool(target.reacted and target.ticket_update is not None)
+    )
+
+
 class HandlerBase:
     """Per-registration state shared by every handler mixin."""
 
@@ -63,7 +74,9 @@ class HandlerBase:
     async def run_album(self, *args: Any, **kwargs: Any) -> Any: ...
     async def ticket_gate_events(self, events: list[WahaEvent]) -> bool: ...
     def ticket_active_id(self, chat_id: str) -> int: ...
-    def finalize_ticket(self, target: RunTarget | None, outcome: str) -> None: ...
+    def finalize_ticket(
+        self, target: RunTarget | None, outcome: str, reply: str = ""
+    ) -> None: ...
     def pause_after_human_message(
         self, event: WahaEvent, config: SessionConfig
     ) -> None: ...

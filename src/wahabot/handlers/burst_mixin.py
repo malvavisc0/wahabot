@@ -420,6 +420,10 @@ class BurstMixin(HandlerBase):
         targets the LAST buffered message (the natural reply anchor).
         """
         merged_burst = await self.merge_burst(buffer, messages)
+        chat_id = buffer.key[1]
+        turn_ids = [str(event.payload.get("id", "")) for event in messages]
+        if await self.turn_suppressed(buffer.key[0], chat_id, turn_ids):
+            return "superseded", None
         if merged_burst is None:
             # Nothing answerable, but the customer's media-only burst
             # still belongs on their ticket before its rows settle.
@@ -427,9 +431,7 @@ class BurstMixin(HandlerBase):
                 return "operator_owned", None
             return "empty", None
         merged, entries = merged_burst
-        chat_id = buffer.key[1]
         message_id = str(merged.payload.get("id", ""))
-        turn_ids = [str(event.payload.get("id", "")) for event in messages]
         # Every buffered message belongs on the ticket, including media
         # members the assistant itself could not use.
         if await self.ticket_gate_events(messages):
@@ -458,7 +460,7 @@ class BurstMixin(HandlerBase):
             message_ids=turn_ids,
             duration_ms=int((time.monotonic() - started) * 1000),
         )
-        self.finalize_ticket(target, outcome)
+        self.finalize_ticket(target, outcome, reply)
         # Post-reply memory jobs outside the chat lock: the recap merge
         # and the embedding drain must never hold the chat's next run.
         await self.agent.merge_learned()

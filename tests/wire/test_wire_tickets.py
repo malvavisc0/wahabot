@@ -195,7 +195,10 @@ def test_wrong_amount_is_not_sent_and_the_draft_is_shown(bot: Bot) -> None:
 def test_held_reply_goes_out_after_the_next_inbound(bot: Bot) -> None:
     handover_bot(bot, "Le devolvimos 10 EUR.")
     store = bot.handlers.ticket_store
-    store.upsert_contact(CUSTOMER, last_inbound_at=store.now() - 8 * 86400)
+    store.execute(
+        "UPDATE contacts SET last_inbound_at = ? WHERE chat_id = ?",
+        (store.now() - 8 * 86400, CUSTOMER),
+    )
     quote = alert_id(bot)
     bot.waha.sent.clear()
 
@@ -226,12 +229,7 @@ def test_human_message_pauses_and_resume_restarts(bot: Bot) -> None:
     bot.post(human)
 
     store = bot.handlers.ticket_store
-    assert _wait(
-        lambda: (
-            store.contact(CUSTOMER) is not None
-            and store.contact(CUSTOMER).paused_until is not None
-        )
-    )
+    assert _wait(lambda: store.chat_paused_until(CUSTOMER) is not None)
     bot.waha.sent.clear()
     bot.post(customer_event("WHILE_PAUSED", "hello?"))
     assert _wait(
@@ -269,6 +267,7 @@ def test_bot_send_source_api_does_not_pause(bot: Bot) -> None:
     store = bot.handlers.ticket_store
     contact = store.contact(CUSTOMER)
     assert contact is not None and contact.paused_until is None
+    assert store.chat_paused_until(CUSTOMER) is None
 
 
 def test_recovered_run_opens_no_second_ticket(bot: Bot) -> None:
@@ -431,3 +430,47 @@ def test_media_only_burst_opens_a_ticket_and_stores_the_file(bot: Bot) -> None:
     assert _wait(lambda: len(store.attachments(ticket.id)) == 1)
     assert store.attachments(ticket.id)[0].kind == "image"
     assert restarted.waha.sent == []
+
+
+def test_customer_language_is_detected_from_the_first_message(bot: Bot) -> None:
+    from wahabot.core.tickets.models import TicketState, TicketUpdate
+
+    bot.stack.llm.selector = selector_for("resolution", "ok")
+    bot.post(customer_event("ES_DETECT", "Hola, necesito ayuda con mi pedido"))
+
+    store = bot.handlers.ticket_store
+    assert _wait(lambda: store.contact(CUSTOMER).language == "es")
+
+    ticket = store.chat_tickets(CUSTOMER, limit=5)[0]
+    store.update_ticket(ticket.id, TicketUpdate(state=TicketState.NEEDS_YOU.value))
+    bot.waha.sent.clear()
+    bot.post(customer_event("ES_DETECT_FOLLOW", "¿Alguna novedad?"))
+
+    assert _wait(
+        lambda: any(
+            entry[1] == CUSTOMER and entry[2] == SPANISH_HOLDING
+            for entry in bot.waha.sent
+        )
+    )
+
+
+def test_human_pause_on_the_phone_chat_covers_the_lid_chat(bot: Bot, monkeypatch) -> None:
+    store = bot.handlers.ticket_store
+    paused = operator_event("LID_HUMAN", "I will handle this one")
+    paused["payload"]["from"] = OWN_LID
+    paused["payload"]["to"] = CUSTOMER
+    paused["payload"]["fromMe"] = True
+    bot.post(paused)
+    assert _wait(lambda: store.chat_paused_until(CUSTOMER) is not None)
+
+    monkeypatch.setattr(bot.handlers.waha, "lid_phone", lambda session, lid: CUSTOMER)
+    lid = "999000111@lid"
+    event = customer_event("LID_CUSTOMER", "Hola, necesito ayuda con mi pedido")
+    event["payload"]["from"] = lid
+    event["payload"]["participant"] = lid
+    bot.post(event)
+
+    assert _wait(
+        lambda: store.contact(lid) is not None and store.contact(lid).phone == CUSTOMER
+    )
+    assert not any(entry[1] == lid for entry in bot.waha.sent)

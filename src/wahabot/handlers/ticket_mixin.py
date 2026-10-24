@@ -15,19 +15,28 @@ from wahabot.core.models import WahaEvent
 from wahabot.core.notebook import AUTHOR_OPERATOR, KIND_FACT
 from wahabot.core.runs import chat_lock
 from wahabot.core.tickets.alerts import (
+    alert_intent_key,
     operator_language,
     send_alert,
     translate_cached,
 )
 from wahabot.core.tickets.attachments import persist_event_attachments
+from wahabot.core.tickets.identity import phone_alias
+from wahabot.core.tickets.language import detect_language
 from wahabot.core.tickets.lifecycle import (
+    GLOBAL_PAUSE_FOREVER,
     Inbound,
+    apply_delivery,
+    apply_split,
     close_ticket,
-    finalize_delivery,
+    closed_mid_run,
+    holding_due,
+    inbound_words,
+    is_paused,
     is_thanks_only,
+    queue_alert,
     record_inbound,
     reopen_ticket,
-    split_ticket,
 )
 from wahabot.core.tickets.models import (
     Actor,
@@ -51,39 +60,13 @@ from wahabot.core.tickets.router import (
     is_self_chat_event,
     whats_open_text,
 )
-from wahabot.core.tickets.store import TicketStore
-from wahabot.handlers.base import HandlerBase
+from wahabot.handlers.base import HandlerBase, run_delivered
 from wahabot.handlers.memory import remember_customer_message, remember_sent_relay
 from wahabot.handlers.replies import send_self_reply
 from wahabot.status.state import state as status_state
 
-
-def inbound_words(events: list[WahaEvent]) -> tuple[WahaEvent, str]:
-    """The event carrying text and the combined body for a ticket event."""
-    bodies = [
-        str(event.payload.get("body", "") or "").strip()
-        for event in events
-        if str(event.payload.get("body", "") or "").strip()
-    ]
-    content = next(
-        (event for event in events if str(event.payload.get("body", "") or "").strip()),
-        events[0],
-    )
-    return content, "\n".join(bodies)
-
-
-def finalize_split(store: TicketStore, ticket: Ticket, summary: str) -> None:
-    """Create the staged split ticket after the old one is finalized."""
-    if not summary:
-        return
-    refreshed = store.ticket(ticket.id)
-    if refreshed is not None:
-        split_ticket(store, refreshed, summary)
-
-
-GLOBAL_PAUSE_FOREVER = -1
-
 _HOLDING_REPLY = "Thanks — your message is still with the team. Someone will reply here."
+_HOLDING_COOLDOWN_S = 3600
 
 
 class TicketMixin(HandlerBase):
@@ -142,13 +125,20 @@ class TicketMixin(HandlerBase):
             return None
         content, body = inbound_words(events)
         config = self.config_reloader.current_config()
+        phone = phone_alias(store, content, self.waha.lid_phone)
         inbound = record_inbound(
             store,
             content,
             message_ids=[str(event.payload.get("id", "")) for event in events],
             close_after_days=config.close_after_days,
             body=body,
+            phone=phone,
         )
+        if not inbound.contact.language and body.strip():
+            detected = detect_language(body)
+            if detected:
+                store.set_contact_language(inbound.contact.id, detected)
+                inbound.contact.language = detected
         for event in events:
             persist_event_attachments(
                 store, self.waha, inbound.ticket, event, self.settings
@@ -201,12 +191,23 @@ class TicketMixin(HandlerBase):
         self, events: list[WahaEvent], inbound: Inbound
     ) -> None:
         """Hold the customer with a short reply and nudge once per interval."""
-        await self.ticket_send_holding(
-            events, inbound.ticket.chat_id, inbound.contact.language
-        )
+        if self.ticket_holding_due(inbound.ticket.id):
+            await self.ticket_send_holding(
+                events,
+                inbound.ticket.chat_id,
+                inbound.contact.language,
+                ticket_id=inbound.ticket.id,
+            )
         if self.scheduler is not None:
             await asyncio.to_thread(self.scheduler.nudge, int(time.time()))
         await self.ticket_remember_and_settle(events, "operator_owned", "needs_you")
+
+    def ticket_holding_due(self, ticket_id: int) -> bool:
+        """Whether this needs-you ticket should send another holding reply."""
+        store = self.ticket_store
+        if store is None:
+            return True
+        return holding_due(store, ticket_id, int(time.time()), _HOLDING_COOLDOWN_S)
 
     async def ticket_operator_reask(
         self, events: list[WahaEvent], inbound: Inbound
@@ -219,15 +220,23 @@ class TicketMixin(HandlerBase):
             logger.warning("Reopened ticket alert failed: {exc}", exc=exc)
         if not delivered:
             await self.ticket_send_holding(
-                events, inbound.ticket.chat_id, inbound.contact.language
+                events,
+                inbound.ticket.chat_id,
+                inbound.contact.language,
+                ticket_id=inbound.ticket.id,
             )
         await self.ticket_remember_and_settle(
             events, "operator_owned", "operator solved re-ask"
         )
 
     async def ticket_send_holding(
-        self, events: list[WahaEvent], chat_id: str, language: str = ""
-    ) -> None:
+        self,
+        events: list[WahaEvent],
+        chat_id: str,
+        language: str = "",
+        *,
+        ticket_id: int = 0,
+    ) -> bool:
         """Send the holding reply in the customer's language, fail-soft.
 
         The text is fixed, so the translation is cached by source hash:
@@ -247,11 +256,23 @@ class TicketMixin(HandlerBase):
             except Exception as exc:
                 logger.warning("Holding translation failed: {exc}", exc=exc)
         try:
-            await asyncio.to_thread(self.waha.send_text, events[0].session, chat_id, text)
+            sent_id = await asyncio.to_thread(
+                self.waha.send_text, events[0].session, chat_id, text
+            )
         except Exception as exc:
             logger.warning(
                 "Holding reply failed for {chat}: {exc}", chat=chat_id, exc=exc
             )
+            return False
+        if sent_id and store is not None and ticket_id:
+            store.add_event(
+                ticket_id,
+                Actor.ASSISTANT.value,
+                EventKind.HOLDING.value,
+                text,
+                [sent_id],
+            )
+        return bool(sent_id)
 
     def ticket_send_alert(self, inbound: Inbound) -> bool:
         """Send the alert for a reopened operator-solved ticket."""
@@ -269,7 +290,11 @@ class TicketMixin(HandlerBase):
                 self.config_reloader.current_config().operator_language
             ),
             translator=self.ticket_translator,
+            alert_key=alert_intent_key(store, inbound.ticket, "reask"),
         )
+        if result.pending:
+            queue_alert(store, inbound.ticket)
+            return False
         return result.delivered
 
     async def ticket_remember_and_settle(
@@ -315,42 +340,34 @@ class TicketMixin(HandlerBase):
         return ticket.id if ticket is not None else 0
 
     @override
-    def finalize_ticket(self, target: RunTarget | None, outcome: str) -> None:
+    def finalize_ticket(
+        self, target: RunTarget | None, outcome: str, reply: str = ""
+    ) -> None:
         """Apply staged ticket values after a confirmed assistant delivery."""
         if target is None or target.ticket_store is None or not target.ticket_id:
             return
-        if outcome not in ("reply", "delivered_via_tool") and not target.sent:
+        if not run_delivered(target, outcome):
             return
         store = target.ticket_store
         ticket = store.ticket(target.ticket_id)
         if ticket is None:
             return
-        try:
-            finalize_split(store, ticket, target.ticket_split)
-            finalize_delivery(
-                store,
-                ticket.id,
-                target.ticket_update or TicketUpdate(),
-                delivered=True,
+        staged = target.ticket_update or TicketUpdate()
+        if closed_mid_run(ticket, staged):
+            logger.info(
+                "Ticket {number} closed mid-run; discarding its staged update",
+                number=ticket.number,
             )
-        except Exception:
-            logger.exception("Ticket finalize failed for {number}", number=ticket.number)
+            return
+        staged = apply_split(store, ticket, target.ticket_split, staged)
+        apply_delivery(store, ticket, staged, reply or target.sent_text)
 
     def ticket_paused(self, session: str, inbound: Inbound) -> bool:
         """Whether the customer chat or the whole session is paused."""
-        now = int(time.time())
-        if (
-            inbound.contact.paused_until is not None
-            and inbound.contact.paused_until > now
-        ):
-            return True
         store = self.ticket_store
         if store is None:
             return False
-        global_until = store.session_paused_until(session)
-        return global_until is not None and (
-            global_until == GLOBAL_PAUSE_FOREVER or global_until > now
-        )
+        return is_paused(store, session, inbound, int(time.time()))
 
     @override
     def pause_after_human_message(self, event: WahaEvent, config: SessionConfig) -> None:
@@ -367,9 +384,11 @@ class TicketMixin(HandlerBase):
         hours = config.pause_after_human_hours
         if hours <= 0:
             return
-        contact = self.ticket_store.upsert_contact(chat)
         until = int(time.time()) + hours * 3600
-        self.ticket_store.set_contact_paused(contact.chat_id, until)
+        contact = self.ticket_store.contact(chat)
+        if contact is not None:
+            self.ticket_store.set_contact_paused(contact.chat_id, until)
+        self.ticket_store.set_chat_paused(chat, until)
 
     @override
     async def handle_ticket_route(
@@ -481,21 +500,25 @@ class TicketMixin(HandlerBase):
         store = self.ticket_store
         if store is None:
             return
-        try:
-            if route.kind == RouteKind.CLOSE:
-                close_ticket(store, route.ticket)
-                message = f"Closed {route.ticket.number}."
-            else:
-                reopen_ticket(store, route.ticket)
-                message = f"Reopened {route.ticket.number}."
-        except ValueError as exc:
-            message = str(exc)
+        ok = True
+        async with chat_lock(event.session, route.ticket.chat_id):
+            try:
+                if route.kind == RouteKind.CLOSE:
+                    close_ticket(store, route.ticket)
+                    message = f"Closed {route.ticket.number}."
+                else:
+                    reopen_ticket(store, route.ticket)
+                    message = f"Reopened {route.ticket.number}."
+            except ValueError as exc:
+                ok = False
+                message = str(exc)
         save_action(
             self.settings.data_dir,
             event.session,
             "ticket_command",
             ticket=route.ticket.number,
             command=route.kind.value,
+            ok=ok,
         )
         await self.ticket_send_operator(event, message)
 
@@ -508,11 +531,21 @@ class TicketMixin(HandlerBase):
             return
         if route.contact is not None:
             if route.kind == RouteKind.PAUSE:
-                until = int(time.time()) + config.pause_after_human_hours * 3600
-                store.set_contact_paused(route.contact.chat_id, until)
-                message = f"Paused {route.contact.display}."
+                if config.pause_after_human_hours <= 0:
+                    message = "Pause is disabled: set pause_after_human_hours above 0."
+                else:
+                    until = int(time.time()) + config.pause_after_human_hours * 3600
+                    store.set_contact_paused(route.contact.chat_id, until)
+                    message = f"Paused {route.contact.display}."
             else:
                 store.set_contact_paused(route.contact.chat_id, None)
+                for alias in (
+                    route.contact.chat_id,
+                    route.contact.phone,
+                    route.contact.lid,
+                ):
+                    if alias:
+                        store.set_chat_paused(alias, None)
                 message = f"Resumed {route.contact.display}."
         else:
             until = GLOBAL_PAUSE_FOREVER if route.kind == RouteKind.PAUSE else None

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import Callable
 
 from tests.harness import RecordingWaha
@@ -12,6 +13,7 @@ from wahabot.core.tickets.replies import (
     fact_tokens,
     handle_operator_reply,
     mismatch_tokens,
+    omitted_tokens,
     parse_kind,
     window_open,
 )
@@ -288,3 +290,84 @@ def test_failed_send_is_not_confirmed(store: TicketStore) -> None:
     assert not outcome.sent
     assert "not confirmed" in outcome.confirmation
     assert store.ticket(ticket.id).state == TicketState.NEEDS_YOU.value
+
+
+def test_fact_check_composes_and_localizes_numbers() -> None:
+    assert mismatch_tokens("200 EUR", "two hundred euros") == []
+    assert mismatch_tokens("25 days", "twenty-five days") == []
+    assert mismatch_tokens("100 EUR", "one hundred euros") == []
+    assert mismatch_tokens("10 EUR", "diez euros") == []
+    assert mismatch_tokens("10 eur", "€10") == []
+    assert fact_tokens("once") == set()
+    assert fact_tokens("neuf") == set()
+    assert mismatch_tokens("EUR 10", "10 EUR") == []
+    assert mismatch_tokens("10%", "10 %") == []
+    assert omitted_tokens("we refunded it", "refunded 10 EUR") == ["10 eur"]
+
+
+def test_fact_check_rejects_a_draft_that_drops_an_amount(
+    store: TicketStore,
+) -> None:
+    async def run() -> ReplyOutcome:
+        contact, ticket = setup_ticket(store, last_inbound_at=store.now())
+        return await handle_operator_reply(
+            store,
+            RecordingWaha(),
+            "default",
+            ticket,
+            contact,
+            "refunded 10 EUR",
+            complete=completer("resolution", "we refunded it"),
+            reply_window_days=7,
+        )
+
+    outcome = asyncio.run(run())
+    assert not outcome.sent
+    assert outcome.missing == ["10 eur"]
+    assert "drops values" in outcome.confirmation
+
+
+def test_deliver_held_sends_every_pending_draft(store: TicketStore) -> None:
+    contact, ticket = setup_ticket(store, last_inbound_at=store.now())
+    now = store.now()
+    store.add_event(
+        ticket.id,
+        "operator",
+        "held",
+        json.dumps({"kind": RESOLUTION, "draft": "first answer"}),
+        at=now,
+    )
+    store.add_event(
+        ticket.id,
+        "operator",
+        "held",
+        json.dumps({"kind": "instruction", "draft": "second answer"}),
+        at=now + 1,
+    )
+
+    outcome = asyncio.run(
+        deliver_held(store, RecordingWaha(), "default", ticket, contact, now=now + 2)
+    )
+
+    assert outcome is not None and outcome.sent
+    kinds = [event.kind for event in store.events(ticket.id) if event.kind == "sent"]
+    assert len(kinds) == 2
+    assert store.ticket(ticket.id).state == TicketState.WAITING_CUSTOMER.value
+
+
+def test_held_window_says_when_the_customer_never_wrote(store: TicketStore) -> None:
+    async def run() -> ReplyOutcome:
+        contact, ticket = setup_ticket(store, last_inbound_at=None)
+        return await handle_operator_reply(
+            store,
+            RecordingWaha(),
+            "default",
+            ticket,
+            contact,
+            "refunded",
+            complete=completer("resolution", "refunded"),
+            reply_window_days=7,
+        )
+
+    outcome = asyncio.run(run())
+    assert "has not written yet" in outcome.confirmation

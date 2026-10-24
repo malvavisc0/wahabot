@@ -1,12 +1,14 @@
 """The 60-second ticket tick: close, release pauses and nudge."""
 
 import datetime
+import threading
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from loguru import logger
 
 from wahabot.core.access import SessionConfig, SessionConfigReloader
-from wahabot.core.tickets.lifecycle import close_overdue
+from wahabot.core.tickets.alerts import retry_alerts
+from wahabot.core.tickets.lifecycle import close_overdue, close_stale
 from wahabot.core.tickets.models import (
     Actor,
     Contact,
@@ -35,28 +37,56 @@ class TicketScheduler:
         self.store = store
         self.waha = waha
         self.config_reloader = config_reloader
+        self.nudge_lock = threading.Lock()
 
     def tick(self, now: int | None = None) -> None:
         """Run one timer pass: close tickets, release pauses, nudge."""
         moment = self.store.now() if now is None else now
         config = self.config_reloader.current_config()
+        retry_alerts(self.store, self.waha, moment)
         close_overdue(self.store, config.close_after_days, at=moment)
+        close_stale(self.store, config.close_after_days, at=moment)
         self.release_pauses(moment, config)
         self.nudge(moment)
 
     def release_pauses(self, moment: int, config: SessionConfig) -> None:
-        """Clear a contact pause once the customer has been quiet long enough."""
+        """Clear contact and chat pauses once the customer has been quiet."""
         quiet_s = config.pause_after_human_hours * 3600
+        self.release_contact_pauses(moment, quiet_s)
+        self.release_chat_pauses(moment, quiet_s)
+
+    def release_contact_pauses(self, moment: int, quiet_s: int) -> None:
+        """Release expired pauses stored on a contact row."""
         for contact in self.store.paused_contacts():
             if contact.paused_until is None or contact.paused_until > moment:
                 continue
-            last = contact.last_inbound_at
-            if last is not None and moment - last < quiet_s:
+            if (
+                contact.last_inbound_at is not None
+                and moment - contact.last_inbound_at < quiet_s
+            ):
                 continue
             self.store.set_contact_paused(contact.chat_id, None)
 
+    def release_chat_pauses(self, moment: int, quiet_s: int) -> None:
+        """Release expired pauses stored against a chat id."""
+        for chat_id, until in self.store.paused_chats():
+            if until > moment:
+                continue
+            contact = self.store.contact(chat_id)
+            if (
+                contact is not None
+                and contact.last_inbound_at is not None
+                and moment - contact.last_inbound_at < quiet_s
+            ):
+                continue
+            self.store.set_chat_paused(chat_id, None)
+
     def nudge(self, moment: int) -> None:
         """Tell the operator once per interval that a customer asked again."""
+        with self.nudge_lock:
+            self.nudge_locked(moment)
+
+    def nudge_locked(self, moment: int) -> None:
         operator_jid = status_state.operator_jid
         if not operator_jid:
             return

@@ -112,9 +112,8 @@ def send_message(waha: Transport, settings: Settings | None = None) -> BaseTool:
         delivered_to_self(chat_id, sent_id)
         target.sent = chat_id
         target.sent_id = sent_id
-        return sent_message_envelope(
-            chat_id, apply_chat_prefix(text, target.prefix), merged, dangling
-        )
+        target.sent_text = apply_chat_prefix(text, target.prefix)
+        return sent_message_envelope(chat_id, target.sent_text, merged, dangling)
 
     return FunctionTool.from_defaults(
         fn=send_message_fn,

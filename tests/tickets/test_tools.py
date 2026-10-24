@@ -236,3 +236,197 @@ def test_handover_reads_the_operator_language_at_call_time(
 
     assert payload["ok"]
     assert translated == ["es"]
+
+
+def test_handover_alert_includes_staged_values_and_urgency(
+    store: TicketStore, settings: Settings, monkeypatch
+) -> None:
+    from wahabot.status.state import state as status_state
+
+    monkeypatch.setattr(status_state, "operator_jid", ME_JID)
+    _, ticket = make_ticket(store)
+    store.add_event(ticket.id, "customer", "customer_message", "I need a person")
+    waha = RecordingWaha()
+    target = RunTarget(
+        session="default",
+        chat_id=CUSTOMER,
+        ticket_store=store,
+        ticket_id=ticket.id,
+    )
+
+    with target_for(target):
+        update_ticket().fn(
+            summary="late order",
+            details={"order": "A-17"},
+            missing=["address"],
+        )
+        payload = json.loads(
+            hand_to_operator(settings, waha).fn(reason="needs a person", urgent=True)
+        )
+
+    text = waha.sent[0][2]
+    assert payload["ok"]
+    assert text.startswith("URGENT")
+    assert "order: A-17" in text
+    assert "Missing: address" in text
+    stored = store.ticket(ticket.id)
+    assert stored.urgent is True
+    assert stored.details == {"order": "A-17"}
+    assert stored.missing == ["address"]
+    assert stored.summary == "late order"
+
+
+def test_urgent_escalation_after_an_alert_is_not_silently_dropped(
+    store: TicketStore, settings: Settings, monkeypatch
+) -> None:
+    from wahabot.status.state import state as status_state
+
+    monkeypatch.setattr(status_state, "operator_jid", ME_JID)
+    _, ticket = make_ticket(store)
+    store.add_event(ticket.id, "customer", "customer_message", "I need a person")
+    waha = RecordingWaha()
+    target = RunTarget(
+        session="default",
+        chat_id=CUSTOMER,
+        ticket_store=store,
+        ticket_id=ticket.id,
+    )
+
+    with target_for(target):
+        tool = hand_to_operator(settings, waha)
+        first = json.loads(tool.fn(reason="needs a person"))
+        urgent = json.loads(tool.fn(reason="now urgent", urgent=True))
+
+    assert first["ok"] and urgent["ok"]
+    assert len(waha.sent) == 2
+    assert waha.sent[1][2].startswith("URGENT")
+    assert store.ticket(ticket.id).urgent is True
+
+
+def test_handover_refuses_a_ticket_closed_mid_run(
+    store: TicketStore, settings: Settings, monkeypatch
+) -> None:
+    from wahabot.status.state import state as status_state
+
+    monkeypatch.setattr(status_state, "operator_jid", ME_JID)
+    _, ticket = make_ticket(store)
+    store.update_ticket(ticket.id, TicketUpdate(state=TicketState.CLOSED.value))
+    target = RunTarget(
+        session="default",
+        chat_id=CUSTOMER,
+        ticket_store=store,
+        ticket_id=ticket.id,
+    )
+
+    with target_for(target):
+        payload = json.loads(
+            hand_to_operator(settings, RecordingWaha()).fn(reason="needs a person")
+        )
+
+    assert not payload["ok"]
+    assert "closed" in payload["error"]
+    assert store.ticket(ticket.id).state == TicketState.CLOSED.value
+
+
+def test_split_is_refused_with_a_staged_active_state(store: TicketStore) -> None:
+    _, ticket = make_ticket(store)
+    target = RunTarget(
+        session="default",
+        chat_id=CUSTOMER,
+        ticket_store=store,
+        ticket_id=ticket.id,
+    )
+
+    with target_for(target):
+        update_ticket().fn(state=TicketState.WAITING_CUSTOMER.value)
+        refused = json.loads(new_ticket().fn(summary="second issue"))
+
+    assert not refused["ok"]
+
+
+def test_finalize_forces_done_after_a_split_and_records_the_reply(
+    store: TicketStore,
+) -> None:
+    from wahabot.handlers.ticket_mixin import TicketMixin
+
+    _, ticket = make_ticket(store)
+    target = RunTarget(
+        session="default",
+        chat_id=CUSTOMER,
+        ticket_store=store,
+        ticket_id=ticket.id,
+        ticket_split="second issue",
+        ticket_update=TicketUpdate(state=TicketState.WAITING_CUSTOMER.value),
+    )
+
+    TicketMixin().finalize_ticket(target, "reply", "here is your answer")
+
+    old = store.ticket(ticket.id)
+    tickets = store.chat_tickets(CUSTOMER, limit=5)
+    assert old.state == TicketState.DONE.value
+    assert [item.state for item in tickets].count(TicketState.OPEN.value) == 1
+    replies = [item.body for item in store.events(ticket.id) if item.kind == "reply"]
+    assert replies == ["here is your answer"]
+
+
+def test_finalize_does_not_reopen_a_ticket_closed_mid_run(store: TicketStore) -> None:
+    from wahabot.handlers.ticket_mixin import TicketMixin
+
+    _, ticket = make_ticket(store)
+    store.update_ticket(ticket.id, TicketUpdate(state=TicketState.CLOSED.value), at=1000)
+    target = RunTarget(
+        session="default",
+        chat_id=CUSTOMER,
+        ticket_store=store,
+        ticket_id=ticket.id,
+        ticket_update=TicketUpdate(state=TicketState.WAITING_CUSTOMER.value),
+    )
+
+    TicketMixin().finalize_ticket(target, "reply", "late answer")
+
+    closed = store.ticket(ticket.id)
+    assert closed.state == TicketState.CLOSED.value
+    assert closed.closed_at is not None
+
+
+def test_update_ticket_merges_details_and_missing_within_a_run(
+    store: TicketStore,
+) -> None:
+    _, ticket = make_ticket(store)
+    target = RunTarget(
+        session="default",
+        chat_id=CUSTOMER,
+        ticket_store=store,
+        ticket_id=ticket.id,
+    )
+
+    with target_for(target):
+        tool = update_ticket()
+        tool.fn(details={"order": "A-17"}, missing=["address"])
+        tool.fn(details={"address": "Main St"}, missing=["phone"])
+
+    assert target.ticket_update is not None
+    assert target.ticket_update.details == {
+        "order": "A-17",
+        "address": "Main St",
+    }
+    assert target.ticket_update.missing == ["address", "phone"]
+
+
+def test_finalize_records_a_tool_delivered_text(store: TicketStore) -> None:
+    from wahabot.handlers.ticket_mixin import TicketMixin
+
+    _, ticket = make_ticket(store)
+    target = RunTarget(
+        session="default",
+        chat_id=CUSTOMER,
+        ticket_store=store,
+        ticket_id=ticket.id,
+        sent=CUSTOMER,
+        sent_text="delivered by the tool",
+    )
+
+    TicketMixin().finalize_ticket(target, "delivered_via_tool")
+
+    replies = [item.body for item in store.events(ticket.id) if item.kind == "reply"]
+    assert replies == ["delivered by the tool"]
