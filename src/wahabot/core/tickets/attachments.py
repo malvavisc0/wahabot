@@ -3,7 +3,7 @@
 import datetime
 import mimetypes
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -35,7 +35,8 @@ def media_kind(event: WahaEvent) -> str:
 
 def event_declared_type(event: WahaEvent) -> str:
     """WAHA's declared media type, or ""."""
-    data = event.payload.get("_data") or {}
+    raw = event.payload.get("_data")
+    data: dict[str, Any] = raw if isinstance(raw, dict) else {}
     return str(data.get("type") or "")
 
 
@@ -52,12 +53,18 @@ def kind_from_parts(declared: str, mimetype: str) -> str:
 
 def media_url(event: WahaEvent) -> str:
     """The event's media URL, or "" when it has none."""
-    return str((event.payload.get("media") or {}).get("url") or "")
+    media = event.payload.get("media")
+    if not isinstance(media, dict):
+        return ""
+    return str(cast(dict[str, Any], media).get("url") or "")
 
 
 def media_mime(event: WahaEvent) -> str:
     """The event's media mimetype, with a generic fallback."""
-    return str((event.payload.get("media") or {}).get("mimetype") or "")
+    media = event.payload.get("media")
+    if not isinstance(media, dict):
+        return ""
+    return str(cast(dict[str, Any], media).get("mimetype") or "")
 
 
 def byte_cap(kind: str, settings: Settings) -> int:

@@ -5,6 +5,7 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 from loguru import logger
 
@@ -131,7 +132,10 @@ def parse_kind(raw: str) -> str:
         value = json.loads(match.group(0))
     except json.JSONDecodeError:
         return AMBIGUOUS
-    kind = str(value.get("kind", "")).strip().lower() if isinstance(value, dict) else ""
+    if not isinstance(value, dict):
+        return AMBIGUOUS
+    parsed = cast(dict[str, Any], value)
+    kind = str(parsed.get("kind", "")).strip().lower()
     return kind if kind in KINDS else AMBIGUOUS
 
 
@@ -194,8 +198,9 @@ def read_held(body: str) -> tuple[str, str]:
         return RESOLUTION, body
     if not isinstance(value, dict):
         return RESOLUTION, body
-    kind = str(value.get("kind", RESOLUTION))
-    return (kind if kind in KINDS else RESOLUTION, str(value.get("draft", "")))
+    parsed = cast(dict[str, Any], value)
+    kind = str(parsed.get("kind", RESOLUTION))
+    return (kind if kind in KINDS else RESOLUTION, str(parsed.get("draft", "")))
 
 
 def confirmation(contact: Contact, ticket: Ticket, kind: str, draft: str) -> str:

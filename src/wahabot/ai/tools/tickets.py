@@ -179,8 +179,7 @@ def update_ticket(settings: Settings) -> BaseTool:
             return error(f"unknown ticket state {state!r}")
         if state == TicketState.NEEDS_YOU.value:
             return error(
-                "use hand_to_operator for needs_you: it stages the state and alerts "
-                "the operator in one confirmed step"
+                "use hand_to_operator for needs_you; it stages and alerts the operator"
             )
         if done_by is not None and not done_by_allowed(
             done_by, target_operator=operator_run(target)
@@ -385,8 +384,7 @@ def new_ticket(settings: Settings) -> BaseTool:
             TicketState.WAITING_CUSTOMER.value,
         ):
             return error(
-                "cannot split: this ticket is with the operator or waiting for the "
-                "customer; a person must close it first"
+                "cannot split: this ticket belongs to the operator or the customer"
             )
         log_action_reason("new_ticket", reason, ticket=ticket.number)
         target.ticket_id = ticket.id
