@@ -2,9 +2,16 @@
 
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+from loguru import logger
 
 from wahabot.core.models import WahaEvent
+from wahabot.core.tickets.identity import (
+    customer_details,
+    normalize_lid,
+    normalize_phone,
+)
 from wahabot.core.tickets.models import (
     Actor,
     Contact,
@@ -34,7 +41,8 @@ _THANKS = frozenset(
 )
 _THANKS_EMOJI = frozenset({"👍", "🙏", "❤️", "❤", "😊"})
 _NON_WORD = re.compile(r"[\s\W_]+", re.UNICODE)
-_EMOJI_ONLY = re.compile(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\s]+$", re.UNICODE)
+_EMOJI_SKIP = re.compile(r"[\s\ufe0f\u200d\U0001F3FB-\U0001F3FF]")
+GLOBAL_PAUSE_FOREVER = -1
 
 
 @dataclass(slots=True)
@@ -49,27 +57,65 @@ class Inbound:
     previous_done_by: str | None = None
 
 
-def customer_details(event: WahaEvent) -> tuple[str, str, str, str]:
-    """``(chat_id, phone, lid, display_name)`` from one customer event."""
-    chat_id = str(event.payload.get("from", ""))
-    sender = str(event.payload.get("participant") or chat_id)
-    phone = chat_id if chat_id.endswith("@c.us") else ""
-    if sender.endswith("@c.us"):
-        phone = phone or sender
-    lid = (
-        sender
-        if sender.endswith("@lid")
-        else (chat_id if chat_id.endswith("@lid") else "")
+def inbound_words(events: list[WahaEvent]) -> tuple[WahaEvent, str]:
+    """The event carrying text and the combined body for a ticket event."""
+    bodies = [
+        str(event.payload.get("body", "") or "").strip()
+        for event in events
+        if str(event.payload.get("body", "") or "").strip()
+    ]
+    content = next(
+        (event for event in events if str(event.payload.get("body", "") or "").strip()),
+        events[0],
     )
-    name = text_field(event.payload.get("_data"), "notifyName") or str(
-        event.payload.get("notifyName") or ""
-    )
-    return chat_id, phone, lid, name
+    return content, "\n".join(bodies)
+
+
+def finalize_split(store: TicketStore, ticket: Ticket, summary: str) -> None:
+    """Create the staged split ticket."""
+    if not summary:
+        return
+    refreshed = store.ticket(ticket.id)
+    if refreshed is not None:
+        split_ticket(store, refreshed, summary)
 
 
 def contact_language(event: WahaEvent) -> str:
     """The customer's language when the runtime already knows it."""
     return text_field(event.payload.get("_data"), "language")
+
+
+def message_received_at(event: WahaEvent) -> int | None:
+    """The customer's send time, when the event carries one."""
+    for value in (event.payload.get("timestamp"), getattr(event, "timestamp", None)):
+        if value is None:
+            continue
+        try:
+            moment = int(value)
+        except TypeError, ValueError:
+            continue
+        if moment > 0:
+            return moment
+    return None
+
+
+def inbound_timestamp(
+    event: WahaEvent, at: int | None, received_at: int | None, moment: int
+) -> int:
+    """The customer's send time, preferring explicit values."""
+    if received_at is not None:
+        return received_at
+    if at is not None:
+        return at
+    return message_received_at(event) or moment
+
+
+def prior_done_by(store: TicketStore, contact: Contact) -> str | None:
+    """Who resolved the contact's previous ticket, when none is active."""
+    latest = store.latest_ticket(contact.chat_id)
+    if latest is None or store.active_ticket(contact.chat_id) is not None:
+        return None
+    return latest.done_by
 
 
 def record_inbound(
@@ -79,24 +125,21 @@ def record_inbound(
     message_ids: list[str],
     close_after_days: int,
     at: int | None = None,
+    received_at: int | None = None,
     body: str | None = None,
+    phone: str = "",
+    lid: str = "",
 ) -> Inbound:
     """Resolve the contact, open/reopen its ticket and append the message."""
     moment = store.now() if at is None else at
-    chat_id, phone, lid, name = customer_details(event)
+    chat_id, found_phone, found_lid, name = customer_details(event)
     contact = store.upsert_contact(
         chat_id,
-        phone=phone,
-        lid=lid,
+        phone=normalize_phone(phone) or found_phone,
+        lid=normalize_lid(lid) or found_lid,
         display_name=name,
         language=contact_language(event),
-        last_inbound_at=moment,
-    )
-    latest_before = store.latest_ticket(contact.chat_id)
-    previous_done_by = (
-        latest_before.done_by
-        if store.active_ticket(contact.chat_id) is None and latest_before is not None
-        else None
+        last_inbound_at=inbound_timestamp(event, at, received_at, moment),
     )
     ticket, reopened, operator_solved = ticket_for_inbound(
         store, contact, moment, close_after_days
@@ -109,7 +152,7 @@ def record_inbound(
         body=words,
         reopened=reopened,
         operator_solved=operator_solved,
-        previous_done_by=previous_done_by,
+        previous_done_by=prior_done_by(store, contact),
     )
 
 
@@ -220,7 +263,8 @@ def is_thanks_only(body: str) -> bool:
     text = body.strip()
     if not text:
         return False
-    if text in _THANKS_EMOJI or _EMOJI_ONLY.fullmatch(text):
+    emoji = _EMOJI_SKIP.sub("", text)
+    if emoji and all(char in _THANKS_EMOJI for char in emoji):
         return True
     normalized = _NON_WORD.sub("", text.casefold())
     return normalized in _THANKS
@@ -253,6 +297,15 @@ def finalize_delivery(
 def completed_update(update: TicketUpdate) -> TicketUpdate:
     """Fill the default outcome when the model staged no state."""
     if update.state is not None:
+        if update.state == TicketState.DONE.value and update.done_by is None:
+            return TicketUpdate(
+                state=update.state,
+                summary=update.summary,
+                details=update.details,
+                missing=update.missing,
+                done_by=DoneBy.ASSISTANT.value,
+                urgent=update.urgent,
+            )
         return update
     if update.missing:
         return TicketUpdate(
@@ -271,6 +324,91 @@ def completed_update(update: TicketUpdate) -> TicketUpdate:
         done_by=update.done_by or DoneBy.ASSISTANT.value,
         urgent=update.urgent,
     )
+
+
+def closed_mid_run(ticket: Ticket, staged: TicketUpdate) -> bool:
+    """Whether an operator closed the ticket while the run was in flight."""
+    return (
+        ticket.state == TicketState.CLOSED.value
+        and staged.state != TicketState.CLOSED.value
+    )
+
+
+def apply_split(
+    store: TicketStore,
+    ticket: Ticket,
+    summary: str,
+    staged: TicketUpdate,
+) -> TicketUpdate:
+    """Split the ticket and force the old one done, or return *staged*."""
+    if not summary:
+        return staged
+    try:
+        finalize_split(store, ticket, summary)
+    except Exception:
+        logger.exception("Ticket split failed for {number}", number=ticket.number)
+        return staged
+    return replace(
+        staged,
+        state=TicketState.DONE.value,
+        done_by=staged.done_by or DoneBy.ASSISTANT.value,
+    )
+
+
+def apply_delivery(
+    store: TicketStore, ticket: Ticket, staged: TicketUpdate, reply: str
+) -> None:
+    """Apply the staged delivery, logging instead of failing the turn."""
+    try:
+        finalize_delivery(store, ticket.id, staged, delivered=True, reply=reply)
+    except Exception:
+        logger.exception("Ticket finalize failed for {number}", number=ticket.number)
+
+
+def queue_alert(store: TicketStore, ticket: Ticket, *, at: int | None = None) -> Ticket:
+    """Mark a ticket needs_you when its alert is queued for retry."""
+    return store.update_ticket(
+        ticket.id,
+        TicketUpdate(state=TicketState.NEEDS_YOU.value),
+        actor=Actor.ASSISTANT.value,
+        kind=EventKind.STATE.value,
+        body="alert queued for retry",
+        at=at,
+    )
+
+
+def is_paused(store: TicketStore, session: str, inbound: Inbound, moment: int) -> bool:
+    """Whether a contact, any of its aliases, or the session is paused."""
+    contact = inbound.contact
+    if contact.paused_until is not None and contact.paused_until > moment:
+        return True
+    aliases = {
+        contact.chat_id,
+        contact.phone,
+        contact.lid,
+        inbound.ticket.chat_id,
+    }
+    for alias in aliases:
+        if not alias:
+            continue
+        until = store.chat_paused_until(alias)
+        if until is not None and until > moment:
+            return True
+    global_until = store.session_paused_until(session)
+    return global_until is not None and (
+        global_until == GLOBAL_PAUSE_FOREVER or global_until > moment
+    )
+
+
+def holding_due(store: TicketStore, ticket_id: int, moment: int, cooldown_s: int) -> bool:
+    """Whether a needs-you ticket should send another holding reply."""
+    holding = store.last_event(ticket_id, EventKind.HOLDING.value)
+    if holding is None:
+        return True
+    alert = store.last_event(ticket_id, EventKind.ALERT.value)
+    if alert is not None and (alert.at, alert.id) > (holding.at, holding.id):
+        return True
+    return moment - holding.at >= cooldown_s
 
 
 def split_ticket(
@@ -350,6 +488,31 @@ def close_overdue(
                 actor=Actor.SYSTEM.value,
                 kind=EventKind.STATE.value,
                 body="closed after the silence window",
+                at=moment,
+            )
+        )
+    return closed
+
+
+def close_stale(
+    store: TicketStore, close_after_days: int, *, at: int | None = None
+) -> list[Ticket]:
+    """Close open/waiting tickets that nobody touched for the window."""
+    moment = store.now() if at is None else at
+    closed: list[Ticket] = []
+    for ticket in store.tickets_in_states(
+        (TicketState.OPEN.value, TicketState.WAITING_CUSTOMER.value)
+    ):
+        last = max(ticket.updated_at, ticket.last_customer_at or 0)
+        if moment - last <= close_after_days * 86400:
+            continue
+        closed.append(
+            store.update_ticket(
+                ticket.id,
+                TicketUpdate(state=TicketState.CLOSED.value),
+                actor=Actor.SYSTEM.value,
+                kind=EventKind.STATE.value,
+                body="closed after inactivity",
                 at=moment,
             )
         )

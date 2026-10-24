@@ -182,6 +182,7 @@ def send_media_image(
     delivered_to_self(chat_id, sent_id)
     target.sent = chat_id
     target.sent_id = sent_id
+    target.sent_text = caption or ""
     return ok(
         chat=chat_id,
         kind="image",
@@ -211,6 +212,7 @@ def send_media_video(
     delivered_to_self(chat_id, sent_id)
     target.sent = chat_id
     target.sent_id = sent_id
+    target.sent_text = caption or ""
     return ok(
         chat=chat_id,
         kind="video",
@@ -246,6 +248,7 @@ def send_media_file(
     delivered_to_self(chat_id, sent_id)
     target.sent = chat_id
     target.sent_id = sent_id
+    target.sent_text = caption or ""
     return ok(
         chat=chat_id,
         kind="file",

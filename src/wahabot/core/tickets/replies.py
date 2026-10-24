@@ -8,18 +8,30 @@ from dataclasses import dataclass, field
 
 from loguru import logger
 
+from wahabot.core.tickets.facts import (
+    fact_tokens,
+    mismatch_tokens,
+    omitted_tokens,
+)
 from wahabot.core.tickets.models import (
     Actor,
     Contact,
     DoneBy,
     EventKind,
     Ticket,
+    TicketEvent,
     TicketState,
     TicketUpdate,
     text_field,
 )
 from wahabot.core.tickets.store import TicketStore
 from wahabot.core.transport import Transport
+
+__all__ = [
+    "fact_tokens",
+    "mismatch_tokens",
+    "omitted_tokens",
+]
 
 Completer = Callable[[str], str]
 Remember = Callable[[str], Awaitable[None]]
@@ -45,77 +57,6 @@ _DRAFT_PROMPT = (
     "{customer}\n\nOperator words:\n{text}"
 )
 
-_NUMBER_WORDS = {
-    "zero": "0",
-    "one": "1",
-    "two": "2",
-    "three": "3",
-    "four": "4",
-    "five": "5",
-    "six": "6",
-    "seven": "7",
-    "eight": "8",
-    "nine": "9",
-    "ten": "10",
-    "eleven": "11",
-    "twelve": "12",
-    "thirteen": "13",
-    "fourteen": "14",
-    "fifteen": "15",
-    "sixteen": "16",
-    "seventeen": "17",
-    "eighteen": "18",
-    "nineteen": "19",
-    "twenty": "20",
-    "thirty": "30",
-    "forty": "40",
-    "fifty": "50",
-    "sixty": "60",
-    "seventy": "70",
-    "eighty": "80",
-    "ninety": "90",
-    "hundred": "100",
-}
-
-_UNITS = (
-    "days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?|seconds?|"
-    "euros?|eur|usd|dollars?|pounds?|gbp|kg|grams?|g|km|metres?|meters?"
-)
-_FACT_PATTERNS = (
-    re.compile(rf"\d+(?:[.,]\d+)?\s*(?:{_UNITS})\b", re.IGNORECASE),
-    re.compile(r"[€$£]\s*\d+(?:[.,]\d+)?"),
-    re.compile(r"\d+(?:[.,]\d+)?\s*(?:€|\$|£)"),
-    re.compile(r"\b\d+(?:[.,]\d+)?\s*%"),
-    re.compile(r"\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b"),
-    re.compile(r"\b\d{1,2}:\d{2}\b"),
-    re.compile(r"\b\d{1,2}(?:am|pm)\b"),
-    re.compile(r"\b(?:order|ticket|invoice|ref(?:erence)?)\s*#?\s*\d+\b", re.IGNORECASE),
-    re.compile(r"\b\d+(?:[.,]\d+)?\b"),
-)
-_NUMBER_RANGE = re.compile(r"(\d+)\s*(?:-|to|until)\s*(\d+)")
-_UNIT_CANON = {
-    "euro": "eur",
-    "euros": "eur",
-    "dollar": "usd",
-    "dollars": "usd",
-    "pound": "gbp",
-    "pounds": "gbp",
-    "day": "days",
-    "week": "weeks",
-    "month": "months",
-    "year": "years",
-    "hour": "hours",
-    "hr": "hours",
-    "hrs": "hours",
-    "minute": "minutes",
-    "min": "minutes",
-    "mins": "minutes",
-    "second": "seconds",
-    "gram": "grams",
-    "metre": "metres",
-    "meter": "metres",
-}
-
 
 @dataclass(slots=True)
 class ReplyOutcome:
@@ -126,6 +67,7 @@ class ReplyOutcome:
     kind: str = AMBIGUOUS
     draft: str = ""
     mismatches: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
 
 
 def parse_kind(raw: str) -> str:
@@ -169,39 +111,6 @@ async def draft_message(
     return raw.strip().strip('"')
 
 
-def normalize_text(text: str) -> str:
-    """Normalize number words, ranges and whitespace for fact comparison."""
-    lowered = text.casefold()
-    for word, digit in _NUMBER_WORDS.items():
-        lowered = re.sub(rf"\b{word}\b", digit, lowered)
-    lowered = _NUMBER_RANGE.sub(r"\1-\2", lowered)
-    for word, canon in _UNIT_CANON.items():
-        lowered = re.sub(rf"\b{word}\b", canon, lowered)
-    lowered = re.sub(r"(\d)\s+(am|pm)\b", r"\1\2", lowered)
-    return re.sub(r"\s+", " ", lowered).strip()
-
-
-def fact_tokens(text: str) -> set[str]:
-    """Every amount, date, time, duration and reference in *text*."""
-    normalized = normalize_text(text)
-    found: set[str] = set()
-    for pattern in _FACT_PATTERNS:
-        found.update(match.group(0).strip() for match in pattern.finditer(normalized))
-    return found
-
-
-def mismatch_tokens(draft: str, operator_text: str) -> list[str]:
-    """Facts in the draft that the operator never wrote."""
-    missing = fact_tokens(draft) - fact_tokens(operator_text)
-    return sorted(token for token in missing if not subsumed(token, missing))
-
-
-def subsumed(token: str, tokens: set[str]) -> bool:
-    """Whether a broader token in the same set already covers *token*."""
-    pattern = re.compile(rf"(?<!\w){re.escape(token)}(?!\w)")
-    return any(token != other and pattern.search(other) for other in tokens)
-
-
 def window_open(last_customer_at: int | None, now: int, window_days: int) -> bool:
     """Whether the reply window still allows a customer send."""
     return last_customer_at is not None and now - last_customer_at <= window_days * 86400
@@ -235,6 +144,98 @@ def confirmation(contact: Contact, ticket: Ticket, kind: str, draft: str) -> str
     if kind == RESOLUTION:
         return f"Sent to {contact.display}: {draft} Ticket {ticket.number} done."
     return f"Asked {contact.display}: {draft} Ticket {ticket.number} waiting for them."
+
+
+def fact_check_outcome(kind: str, draft: str, operator_text: str) -> ReplyOutcome | None:
+    """The refusal outcome when the draft changes the operator's facts."""
+    mismatches = mismatch_tokens(draft, operator_text)
+    missing = omitted_tokens(draft, operator_text)
+    if not mismatches and not missing:
+        return None
+    changes: list[str] = []
+    if mismatches:
+        changes.append(
+            "adds values the operator did not give (" + ", ".join(mismatches) + ")"
+        )
+    if missing:
+        changes.append("drops values the operator gave (" + ", ".join(missing) + ")")
+    return ReplyOutcome(
+        confirmation=(
+            "Not sent: the draft " + " and ".join(changes) + f".\nDraft: {draft}"
+        ),
+        kind=kind,
+        draft=draft,
+        mismatches=mismatches,
+        missing=missing,
+    )
+
+
+def hold_outcome(
+    store: TicketStore,
+    ticket: Ticket,
+    contact: Contact,
+    kind: str,
+    draft: str,
+    moment: int,
+    reply_window_days: int,
+) -> ReplyOutcome | None:
+    """Hold a draft when the customer has been silent past the window."""
+    if window_open(contact.last_inbound_at, moment, reply_window_days):
+        return None
+    store.add_event(
+        ticket.id,
+        Actor.OPERATOR.value,
+        EventKind.HELD.value,
+        held_payload(kind, draft),
+        at=moment,
+    )
+    if contact.last_inbound_at is None:
+        waited = "has not written yet"
+    else:
+        days = (moment - contact.last_inbound_at) // 86400
+        waited = f"last wrote {days} days ago"
+    return ReplyOutcome(
+        confirmation=(
+            f"Can't send yet: {contact.display} {waited}. "
+            "It goes out when they write again."
+        ),
+        kind=kind,
+        draft=draft,
+    )
+
+
+async def relay_outcome(
+    store: TicketStore,
+    waha: Transport,
+    session: str,
+    ticket: Ticket,
+    contact: Contact,
+    kind: str,
+    draft: str,
+    operator_text: str,
+    moment: int,
+    remember: Remember | None,
+) -> ReplyOutcome:
+    """Send one confirmed relay and build its outcome."""
+    if not send_reply(
+        store, waha, session, ticket, draft, kind, moment, operator_text=operator_text
+    ):
+        return ReplyOutcome(
+            confirmation=(
+                f"Send failed — not confirmed. Ticket {ticket.number} unchanged; "
+                "the message did not go out."
+            ),
+            kind=kind,
+            draft=draft,
+        )
+    if remember is not None:
+        await remember(draft)
+    return ReplyOutcome(
+        confirmation=confirmation(contact, ticket, kind, draft),
+        sent=True,
+        kind=kind,
+        draft=draft,
+    )
 
 
 async def handle_operator_reply(
@@ -271,57 +272,23 @@ async def handle_operator_reply(
             ),
             kind=kind,
         )
-    mismatches = mismatch_tokens(draft, operator_text)
-    if mismatches:
-        return ReplyOutcome(
-            confirmation=(
-                "Not sent: the draft adds values the operator did not give ("
-                + ", ".join(mismatches)
-                + f").\nDraft: {draft}"
-            ),
-            kind=kind,
-            draft=draft,
-            mismatches=mismatches,
-        )
-    if not window_open(contact.last_inbound_at, moment, reply_window_days):
-        store.add_event(
-            ticket.id,
-            Actor.OPERATOR.value,
-            EventKind.HELD.value,
-            held_payload(kind, draft),
-            at=moment,
-        )
-        days = (
-            (moment - contact.last_inbound_at) // 86400
-            if contact.last_inbound_at is not None
-            else 0
-        )
-        return ReplyOutcome(
-            confirmation=(
-                f"Can't send yet: {contact.display} last wrote {days} days ago. "
-                "It goes out when they write again."
-            ),
-            kind=kind,
-            draft=draft,
-        )
-    if not send_reply(
-        store, waha, session, ticket, draft, kind, moment, operator_text=operator_text
-    ):
-        return ReplyOutcome(
-            confirmation=(
-                f"Send failed — not confirmed. Ticket {ticket.number} unchanged; "
-                "the message did not go out."
-            ),
-            kind=kind,
-            draft=draft,
-        )
-    if remember is not None:
-        await remember(draft)
-    return ReplyOutcome(
-        confirmation=confirmation(contact, ticket, kind, draft),
-        sent=True,
-        kind=kind,
-        draft=draft,
+    refused = fact_check_outcome(kind, draft, operator_text)
+    if refused is not None:
+        return refused
+    held = hold_outcome(store, ticket, contact, kind, draft, moment, reply_window_days)
+    if held is not None:
+        return held
+    return await relay_outcome(
+        store,
+        waha,
+        session,
+        ticket,
+        contact,
+        kind,
+        draft,
+        operator_text,
+        moment,
+        remember,
     )
 
 
@@ -370,25 +337,30 @@ def send_reply(
     return True
 
 
-async def deliver_held(
+def pending_held(store: TicketStore, ticket: Ticket) -> list[TicketEvent]:
+    """Held drafts newer than the last confirmed relay, oldest first."""
+    sent = store.last_event(ticket.id, EventKind.SENT.value)
+    sent_key = (sent.at, sent.id) if sent is not None else None
+    return [
+        event
+        for event in store.events(ticket.id)
+        if event.kind == EventKind.HELD.value
+        and (sent_key is None or (event.at, event.id) > sent_key)
+    ]
+
+
+async def deliver_held_event(
     store: TicketStore,
     waha: Transport,
     session: str,
     ticket: Ticket,
     contact: Contact,
-    *,
-    remember: Remember | None = None,
-    now: int | None = None,
-) -> ReplyOutcome | None:
-    """Send a held draft when the customer writes again."""
-    event = store.last_event(ticket.id, EventKind.HELD.value)
-    if event is None:
-        return None
-    sent = store.last_event(ticket.id, EventKind.SENT.value)
-    if sent is not None and (sent.at, sent.id) > (event.at, event.id):
-        return None
+    event: TicketEvent,
+    moment: int,
+    remember: Remember | None,
+) -> ReplyOutcome:
+    """Deliver one held draft and report its outcome."""
     kind, draft = read_held(event.body)
-    moment = store.now() if now is None else now
     if not send_reply(store, waha, session, ticket, draft, kind, moment):
         return ReplyOutcome(
             confirmation=f"Held draft for ticket {ticket.number} could not be sent.",
@@ -403,6 +375,31 @@ async def deliver_held(
         kind=kind,
         draft=draft,
     )
+
+
+async def deliver_held(
+    store: TicketStore,
+    waha: Transport,
+    session: str,
+    ticket: Ticket,
+    contact: Contact,
+    *,
+    remember: Remember | None = None,
+    now: int | None = None,
+) -> ReplyOutcome | None:
+    """Send every held draft that followed the last confirmed relay."""
+    moment = store.now() if now is None else now
+    pending = pending_held(store, ticket)
+    if not pending:
+        return None
+    outcome: ReplyOutcome | None = None
+    for event in pending:
+        outcome = await deliver_held_event(
+            store, waha, session, ticket, contact, event, moment, remember
+        )
+        if not outcome.sent:
+            return outcome
+    return outcome
 
 
 def decision_fact(ticket: Ticket, operator_text: str, draft: str) -> str:

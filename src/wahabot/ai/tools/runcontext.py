@@ -57,6 +57,8 @@ class RunTarget:
     chat_id: str = ""
     sent: str = ""
     sent_id: str = ""
+    #: The text (or media caption) confirmed delivered this run.
+    sent_text: str = ""
     reacted: str = ""
     armed: bool = False
     #: Typing-presence window (``(min_s, max_s)``) from settings; None

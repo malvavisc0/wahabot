@@ -26,7 +26,7 @@ placeholder expansion.
 | `bot_mention_regex` | `string \| null` | `null` | A regex detecting when the bot is addressed in a group. Defaults to a case-insensitive whole-word `@?<bot_name>`. |
 | `group_participation` | `"never" \| "mentioned" \| "judicious"` | `"mentioned"` | How the bot joins group conversations (below). |
 | `reply_window_days` | `integer` | `7` | Recovered rows older than this many days become operator-required work and get no customer reply. Also bounds an operator relay: older customer chats hold the draft until the customer writes again. Bounds 1–30; hot-reloaded. |
-| `close_after_days` | `integer` | `5` | Days after a ticket is done before it auto-closes; a customer message inside the window reopens it. Bounds 1–365; hot-reloaded. |
+| `close_after_days` | `integer` | `5` | Days a done ticket waits before it auto-closes; a customer message inside the window reopens it. Open or waiting tickets untouched for the same window also close. Bounds 1–365; hot-reloaded. |
 | `pause_after_human_hours` | `integer` | `2` | Hours a human-operator message pauses the assistant in that chat. Bounds 0–168; `0` disables the pause. |
 | `operator_language` | `string` | `""` | Language for operator alerts and confirmations. Empty falls back to English. |
 
@@ -59,14 +59,19 @@ The operator replies in the "Message yourself" chat: quote any alert (or
 a forwarded attachment) with what was done, or name the ticket
 (`142: refunded`). The bot drafts the customer message in the customer's
 language, refuses a draft that adds an amount, date, time or reference
-the operator did not write, and confirms the ticket state.
+the operator did not write, and refuses one that drops an amount or
+percentage the operator did write. The customer's language is detected
+from their text; it drives the holding reply and the alert's Language
+line. While a ticket waits on the operator, the customer gets one short
+holding reply per hour (and another after a fresh alert).
 
 Operator commands in the self-chat: `what's open?`, `close 142`,
 `reopen 142`, `pause`, `resume`, `pause <name>`, `resume <name>`.
 `pause` with no name pauses every chat in the session; `resume` clears
 it. A human message typed in a customer chat pauses that chat for
 `pause_after_human_hours`, and messages received while paused are saved
-but never replayed.
+but never replayed. The pause is keyed by the chat, so it does not
+create a stub contact for a customer who has not written yet.
 
 Only one ticket per chat can be active at a time. A different issue is
 split into a new ticket only when the current one is `open` or `done`;

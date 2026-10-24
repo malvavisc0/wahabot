@@ -366,6 +366,27 @@ class IntentStore:
             conn.close()
         return [to_intent(row) for row in rows]
 
+    def find_sent_text(self, chat_id: str, text: str, since: float) -> str:
+        """The transport id of a sent text in *chat_id* since *since*."""
+        conn = connect(self.path)
+        try:
+            rows = conn.execute(
+                "SELECT * FROM outbound_intents WHERE chat_id = ? "
+                + "AND kind IN ('text', 'operator_notice') AND state = ? "
+                + "AND created_at >= ? ORDER BY created_at DESC LIMIT 50",
+                (chat_id, SENT, since),
+            ).fetchall()
+        finally:
+            conn.close()
+        for row in rows:
+            intent = to_intent(row)
+            if (
+                str(intent.payload.get("text") or "") == text
+                and intent.transport_message_id
+            ):
+                return intent.transport_message_id
+        return ""
+
     def recoverable(self, now: float, limit: int = 50) -> list[DeliveryIntent]:
         """Prepared, stale-sending and retry-due failed intents.
 

@@ -131,6 +131,8 @@ class AlbumMixin(HandlerBase):
             album_message_id(event),
             *(str(image.payload.get("id", "")) for image in images),
         ]
+        if await self.turn_suppressed(event.session, chat_id, turn_ids):
+            return "superseded", None
         if await self.ticket_gate_events([event, *images]):
             return "operator_owned", None
         downloaded = await self.download_album_images(images)
@@ -216,7 +218,7 @@ class AlbumMixin(HandlerBase):
             message_ids=turn_ids,
             duration_ms=int((time.monotonic() - started) * 1000),
         )
-        self.finalize_ticket(target, outcome)
+        self.finalize_ticket(target, outcome, reply)
         # Post-reply memory jobs outside the chat lock: the recap merge
         # and the embedding drain must never hold the chat's next run.
         await self.agent.merge_learned()

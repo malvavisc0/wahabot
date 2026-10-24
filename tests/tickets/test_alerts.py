@@ -1,5 +1,13 @@
+import time
+from typing import override
+
 from tests.harness import ME_JID, RecordingWaha
-from wahabot.core.tickets.alerts import compose_alert, send_alert
+from wahabot.core.tickets.alerts import (
+    ALERT_RECONCILE_GRACE_S,
+    alert_intent_key,
+    compose_alert,
+    send_alert,
+)
 from wahabot.core.tickets.attachments import persist_bytes
 from wahabot.core.tickets.models import Contact, Ticket, TicketState, TicketUpdate
 from wahabot.core.tickets.store import TicketStore
@@ -167,3 +175,155 @@ def test_unconfirmed_alert_does_not_change_the_ticket(
     assert not result.delivered
     assert store.ticket(ticket.id).state != TicketState.NEEDS_YOU.value
     assert not any(event.kind == "alert" for event in store.events(ticket.id))
+
+
+def test_a_reopened_ticket_does_not_forward_old_attachments_again(
+    store: TicketStore, settings: Settings
+) -> None:
+    contact, ticket = ticket_with_request(store)
+    waha = RecordingWaha()
+    persist_bytes(store, ticket, "msg-photo", "image", "image/png", b"photo", settings)
+
+    send_alert(store, waha, "default", ME_JID, ticket, contact)
+    assert len(waha.forwarded) == 1
+
+    store.update_ticket(ticket.id, TicketUpdate(state=TicketState.OPEN.value))
+    send_alert(store, waha, "default", ME_JID, store.ticket(ticket.id), contact)
+
+    assert len(waha.forwarded) == 1
+
+
+class HistoryWaha(RecordingWaha):
+    """A transport whose chat history can contain a previously sent alert."""
+
+    def __init__(self, history: list[dict[str, object]] | None = None) -> None:
+        super().__init__()
+        self.history = list(history or [])
+
+    @override
+    def fetch_chat_messages(
+        self, session: str, chat_id: str, limit: int = 50
+    ) -> list[dict[str, object]]:
+        return list(self.history)
+
+    @override
+    def send_text(
+        self,
+        session: str,
+        chat_id: str,
+        text: str,
+        reply_to: str | None = None,
+        mentions: list[str] | None = None,
+    ) -> str:
+        sent_id = super().send_text(session, chat_id, text, reply_to, mentions)
+        self.history.append(
+            {
+                "id": sent_id,
+                "body": text,
+                "fromMe": True,
+                "timestamp": int(time.time()),
+            }
+        )
+        return sent_id
+
+
+def seed_alert(
+    store: TicketStore, ticket: Ticket, key: str, text: str, at: int = 1000
+) -> None:
+    store.claim_alert(key, ticket.id, "default", ME_JID, text, at=at)
+
+
+def test_alert_retry_adopts_a_message_already_in_history(
+    store: TicketStore,
+) -> None:
+    contact, ticket = ticket_with_request(store)
+    key = alert_intent_key(store, ticket, "handover")
+    text = compose_alert(store, ticket, contact, "en", None)
+    seed_alert(store, ticket, key, text)
+    waha = HistoryWaha(
+        [
+            {
+                "id": "true_491555000000@c.us_ADOPTED",
+                "body": text,
+                "fromMe": True,
+                "timestamp": 1001,
+            }
+        ]
+    )
+
+    result = send_alert(
+        store,
+        waha,
+        "default",
+        ME_JID,
+        ticket,
+        contact,
+        alert_key=key,
+        now=1050,
+    )
+
+    assert result.delivered and not result.pending
+    assert waha.sent == []
+    stored = store.ticket(ticket.id)
+    assert stored is not None and stored.state == TicketState.NEEDS_YOU.value
+    assert "true_491555000000@c.us_ADOPTED" in stored.alert_message_ids
+    intent = store.alert_intent(key)
+    assert intent is not None and intent.state == "sent"
+
+
+def test_alert_retry_waits_for_the_grace_before_resending(
+    store: TicketStore,
+) -> None:
+    contact, ticket = ticket_with_request(store)
+    key = alert_intent_key(store, ticket, "handover")
+    text = compose_alert(store, ticket, contact, "en", None)
+    seed_alert(store, ticket, key, text)
+    waha = HistoryWaha()
+
+    pending = send_alert(
+        store, waha, "default", ME_JID, ticket, contact, alert_key=key, now=1010
+    )
+
+    assert pending.pending and not pending.delivered
+    assert waha.sent == []
+
+
+def test_alert_retry_resends_after_the_grace(store: TicketStore) -> None:
+    contact, ticket = ticket_with_request(store)
+    key = alert_intent_key(store, ticket, "handover")
+    text = compose_alert(store, ticket, contact, "en", None)
+    seed_alert(store, ticket, key, text)
+    waha = HistoryWaha()
+
+    result = send_alert(
+        store,
+        waha,
+        "default",
+        ME_JID,
+        ticket,
+        contact,
+        alert_key=key,
+        now=1000 + ALERT_RECONCILE_GRACE_S + 1,
+    )
+
+    assert result.delivered
+    assert len(waha.sent) == 1
+    stored = store.ticket(ticket.id)
+    assert stored is not None and stored.state == TicketState.NEEDS_YOU.value
+
+
+def test_alert_is_not_sent_twice_for_the_same_key(store: TicketStore) -> None:
+    contact, ticket = ticket_with_request(store)
+    key = alert_intent_key(store, ticket, "handover")
+    waha = HistoryWaha()
+
+    first = send_alert(
+        store, waha, "default", ME_JID, ticket, contact, alert_key=key, now=1000
+    )
+    second = send_alert(
+        store, waha, "default", ME_JID, ticket, contact, alert_key=key, now=1001
+    )
+
+    assert first.delivered and second.delivered
+    assert len(waha.sent) == 1
+    assert second.message_ids == first.message_ids

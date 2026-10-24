@@ -3,9 +3,14 @@ import sqlite3
 from tests.harness import chat_event
 from wahabot.ai.tools.runcontext import RunTarget
 from wahabot.core.models import WahaEvent
+from wahabot.core.tickets.identity import customer_details, phone_alias
 from wahabot.core.tickets.lifecycle import (
     Inbound,
+    close_stale,
+    close_ticket,
     finalize_delivery,
+    holding_due,
+    is_paused,
     is_thanks_only,
     open_ticket,
     record_inbound,
@@ -248,3 +253,186 @@ def test_open_ticket_reuses_the_winner_of_a_creation_race(
     monkeypatch.setattr(store, "create_ticket", conflict)
 
     assert open_ticket(store, contact, 1).id == existing.id
+
+
+def test_only_appreciative_emoji_count_as_thanks() -> None:
+    assert is_thanks_only("👍")
+    assert is_thanks_only("👍🏽")
+    assert is_thanks_only("🙏🙏")
+    assert not is_thanks_only("😡")
+    assert not is_thanks_only("❌")
+    assert not is_thanks_only("😭")
+
+
+def test_explicit_done_defaults_done_by_to_assistant(store: TicketStore) -> None:
+    ticket = inbound(store, "resolved", mid="EXPLICIT_DONE").ticket
+
+    done = finalize_delivery(
+        store,
+        ticket.id,
+        TicketUpdate(state=TicketState.DONE.value),
+        delivered=True,
+    )
+
+    assert done is not None
+    assert done.state == TicketState.DONE.value
+    assert done.done_by == "assistant"
+
+
+def test_customer_details_reads_phone_domains_and_device_suffixes() -> None:
+    raw = chat_event(body="hello", mid="DETAILS", chat="491555000001:12@s.whatsapp.net")
+    raw["payload"]["participant"] = "491555000001:12@s.whatsapp.net"
+    chat_id, phone, lid, _ = customer_details(WahaEvent.model_validate(raw))
+
+    assert chat_id == "491555000001:12@s.whatsapp.net"
+    assert phone == "491555000001@s.whatsapp.net"
+    assert lid == ""
+
+
+def test_last_inbound_uses_the_message_time_and_keeps_the_newest(
+    store: TicketStore,
+) -> None:
+    forwarded = chat_event(body="first", mid="TIME1", chat=CUSTOMER)
+    forwarded["payload"]["timestamp"] = 1_000
+    record_inbound(
+        store,
+        WahaEvent.model_validate(forwarded),
+        message_ids=[forwarded["payload"]["id"]],
+        close_after_days=5,
+        body="first",
+    )
+    assert store.contact(CUSTOMER).last_inbound_at == 1_000
+
+    out_of_order = chat_event(body="old", mid="TIME0", chat=CUSTOMER)
+    out_of_order["payload"]["timestamp"] = 500
+    record_inbound(
+        store,
+        WahaEvent.model_validate(out_of_order),
+        message_ids=[out_of_order["payload"]["id"]],
+        close_after_days=5,
+        body="old",
+    )
+    assert store.contact(CUSTOMER).last_inbound_at == 1_000
+
+    newer = chat_event(body="new", mid="TIME2", chat=CUSTOMER)
+    newer["payload"]["timestamp"] = 2_000
+    record_inbound(
+        store,
+        WahaEvent.model_validate(newer),
+        message_ids=[newer["payload"]["id"]],
+        close_after_days=5,
+        body="new",
+    )
+    assert store.contact(CUSTOMER).last_inbound_at == 2_000
+
+
+def test_close_stale_closes_untouched_open_and_waiting_tickets(
+    store: TicketStore,
+) -> None:
+    contact = store.upsert_contact(CUSTOMER, display_name="Smoke Sender")
+    open_ticket = store.create_ticket(contact.id, CUSTOMER, summary="open", at=1_000)
+    waiting = store.create_ticket(contact.id, "491555000002@c.us", at=1_000)
+    store.update_ticket(
+        waiting.id,
+        TicketUpdate(state=TicketState.WAITING_CUSTOMER.value),
+        at=1_000,
+    )
+    needs = store.create_ticket(contact.id, "491555000003@c.us", at=1_000)
+    store.update_ticket(
+        needs.id, TicketUpdate(state=TicketState.NEEDS_YOU.value), at=1_000
+    )
+
+    close_stale(store, 5, at=1_000 + 6 * 86400)
+
+    assert store.ticket(open_ticket.id).state == TicketState.CLOSED.value
+    assert store.ticket(waiting.id).state == TicketState.CLOSED.value
+    assert store.ticket(needs.id).state == TicketState.NEEDS_YOU.value
+
+
+def test_closing_an_unresolved_ticket_does_not_claim_done(store: TicketStore) -> None:
+    ticket = inbound(store, "still broken", mid="CLOSE_OPEN").ticket
+
+    closed = close_ticket(store, store.ticket(ticket.id))
+
+    assert closed.state == TicketState.CLOSED.value
+    assert closed.done_at is None
+    assert closed.done_by is None
+
+
+def test_holding_due_resets_after_a_new_alert_and_cools_down(
+    store: TicketStore,
+) -> None:
+    contact = store.upsert_contact(CUSTOMER, display_name="Smoke Sender")
+    ticket = store.create_ticket(contact.id, CUSTOMER, at=1000)
+
+    assert holding_due(store, ticket.id, 1000, 3600)
+    store.add_event(ticket.id, "assistant", "holding", "still here", at=1000)
+    assert not holding_due(store, ticket.id, 1001, 3600)
+    assert holding_due(store, ticket.id, 1000 + 3600, 3600)
+    store.add_event(ticket.id, "assistant", "alert", "Ticket 1", at=2000)
+    assert holding_due(store, ticket.id, 2001, 3600)
+
+
+def test_details_merge_across_successive_updates(store: TicketStore) -> None:
+    ticket = inbound(store, "details", mid="DETAILS2").ticket
+
+    store.update_ticket(ticket.id, TicketUpdate(details={"order": "A-17"}))
+    store.update_ticket(ticket.id, TicketUpdate(details={"address": "Main St"}))
+
+    assert store.ticket(ticket.id).details == {
+        "order": "A-17",
+        "address": "Main St",
+    }
+
+
+def test_customer_details_reads_alternate_jids_from_the_payload() -> None:
+    raw = chat_event(body="hello", mid="ALIAS", chat="999@lid")
+    raw["payload"]["participant"] = "999@lid"
+    raw["payload"]["_data"]["key"] = {
+        "remoteJidAlt": "491555000001@c.us",
+        "senderLid": "999@lid",
+    }
+
+    chat_id, phone, lid, _ = customer_details(WahaEvent.model_validate(raw))
+
+    assert chat_id == "999@lid"
+    assert phone == "491555000001@c.us"
+    assert lid == "999@lid"
+
+
+def test_phone_alias_uses_the_lid_lookup_only_when_needed(
+    store: TicketStore,
+) -> None:
+    raw = chat_event(body="hello", mid="ALIAS2", chat="999@lid")
+    raw["payload"]["participant"] = "999@lid"
+    event = WahaEvent.model_validate(raw)
+    calls: list[str] = []
+
+    def resolve(session: str, lid: str) -> str:
+        calls.append(lid)
+        return "491555000001@c.us"
+
+    assert phone_alias(store, event, resolve) == "491555000001@c.us"
+    assert calls == ["999@lid"]
+
+    store.upsert_contact("999@lid", lid="999@lid", phone="491555000001@c.us")
+    assert phone_alias(store, event, resolve) == "491555000001@c.us"
+    assert calls == ["999@lid"]
+
+
+def test_is_paused_matches_any_contact_alias(store: TicketStore) -> None:
+    contact = store.upsert_contact(
+        "999@lid",
+        lid="999@lid",
+        phone="491555000001@c.us",
+    )
+    ticket = store.create_ticket(contact.id, contact.chat_id, at=1000)
+    inbound = Inbound(contact=contact, ticket=ticket, body="hello")
+    store.set_chat_paused("491555000001@c.us", 2000)
+
+    assert is_paused(store, "default", inbound, 1500)
+    assert not is_paused(store, "default", inbound, 2500)
+
+    store.set_chat_paused("491555000001@c.us", None)
+    store.set_chat_paused("999@lid", 2000)
+    assert is_paused(store, "default", inbound, 1500)

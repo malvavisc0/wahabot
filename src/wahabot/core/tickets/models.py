@@ -50,6 +50,7 @@ class EventKind(StrEnum):
     OPERATOR_REPLY = "operator_reply"
     SENT = "sent"
     HELD = "held"
+    HOLDING = "holding"
     STATE = "state"
     ATTACHMENT = "attachment"
     NUDGE = "nudge"
@@ -171,3 +172,23 @@ def json_object(raw: str) -> dict[str, object]:
     except json.JSONDecodeError:
         return {}
     return dict(as_mapping(value))
+
+
+ALERT_SENDING = "sending"
+ALERT_SENT = "sent"
+ALERT_FAILED = "failed"
+
+
+@dataclass(slots=True)
+class AlertIntent:
+    """One operator alert claimed before its transport send."""
+
+    key: str
+    ticket_id: int
+    session: str
+    chat_id: str
+    text: str
+    state: str
+    sent_id: str
+    created_at: int
+    updated_at: int
