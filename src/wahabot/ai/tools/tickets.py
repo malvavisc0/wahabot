@@ -550,8 +550,7 @@ def new_ticket() -> BaseTool:
             TicketState.CLOSED.value,
         ):
             return error(
-                "cannot split: this run already staged a state that must be "
-                "handled by a person first"
+                "cannot split: this run staged a state a person must handle first"
             )
         log_action_reason("new_ticket", reason, ticket=ticket.number)
         target.ticket_id = ticket.id

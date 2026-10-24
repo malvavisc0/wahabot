@@ -1,5 +1,7 @@
 """Find an operator alert already delivered by an earlier attempt."""
 
+from typing import cast
+
 from loguru import logger
 
 from wahabot.core.tickets.models import AlertIntent
@@ -12,7 +14,7 @@ ALERT_LOOKBACK_S = 300
 def waha_message_id(message: dict[str, object]) -> str:
     value = message.get("id")
     if isinstance(value, dict):
-        return str(value.get("_serialized") or "")
+        return str(cast("dict[str, object]", value).get("_serialized") or "")
     return str(value or "")
 
 
@@ -21,7 +23,11 @@ def waha_message_body(message: dict[str, object]) -> str:
     if body:
         return body
     data = message.get("_data")
-    return str(data.get("body") or "") if isinstance(data, dict) else ""
+    return (
+        str(cast("dict[str, object]", data).get("body") or "")
+        if isinstance(data, dict)
+        else ""
+    )
 
 
 def waha_message_time(message: dict[str, object]) -> int | None:
@@ -29,7 +35,7 @@ def waha_message_time(message: dict[str, object]) -> int | None:
     if value is None:
         data = message.get("_data")
         if isinstance(data, dict):
-            value = data.get("messageTimestamp")
+            value = cast("dict[str, object]", data).get("messageTimestamp")
     if not isinstance(value, int | float | str):
         return None
     try:
@@ -80,14 +86,15 @@ def history_match(store: TicketStore, message: object, intent: AlertIntent) -> s
     """The id of one history message when it is this intent's alert."""
     if not isinstance(message, dict):
         return ""
-    if message.get("fromMe") is False:
+    fields = cast("dict[str, object]", message)
+    if fields.get("fromMe") is False:
         return ""
-    if waha_message_body(message) != intent.text:
+    if waha_message_body(fields) != intent.text:
         return ""
-    moment = waha_message_time(message)
+    moment = waha_message_time(fields)
     if moment is not None and moment < intent.created_at - ALERT_LOOKBACK_S:
         return ""
-    sent_id = waha_message_id(message)
+    sent_id = waha_message_id(fields)
     if sent_id and not store.alert_id_used(sent_id, intent.key):
         return sent_id
     return ""
