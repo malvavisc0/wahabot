@@ -2,6 +2,7 @@
 
 from wahabot.core.db.connection import connect, transaction
 from wahabot.core.schedule.models import DeferredNotice
+from wahabot.core.tickets.models import TicketState
 from wahabot.core.tickets.store_base import StoreBase
 
 
@@ -87,24 +88,47 @@ class ScheduleMixin(StoreBase):
         conn = connect(self.path)
         try:
             with transaction(conn):
-                cursor = conn.execute(
-                    "INSERT INTO deferred_notices "
-                    + "(ticket_id, session, chat_id, text, not_before, created_at) "
-                    + "VALUES (?, ?, ?, ?, ?, ?)",
-                    (ticket_id, session, chat_id, text, not_before, moment),
-                )
-                notice_id = int(cursor.lastrowid or 0)
+                existing = conn.execute(
+                    "SELECT id FROM deferred_notices "
+                    + "WHERE ticket_id = ? AND sent_at IS NULL "
+                    + "ORDER BY id DESC LIMIT 1",
+                    (ticket_id,),
+                ).fetchone()
+                if existing is not None:
+                    notice_id = int(existing["id"])
+                    conn.execute(
+                        "UPDATE deferred_notices SET session = ?, chat_id = ?, "
+                        + "text = ?, not_before = ?, created_at = ? WHERE id = ?",
+                        (
+                            session,
+                            chat_id,
+                            text,
+                            not_before,
+                            moment,
+                            notice_id,
+                        ),
+                    )
+                else:
+                    cursor = conn.execute(
+                        "INSERT INTO deferred_notices "
+                        + "(ticket_id, session, chat_id, text, not_before, created_at) "
+                        + "VALUES (?, ?, ?, ?, ?, ?)",
+                        (ticket_id, session, chat_id, text, not_before, moment),
+                    )
+                    notice_id = int(cursor.lastrowid or 0)
         finally:
             conn.close()
         return notice_id
 
     def pending_notices(self, now: int, limit: int = 10) -> list[DeferredNotice]:
-        """Unsent notices whose delivery window has opened."""
+        """Unsent notices for still-open needs-you tickets, oldest first."""
         return self.query_all(
-            "SELECT id, ticket_id, session, chat_id, text, not_before, created_at "
-            + "FROM deferred_notices WHERE sent_at IS NULL AND not_before <= ? "
-            + "ORDER BY not_before, id LIMIT ?",
-            (now, limit),
+            "SELECT n.id, n.ticket_id, n.session, n.chat_id, n.text, "
+            + "n.not_before, n.created_at FROM deferred_notices n "
+            + "JOIN tickets t ON t.id = n.ticket_id "
+            + "WHERE n.sent_at IS NULL AND n.not_before <= ? AND t.state = ? "
+            + "ORDER BY n.not_before, n.id LIMIT ?",
+            (now, TicketState.NEEDS_YOU.value, limit),
             lambda row: DeferredNotice(
                 id=int(row["id"]),
                 ticket_id=int(row["ticket_id"]),
@@ -124,9 +148,9 @@ class ScheduleMixin(StoreBase):
         )
 
     def cancel_notices(self, ticket_id: int, at: int) -> None:
-        """Drop unsent notices for a ticket (it was answered by hand)."""
+        """Drop unsent notices for a ticket (it was answered or closed)."""
         self.execute(
-            "UPDATE deferred_notices SET sent_at = ? WHERE ticket_id = ? "
-            + "AND sent_at IS NULL",
+            "UPDATE deferred_notices SET sent_at = ?, sent_id = 'cancelled' "
+            + "WHERE ticket_id = ? AND sent_at IS NULL",
             (at, ticket_id),
         )

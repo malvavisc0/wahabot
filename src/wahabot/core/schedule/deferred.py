@@ -1,6 +1,9 @@
 """Deferred operator notices: queue outside hours, send when open."""
 
+from loguru import logger
+
 from wahabot.core.schedule.models import DeferredNotice
+from wahabot.core.tickets.alerts import forward_attachments
 from wahabot.core.tickets.models import Ticket
 from wahabot.core.tickets.store import TicketStore
 from wahabot.core.transport import Transport
@@ -45,5 +48,15 @@ def deliver_due_notices(
         if not sent_id:
             continue
         store.mark_notice_sent(notice.id, sent_id, now)
+        ticket = store.ticket(notice.ticket_id)
+        if ticket is not None:
+            try:
+                forward_attachments(store, waha, notice.session, notice.chat_id, ticket)
+            except Exception as exc:
+                logger.warning(
+                    "Deferred alert attachment forward failed for {id}: {exc}",
+                    id=notice.ticket_id,
+                    exc=exc,
+                )
         sent += 1
     return sent

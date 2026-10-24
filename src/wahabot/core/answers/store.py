@@ -254,12 +254,19 @@ class AnswerStore(StoreBase):
             conn.close()
         return candidate_from_row(row)
 
-    def latest_candidate(self) -> AnswerCandidate | None:
-        """The newest candidate that has not been saved."""
+    def latest_candidate(self, ticket_id: int | None = None) -> AnswerCandidate | None:
+        """The newest candidate that has not been saved, optionally per ticket."""
+        if ticket_id is None:
+            return self.query_one(
+                f"SELECT {_CANDIDATE_COLUMNS} FROM answer_candidates "
+                + "WHERE saved_at IS NULL ORDER BY id DESC LIMIT 1",
+                (),
+                candidate_from_row,
+            )
         return self.query_one(
             f"SELECT {_CANDIDATE_COLUMNS} FROM answer_candidates "
-            + "WHERE saved_at IS NULL ORDER BY id DESC LIMIT 1",
-            (),
+            + "WHERE saved_at IS NULL AND ticket_id = ? ORDER BY id DESC LIMIT 1",
+            (ticket_id,),
             candidate_from_row,
         )
 

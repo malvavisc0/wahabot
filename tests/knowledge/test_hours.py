@@ -18,7 +18,8 @@ from wahabot.core.schedule.hours import (
     render_away_message,
 )
 from wahabot.core.schedule.models import OpeningState
-from wahabot.core.tickets.models import TicketState
+from wahabot.core.tickets.lifecycle import close_ticket
+from wahabot.core.tickets.models import TicketState, TicketUpdate
 from wahabot.core.tickets.store import TicketStore
 from wahabot.settings import Settings
 
@@ -79,9 +80,31 @@ def test_opening_state_overnight_and_dst() -> None:
     assert opening_state(always, at(1, 3)).open
 
 
+def test_overnight_window_reports_its_own_close_time() -> None:
+    config = config_with_hours(
+        **{
+            "fri": {"open": "22:00", "close": "02:00"},
+            "sat": {"open": "10:00", "close": "14:00"},
+        }
+    )
+    zone = ZoneInfo("Europe/Madrid")
+    at = int(datetime.datetime(2026, 6, 6, 1, 0, tzinfo=zone).timestamp())
+    expected = int(datetime.datetime(2026, 6, 6, 2, 0, tzinfo=zone).timestamp())
+
+    state = opening_state(config, at)
+
+    assert state.open
+    assert state.next_opening == expected
+
+
 def test_deferred_notice_and_night_readiness(store: TicketStore) -> None:
     contact = store.upsert_contact(CUSTOMER, phone=CUSTOMER)
     ticket = store.create_ticket(contact.id, CUSTOMER)
+    store.update_ticket(
+        ticket.id,
+        TicketUpdate(state=TicketState.NEEDS_YOU.value),
+        at=100,
+    )
     assert not store.night_ready("")
     assert not store.night_ready(NIGHT)
     store.upsert_contact(NIGHT, phone=NIGHT)
@@ -91,6 +114,14 @@ def test_deferred_notice_and_night_readiness(store: TicketStore) -> None:
     assert due_notices(store, 99) == []
     assert len(due_notices(store, 101)) == 1
     assert store.pending_notices(102)[0].text == "queued"
+
+    # A retried handover updates the one pending notice instead of queuing twice.
+    defer_notice(store, ticket, "default", ME_JID, "updated", now=100, at=101)
+    pending = store.pending_notices(102)
+    assert len(pending) == 1 and pending[0].text == "updated"
+
+    close_ticket(store, ticket, at=102)
+    assert store.pending_notices(103) == []
 
 
 def test_handover_defers_non_urgent_outside_hours(

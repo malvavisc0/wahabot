@@ -2,6 +2,7 @@
 
 from wahabot.core.answers.models import Answer, AnswerCandidate, AnswerHit
 from wahabot.core.answers.retrieval import (
+    ANSWERS_OVER_BUDGET,
     ANSWERS_SEARCH_LIMIT,
     ANSWERS_TOKEN_LIMIT,
     render_answers_section,
@@ -93,11 +94,13 @@ class AnswerService:
         return hits
 
     def prompt_section(self, token_limit: int | None = None) -> str:
-        """The whole enabled set when it fits, else "" (search takes over)."""
-        return render_answers_section(
-            self.store.enabled(),
+        """The whole enabled set when it fits, else a search-before-answering hint."""
+        items = self.store.enabled()
+        rendered = render_answers_section(
+            items,
             token_limit=self.token_limit if token_limit is None else token_limit,
         )
+        return rendered or (ANSWERS_OVER_BUDGET if items else "")
 
     def offer_candidate(
         self, ticket_id: int, question: str, answer: str
@@ -106,13 +109,13 @@ class AnswerService:
         clean_question, clean_answer = validate_text(question, answer)
         return self.store.add_candidate(ticket_id, clean_question, clean_answer)
 
-    def latest_candidate(self) -> AnswerCandidate | None:
-        """The newest unsaved candidate."""
-        return self.store.latest_candidate()
+    def latest_candidate(self, ticket_id: int | None = None) -> AnswerCandidate | None:
+        """The newest unsaved candidate, optionally for one ticket."""
+        return self.store.latest_candidate(ticket_id)
 
-    def save_latest_candidate(self) -> Answer | None:
+    def save_latest_candidate(self, ticket_id: int | None = None) -> Answer | None:
         """Save the newest candidate once; None when there is nothing to save."""
-        candidate = self.store.latest_candidate()
+        candidate = self.store.latest_candidate(ticket_id)
         if candidate is None:
             return None
         return self.save_candidate(candidate.id)

@@ -3,15 +3,24 @@ import json
 from collections.abc import Callable
 
 from tests.harness import RecordingWaha
-from wahabot.core.tickets.models import Contact, Ticket, TicketState, TicketUpdate
+from wahabot.core.tickets.models import (
+    Actor,
+    Contact,
+    EventKind,
+    Ticket,
+    TicketState,
+    TicketUpdate,
+)
 from wahabot.core.tickets.replies import (
     AMBIGUOUS,
+    ANSWER,
     RESOLUTION,
     Remember,
     ReplyOutcome,
     deliver_held,
     fact_tokens,
     handle_operator_reply,
+    held_payload,
     mismatch_tokens,
     omitted_tokens,
     parse_kind,
@@ -355,6 +364,40 @@ def test_deliver_held_sends_every_pending_draft(store: TicketStore) -> None:
     assert store.ticket(ticket.id).state == TicketState.WAITING_CUSTOMER.value
 
 
+def test_held_answer_offers_save_when_delivered(store: TicketStore) -> None:
+    from wahabot.core.answers.service import AnswerService
+    from wahabot.core.answers.store import AnswerStore
+
+    contact, ticket = setup_ticket(store, last_inbound_at=store.now())
+    now = store.now()
+    store.add_event(
+        ticket.id,
+        Actor.OPERATOR.value,
+        EventKind.HELD.value,
+        held_payload(ANSWER, "It shipped yesterday.", "Where is my order?"),
+        at=now,
+    )
+    answers = AnswerService(AnswerStore(store.path))
+
+    outcome = asyncio.run(
+        deliver_held(
+            store,
+            RecordingWaha(),
+            "default",
+            ticket,
+            contact,
+            answer_service=answers,
+            now=now + 1,
+        )
+    )
+
+    assert outcome is not None and outcome.sent
+    assert outcome.save_ticket == ticket.number
+    candidate = answers.latest_candidate(ticket.id)
+    assert candidate is not None
+    assert candidate.question == "Where is my order?"
+
+
 def test_held_window_says_when_the_customer_never_wrote(store: TicketStore) -> None:
     async def run() -> ReplyOutcome:
         contact, ticket = setup_ticket(store, last_inbound_at=None)
@@ -398,14 +441,14 @@ def test_answer_reply_offers_one_save_and_stores_a_candidate(
         )
     )
     assert outcome.sent
-    assert "Reply save." in outcome.confirmation
+    assert "Reply save 1." in outcome.confirmation
     candidate = answers.latest_candidate()
     assert candidate is not None and candidate.ticket_id == ticket.id
     assert store.ticket(ticket.id).state == TicketState.DONE.value
 
-    saved = answers.save_latest_candidate()
+    saved = answers.save_latest_candidate(ticket.id)
     assert saved is not None
-    assert answers.save_latest_candidate() is None
+    assert answers.save_latest_candidate(ticket.id) is None
 
 
 def test_action_reply_never_offers_save(store: TicketStore) -> None:

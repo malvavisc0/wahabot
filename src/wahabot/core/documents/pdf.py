@@ -30,6 +30,22 @@ def run_command(command: list[str], timeout_s: float) -> tuple[int, bytes, str]:
     )
 
 
+def pdf_page_count(path: Path, limits: DocumentLimits) -> int:
+    """Total pages in a PDF, or 0 when ``pdfinfo`` cannot tell."""
+    code, stdout, _ = run_command(["pdfinfo", str(path)], limits.timeout_s)
+    if code != 0:
+        return 0
+    for line in stdout.decode(errors="replace").splitlines():
+        key, _, value = line.partition(":")
+        if key.strip().casefold() != "pages":
+            continue
+        try:
+            return int(value.strip())
+        except ValueError:
+            return 0
+    return 0
+
+
 def pdf_text(path: Path, limits: DocumentLimits) -> tuple[str, int, str]:
     """``pdftotext -layout`` up to the page limit; ``(text, pages, error)``."""
     code, stdout, stderr = run_command(

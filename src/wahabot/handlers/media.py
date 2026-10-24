@@ -15,9 +15,13 @@ from wahabot.core.documents.extract import extract_bytes, is_document
 from wahabot.core.documents.limits import (
     DOCUMENT_MARKER_KEY,
     DOCUMENT_TEXT_KEY,
+    STATUS_UNREADABLE,
     DocumentLimits,
+    DocumentText,
     document_marker,
     document_text_payload,
+    mark_document_failure,
+    unreadable_notice,
 )
 from wahabot.core.models import WahaEvent
 from wahabot.core.transcribe import fetch_transcript
@@ -108,6 +112,9 @@ async def prepare_document_event(
             id=str(event.payload.get("id", "")),
             exc=exc,
         )
+        mark_document_failure(
+            event, filename, mime, too_large=isinstance(exc, MediaTooLargeError)
+        )
         return
     try:
         result = await asyncio.to_thread(
@@ -123,7 +130,13 @@ async def prepare_document_event(
             id=str(event.payload.get("id", "")),
             exc=exc,
         )
-        return
+        result = DocumentText(
+            text="",
+            status=STATUS_UNREADABLE,
+            notice=unreadable_notice(filename),
+            filename=filename,
+            mime=mime,
+        )
     event.payload[DOCUMENT_MARKER_KEY] = document_marker(result)
     event.payload[DOCUMENT_TEXT_KEY] = document_text_payload(result)
 

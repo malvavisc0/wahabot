@@ -117,9 +117,7 @@ def assemble_prompt(
     knowledge_only: bool,
 ) -> str:
     """Order safety, instructions, answers and the opt-in answers-only rule."""
-    sections: list[str] = []
-    if knowledge_only or answers.strip():
-        sections.append(BASE_SAFETY)
+    sections: list[str] = [BASE_SAFETY]
     if goal:
         sections.append(f"# Goal\n\n{goal}")
     if memory:

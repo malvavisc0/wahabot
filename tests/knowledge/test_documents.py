@@ -1,5 +1,6 @@
 """Document extraction: generated fixtures, OCR, limits and turn rendering."""
 
+import asyncio
 import shutil
 import zipfile
 from pathlib import Path
@@ -8,19 +9,30 @@ import pytest
 
 from wahabot.ai.serials import SerialRegistry
 from wahabot.ai.turn_records import RecordEntry, Slots, render_entry
-from wahabot.core.documents.extract import DocumentLimits, extract_document
+from wahabot.core.documents.extract import (
+    DocumentLimits,
+    apply_page_limit,
+    extract_document,
+)
 from wahabot.core.documents.limits import (
     DOCUMENT_MARKER_KEY,
     DOCUMENT_TEXT_KEY,
     DocumentText,
     document_marker,
     document_text_payload,
+    page_limit_notice,
 )
 from wahabot.core.documents.pdf import run_command
 from wahabot.core.models import WahaEvent
-from wahabot.core.tickets.attachments import attachment_metadata, persist_bytes
+from wahabot.core.tickets.attachments import (
+    attachment_metadata,
+    persist_bytes,
+    persist_event_attachments,
+)
 from wahabot.core.tickets.models import Ticket
 from wahabot.core.tickets.store import TicketStore
+from wahabot.core.waha import MediaTooLargeError
+from wahabot.handlers.single_mixin import SingleMixin
 from wahabot.settings import Settings
 
 
@@ -152,6 +164,135 @@ def test_limits_truncate_and_binary_timeout(tmp_path: Path) -> None:
 
     code, _, error = run_command(["sleep", "2"], 0.01)
     assert code == -2 and "timed out" in error
+
+
+def test_over_limit_payload_keeps_the_notice() -> None:
+    result = DocumentText(
+        text="only the beginning",
+        status="over_limit",
+        pages=100,
+        notice="The document has 100 pages; only the first 20 were read.",
+        filename="policy.pdf",
+        mime="application/pdf",
+    )
+    payload = document_text_payload(result)
+    assert "only the beginning" in payload
+    assert "only the first 20 were read" in payload
+
+
+def test_page_limit_marks_the_result() -> None:
+    result = DocumentText(
+        text="page text",
+        status="ok",
+        pages=20,
+        filename="policy.pdf",
+        mime="application/pdf",
+    )
+    limited = apply_page_limit(result, 100, "policy.pdf", DocumentLimits(max_pages=20))
+    assert limited.status == "over_limit"
+    assert limited.pages == 100
+    assert limited.notice == page_limit_notice("policy.pdf", 20, 100)
+
+
+def test_uncaptioned_document_reaches_the_agent_gate() -> None:
+    event = WahaEvent.model_validate(
+        {
+            "event": "message",
+            "session": "default",
+            "payload": {
+                "id": "false_123@g.us_DOC",
+                "from": "123@g.us",
+                "fromMe": False,
+                "body": "",
+                "timestamp": 1,
+                "_data": {"type": "document"},
+            },
+        }
+    )
+
+    class Gate:
+        settled = False
+
+        async def ticket_gate_events(self, events: list[WahaEvent]) -> bool:
+            events[0].payload[DOCUMENT_MARKER_KEY] = "[document: policy.pdf]"
+            return False
+
+        def settle_intake(self, *_args: object, **_kwargs: object) -> None:
+            self.settled = True
+
+    gate = Gate()
+    handled = asyncio.run(
+        SingleMixin.ticket_or_content_gate(gate, event, None, None, None, None)  # type: ignore[arg-type]
+    )
+    assert handled is False
+    assert gate.settled is False
+
+
+def test_empty_turn_without_a_document_still_settles_silent() -> None:
+    event = WahaEvent.model_validate(
+        {
+            "event": "message",
+            "session": "default",
+            "payload": {
+                "id": "false_123@g.us_EMPTY",
+                "from": "123@g.us",
+                "fromMe": False,
+                "body": "",
+                "timestamp": 1,
+                "_data": {"type": "text"},
+            },
+        }
+    )
+
+    class Gate:
+        settled = False
+
+        async def ticket_gate_events(self, _events: list[WahaEvent]) -> bool:
+            return False
+
+        def settle_intake(self, *_args: object, **_kwargs: object) -> None:
+            self.settled = True
+
+    gate = Gate()
+    handled = asyncio.run(
+        SingleMixin.ticket_or_content_gate(gate, event, None, None, None, None)  # type: ignore[arg-type]
+    )
+    assert handled is True
+    assert gate.settled is True
+
+
+def test_too_large_download_marks_the_turn(
+    store: TicketStore, settings: Settings
+) -> None:
+    contact = store.upsert_contact("491555000001@c.us")
+    ticket = store.create_ticket(contact.id, "491555000001@c.us")
+    event = WahaEvent.model_validate(
+        {
+            "event": "message",
+            "session": "default",
+            "payload": {
+                "id": "msg-big",
+                "from": contact.chat_id,
+                "fromMe": False,
+                "body": "",
+                "hasMedia": True,
+                "media": {
+                    "url": "http://example.test/big.pdf",
+                    "mimetype": "application/pdf",
+                    "filename": "big.pdf",
+                },
+                "_data": {"type": "document"},
+            },
+        }
+    )
+
+    class TooLarge:
+        def download_media(self, *_args: object, **_kwargs: object) -> bytes:
+            raise MediaTooLargeError("http://example.test/big.pdf", 1)
+
+    assert persist_event_attachments(store, TooLarge(), ticket, event, settings) == []  # type: ignore[arg-type]
+    assert "over_limit" in str(event.payload[DOCUMENT_MARKER_KEY])
+    assert "too large" in str(event.payload[DOCUMENT_TEXT_KEY]).casefold()
 
 
 def test_document_payload_and_attachment_page_count(

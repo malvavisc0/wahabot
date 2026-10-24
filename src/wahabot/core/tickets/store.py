@@ -519,6 +519,15 @@ class TicketStore(ScheduleMixin, ContactMixin, AlertMixin):
             ticket_from_row,
         )
 
+    def tickets_done_between(self, start: int, end: int) -> list[Ticket]:
+        """Tickets marked done in a half-open instant window, oldest first."""
+        return self.query_all(
+            f"SELECT {_TICKET_COLUMNS} FROM tickets "
+            + "WHERE done_at >= ? AND done_at < ? ORDER BY number",
+            (start, end),
+            ticket_from_row,
+        )
+
     def done_tickets(self) -> list[Ticket]:
         """Every done ticket, oldest first."""
         return self.query_all(

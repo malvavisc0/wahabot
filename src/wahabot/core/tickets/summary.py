@@ -50,11 +50,12 @@ def build_summary(
     zone = session_zone(timezone, fallback_timezone)
     start, end = day_window(now, str(zone))
     yesterday = store.tickets_between(start, end)
+    finished = store.tickets_done_between(start, end)
     done_assistant = sum(
-        1 for ticket in yesterday if ticket.done_by == DoneBy.ASSISTANT.value
+        1 for ticket in finished if ticket.done_by == DoneBy.ASSISTANT.value
     )
     done_operator = sum(
-        1 for ticket in yesterday if ticket.done_by == DoneBy.OPERATOR.value
+        1 for ticket in finished if ticket.done_by == DoneBy.OPERATOR.value
     )
     waiting = list(needs_you_order(store))
     lines = [
@@ -116,7 +117,8 @@ def send_summary(
         fallback_timezone=fallback_timezone,
     ):
         return None
-    text = build_summary(store, session, now, timezone, fallback_timezone)
+    zone = str(session_zone(timezone, fallback_timezone))
+    text = build_summary(store, session, now, zone, fallback_timezone)
     language = (operator_language or "en").strip() or "en"
     if language != "en" and translate is not None:
         with contextlib.suppress(Exception):
@@ -125,13 +127,21 @@ def send_summary(
     if not sent_id:
         return None
     store.set_summary_message_id(session, sent_id)
-    store.set_last_summary_date(session, str(local_date(now, timezone)))
+    store.set_last_summary_date(session, str(local_date(now, str(zone))))
+    # The summary lists every needs-you ticket, so a queued individual alert
+    # for the same ticket would page the operator twice at the same opening.
+    for ticket in store.needs_you_tickets():
+        store.cancel_notices(ticket.id, now)
     return sent_id
 
 
 def needs_you_order(store: TicketStore) -> Sequence[Ticket]:
-    """Needs-you tickets, urgent first then oldest number."""
+    """Needs-you tickets, urgent first then longest waiting first."""
     return sorted(
         store.needs_you_tickets(),
-        key=lambda item: (not item.urgent, item.number),
+        key=lambda item: (
+            not item.urgent,
+            item.last_customer_at or item.updated_at,
+            item.number,
+        ),
     )
