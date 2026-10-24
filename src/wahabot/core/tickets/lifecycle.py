@@ -1,12 +1,14 @@
 """Ticket lifecycle: opening, reopening, finalizing and closing."""
 
 import re
+import sqlite3
 from dataclasses import dataclass
 
 from wahabot.core.models import WahaEvent
 from wahabot.core.tickets.models import (
     Actor,
     Contact,
+    DoneBy,
     EventKind,
     Ticket,
     TicketEvent,
@@ -111,6 +113,27 @@ def record_inbound(
     )
 
 
+def open_ticket(
+    store: TicketStore,
+    contact: Contact,
+    moment: int,
+    previous_ticket_id: int | None = None,
+) -> Ticket:
+    """Create a ticket, reusing the active one if a concurrent message won."""
+    try:
+        return store.create_ticket(
+            contact.id,
+            contact.chat_id,
+            previous_ticket_id=previous_ticket_id,
+            at=moment,
+        )
+    except sqlite3.IntegrityError:
+        active = store.active_ticket(contact.chat_id)
+        if active is None:
+            raise
+        return active
+
+
 def ticket_for_inbound(
     store: TicketStore, contact: Contact, moment: int, close_after_days: int
 ) -> tuple[Ticket, bool, bool]:
@@ -120,11 +143,7 @@ def ticket_for_inbound(
         return active, False, False
     latest = store.latest_ticket(contact.chat_id)
     if latest is None:
-        return (
-            store.create_ticket(contact.id, contact.chat_id, at=moment),
-            False,
-            False,
-        )
+        return open_ticket(store, contact, moment), False, False
     if latest.state == TicketState.DONE.value and within_close_window(
         latest, moment, close_after_days
     ):
@@ -136,7 +155,7 @@ def ticket_for_inbound(
             body="reopened by a customer message",
             at=moment,
         )
-        return reopened, True, latest.done_by == "operator"
+        return reopened, True, latest.done_by == DoneBy.OPERATOR.value
     if latest.state == TicketState.DONE.value:
         store.update_ticket(
             latest.id,
@@ -146,16 +165,7 @@ def ticket_for_inbound(
             body="closed before a new ticket opened",
             at=moment,
         )
-    return (
-        store.create_ticket(
-            contact.id,
-            contact.chat_id,
-            previous_ticket_id=latest.id,
-            at=moment,
-        ),
-        False,
-        False,
-    )
+    return open_ticket(store, contact, moment, latest.id), False, False
 
 
 def within_close_window(ticket: Ticket, moment: int, close_after_days: int) -> bool:
@@ -200,13 +210,9 @@ def burst_event(
     store: TicketStore, ticket_id: int, message_ids: list[str]
 ) -> TicketEvent | None:
     """The ticket event a burst's later rows join, or None."""
-    wanted = set(message_ids)
-    for event in reversed(store.events(ticket_id)):
-        if event.kind == EventKind.CUSTOMER_MESSAGE.value and wanted & set(
-            event.message_ids
-        ):
-            return event
-    return None
+    return store.event_with_message_ids(
+        ticket_id, message_ids, EventKind.CUSTOMER_MESSAGE.value
+    )
 
 
 def is_thanks_only(body: str) -> bool:
@@ -262,7 +268,7 @@ def completed_update(update: TicketUpdate) -> TicketUpdate:
         summary=update.summary,
         details=update.details,
         missing=update.missing,
-        done_by=update.done_by or "assistant",
+        done_by=update.done_by or DoneBy.ASSISTANT.value,
         urgent=update.urgent,
     )
 
@@ -270,21 +276,14 @@ def completed_update(update: TicketUpdate) -> TicketUpdate:
 def split_ticket(
     store: TicketStore, ticket: Ticket, summary: str, at: int | None = None
 ) -> Ticket:
-    """Split an open/done ticket into a new open one.
-
-    A ``needs_you`` or ``waiting_customer`` ticket is refused: the split
-    would detach the operator's current work.
-    """
-    if ticket.state in (
-        TicketState.NEEDS_YOU.value,
-        TicketState.WAITING_CUSTOMER.value,
-    ):
+    """Split an open/done ticket into a new open one."""
+    if ticket.state not in (TicketState.OPEN.value, TicketState.DONE.value):
         raise ValueError("only an open or done ticket can be split")
     moment = store.now() if at is None else at
     if ticket.state == TicketState.OPEN.value:
         store.update_ticket(
             ticket.id,
-            TicketUpdate(state=TicketState.DONE.value, done_by="assistant"),
+            TicketUpdate(state=TicketState.DONE.value, done_by=DoneBy.ASSISTANT.value),
             actor=Actor.ASSISTANT.value,
             kind=EventKind.STATE.value,
             body="split into a new ticket",

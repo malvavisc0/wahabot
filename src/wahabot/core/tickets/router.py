@@ -21,7 +21,8 @@ _REOPEN = re.compile(r"^\s*reopen\s+(?:ticket\s*)?#?(\d+)\s*$", re.IGNORECASE)
 _PAUSE = re.compile(r"^\s*pause(?:\s+(.+))?\s*$", re.IGNORECASE)
 _RESUME = re.compile(r"^\s*resume(?:\s+(.+))?\s*$", re.IGNORECASE)
 _NUMBERED = re.compile(
-    r"^\s*(?:ticket\s*)?#?(\d+)\s*(?:[:.\-]\s*|\s+)(.+)$", re.IGNORECASE
+    r"^\s*(?:(?:ticket\s*#?|#)(\d+)\b\s*[:.\-]?\s*|(\d+)\s*[:.\-]\s+)(.+)$",
+    re.IGNORECASE,
 )
 _NAMED = re.compile(r"^\s*([^:\n]{1,60}):\s*(.+)$")
 _QUOTED_ID_KEYS = ("id", "_serialized")
@@ -135,12 +136,13 @@ def route_ticket_text(store: TicketStore, body: str) -> Route:
     """Recognize a numbered or uniquely named ticket reply."""
     numbered = _NUMBERED.match(body)
     if numbered:
-        ticket = store.ticket_by_number(int(numbered.group(1)))
+        number = int(numbered.group(1) or numbered.group(2))
+        ticket = store.ticket_by_number(number)
         if ticket is not None:
             return Route(
-                RouteKind.TICKET_REPLY, ticket=ticket, text=numbered.group(2).strip()
+                RouteKind.TICKET_REPLY, ticket=ticket, text=numbered.group(3).strip()
             )
-        return Route(RouteKind.ASK, text=f"No ticket #{numbered.group(1)}.")
+        return Route(RouteKind.ASK, text=f"No ticket #{number}.")
     named = _NAMED.match(body)
     if named:
         matches = contacts_named(store, named.group(1))

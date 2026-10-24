@@ -1,14 +1,16 @@
 from tests.harness import ME_JID, RecordingWaha
 from wahabot.core.tickets.alerts import compose_alert, send_alert
 from wahabot.core.tickets.attachments import persist_bytes
-from wahabot.core.tickets.models import TicketState, TicketUpdate
+from wahabot.core.tickets.models import Contact, Ticket, TicketState, TicketUpdate
 from wahabot.core.tickets.store import TicketStore
 from wahabot.settings import Settings
 
 CUSTOMER = "491555000001@c.us"
 
 
-def ticket_with_request(store: TicketStore, *, urgent: bool = False):
+def ticket_with_request(
+    store: TicketStore, *, urgent: bool = False
+) -> tuple[Contact, Ticket]:
     contact = store.upsert_contact(
         CUSTOMER,
         phone=CUSTOMER,
@@ -126,7 +128,7 @@ def test_failed_forward_and_local_send_tells_the_operator(
     result = send_alert(store, waha, "default", ME_JID, ticket, contact)
 
     assert result.failed_attachments == 1
-    assert any("Could not attach 1 file" in entry[2] for entry in waha.sent)
+    assert any("Could not attach photo" in entry[2] for entry in waha.sent)
     assert store.ticket(ticket.id).state == TicketState.NEEDS_YOU.value
 
 

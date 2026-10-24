@@ -24,44 +24,70 @@ class ContactMixin(StoreBase):
         external_user_ref: str = "",
         last_inbound_at: int | None = None,
     ) -> Contact:
-        """Create or refresh one contact by chat id."""
+        """Create or refresh one contact by chat id, phone or lid alias."""
         conn = connect(self.path)
         try:
             with transaction(conn):
-                conn.execute(
-                    "INSERT INTO contacts (chat_id, phone, lid, display_name, language, "
-                    + "external_user_ref, last_inbound_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
-                    + "ON CONFLICT(chat_id) DO UPDATE SET "
-                    + "phone = CASE WHEN excluded.phone != '' THEN excluded.phone "
-                    + "ELSE contacts.phone END, "
-                    + "lid = CASE WHEN excluded.lid != '' THEN excluded.lid "
-                    + "ELSE contacts.lid END, "
-                    + "display_name = CASE WHEN excluded.display_name != '' "
-                    + "THEN excluded.display_name ELSE contacts.display_name END, "
-                    + "language = CASE WHEN excluded.language != '' "
-                    + "THEN excluded.language ELSE contacts.language END, "
-                    + "external_user_ref = CASE WHEN excluded.external_user_ref "
-                    + "!= '' THEN excluded.external_user_ref "
-                    + "ELSE contacts.external_user_ref END, "
-                    + "last_inbound_at = COALESCE(excluded.last_inbound_at, "
-                    + "contacts.last_inbound_at)",
-                    (
-                        chat_id,
-                        phone,
-                        lid,
-                        display_name,
-                        language,
-                        external_user_ref,
-                        last_inbound_at,
-                    ),
-                )
                 row = conn.execute(
-                    f"SELECT {_CONTACT_COLUMNS} FROM contacts WHERE chat_id = ?",
-                    (chat_id,),
+                    f"SELECT {_CONTACT_COLUMNS} FROM contacts "
+                    + "WHERE chat_id = ? OR (phone != '' AND phone = ?) "
+                    + "OR (lid != '' AND lid = ?) "
+                    + "ORDER BY CASE WHEN chat_id = ? THEN 0 ELSE 1 END, id LIMIT 1",
+                    (chat_id, phone, lid, chat_id),
                 ).fetchone()
+                if row is None:
+                    cursor = conn.execute(
+                        "INSERT INTO contacts (chat_id, phone, lid, display_name, "
+                        + "language, external_user_ref, last_inbound_at) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            chat_id,
+                            phone,
+                            lid,
+                            display_name,
+                            language,
+                            external_user_ref,
+                            last_inbound_at,
+                        ),
+                    )
+                    contact_id = int(cursor.lastrowid or 0)
+                else:
+                    contact_id = int(row["id"])
+                    if str(row["chat_id"]) != chat_id:
+                        conn.execute(
+                            "UPDATE tickets SET chat_id = ? WHERE contact_id = ?",
+                            (chat_id, contact_id),
+                        )
+                    conn.execute(
+                        "UPDATE contacts SET chat_id = ?, "
+                        + "phone = COALESCE(NULLIF(?, ''), phone), "
+                        + "lid = COALESCE(NULLIF(?, ''), lid), "
+                        + "display_name = COALESCE(NULLIF(?, ''), display_name), "
+                        + "language = COALESCE(NULLIF(?, ''), language), "
+                        + "external_user_ref = COALESCE(NULLIF(?, ''), "
+                        + "external_user_ref), "
+                        + "last_inbound_at = COALESCE(?, last_inbound_at) "
+                        + "WHERE id = ?",
+                        (
+                            chat_id,
+                            phone,
+                            lid,
+                            display_name,
+                            language,
+                            external_user_ref,
+                            last_inbound_at,
+                            contact_id,
+                        ),
+                    )
+                refreshed = conn.execute(
+                    f"SELECT {_CONTACT_COLUMNS} FROM contacts WHERE id = ?",
+                    (contact_id,),
+                ).fetchone()
+                if refreshed is None:
+                    raise KeyError(f"contact {contact_id} not found after upsert")
         finally:
             conn.close()
-        return contact_from_row(row)
+        return contact_from_row(refreshed)
 
     def contact(self, chat_id: str) -> Contact | None:
         """One contact by chat id."""

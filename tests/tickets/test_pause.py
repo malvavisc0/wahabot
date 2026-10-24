@@ -1,7 +1,7 @@
 from tests.harness import RecordingWaha
 from wahabot.core.access import SessionConfig
 from wahabot.core.scheduler import TicketScheduler, age_hours
-from wahabot.core.tickets.models import TicketState, TicketUpdate
+from wahabot.core.tickets.models import Ticket, TicketState, TicketUpdate
 from wahabot.core.tickets.store import TicketStore
 from wahabot.settings import Settings
 
@@ -19,13 +19,16 @@ class Reloader:
 
 
 def scheduler_for(
-    store: TicketStore, settings: Settings, config: SessionConfig
+    store: TicketStore,
+    settings: Settings,
+    config: SessionConfig,
+    waha: RecordingWaha | None = None,
 ) -> tuple[TicketScheduler, RecordingWaha]:
-    waha = RecordingWaha()
-    return TicketScheduler(settings, store, waha, Reloader(config)), waha
+    sender = waha or RecordingWaha()
+    return TicketScheduler(settings, store, sender, Reloader(config)), sender
 
 
-def done_ticket(store: TicketStore, at: int):
+def done_ticket(store: TicketStore, at: int) -> Ticket:
     contact = store.upsert_contact(
         CUSTOMER, display_name="Smoke Sender", last_inbound_at=at
     )
@@ -114,6 +117,7 @@ def test_nudge_goes_out_once_per_interval(
     scheduler.tick(now=2000 + HOUR)
     assert len(waha.sent) == 1
     assert "asked again about 1" in waha.sent[0][2]
+    assert "any update?" in waha.sent[0][2]
 
     scheduler.tick(now=2000 + 12 * HOUR)
     assert len(waha.sent) == 1
@@ -123,6 +127,57 @@ def test_nudge_goes_out_once_per_interval(
     )
     scheduler.tick(now=2000 + 25 * HOUR)
     assert len(waha.sent) == 2
+
+
+def test_nudge_waits_for_a_message_after_the_alert(
+    store: TicketStore, settings: Settings, monkeypatch
+) -> None:
+    from wahabot.status.state import state as status_state
+
+    monkeypatch.setattr(status_state, "operator_jid", "491555000000@c.us")
+    contact = store.upsert_contact(
+        CUSTOMER, display_name="Smoke Sender", last_inbound_at=1000
+    )
+    ticket = store.create_ticket(contact.id, CUSTOMER, at=1000)
+    store.update_ticket(
+        ticket.id, TicketUpdate(state=TicketState.NEEDS_YOU.value), at=1000
+    )
+    store.add_event(ticket.id, "customer", "customer_message", "where is it?", at=1000)
+    store.add_event(ticket.id, "assistant", "alert", "Ticket 1", at=2000)
+    scheduler, waha = scheduler_for(store, settings, SessionConfig(system_prompt="x"))
+
+    scheduler.tick(now=2000 + HOUR)
+
+    assert waha.sent == []
+
+
+class SilentWaha(RecordingWaha):
+    def send_text(self, *args, **kwargs) -> str:
+        return ""
+
+
+def test_unconfirmed_nudge_is_not_recorded(
+    store: TicketStore, settings: Settings, monkeypatch
+) -> None:
+    from wahabot.status.state import state as status_state
+
+    monkeypatch.setattr(status_state, "operator_jid", "491555000000@c.us")
+    contact = store.upsert_contact(
+        CUSTOMER, display_name="Smoke Sender", last_inbound_at=1000
+    )
+    ticket = store.create_ticket(contact.id, CUSTOMER, at=1000)
+    store.update_ticket(
+        ticket.id, TicketUpdate(state=TicketState.NEEDS_YOU.value), at=1000
+    )
+    store.add_event(ticket.id, "assistant", "alert", "Ticket 1", at=1000)
+    store.add_event(ticket.id, "customer", "customer_message", "any update?", at=2000)
+    scheduler, _ = scheduler_for(
+        store, settings, SessionConfig(system_prompt="x"), SilentWaha()
+    )
+
+    scheduler.tick(now=2000 + HOUR)
+
+    assert store.last_event(ticket.id, "nudge") is None
 
 
 def test_age_hours_uses_the_configured_zone() -> None:

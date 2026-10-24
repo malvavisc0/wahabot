@@ -37,7 +37,7 @@ class TicketScheduler:
         self.config_reloader = config_reloader
 
     def tick(self, now: int | None = None) -> None:
-        """Run one pass; every failure is contained to its ticket."""
+        """Run one timer pass: close tickets, release pauses, nudge."""
         moment = self.store.now() if now is None else now
         config = self.config_reloader.current_config()
         close_overdue(self.store, config.close_after_days, at=moment)
@@ -68,13 +68,25 @@ class TicketScheduler:
                 continue
             alert = self.store.last_event(ticket.id, EventKind.ALERT.value)
             since = alert.at if alert is not None else ticket.updated_at
+            latest = self.store.last_event(ticket.id, EventKind.CUSTOMER_MESSAGE.value)
             text = nudge_text(
-                contact, ticket, moment, self.settings.timezone, since=since
+                contact,
+                ticket,
+                moment,
+                self.settings.timezone,
+                since=since,
+                words=latest.body if latest is not None else "",
             )
             try:
-                self.waha.send_text(self.settings.session, operator_jid, text)
+                sent_id = self.waha.send_text(self.settings.session, operator_jid, text)
             except Exception as exc:
                 logger.warning("Ticket {n} nudge failed: {exc}", n=ticket.number, exc=exc)
+                continue
+            if not sent_id:
+                logger.warning(
+                    "Ticket {n} nudge returned no message id; not recorded",
+                    n=ticket.number,
+                )
                 continue
             self.store.add_event(
                 ticket.id,
@@ -89,9 +101,12 @@ class TicketScheduler:
         customer = self.store.last_event(ticket.id, EventKind.CUSTOMER_MESSAGE.value)
         if customer is None:
             return False
+        alert = self.store.last_event(ticket.id, EventKind.ALERT.value)
+        if alert is None or (customer.at, customer.id) <= (alert.at, alert.id):
+            return False
         last_nudge = self.store.last_event(ticket.id, EventKind.NUDGE.value)
         if last_nudge is not None:
-            if last_nudge.id >= customer.id:
+            if (last_nudge.at, last_nudge.id) >= (customer.at, customer.id):
                 return False
             if moment - last_nudge.at < NUDGE_INTERVAL_S:
                 return False
@@ -110,9 +125,17 @@ def age_hours(start: int, now: int, tz_name: str) -> int:
 
 
 def nudge_text(
-    contact: Contact, ticket: Ticket, now: int, tz_name: str, *, since: int | None = None
+    contact: Contact,
+    ticket: Ticket,
+    now: int,
+    tz_name: str,
+    *,
+    since: int | None = None,
+    words: str = "",
 ) -> str:
     """The operator nudge for a re-asked needs-you ticket."""
     start = since if since is not None else ticket.updated_at
     waiting = age_hours(start, now, tz_name)
-    return f"{contact.display} asked again about {ticket.number}, waiting {waiting} h."
+    line = f"{contact.display} asked again about {ticket.number}, waiting {waiting} h."
+    snippet = words.strip()
+    return f'{line} "{snippet[:240]}"' if snippet else line

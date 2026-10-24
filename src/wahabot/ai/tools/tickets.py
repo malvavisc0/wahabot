@@ -1,5 +1,6 @@
 """Ticket tools: support state, updates, handover and splitting."""
 
+from collections.abc import Callable
 from dataclasses import replace
 
 from llama_index.core.tools import BaseTool, FunctionTool
@@ -28,6 +29,7 @@ from wahabot.core.tickets.alerts import (
 from wahabot.core.tickets.attachments import attachment_metadata
 from wahabot.core.tickets.models import (
     Contact,
+    DoneBy,
     EventKind,
     Ticket,
     TicketState,
@@ -49,6 +51,8 @@ _ALLOWED_STATES = frozenset(
     }
 )
 _CUSTOMER_DONE_BY = frozenset({"assistant", "customer"})
+
+OperatorLanguage = str | Callable[[], str]
 
 
 def ticket_context(
@@ -114,7 +118,7 @@ def ticket_payload(store: TicketStore, ticket: Ticket | None) -> dict[str, objec
     }
 
 
-def support_state(settings: Settings) -> BaseTool:
+def support_state() -> BaseTool:
     """Build the read-only ticket state tool."""
 
     def support_state_fn(
@@ -161,7 +165,7 @@ def lookup_ticket(
     return ticket, contact
 
 
-def update_ticket(settings: Settings) -> BaseTool:
+def update_ticket() -> BaseTool:
     """Build the staging tool for ticket values."""
 
     def update_ticket_fn(
@@ -217,7 +221,7 @@ def done_by_allowed(done_by: str, *, target_operator: bool) -> bool:
     """Whether this run may stage the given resolver."""
     if done_by in _CUSTOMER_DONE_BY:
         return True
-    return target_operator and done_by == "operator"
+    return target_operator and done_by == DoneBy.OPERATOR.value
 
 
 def merge_update(
@@ -271,7 +275,7 @@ def stage_handover(target: RunTarget, ticket: Ticket, urgent: bool) -> None:
 def hand_to_operator(
     settings: Settings,
     waha: Transport,
-    language: str = "",
+    language: OperatorLanguage = "",
     translator: Translator | None = None,
 ) -> BaseTool:
     """Build the handover tool that stages needs_you and sends the alert."""
@@ -289,6 +293,7 @@ def hand_to_operator(
             return ok(
                 ticket=ticket.number, state=ticket.state, alert_ids=[], duplicate=True
             )
+        language_value = language() if callable(language) else language
         log_action_reason("hand_to_operator", reason, ticket=ticket.number)
         try:
             result = send_alert(
@@ -298,7 +303,7 @@ def hand_to_operator(
                 status_state.operator_jid,
                 ticket,
                 contact,
-                language=operator_language(language),
+                language=operator_language(language_value),
                 translator=translator,
                 only_message_ids=selected,
             )
@@ -369,7 +374,7 @@ def resolve_attach_ids(
     return resolved, None
 
 
-def new_ticket(settings: Settings) -> BaseTool:
+def new_ticket() -> BaseTool:
     """Build the split tool that stages a new ticket after delivery."""
 
     def new_ticket_fn(summary: str, reason: str = "") -> str:
@@ -380,13 +385,8 @@ def new_ticket(settings: Settings) -> BaseTool:
         ticket, _ = ticket_context(store, target.ticket_id, target.chat_id)
         if ticket is None:
             return error("no ticket exists for this chat")
-        if ticket.state in (
-            TicketState.NEEDS_YOU.value,
-            TicketState.WAITING_CUSTOMER.value,
-        ):
-            return error(
-                "cannot split: this ticket belongs to the operator or the customer"
-            )
+        if ticket.state not in (TicketState.OPEN.value, TicketState.DONE.value):
+            return error("cannot split: only an open or done ticket can be split")
         log_action_reason("new_ticket", reason, ticket=ticket.number)
         target.ticket_id = ticket.id
         target.ticket_split = summary.strip()
@@ -409,15 +409,15 @@ def build_ticket_tools(
     settings: Settings,
     waha: Transport,
     *,
-    operator_language: str = "",
+    operator_language: OperatorLanguage = "",
     translator: Translator | None = None,
 ) -> list[BaseTool]:
     """The ticket toolset, or [] when no ticket store is wired."""
     if store is None:
         return []
     return [
-        support_state(settings),
-        update_ticket(settings),
+        support_state(),
+        update_ticket(),
         hand_to_operator(settings, waha, operator_language, translator),
-        new_ticket(settings),
+        new_ticket(),
     ]

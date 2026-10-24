@@ -14,6 +14,7 @@ from wahabot.core.audit import save_action
 from wahabot.core.models import WahaEvent
 from wahabot.core.notebook import AUTHOR_OPERATOR, KIND_FACT
 from wahabot.core.runs import chat_lock
+from wahabot.core.tickets.alerts import operator_language, send_alert
 from wahabot.core.tickets.attachments import persist_event_attachments
 from wahabot.core.tickets.lifecycle import (
     Inbound,
@@ -26,6 +27,7 @@ from wahabot.core.tickets.lifecycle import (
 )
 from wahabot.core.tickets.models import (
     Actor,
+    DoneBy,
     EventKind,
     Ticket,
     TicketState,
@@ -49,6 +51,7 @@ from wahabot.core.tickets.store import TicketStore
 from wahabot.handlers.base import HandlerBase
 from wahabot.handlers.memory import remember_customer_message, remember_sent_relay
 from wahabot.handlers.replies import send_self_reply
+from wahabot.status.state import state as status_state
 
 
 def inbound_words(events: list[WahaEvent]) -> tuple[WahaEvent, str]:
@@ -162,7 +165,7 @@ class TicketMixin(HandlerBase):
             ticket.id,
             TicketUpdate(
                 state=TicketState.DONE.value,
-                done_by=inbound.previous_done_by or "assistant",
+                done_by=inbound.previous_done_by or DoneBy.ASSISTANT.value,
             ),
             actor=Actor.CUSTOMER.value,
             kind=EventKind.STATE.value,
@@ -203,10 +206,12 @@ class TicketMixin(HandlerBase):
         self, events: list[WahaEvent], inbound: Inbound
     ) -> None:
         """Alert the operator again when a solved ticket reopens."""
+        delivered = False
         try:
-            await asyncio.to_thread(self.ticket_send_alert, inbound)
+            delivered = await asyncio.to_thread(self.ticket_send_alert, inbound)
         except Exception as exc:
             logger.warning("Reopened ticket alert failed: {exc}", exc=exc)
+        if not delivered:
             await self.ticket_send_holding(events, inbound.ticket.chat_id)
         await self.ticket_remember_and_settle(
             events, "operator_owned", "operator solved re-ask"
@@ -223,15 +228,12 @@ class TicketMixin(HandlerBase):
                 "Holding reply failed for {chat}: {exc}", chat=chat_id, exc=exc
             )
 
-    def ticket_send_alert(self, inbound: Inbound) -> None:
+    def ticket_send_alert(self, inbound: Inbound) -> bool:
         """Send the alert for a reopened operator-solved ticket."""
-        from wahabot.core.tickets.alerts import operator_language, send_alert
-        from wahabot.status.state import state as status_state
-
         store = self.ticket_store
         if store is None or not status_state.operator_jid:
             raise RuntimeError("no operator target")
-        send_alert(
+        result = send_alert(
             store,
             self.waha,
             self.settings.session,
@@ -239,11 +241,11 @@ class TicketMixin(HandlerBase):
             inbound.ticket,
             inbound.contact,
             language=operator_language(
-                self.config_reloader.current_config().operator_language,
-                inbound.contact.language,
+                self.config_reloader.current_config().operator_language
             ),
             translator=self.ticket_translator,
         )
+        return result.delivered
 
     async def ticket_remember_and_settle(
         self, events: list[WahaEvent], outcome: str, reason: str
@@ -299,13 +301,13 @@ class TicketMixin(HandlerBase):
         if ticket is None:
             return
         try:
+            finalize_split(store, ticket, target.ticket_split)
             finalize_delivery(
                 store,
                 ticket.id,
                 target.ticket_update or TicketUpdate(),
                 delivered=True,
             )
-            finalize_split(store, ticket, target.ticket_split)
         except Exception:
             logger.exception("Ticket finalize failed for {number}", number=ticket.number)
 

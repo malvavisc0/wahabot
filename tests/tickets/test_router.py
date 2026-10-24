@@ -1,6 +1,6 @@
 from tests.harness import ME_JID, OWN_LID, waha_event
 from wahabot.core.models import WahaEvent
-from wahabot.core.tickets.models import TicketState, TicketUpdate
+from wahabot.core.tickets.models import Contact, Ticket, TicketState, TicketUpdate
 from wahabot.core.tickets.router import (
     RouteKind,
     ask_which_ticket,
@@ -28,7 +28,9 @@ def operator_event(body: str, *, mid: str = "OP", quote: str = "") -> WahaEvent:
     return WahaEvent.model_validate(raw)
 
 
-def make_ticket(store: TicketStore, chat: str, name: str, mid: str):
+def make_ticket(
+    store: TicketStore, chat: str, name: str, mid: str
+) -> tuple[Contact, Ticket]:
     contact = store.upsert_contact(chat, display_name=name)
     ticket = store.create_ticket(contact.id, chat, summary="issue")
     store.update_ticket(ticket.id, TicketUpdate(state=TicketState.NEEDS_YOU.value))
@@ -55,6 +57,31 @@ def test_number_and_unique_name_both_route(store: TicketStore) -> None:
     assert numbered.ticket.number == ticket.number
     assert named.kind == RouteKind.TICKET_REPLY
     assert named.text == "refunded"
+
+
+def test_numbered_forms_are_all_accepted(store: TicketStore) -> None:
+    _, ticket = make_ticket(store, CUSTOMER, "Smoke Sender", "NF")
+
+    for body in (
+        f"{ticket.number}: refunded",
+        f"ticket {ticket.number} refunded",
+        f"#{ticket.number} refunded",
+    ):
+        route = route_message(store, operator_event(body))
+        assert route.kind == RouteKind.TICKET_REPLY
+        assert route.ticket is not None and route.ticket.number == ticket.number
+
+
+def test_timestamps_and_note_numbers_do_not_route(store: TicketStore) -> None:
+    make_ticket(store, CUSTOMER, "Smoke Sender", "FP")
+
+    for body in (
+        "2:30 lunch with the team",
+        "2026 is going to be a good year",
+        "123 Main Street",
+        "10.5 kg please",
+    ):
+        assert route_message(store, operator_event(body)).kind == RouteKind.NONE
 
 
 def test_unknown_number_asks_instead_of_ignoring(store: TicketStore) -> None:
