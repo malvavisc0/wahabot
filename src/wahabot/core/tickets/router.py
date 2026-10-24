@@ -3,11 +3,16 @@
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, cast
 
 from wahabot.ai.messages import bot_jids, jid_string
 from wahabot.core.models import WahaEvent
-from wahabot.core.tickets.models import ACTIVE_STATES, Contact, Ticket
+from wahabot.core.tickets.models import (
+    ACTIVE_STATES,
+    Contact,
+    Ticket,
+    as_mapping,
+    text_field,
+)
 from wahabot.core.tickets.store import TicketStore
 
 _WHATS_OPEN = re.compile(r"^\s*what(?:'s| is)\s+open\??\s*$", re.IGNORECASE)
@@ -63,20 +68,17 @@ def quoted_id(event: WahaEvent) -> str:
     """The id of the message this event quotes, or ""."""
     reply = event.payload.get("replyTo")
     if not isinstance(reply, dict):
-        raw = event.payload.get("_data")
-        data: dict[str, Any] = raw if isinstance(raw, dict) else {}
-        reply = data.get("quotedMsg")
+        reply = as_mapping(event.payload.get("_data")).get("quotedMsg")
     if not isinstance(reply, dict):
         return ""
-    quoted = cast(dict[str, Any], reply)
+    quoted = as_mapping(reply)
     for key in _QUOTED_ID_KEYS:
         value = quoted.get(key)
         if isinstance(value, str) and value:
             return value
-        if isinstance(value, dict):
-            nested = cast(dict[str, Any], value)
-            if nested.get("_serialized"):
-                return str(nested["_serialized"])
+        serialized = text_field(value, "_serialized")
+        if serialized:
+            return serialized
     return ""
 
 

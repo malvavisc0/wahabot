@@ -2,13 +2,14 @@
 
 import asyncio
 import time
-from typing import Any, override
+from typing import override
 
 from loguru import logger
 
 from wahabot.ai.messages import bot_jids, jid_string
 from wahabot.ai.tools.runcontext import RunTarget
 from wahabot.commands import build_command_event
+from wahabot.core.access import SessionConfig
 from wahabot.core.audit import save_action
 from wahabot.core.models import WahaEvent
 from wahabot.core.notebook import AUTHOR_OPERATOR, KIND_FACT
@@ -31,6 +32,7 @@ from wahabot.core.tickets.models import (
     TicketUpdate,
 )
 from wahabot.core.tickets.replies import (
+    Remember,
     ReplyOutcome,
     decision_fact,
     deliver_held,
@@ -267,7 +269,7 @@ class TicketMixin(HandlerBase):
             async with chat_lock(event.session, str(event.payload.get("from", ""))):
                 await remember_customer_message(event, self.agent, self.settings, body)
 
-    def ticket_remember_relay(self, ticket: Ticket) -> Any:
+    def ticket_remember_relay(self, ticket: Ticket) -> Remember:
         """The memory callback for an operator relay to one ticket."""
 
         async def remember(text: str) -> None:
@@ -324,7 +326,7 @@ class TicketMixin(HandlerBase):
         )
 
     @override
-    def pause_after_human_message(self, event: WahaEvent, config: Any) -> None:
+    def pause_after_human_message(self, event: WahaEvent, config: SessionConfig) -> None:
         """Pause a customer chat after a human operator typed there."""
         if self.ticket_store is None or not event.payload.get("fromMe"):
             return
@@ -344,7 +346,7 @@ class TicketMixin(HandlerBase):
 
     @override
     async def handle_ticket_route(
-        self, event: WahaEvent, route: Route, config: Any
+        self, event: WahaEvent, route: Route, config: SessionConfig
     ) -> bool:
         """Handle one parsed self-chat command; always answers the operator."""
         if self.ticket_store is None:
@@ -368,7 +370,7 @@ class TicketMixin(HandlerBase):
         return False
 
     async def ticket_reply_route(
-        self, event: WahaEvent, route: Route, config: Any
+        self, event: WahaEvent, route: Route, config: SessionConfig
     ) -> None:
         """Run the classify/draft/verify/send loop for one operator reply."""
         store = self.ticket_store
@@ -430,7 +432,9 @@ class TicketMixin(HandlerBase):
             author_kind=AUTHOR_OPERATOR,
         )
 
-    async def ticket_confirmation(self, outcome: ReplyOutcome, config: Any) -> str:
+    async def ticket_confirmation(
+        self, outcome: ReplyOutcome, config: SessionConfig
+    ) -> str:
         """The operator-facing confirmation in the configured language."""
         language = (config.operator_language or "en").strip() or "en"
         if language == "en" or self.ticket_translator is None:
@@ -469,7 +473,7 @@ class TicketMixin(HandlerBase):
         await self.ticket_send_operator(event, message)
 
     async def ticket_pause_route(
-        self, event: WahaEvent, route: Route, config: Any
+        self, event: WahaEvent, route: Route, config: SessionConfig
     ) -> None:
         """Pause or resume one contact, or the whole session."""
         store = self.ticket_store

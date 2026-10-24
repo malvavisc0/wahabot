@@ -35,6 +35,7 @@ from wahabot.core.notebook import (
     RULE_MESSAGE_PREFIX,
 )
 from wahabot.core.recovery.context import apology
+from wahabot.core.tickets.store import TicketStore
 from wahabot.core.transport import Transport
 from wahabot.core.transport.context import bind_intake_ids, reset_intake_ids
 from wahabot.settings import Settings
@@ -222,7 +223,7 @@ async def handle_message(
     turn_ids: Sequence[str] = (),
     turn_started_at: float | None = None,
     owner: str = "",
-    ticket_store: object | None = None,
+    ticket_store: TicketStore | None = None,
     ticket_id: int = 0,
 ) -> tuple[str, RunTarget]:
     """Run the agent workflow over an incoming message event.

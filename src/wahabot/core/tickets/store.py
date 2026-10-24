@@ -1,8 +1,8 @@
 """SQLite storage for tickets, events and attachments."""
 
 import json
+import sqlite3
 from collections.abc import Iterable
-from typing import Any
 
 from wahabot.core.db.connection import connect, transaction
 from wahabot.core.tickets.models import (
@@ -189,7 +189,11 @@ class TicketStore(ContactMixin):
         return ticket_from_row(row)
 
     def apply_update(
-        self, conn: Any, current: Any, update: TicketUpdate, moment: int
+        self,
+        conn: sqlite3.Connection,
+        current: sqlite3.Row,
+        update: TicketUpdate,
+        moment: int,
     ) -> None:
         """Write the non-empty parts of one staged update."""
         fields: list[str] = ["updated_at = ?"]
@@ -220,8 +224,8 @@ class TicketStore(ContactMixin):
 
     def apply_state_times(
         self,
-        conn: Any,
-        current: Any,
+        conn: sqlite3.Connection,
+        current: sqlite3.Row,
         update: TicketUpdate,
         moment: int,
         fields: list[str],
@@ -269,7 +273,7 @@ class TicketStore(ContactMixin):
 
     def insert_event(
         self,
-        conn: Any,
+        conn: sqlite3.Connection,
         ticket_id: int,
         actor: str,
         kind: str,

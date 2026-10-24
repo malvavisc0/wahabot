@@ -1,12 +1,12 @@
 """Ticket tools: support state, updates, handover and splitting."""
 
 from dataclasses import replace
-from typing import Any
 
 from llama_index.core.tools import BaseTool, FunctionTool
 
 from wahabot.ai.tools.envelope import error, ok
 from wahabot.ai.tools.runcontext import (
+    RunTarget,
     current_target,
     fenced_message_id,
     log_action_reason,
@@ -35,6 +35,7 @@ from wahabot.core.tickets.models import (
 )
 from wahabot.core.tickets.router import contacts_named
 from wahabot.core.tickets.store import TicketStore
+from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 from wahabot.status.state import state as status_state
 
@@ -65,9 +66,9 @@ def ticket_context(
 
 def support_payload(
     store: TicketStore, ticket: Ticket | None, contact: Contact | None
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """The ticket, contact and attachment facts the model may see."""
-    payload: dict[str, Any] = {
+    payload: dict[str, object] = {
         "contact": contact_payload(contact),
         "ticket": ticket_payload(store, ticket),
     }
@@ -79,7 +80,7 @@ def support_payload(
     return payload
 
 
-def contact_payload(contact: Contact | None) -> dict[str, Any] | None:
+def contact_payload(contact: Contact | None) -> dict[str, object] | None:
     """Contact facts without paths or secrets."""
     if contact is None:
         return None
@@ -94,7 +95,7 @@ def contact_payload(contact: Contact | None) -> dict[str, Any] | None:
     }
 
 
-def ticket_payload(store: TicketStore, ticket: Ticket | None) -> dict[str, Any] | None:
+def ticket_payload(store: TicketStore, ticket: Ticket | None) -> dict[str, object] | None:
     """Ticket facts and attachment metadata, never file paths."""
     if ticket is None:
         return None
@@ -241,7 +242,7 @@ def merge_update(
 
 
 def handover_preflight(
-    target: Any, settings: Settings, attach_message_ids: list[str]
+    target: RunTarget, settings: Settings, attach_message_ids: list[str]
 ) -> tuple[TicketStore, Ticket, Contact, list[str]] | str:
     """Validate the run, ticket, attachments and operator target."""
     store: TicketStore | None = target.ticket_store
@@ -260,7 +261,7 @@ def handover_preflight(
     return store, ticket, contact, selected
 
 
-def stage_handover(target: Any, ticket: Ticket, urgent: bool) -> None:
+def stage_handover(target: RunTarget, ticket: Ticket, urgent: bool) -> None:
     """Stage needs_you only after the transport confirmed the alert."""
     target.ticket_id = ticket.id
     staged = merge_update(target.ticket_update, state=TicketState.NEEDS_YOU.value)
@@ -269,7 +270,7 @@ def stage_handover(target: Any, ticket: Ticket, urgent: bool) -> None:
 
 def hand_to_operator(
     settings: Settings,
-    waha: Any,
+    waha: Transport,
     language: str = "",
     translator: Translator | None = None,
 ) -> BaseTool:
@@ -349,7 +350,7 @@ def resolve_attach_ids(
     chat_id: str,
     session: str,
     settings: Settings,
-    target: Any,
+    target: RunTarget,
 ) -> tuple[list[str], str | None]:
     """Resolve `#m<n>` tokens and refuse paths or foreign ids."""
     resolved: list[str] = []
@@ -406,7 +407,7 @@ def new_ticket(settings: Settings) -> BaseTool:
 def build_ticket_tools(
     store: TicketStore | None,
     settings: Settings,
-    waha: Any,
+    waha: Transport,
     *,
     operator_language: str = "",
     translator: Translator | None = None,

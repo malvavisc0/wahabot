@@ -1,5 +1,4 @@
 import asyncio
-from typing import Any
 
 from tests.conftest import Bot
 from tests.harness import (
@@ -11,11 +10,12 @@ from tests.harness import (
     waha_event,
 )
 from tests.wire.support import _wait
+from wahabot.core.tickets.models import text_field
 
 CUSTOMER = "491555000001@c.us"
 
 
-def text_response(text: str) -> dict[str, Any]:
+def text_response(text: str) -> dict[str, object]:
     return {
         "id": "chatcmpl-wire-tickets",
         "object": "chat.completion",
@@ -35,15 +35,15 @@ def text_response(text: str) -> dict[str, Any]:
 def selector_for(kind: str, draft: str):
     """Answer each request by its exact shape, never by arrival order."""
 
-    def selector(body: dict[str, Any]) -> dict[str, Any]:
-        text = "\n".join(
-            str(message.get("content", "")) for message in body.get("messages", [])
-        )
+    def selector(body: dict[str, object]) -> dict[str, object]:
+        messages = body.get("messages")
+        entries = messages if isinstance(messages, list) else []
+        text = "\n".join(text_field(message, "content") for message in entries)
         if "Classify one operator reply" in text:
             return text_response(f'{{"kind": "{kind}"}}')
         if "Draft one WhatsApp message" in text:
             return text_response(draft)
-        if any(message.get("role") == "tool" for message in body.get("messages", [])):
+        if any(text_field(message, "role") == "tool" for message in entries):
             return text_response("the team has this")
         if "HANDOVER" in text:
             return tool_call_response(
@@ -60,7 +60,7 @@ def selector_for(kind: str, draft: str):
     return selector
 
 
-def customer_event(mid: str, body: str) -> dict[str, Any]:
+def customer_event(mid: str, body: str) -> dict[str, object]:
     event = waha_event(mid)
     payload = event["payload"]
     payload["id"] = f"false_{CUSTOMER}_{mid}"
@@ -72,7 +72,7 @@ def customer_event(mid: str, body: str) -> dict[str, Any]:
     return event
 
 
-def operator_event(mid: str, body: str, *, quote: str = "") -> dict[str, Any]:
+def operator_event(mid: str, body: str, *, quote: str = "") -> dict[str, object]:
     event = waha_event(mid)
     payload = event["payload"]
     payload["id"] = f"true_{ME_JID}_{mid}"
@@ -88,7 +88,7 @@ def operator_event(mid: str, body: str, *, quote: str = "") -> dict[str, Any]:
     return event
 
 
-def alerts(bot: Bot) -> list[Any]:
+def alerts(bot: Bot) -> list[tuple[str, str, str, list[str] | None]]:
     return [
         entry
         for entry in bot.waha.sent

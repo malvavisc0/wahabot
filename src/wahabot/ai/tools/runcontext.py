@@ -21,6 +21,7 @@ from wahabot.ai.tools.envelope import error
 from wahabot.core.echoes import remember_self_echo
 from wahabot.core.jid import chat_from_message_id, same_chat
 from wahabot.core.tickets.models import TicketUpdate
+from wahabot.core.tickets.store import TicketStore
 from wahabot.core.transport.context import bind_intake_ids
 from wahabot.status import state as _status_state
 
@@ -91,7 +92,7 @@ class RunTarget:
     anchor_at: float = 0.0
     outcome: str = ""
     #: The ticket service and the current ticket, bound by the caller.
-    ticket_store: Any = None
+    ticket_store: TicketStore | None = None
     ticket_id: int = 0
     #: Values the model staged for the ticket; applied only after a
     #: confirmed delivery.
