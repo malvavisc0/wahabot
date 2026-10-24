@@ -297,6 +297,11 @@ SQLite/WAL with numbered migrations); every outbound send first records an
 the message id, rendered record, arrival time, addressed flag and state
 (`pending`, `processing`, `delivering`, `done`, `failed`).
 
+Operator alerts use a separate `alert_intents` ledger. The alert intent
+is written before the send; a retry first looks for the alert in the
+operator chat's WAHA history and in the outbound intent ledger, and only
+resends after the grace window when no trace exists.
+
 A run claims its own turn rows when it starts (still under the chat
 lock, with a lease that outlives `WAHABOT_RUN_TIMEOUT`) so the recovery
 tick — whose due work is pending and failed rows only — can never
