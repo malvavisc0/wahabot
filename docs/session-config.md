@@ -63,7 +63,10 @@ the operator did not write, and refuses one that drops an amount or
 percentage the operator did write. The customer's language is detected
 from their text; it drives the holding reply and the alert's Language
 line. While a ticket waits on the operator, the customer gets one short
-holding reply per hour (and another after a fresh alert).
+holding reply per hour (and another after a fresh alert). If WAHA does
+not confirm an alert, the handover stays queued and the 60-second tick
+reconciles it against the operator chat before retrying, so one decision
+does not page twice.
 
 Operator commands in the self-chat: `what's open?`, `close 142`,
 `reopen 142`, `pause`, `resume`, `pause <name>`, `resume <name>`.

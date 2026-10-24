@@ -36,7 +36,11 @@ human behind each message is `participant`. This inverts what you'd
 naively expect: `from` is "where the message landed" (which chat), not
 "who typed it". JIDs may use `@lid` (linked-device IDs) or `@c.us`
 (phone numbers) — `@lid` values are stable identifiers that do not
-directly expose a phone number.
+directly expose a phone number. WAHA can map a LID to a phone JID with
+`GET /api/{session}/lids/{lid}`; wahabot uses that mapping for ticket
+contacts and alternates present in the payload (`remoteJidAlt`,
+`senderLid`, `senderPn`) when available. Ticket and operator pauses are
+checked against the chat, phone and LID aliases.
 
 ## How the session config uses these
 
