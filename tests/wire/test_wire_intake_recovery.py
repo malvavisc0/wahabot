@@ -40,7 +40,17 @@ def test_duplicate_delivery_while_the_first_run_is_processing(bot: Bot) -> None:
     started = threading.Event()
     release = threading.Event()
 
+    def is_triage_gate(body: dict[str, Any]) -> bool:
+        messages = body.get("messages")
+        entries = messages if isinstance(messages, list) else []
+        text = "\n".join(str(item.get("content", "")) for item in entries)
+        return '"participate"' in text and "adversarial" in text
+
     async def selector(body: dict[str, Any]) -> dict[str, Any]:
+        # The gate runs concurrently and may call first. Only hold the
+        # agent call, which happens after the run claims its ledger rows.
+        if is_triage_gate(body):
+            return SecondResponse
         if not started.is_set():
             started.set()
             while not release.is_set():
@@ -120,7 +130,17 @@ def test_recovery_tick_leaves_a_live_inflight_turn_to_its_run(bot: Bot) -> None:
     started = threading.Event()
     release = threading.Event()
 
+    def is_triage_gate(body: dict[str, Any]) -> bool:
+        messages = body.get("messages")
+        entries = messages if isinstance(messages, list) else []
+        text = "\n".join(str(item.get("content", "")) for item in entries)
+        return '"participate"' in text and "adversarial" in text
+
     async def selector(body: dict[str, Any]) -> dict[str, Any]:
+        # The gate runs concurrently and may call first. Only hold the
+        # agent call, which happens after the run claims its ledger rows.
+        if is_triage_gate(body):
+            return SecondResponse
         if not started.is_set():
             started.set()
             while not release.is_set():
