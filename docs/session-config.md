@@ -28,7 +28,13 @@ placeholder expansion.
 | `reply_window_days` | `integer` | `7` | Recovered rows older than this many days become operator-required work and get no customer reply. Also bounds an operator relay: older customer chats hold the draft until the customer writes again. Bounds 1–30; hot-reloaded. |
 | `close_after_days` | `integer` | `5` | Days a done ticket waits before it auto-closes; a customer message inside the window reopens it. Open or waiting tickets untouched for the same window also close. Bounds 1–365; hot-reloaded. |
 | `pause_after_human_hours` | `integer` | `2` | Hours a human-operator message pauses the assistant in that chat. Bounds 0–168; `0` disables the pause. |
-| `operator_language` | `string` | `""` | Language for operator alerts and confirmations. Empty falls back to English. |
+| `operator_language` | `string` | `""` | Language for operator alerts and confirmations. Empty falls back to English, then the customer's detected language. |
+| `timezone` | `string` | `""` | IANA zone for support hours and local-day summaries (e.g. `Europe/Madrid`). Empty falls back to `WAHABOT_TIMEZONE`. An unknown zone is rejected at load. |
+| `hours` | `object` | `{}` | Opening hours keyed `mon`…`sun`, each `{"open": "09:00", "close": "17:00"}` or `{"closed": true}`. Empty means always open. An overnight window (`22:00`–`02:00`) is supported. |
+| `away_message` | `string` | `""` | Customer-facing outside-hours text. `{ticket}` and `{next_opening}` are filled by code; empty uses the bundled wording. |
+| `night_number` | `string` | `""` | After-hours contact for urgent work. It is only messaged after that number has written once; otherwise the alert notes the setup gap and never messages a stranger first. |
+| `team_groups` | `string[]` | `[]` | Group chat ids that run as the internal team surface. Listed groups become mentioned-only and can never write tickets, message customers, use TTS or greet first. |
+| `knowledge_only` | `boolean` | `false` | Opt-in answers-only support mode. When on, uncovered questions get "I don't know" plus a handover offer instead of open-domain answering. |
 
 Example:
 
@@ -42,7 +48,20 @@ Example:
   "bot_name": "Kai",
   "bot_mention_regex": "(?i)(?<![a-z@])@?k[aā]i(?![a-z])",
   "group_participation": "judicious",
-  "reply_window_days": 7
+  "reply_window_days": 7,
+  "timezone": "Europe/Madrid",
+  "hours": {
+    "mon": {"open": "09:00", "close": "17:00"},
+    "tue": {"open": "09:00", "close": "17:00"},
+    "wed": {"open": "09:00", "close": "17:00"},
+    "thu": {"open": "09:00", "close": "17:00"},
+    "fri": {"open": "09:00", "close": "17:00"},
+    "sat": {"closed": true},
+    "sun": {"closed": true}
+  },
+  "away_message": "Ticket {ticket}: we are away and reply after {next_opening}.",
+  "knowledge_only": true,
+  "team_groups": ["<internal-team-jid>@g.us"]
 }
 ```
 
@@ -94,6 +113,59 @@ will copy whatever tone you set here into every reply. Keep style
 rules in the prompt itself (e.g. "short replies", "no markdown",
 "match the group's slang") — they change the output far more than
 any code-side default.
+
+## Support hours
+
+`hours` and `timezone` decide whether the business is open. Inside a
+window the bot answers normally and alerts the operator. Outside it,
+non-urgent handovers are deferred: the ticket becomes needs-you, no
+individual alert is sent, and the queued alert is delivered by the
+60-second tick at the next opening. Urgent handovers still alert
+immediately and additionally notify `night_number` when that contact is
+ready. The customer is told when to expect a reply using
+`away_message`, with `{ticket}` and `{next_opening}` filled in code.
+Overnight windows and DST transitions are evaluated in `timezone`.
+
+At the first opening of each local day the operator receives one
+morning summary (yesterday's ticket counts and needs-you work, urgent
+first, with ages). `last_summary_date` makes it once per local day and
+restart-safe; the summary message id is stored so quoted ticket numbers
+still route.
+
+## Published answers (Teach)
+
+The operator can publish question/answer pairs by replying to a ticket
+alert with an explanation. The reply classifier marks it as an
+`answer` (not a business action), sends the customer relay, and asks
+`Should I answer this myself next time? Reply save.` A bare `save` in
+the self-chat saves that candidate once; a second `save` reports that
+there is nothing to save.
+
+Enabled answers are injected as one whole `# Answers` section when the
+set fits `answers_token_limit` (6000 tokens). A set that does not fit
+is not pasted at all; the model searches it with `search_knowledge`.
+Answers are reference material: they never outrank safety or the
+session's Instructions, and returned hits are recorded in
+`answer_uses`. Deleting an answer is a soft delete and the latest one
+can be undone.
+
+## Internal team groups
+
+`team_groups` is an allowlist, not a mode. Each listed group is
+additive: it overrides the session's group participation to
+`mentioned` for that chat only, so unlisted groups keep their existing
+`never`/`mentioned`/`judicious` behavior. A run in a listed group has
+surface `team_group` and the restrictions are enforced in code:
+
+- never open, update or close a ticket; read-only ticket facts are
+  available (including open work for "what's open?");
+- never send from the group run to a customer chat;
+- no customer-system writes;
+- no TTS and no posting first. The run wakes only when the newest body
+  names the assistant, quotes its message, or replies to it.
+
+Group traffic is still journaled and chat-scoped notebook notes still
+work; a group note never becomes a customer-chat note.
 
 ## System prompt variables
 

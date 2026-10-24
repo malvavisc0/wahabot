@@ -43,6 +43,7 @@ from wahabot.ai.serials import (
 )
 from wahabot.ai.video import MAX_TRANSCRIPT_CHARS
 from wahabot.ai.vision import image_caption, image_noun
+from wahabot.core.documents.limits import DOCUMENT_MARKER_KEY, DOCUMENT_TEXT_KEY
 from wahabot.core.identity import AUTHOR_BOT, AUTHOR_OPERATOR, authors, display_name
 from wahabot.core.identity import names as name_book
 from wahabot.core.jid import chat_from_message_id, is_own_message_id
@@ -77,6 +78,7 @@ class Slots:
 
     images: int = 0
     videos: int = 0
+    documents: int = 0
 
     def take_images(self, count: int) -> int:
         """Reserve *count* image slots and return the first one."""
@@ -88,6 +90,11 @@ class Slots:
         """Reserve one video slot and return it."""
         self.videos += 1
         return self.videos
+
+    def take_document(self) -> int:
+        """Reserve one document slot and return it."""
+        self.documents += 1
+        return self.documents
 
 
 def record_kind(event: WahaEvent) -> str:
@@ -292,6 +299,19 @@ def audio_payload(event: WahaEvent) -> list[str]:
     return [f'[audio: "{trimmed}{suffix}"]']
 
 
+def document_parts(event: WahaEvent, slots: Slots) -> tuple[list[str], list[str]]:
+    """The ``document#n`` flag plus marker and untrusted extracted text."""
+    marker = str(event.payload.get(DOCUMENT_MARKER_KEY) or "").strip()
+    if not marker:
+        return [], []
+    text = str(event.payload.get(DOCUMENT_TEXT_KEY) or "").strip()
+    payloads = [marker]
+    if text:
+        lines = [line for line in text.splitlines() if line.strip()]
+        payloads.extend(lines[:400])
+    return [f"document#{slots.take_document()}"], payloads
+
+
 def image_payloads(images: Sequence[dict[str, Any]]) -> list[str]:
     """The media-analysis payload line for an entry's images."""
     if not images:
@@ -417,9 +437,11 @@ def render_entry(
     event = entry.event
     name, ordinal, serial = resolve_identity(event, registry, names)
     media_flags, media_payloads, blocks = media_parts(entry, slots)
+    document_flags, document_payloads = document_parts(event, slots)
     quote_flags, quote_payloads = quote_parts(event, registry)
     payloads = [
         *media_payloads,
+        *document_payloads,
         *audio_payload(event),
         *quote_payloads,
         *reaction_parts(event, registry),
@@ -433,6 +455,7 @@ def render_entry(
         kind=record_kind(event),
         flags=(
             *media_flags,
+            *document_flags,
             *(["addressed"] if entry.addressed else []),
             *quote_flags,
         ),

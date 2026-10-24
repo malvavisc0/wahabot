@@ -46,9 +46,11 @@ class AlertResult:
         return bool(self.message_ids)
 
 
-def operator_language(config_language: str) -> str:
-    """The alert language: the operator's setting, then English."""
-    return (config_language or "en").strip() or "en"
+def operator_language(config_language: str, detected: str = "") -> str:
+    """The alert language: setting, detected operator language, then English."""
+    from wahabot.core.tickets.language import operator_language_for
+
+    return operator_language_for(config_language, detected)
 
 
 def display_phone(phone: str) -> str:

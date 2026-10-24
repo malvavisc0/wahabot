@@ -8,11 +8,13 @@ from dataclasses import dataclass, field
 
 from loguru import logger
 
+from wahabot.core.answers.service import AnswerService
 from wahabot.core.tickets.facts import (
     fact_tokens,
     mismatch_tokens,
     omitted_tokens,
 )
+from wahabot.core.tickets.language import detect_language
 from wahabot.core.tickets.models import (
     Actor,
     Contact,
@@ -38,15 +40,17 @@ Remember = Callable[[str], Awaitable[None]]
 
 RESOLUTION = "resolution"
 INSTRUCTION = "instruction"
+ANSWER = "answer"
 AMBIGUOUS = "ambiguous"
-KINDS = frozenset({RESOLUTION, INSTRUCTION, AMBIGUOUS})
+KINDS = frozenset({RESOLUTION, INSTRUCTION, ANSWER, AMBIGUOUS})
 
 _CLASSIFY_PROMPT = (
     "Classify one operator reply for a support ticket. Return strict JSON only: "
-    '{{"kind": "resolution"|"instruction"|"ambiguous"}}. '
-    "resolution means the operator says what was done or decided for the customer. "
+    '{{"kind": "resolution"|"instruction"|"answer"|"ambiguous"}}. '
+    "resolution means the operator did a business action for the customer. "
     "instruction means the operator asks the customer to do or answer something. "
-    "ambiguous means neither is clear.\n\nOperator reply:\n{text}"
+    "answer means the operator explains something, with no business action. "
+    "ambiguous means none is clear.\n\nOperator reply:\n{text}"
 )
 
 _DRAFT_PROMPT = (
@@ -63,11 +67,17 @@ class ReplyOutcome:
     """The operator-facing result of one routed reply."""
 
     confirmation: str
+    detected: str = ""
     sent: bool = False
     kind: str = AMBIGUOUS
     draft: str = ""
     mismatches: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
+
+
+def should_offer_save(kind: str) -> bool:
+    """Whether an answer-shaped reply may be saved as a published answer."""
+    return kind == ANSWER
 
 
 def parse_kind(raw: str) -> str:
@@ -141,7 +151,7 @@ def read_held(body: str) -> tuple[str, str]:
 
 def confirmation(contact: Contact, ticket: Ticket, kind: str, draft: str) -> str:
     """The short confirmation that names recipient and ticket state."""
-    if kind == RESOLUTION:
+    if kind in (RESOLUTION, ANSWER):
         return f"Sent to {contact.display}: {draft} Ticket {ticket.number} done."
     return f"Asked {contact.display}: {draft} Ticket {ticket.number} waiting for them."
 
@@ -249,6 +259,7 @@ async def handle_operator_reply(
     complete: Completer,
     reply_window_days: int,
     remember: Remember | None = None,
+    answer_service: AnswerService | None = None,
     now: int | None = None,
 ) -> ReplyOutcome:
     """Classify, draft, verify and deliver one operator reply."""
@@ -278,7 +289,7 @@ async def handle_operator_reply(
     held = hold_outcome(store, ticket, contact, kind, draft, moment, reply_window_days)
     if held is not None:
         return held
-    return await relay_outcome(
+    outcome = await relay_outcome(
         store,
         waha,
         session,
@@ -289,6 +300,31 @@ async def handle_operator_reply(
         operator_text,
         moment,
         remember,
+    )
+    outcome.detected = detect_language(operator_text)
+    if outcome.sent and should_offer_save(kind) and answer_service is not None:
+        offer_answer_candidate(answer_service, store, ticket, outcome)
+    return outcome
+
+
+def offer_answer_candidate(
+    service: AnswerService,
+    store: TicketStore,
+    ticket: Ticket,
+    outcome: ReplyOutcome,
+) -> None:
+    """Store the unsaved candidate and add the one-line save offer."""
+    try:
+        service.offer_candidate(
+            ticket.id,
+            customer_words(store, ticket),
+            outcome.draft,
+        )
+    except Exception as exc:
+        logger.warning("Answer candidate was not stored: {exc}", exc=exc)
+        return
+    outcome.confirmation = (
+        f"{outcome.confirmation}\nShould I answer this myself next time? Reply save."
     )
 
 
@@ -320,12 +356,9 @@ def send_reply(
         [sent_id],
         at=moment,
     )
-    state = (
-        TicketState.DONE.value
-        if kind == RESOLUTION
-        else TicketState.WAITING_CUSTOMER.value
-    )
-    done_by = DoneBy.OPERATOR.value if kind == RESOLUTION else None
+    resolved = kind in (RESOLUTION, ANSWER)
+    state = TicketState.DONE.value if resolved else TicketState.WAITING_CUSTOMER.value
+    done_by = DoneBy.OPERATOR.value if resolved else None
     store.update_ticket(
         ticket.id,
         TicketUpdate(state=state, done_by=done_by),
@@ -334,6 +367,7 @@ def send_reply(
         body=operator_text or draft,
         at=moment,
     )
+    store.cancel_notices(ticket.id, moment)
     return True
 
 

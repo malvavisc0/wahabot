@@ -28,6 +28,7 @@ from wahabot.core.runs import (
     context_for,
     persist_memory,
 )
+from wahabot.core.teams.groups import surface_for
 from wahabot.handlers.base import HandlerBase
 from wahabot.handlers.dedup import forget_seen
 from wahabot.handlers.media import album_message_id, download_image
@@ -200,6 +201,7 @@ class AlbumMixin(HandlerBase):
                     owner=owner,
                     ticket_store=self.ticket_store,
                     ticket_id=ticket_id,
+                    surface=surface_for(current, chat_id),
                 )
             await persist_memory(self.settings, event.session, chat_id, ctx)
         delivered = bool(target.sent or target.reacted)

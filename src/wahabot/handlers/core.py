@@ -6,6 +6,7 @@ from wahabot.ai.intake import IntakeLedger
 from wahabot.ai.tools.whatsapp import EscalationChannel
 from wahabot.ai.triage import TriageGate
 from wahabot.core.access import SessionConfig, SessionConfigReloader
+from wahabot.core.answers.service import AnswerService
 from wahabot.core.delivery.intents import IntentStore
 from wahabot.core.scheduler import TicketScheduler
 from wahabot.core.tickets.store import TicketStore
@@ -39,6 +40,7 @@ class Handlers(
         ticket_store: TicketStore | None = None,
         ticket_translator: TicketTranslator | None = None,
         scheduler: TicketScheduler | None = None,
+        answer_service: AnswerService | None = None,
     ) -> None:
         self.settings = settings
         self.waha = waha
@@ -52,6 +54,7 @@ class Handlers(
         self.ticket_store = ticket_store
         self.ticket_translator = ticket_translator
         self.scheduler = scheduler
+        self.answer_service = answer_service
         self.transport = waha
         self.bursts = Bursts(
             settings.burst_inactivity_s,

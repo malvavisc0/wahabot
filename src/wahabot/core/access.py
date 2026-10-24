@@ -3,10 +3,12 @@
 import json
 import threading
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from wahabot.core.schedule.models import DAY_KEYS, DayHours
 from wahabot.core.tokens import text_tokens
 
 CONFIG_MEMORY_TOKEN_LIMIT = 1024
@@ -59,6 +61,47 @@ class SessionConfig(BaseModel):
     pause_after_human_hours: int = Field(default=2, ge=0, le=168)
     #: Operator-facing alert language; empty falls back to English.
     operator_language: str = ""
+    #: Session timezone; empty falls back to WAHABOT_TIMEZONE.
+    timezone: str = ""
+    #: Opening hours per weekday (mon..sun); an empty mapping is always open.
+    hours: dict[str, DayHours] = Field(default_factory=dict)
+    #: Customer-facing message sent outside hours; {ticket} and
+    #: {next_opening} are filled by code.
+    away_message: str = ""
+    #: The after-hours contact; it is only ever messaged after it wrote first.
+    night_number: str = ""
+    #: Group chat ids that run as the internal team surface.
+    team_groups: list[str] = Field(default_factory=list)
+    #: Answers-only support mode; opt-in, never the personal default.
+    knowledge_only: bool = False
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        """Accept an empty fallback or a zoneinfo-resolvable name."""
+        name = value.strip()
+        if not name:
+            return ""
+        try:
+            ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError, OSError) as exc:
+            raise ValueError(f"unknown timezone {name!r}") from exc
+        return name
+
+    @field_validator("hours")
+    @classmethod
+    def validate_hours(cls, value: dict[str, DayHours]) -> dict[str, DayHours]:
+        """Accept only the seven weekday keys, in a stable order."""
+        unknown = set(value) - set(DAY_KEYS)
+        if unknown:
+            raise ValueError(f"unknown hours day(s): {', '.join(sorted(unknown))}")
+        return {day: value[day] for day in DAY_KEYS if day in value}
+
+    @field_validator("team_groups")
+    @classmethod
+    def validate_team_groups(cls, value: list[str]) -> list[str]:
+        """Keep the allowlist as distinct, non-empty chat ids."""
+        return list(dict.fromkeys(item.strip() for item in value if item.strip()))
 
 
 def load_session_config(path: Path) -> SessionConfig:

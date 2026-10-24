@@ -30,9 +30,59 @@ from wahabot.ai.tools.whatsapp.media_files import (
 )
 from wahabot.ai.tools.whatsapp.targets import probe_media_url
 from wahabot.ai.tools.whatsapp.text_send import blame_delivery_error
+from wahabot.core.teams.groups import team_capability_error
 from wahabot.core.transport import Transport
 from wahabot.core.tts import synthesize
 from wahabot.settings import Settings
+
+
+def prepare_media(
+    kind: str,
+    caption: str,
+    url: str | None,
+    path: str | None,
+    text: str | None,
+    filename: str | None,
+    language: str | None,
+) -> tuple[Callable[..., str] | None, str | None, str | None, str | None, str | None]:
+    """Resolve the handler and normalize sources before the source check."""
+    if blame := blame_delivery_error(f"{caption}\n{text or ''}"):
+        return None, url, path, text, blame
+    handler = _SEND_MEDIA_HANDLERS.get(kind)
+    if handler is None:
+        return None, url, path, text, f"unknown kind: {kind!r}"
+    clean_url = normalize_media_source(url)
+    clean_path = normalize_media_source(path)
+    clean_text = normalize_media_source(text)
+    return (
+        handler,
+        clean_url,
+        clean_path,
+        clean_text,
+        media_argument_error(
+            clean_url, clean_path, clean_text, kind, caption, filename, language
+        ),
+    )
+
+
+def media_target(
+    target: RunTarget, chat: str | None, url: str | None
+) -> tuple[str, str] | str:
+    """The fenced session/chat, the probe result, or an error envelope."""
+    chat_id, fence_error = fenced_chat(chat, target)
+    if fence_error:
+        return error(fence_error)
+    session = target.session
+    if not session or not chat_id:
+        return error("no active conversation context")
+    delivery_error = delivery_target_error(chat_id, None, target)
+    if delivery_error:
+        return error(delivery_error)
+    if url:
+        probe_error = probe_media_url(url)
+        if probe_error:
+            return error(probe_error)
+    return session, chat_id
 
 
 def send_media(waha: Transport, settings: Settings) -> BaseTool:
@@ -61,42 +111,23 @@ def send_media(waha: Transport, settings: Settings) -> BaseTool:
         target = current_target()
         if refusal := send_guard(target):
             return refusal
+        if (
+            kind == "voice"
+            and text
+            and (team_refusal := team_capability_error(target, "tts"))
+        ):
+            return error(team_refusal)
 
-        def preflight() -> tuple[Callable[..., str] | None, str | None]:
-            """The handler and the argument error, with sources normalized."""
-            nonlocal url, path, text
-            if blame := blame_delivery_error(f"{caption}\n{text or ''}"):
-                return None, blame
-            handler = _SEND_MEDIA_HANDLERS.get(kind)
-            if handler is None:
-                return None, f"unknown kind: {kind!r}"
-            # Blank sources count as absent (a whitespace-only url must not
-            # outrank a real path below) — normalize before the XOR check
-            # and the dispatch, so both see the same source.
-            url = normalize_media_source(url)
-            path = normalize_media_source(path)
-            text = normalize_media_source(text)
-            return handler, media_argument_error(
-                url, path, text, kind, caption, filename, language
-            )
-
-        handler, preflight_error = preflight()
-        if preflight_error:
-            return error(preflight_error)
+        handler, url, path, text, media_error = prepare_media(
+            kind, caption, url, path, text, filename, language
+        )
+        if media_error:
+            return error(media_error)
+        prepared = media_target(target, chat, url)
+        if isinstance(prepared, str):
+            return prepared
+        session, chat_id = prepared
         assert handler is not None
-        chat_id, fence_error = fenced_chat(chat, target)
-        if fence_error:
-            return error(fence_error)
-        session = target.session
-        if not session or not chat_id:
-            return error("no active conversation context")
-        delivery_error = delivery_target_error(chat_id, None, target)
-        if delivery_error:
-            return error(delivery_error)
-        if url:
-            probe_error = probe_media_url(url)
-            if probe_error:
-                return error(probe_error)
         log_action_reason("send_media", reason, chat=chat_id, kind=kind)
         return dispatch_media(
             waha,

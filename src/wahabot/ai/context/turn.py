@@ -225,6 +225,7 @@ async def handle_message(
     owner: str = "",
     ticket_store: TicketStore | None = None,
     ticket_id: int = 0,
+    surface: str = "",
 ) -> tuple[str, RunTarget]:
     """Run the agent workflow over an incoming message event.
 
@@ -319,6 +320,7 @@ async def handle_message(
         ),
         ticket_store=ticket_store,
         ticket_id=ticket_id,
+        surface=surface,
     )
     token = bind_target(target)
     intake_token = bind_intake_ids(turn_ids)

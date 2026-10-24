@@ -477,6 +477,88 @@ text reply in the same run — never a crash, never a silent hole. The
 url/path relay forms are unchanged. Design rationale and the voice
 audition live in `docs/plans/tts-integration.md`.
 
+## Knowledge, documents, hours and team groups
+
+### Published answers and retrieval
+
+`core/answers` owns answers, their FTS5 index (kept in sync by SQL
+triggers), `answer_uses`, and `answer_candidates`. `render_system_prompt`
+appends the whole enabled set as `# Answers` only when the rendered
+section fits `ANSWERS_TOKEN_LIMIT` (6000 tokens); an oversized set is
+dropped entirely rather than half-pasted. `search_knowledge` is
+registered unconditionally against the same store, so an answer added
+after the agent was built is immediately searchable; every returned hit
+records a use. The section's preamble states that answers never
+override safety or the Instructions, and notebook notes never override
+answers. `knowledge_only` adds the answers-only rule and the "I don't
+know" fallback; it is opt-in and does not change the personal-track
+open-domain behavior.
+
+A ticket reply classified as `answer` stores the customer's question
+and the operator's confirmed draft as an unsaved candidate. The
+confirmation gets one line: `Should I answer this myself next time?
+Reply save.` A bare `save` in the self-chat calls
+`AnswerService.save_latest_candidate`, which stamps `saved_at` and can
+never create the same candidate twice. Action-shaped replies
+(`resolution`, `instruction`) never offer it.
+
+### Documents
+
+Customer documents arrive as attachment events. `core/documents`
+extracts them within `max_document_pages`, `max_document_chars`,
+`max_file_bytes` and `document_timeout_s`: `pdftotext` first, then
+`pdftoppm` + `tesseract` when text is missing; `pandoc` for DOCX/ODT/RTF;
+plain text and CSV directly. Every converter is a bounded subprocess, so
+a hung binary cannot hold the turn. The extracted text is stored as the
+attachment's `derived_text` with `page_count`; the turn carries a
+`document#n` flag plus the filename/mimetype/status marker and the text
+under `[document text, untrusted; verify before relying]`. The record
+grammar escapes each line, so document text cannot forge a ledger line.
+Unreadable and over-limit documents keep their notice and stay attached
+for the operator instead of failing the turn. Tests generate their own
+PDF/DOCX/scan fixtures; no real document or PII is committed.
+
+### Hours, deferred alerts and the morning summary
+
+`core/schedule` evaluates `SessionConfig.hours` in the session timezone
+(session field, then `WAHABOT_TIMEZONE`, then UTC), including overnight
+windows and DST. Outside hours, `hand_to_operator` queues the composed
+operator alert in `deferred_notices` for `next_opening`, persists the
+ticket as needs-you, and returns the rendered away message for the
+customer. The scheduler delivers due notices only while open. Urgent
+handovers bypass the deferral and additionally send a short note to
+`night_number` if that contact has written before; an unready number is
+never messaged first and leaves a setup-gap log.
+
+At the first opening of a local day, `core/tickets/summary` builds
+yesterday's counts plus needs-you work (urgent first, with ages), sends
+it once to the operator, stores `last_summary_date` and
+`summary_message_id` in `session_state`. The date check is read from
+SQLite on every tick, so a restart does not duplicate the summary.
+
+### Team groups
+
+`team_groups` is an allowlist applied at the addressing gate: a listed
+group overrides group participation to `mentioned` for that chat only.
+`surface_for` binds `RunTarget.surface = "team_group"`; `fenced_chat`
+already refuses cross-chat sends, and `team_capability_error` adds
+code-enforced refusals for ticket writes, customer sends,
+customer-system writes, TTS and greetings. `support_state` stays
+read-only and, in a team group, returns either one looked-up ticket or
+the open-ticket list for "what's open?". Unlisted groups keep every
+prior participation behavior. The bot never posts first in a team group:
+the run only wakes on a mention, a quote of its message, or a reply to
+it.
+
+### Language
+
+Ticket language detection stays in `core/tickets/language` (phase 2's
+strict stopword detector), stored on the contact. Operator alerts and
+confirmations use `operator_language`, then the customer's detected
+language, then English; translations are cached per session. The relay
+draft and the pinned reply rule follow the customer's stored language,
+and an unknown language falls back to English rather than guessing.
+
 ## Beyond the chat turn: commands, reactions, session health
 
 Three event flows sit outside the plain message → reply pipeline:

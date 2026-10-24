@@ -102,6 +102,19 @@ class ContactMixin(StoreBase):
             contact_from_row,
         )
 
+    def contact_by_phone(self, phone: str) -> Contact | None:
+        """One contact by phone number or its chat id form."""
+        wanted = "".join(ch for ch in phone.split("@", 1)[0] if ch.isdigit())
+        if not wanted:
+            return None
+        return self.query_one(
+            f"SELECT {_CONTACT_COLUMNS} FROM contacts "
+            + "WHERE phone = ? OR chat_id = ? OR chat_id LIKE ? "
+            + "ORDER BY id LIMIT 1",
+            (wanted, f"{wanted}@c.us", f"{wanted}@%"),
+            contact_from_row,
+        )
+
     def contact_by_id(self, contact_id: int) -> Contact | None:
         """One contact by row id."""
         return self.query_one(

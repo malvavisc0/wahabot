@@ -22,7 +22,7 @@ from wahabot.core.tickets.alerts import (
 )
 from wahabot.core.tickets.attachments import persist_event_attachments
 from wahabot.core.tickets.identity import phone_alias
-from wahabot.core.tickets.language import detect_language
+from wahabot.core.tickets.language import detect_language, operator_language_for
 from wahabot.core.tickets.lifecycle import (
     GLOBAL_PAUSE_FOREVER,
     Inbound,
@@ -403,6 +403,9 @@ class TicketMixin(HandlerBase):
         if route.kind == RouteKind.WHATS_OPEN:
             await self.ticket_send_operator(event, whats_open_text(self.ticket_store))
             return True
+        if route.kind == RouteKind.SAVE:
+            await self.ticket_save_answer(event)
+            return True
         if route.kind in (RouteKind.CLOSE, RouteKind.REOPEN):
             await self.ticket_state_route(event, route)
             return True
@@ -414,6 +417,20 @@ class TicketMixin(HandlerBase):
             await self.ticket_send_operator(event, text)
             return True
         return False
+
+    async def ticket_save_answer(self, event: WahaEvent) -> None:
+        """Save the newest answer candidate, or say there is none."""
+        service = self.answer_service
+        if service is None:
+            await self.ticket_send_operator(event, "Teaching is not available.")
+            return
+        saved = service.save_latest_candidate()
+        if saved is None:
+            await self.ticket_send_operator(event, "There is nothing to save.")
+            return
+        await self.ticket_send_operator(
+            event, f"Saved answer {saved.id}: {saved.question}"
+        )
 
     async def ticket_reply_route(
         self, event: WahaEvent, route: Route, config: SessionConfig
@@ -446,6 +463,7 @@ class TicketMixin(HandlerBase):
                 complete=self.ticket_complete,
                 reply_window_days=config.reply_window_days,
                 remember=self.ticket_remember_relay(ticket),
+                answer_service=self.answer_service,
             )
             if outcome.sent:
                 await self.ticket_write_fact(event, ticket, route.text, outcome)
@@ -482,7 +500,7 @@ class TicketMixin(HandlerBase):
         self, outcome: ReplyOutcome, config: SessionConfig
     ) -> str:
         """The operator-facing confirmation in the configured language."""
-        language = (config.operator_language or "en").strip() or "en"
+        language = operator_language_for(config.operator_language, outcome.detected)
         if language == "en" or self.ticket_translator is None:
             return outcome.confirmation
         try:

@@ -55,6 +55,8 @@ class RunTarget:
 
     session: str = ""
     chat_id: str = ""
+    #: ``customer``, ``operator`` or ``team_group``; bound per run, never inferred.
+    surface: str = ""
     sent: str = ""
     sent_id: str = ""
     #: The text (or media caption) confirmed delivered this run.

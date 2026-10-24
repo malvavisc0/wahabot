@@ -7,7 +7,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from loguru import logger
 
 from wahabot.core.access import SessionConfig, SessionConfigReloader
-from wahabot.core.tickets.alerts import retry_alerts
+from wahabot.core.schedule.deferred import deliver_due_notices
+from wahabot.core.schedule.hours import effective_timezone, opening_state
+from wahabot.core.tickets.alerts import Translator, retry_alerts
 from wahabot.core.tickets.lifecycle import close_overdue, close_stale
 from wahabot.core.tickets.models import (
     Actor,
@@ -16,6 +18,7 @@ from wahabot.core.tickets.models import (
     Ticket,
 )
 from wahabot.core.tickets.store import TicketStore
+from wahabot.core.tickets.summary import send_summary
 from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 from wahabot.status.state import state as status_state
@@ -32,11 +35,13 @@ class TicketScheduler:
         store: TicketStore,
         waha: Transport,
         config_reloader: SessionConfigReloader,
+        translator: Translator | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
         self.waha = waha
         self.config_reloader = config_reloader
+        self.translator = translator
         self.nudge_lock = threading.Lock()
 
     def tick(self, now: int | None = None) -> None:
@@ -48,6 +53,39 @@ class TicketScheduler:
         close_stale(self.store, config.close_after_days, at=moment)
         self.release_pauses(moment, config)
         self.nudge(moment)
+        self.scheduled_notices(moment, config)
+        self.morning_summary(moment, config)
+
+    def scheduled_notices(self, moment: int, config: SessionConfig) -> None:
+        """Deliver deferred alerts only while the business is open."""
+        state = opening_state(config, moment, self.settings.timezone)
+        if not state.open:
+            return
+        deliver_due_notices(self.store, self.waha, moment)
+
+    def morning_summary(self, moment: int, config: SessionConfig) -> None:
+        """Send the morning summary once per local day at the first opening."""
+        if not config.hours:
+            return
+        destination = status_state.operator_jid
+        if not destination:
+            return
+        zone = effective_timezone(config.timezone, self.settings.timezone)
+        try:
+            send_summary(
+                self.store,
+                self.waha,
+                self.settings.session,
+                destination,
+                moment,
+                zone,
+                hours=config.hours,
+                operator_language=config.operator_language,
+                translate=self.translator,
+                fallback_timezone=self.settings.timezone,
+            )
+        except Exception as exc:
+            logger.warning("Morning summary failed: {exc}", exc=exc)
 
     def release_pauses(self, moment: int, config: SessionConfig) -> None:
         """Clear contact and chat pauses once the customer has been quiet."""
