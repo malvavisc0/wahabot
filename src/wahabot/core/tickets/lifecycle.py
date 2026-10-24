@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from wahabot.core.models import WahaEvent
 from wahabot.core.tickets.models import (
@@ -58,14 +59,16 @@ def customer_details(event: WahaEvent) -> tuple[str, str, str, str]:
         if sender.endswith("@lid")
         else (chat_id if chat_id.endswith("@lid") else "")
     )
-    data = event.payload.get("_data") or {}
+    raw = event.payload.get("_data")
+    data: dict[str, Any] = raw if isinstance(raw, dict) else {}
     name = str(data.get("notifyName") or event.payload.get("notifyName") or "")
     return chat_id, phone, lid, name
 
 
 def contact_language(event: WahaEvent) -> str:
     """The customer's language when the runtime already knows it."""
-    data = event.payload.get("_data") or {}
+    raw = event.payload.get("_data")
+    data: dict[str, Any] = raw if isinstance(raw, dict) else {}
     return str(data.get("language") or "")
 
 

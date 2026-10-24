@@ -172,8 +172,7 @@ def escalate(waha: Transport, channel: EscalationChannel, settings: Settings) ->
             # language, attachments and a durable ticket state). Escalating
             # here would bypass it and lose the ticket.
             return error(
-                "ticket chats use hand_to_operator, not escalate: it records the "
-                "ticket, copies attachments and alerts the operator"
+                "ticket chats use hand_to_operator, not escalate: it records the ticket"
             )
         return forward_escalation(
             waha, channel, settings, target.session, chat_id, report

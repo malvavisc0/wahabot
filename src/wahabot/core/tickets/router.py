@@ -3,6 +3,7 @@
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any, cast
 
 from wahabot.ai.messages import bot_jids, jid_string
 from wahabot.core.models import WahaEvent
@@ -62,15 +63,20 @@ def quoted_id(event: WahaEvent) -> str:
     """The id of the message this event quotes, or ""."""
     reply = event.payload.get("replyTo")
     if not isinstance(reply, dict):
-        reply = (event.payload.get("_data") or {}).get("quotedMsg")
+        raw = event.payload.get("_data")
+        data: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        reply = data.get("quotedMsg")
     if not isinstance(reply, dict):
         return ""
+    quoted = cast(dict[str, Any], reply)
     for key in _QUOTED_ID_KEYS:
-        value = reply.get(key)
+        value = quoted.get(key)
         if isinstance(value, str) and value:
             return value
-        if isinstance(value, dict) and value.get("_serialized"):
-            return str(value["_serialized"])
+        if isinstance(value, dict):
+            nested = cast(dict[str, Any], value)
+            if nested.get("_serialized"):
+                return str(nested["_serialized"])
     return ""
 
 
