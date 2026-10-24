@@ -133,6 +133,7 @@ def session_view(
             config.goal,
             config.memory,
             operator_name=config.operator_name,
+            knowledge_only=config.knowledge_only,
             **cli_helpers.identity_kwargs(settings),
         )
     console.print(

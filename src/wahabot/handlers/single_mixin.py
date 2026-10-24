@@ -27,9 +27,10 @@ from wahabot.core.runs import (
     context_for,
     persist_memory,
 )
+from wahabot.core.teams.groups import surface_for
 from wahabot.handlers.base import HandlerBase
 from wahabot.handlers.dedup import forget_seen
-from wahabot.handlers.media import video_frames
+from wahabot.handlers.media import prepare_document_event, video_frames
 from wahabot.handlers.replies import finish_agent_reply_with_intake
 from wahabot.status import (
     classify_llm_failure,
@@ -111,6 +112,7 @@ class SingleMixin(HandlerBase):
                         owner=owner,
                         ticket_store=self.ticket_store,
                         ticket_id=ticket_id,
+                        surface=surface_for(config, str(event.payload.get("from", ""))),
                     )
                 await persist_memory(self.settings, event.session, chat_id, ctx)
                 delivered = bool(target.sent or target.reacted)
@@ -204,6 +206,8 @@ class SingleMixin(HandlerBase):
         if await self.skip_or_buffer_message(event, config, operator_wakes):
             return
         body = await self.transcribe_message(event, body)
+        if str(event.payload.get("from", "")).endswith("@g.us"):
+            await prepare_document_event(event, self.waha, self.settings)
         body, video, url_video = await self.prepare_message_videos(
             event, body, stamp_body=False
         )

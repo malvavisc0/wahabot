@@ -6,6 +6,16 @@ from pathlib import Path
 
 from loguru import logger
 
+from wahabot.core.documents.extract import extract_bytes, is_document
+from wahabot.core.documents.limits import (
+    DOCUMENT_MARKER_KEY,
+    DOCUMENT_TEXT_KEY,
+    DocumentLimits,
+    DocumentText,
+    document_marker,
+    document_text_payload,
+    unreadable_notice,
+)
 from wahabot.core.models import WahaEvent
 from wahabot.core.tickets.models import (
     Actor,
@@ -64,6 +74,13 @@ def media_mime(event: WahaEvent) -> str:
     return text_field(event.payload.get("media"), "mimetype")
 
 
+def media_filename(event: WahaEvent) -> str:
+    """The sender's document filename, or ""."""
+    return text_field(event.payload.get("media"), "filename") or text_field(
+        event.payload.get("_data"), "filename"
+    )
+
+
 def byte_cap(kind: str, settings: Settings) -> int:
     """The download cap for one media kind."""
     return {
@@ -119,15 +136,43 @@ def persist_event_attachments(
             "Ticket attachment download failed for {id}: {exc}", id=message_id, exc=exc
         )
         return []
+    mime = media_mime(event)
+    filename = media_filename(event)
+    derived_text = str(event.payload.get("body", "") or "")
+    page_count = 0
+    if kind == "file" and is_document(mime, filename):
+        try:
+            result = extract_bytes(
+                data,
+                mime,
+                filename,
+                DocumentLimits.from_settings(settings),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Document extraction failed for {id}: {exc}", id=message_id, exc=exc
+            )
+            result = DocumentText(
+                text="",
+                status="unreadable",
+                notice=unreadable_notice(filename),
+                filename=filename,
+                mime=mime,
+            )
+        derived_text = result.text or result.notice
+        page_count = result.pages
+        event.payload[DOCUMENT_MARKER_KEY] = document_marker(result)
+        event.payload[DOCUMENT_TEXT_KEY] = document_text_payload(result)
     return persist_bytes(
         store,
         ticket,
         message_id,
         kind,
-        media_mime(event),
+        mime,
         data,
         settings,
-        derived_text=str(event.payload.get("body", "") or ""),
+        derived_text=derived_text,
+        page_count=page_count,
         at=at,
     )
 
@@ -142,6 +187,7 @@ def persist_bytes(
     settings: Settings,
     *,
     derived_text: str = "",
+    page_count: int = 0,
     at: int | None = None,
 ) -> list[Attachment]:
     """Store already-downloaded bytes, linking them to ticket and message."""
@@ -168,6 +214,7 @@ def persist_bytes(
         sha256=sha256,
         path=str(path),
         derived_text=derived_text,
+        page_count=page_count,
     )
     store.add_event(
         ticket.id,
@@ -189,6 +236,7 @@ def attachment_metadata(attachments: list[Attachment]) -> list[dict[str, object]
             "bytes": item.bytes,
             "message_id": item.message_id,
             "text": item.derived_text,
+            "page_count": item.page_count,
         }
         for item in attachments
     ]

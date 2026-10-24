@@ -20,6 +20,7 @@ _CLOSE = re.compile(r"^\s*close\s+(?:ticket\s*)?#?(\d+)\s*$", re.IGNORECASE)
 _REOPEN = re.compile(r"^\s*reopen\s+(?:ticket\s*)?#?(\d+)\s*$", re.IGNORECASE)
 _PAUSE = re.compile(r"^\s*pause(?:\s+(.+))?\s*$", re.IGNORECASE)
 _RESUME = re.compile(r"^\s*resume(?:\s+(.+))?\s*$", re.IGNORECASE)
+_SAVE = re.compile(r"^\s*save\s*$", re.IGNORECASE)
 _NUMBERED = re.compile(
     r"^\s*(?:(?:ticket\s*#?|#)(\d+)\b\s*[:.\-]?\s*|(\d+)\s*[:.\-]\s+)(.+)$",
     re.IGNORECASE,
@@ -38,6 +39,7 @@ class RouteKind(StrEnum):
     REOPEN = "reopen"
     PAUSE = "pause"
     RESUME = "resume"
+    SAVE = "save"
     ASK = "ask"
     NONE = "none"
 
@@ -88,9 +90,14 @@ def route_message(store: TicketStore, event: WahaEvent) -> Route:
     body = str(event.payload.get("body", "") or "").removeprefix("[voice note]").strip()
     if not body:
         return Route(RouteKind.NONE)
-    alert = store.ticket_for_alert_message(quoted_id(event))
+    quoted = quoted_id(event)
+    alert = store.ticket_for_alert_message(quoted)
     if alert is not None:
         return Route(RouteKind.QUOTE_REPLY, ticket=alert, text=body)
+    if quoted and quoted == store.summary_message_id(event.session):
+        summary_route = route_ticket_text(store, body)
+        if summary_route.kind != RouteKind.NONE:
+            return summary_route
     command = route_command(store, body)
     if command is not None:
         return command
@@ -101,6 +108,8 @@ def route_command(store: TicketStore, body: str) -> Route | None:
     """Recognize the fixed command words."""
     if _WHATS_OPEN.match(body):
         return Route(RouteKind.WHATS_OPEN)
+    if _SAVE.match(body):
+        return Route(RouteKind.SAVE)
     for pattern, kind in ((_CLOSE, RouteKind.CLOSE), (_REOPEN, RouteKind.REOPEN)):
         match = pattern.match(body)
         if match:

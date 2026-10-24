@@ -158,6 +158,15 @@ class Settings(BaseSettings):
     #: (kind=file) — base64 inflates ~4/3x and the whole file rides one
     #: JSON request; 16 MB matches WhatsApp's own document limit.
     max_file_bytes: int = 16 * 1024 * 1024
+    #: Documents are read up to this many pages (OCR too). Longer
+    #: documents remain attached and get an over-limit notice.
+    max_document_pages: int = 20
+    #: Extracted document text is capped; the rest is dropped and the
+    #: operator/customer are told it was truncated.
+    max_document_chars: int = 12_000
+    #: One bounded converter/OCR run (pdftotext, pdftoppm, tesseract,
+    #: pandoc); a hung binary never stalls the turn.
+    document_timeout_s: float = 20.0
     #: Local videos larger than this are rejected by the send_media tool
     #: (kind=video) — same base64/JSON constraint, but a shell-tool
     #: render easily outruns a document; WAHA's ffmpeg transcode still

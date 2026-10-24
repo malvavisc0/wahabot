@@ -114,4 +114,9 @@ ignore_names = [
     # Test-only accessors on the intent/transport surfaces (recent
     # intents, bulk recovery drains); tests/ is outside vulture's scan.
     "recent", "recover_intents",
+    # Pydantic model validators (framework dispatch) and the answer
+    # CRUD accessors used from the operator/Teach surface and smoke
+    # scripts (tests/ and scripts/ are outside vulture's scan).
+    "validate_timezone", "validate_hours", "validate_team_groups",
+    "validate_window", "enable", "disable", "uses_count",
 ]

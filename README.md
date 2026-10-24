@@ -18,7 +18,7 @@ Incoming message -> context and memory -> model
                               final reply, reaction, or silence
 ```
 
-The bundled tools cover text and media delivery, quoting and numeric mentions, reactions, native forwarding, chat context, web search, page and video-metadata retrieval, human escalation, an optional host shell, and optional image generation/editing. Python builder docstrings are for developers; explicit tool descriptions and parameter schemas are the instructions sent to the model.
+The bundled tools cover text and media delivery, quoting and numeric mentions, reactions, native forwarding, chat context, published-answer search, web search, page and video-metadata retrieval, human escalation, an optional host shell, and optional image generation/editing. Python builder docstrings are for developers; explicit tool descriptions and parameter schemas are the instructions sent to the model.
 
 The loop has brakes: `stay_silent` ends a run and cancels other tools in that batch, repeated calls are blocked, and round and run-time limits stop runaway work. Text, media, and forwarding share one successful-send allowance per run; reactions have a separate allowance. After successful delivery, further research or actions are blocked. In groups, mentioned mode responds when addressed, while judicious mode asks the triage gate whether an unaddressed message is worth a run; once admitted, the model still decides whether to speak.
 
@@ -72,6 +72,14 @@ Every customer 1:1 conversation is a ticket. The bot opens it silently, answers 
 
 The operator console is the self-chat itself: reply to an alert or name the ticket (`142: refunded`), ask `what's open?`, `close 142`, `reopen 142`, `pause`, `resume`, `pause <name>` or `resume <name>`. Typing in a customer chat pauses the bot there for two hours; messages received while paused are saved and never replayed. Only one ticket per chat is active, and a different issue is split into a new ticket only from an open or done ticket, so operator work is never detached.
 
+## Knowledge, documents and support hours
+
+Published answers (question/answer pairs) can be saved from the operator desk: reply to a ticket with an explanation, then send `save` when asked. The enabled set rides the prompt when it fits and is searchable with `search_knowledge` when it does not. `knowledge_only` is an opt-in answers-only mode; the personal default still answers from the full conversation and tools.
+
+PDFs, scanned PDFs, DOCX/ODT/RTF, plain text and CSV are read during the turn within page, character, size and time limits. The extracted text is marked untrusted in the prompt, and scanned pages fall back to Tesseract. Unreadable or oversized documents stay attached with a plain-language notice.
+
+Support hours live in the session config: non-urgent handovers outside hours are queued for the next opening, urgent ones alert immediately (and the configured night number once it has written), and the first opening of each local day sends one operator summary. Internal team groups are an allowlist: they run mentioned-only and are fenced in code from tickets, customer sends, TTS and greetings.
+
 ## Straight talk about the channel
 
 Two things you should know before you put this on a business number:
@@ -83,7 +91,7 @@ Memory, event journals, audit records and the intake/outbound ledger live on you
 
 ## Where this is heading
 
-The current project is the conversation engine with durable tickets and a WhatsApp operator desk. A web History page, CRM/job-system connectors, the morning summary and team groups are future directions, not bundled features.
+The current project is the conversation engine with durable tickets, a WhatsApp operator desk, published answers, bounded document reading, support hours with a restart-safe morning summary, and fenced internal team groups. A web History page and CRM/job-system connectors are future directions, not bundled features.
 
 ## Install
 

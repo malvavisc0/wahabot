@@ -26,6 +26,7 @@ from wahabot.core.inbound import (
 from wahabot.core.intake.store import IntakeRow
 from wahabot.core.models import WahaEvent
 from wahabot.core.presence import mark_seen
+from wahabot.core.teams.groups import group_participation
 from wahabot.core.tickets.router import RouteKind, is_self_chat_event, route_message
 from wahabot.handlers.base import HandlerBase
 from wahabot.handlers.dedup import forget_seen, is_stale, seen_recently
@@ -344,11 +345,12 @@ class IngestMixin(HandlerBase):
         operator_wakes: bool | None,
     ) -> bool:
         """Whether this message would wake a run, for delivery guard ordering."""
+        chat_id = str(event.payload.get("from", ""))
         return bool(operator_wakes) or is_group_addressed(
             event,
             bot_name=config.bot_name,
             bot_mention_regex=config.bot_mention_regex,
-            participation=config.group_participation,
+            participation=group_participation(config, chat_id),
         )
 
     async def record_webhook_intake(self, event: WahaEvent) -> None:
@@ -486,11 +488,12 @@ class IngestMixin(HandlerBase):
         """Apply group addressing and queue eligible bursts."""
         if self.albums.consumed(event):
             return True
+        chat_id = str(event.payload.get("from", ""))
         if not operator_wakes and not is_group_addressed(
             event,
             bot_name=config.bot_name,
             bot_mention_regex=config.bot_mention_regex,
-            participation=config.group_participation,
+            participation=group_participation(config, chat_id),
         ):
             logger.debug(
                 "Ignoring unaddressed group message {id}", id=event.payload.get("id")

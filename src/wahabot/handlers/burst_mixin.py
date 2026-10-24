@@ -38,6 +38,7 @@ from wahabot.core.runs import (
     context_for,
     persist_memory,
 )
+from wahabot.core.teams.groups import surface_for
 from wahabot.core.transcribe import transcribe_voice_note
 from wahabot.handlers.base import HandlerBase
 from wahabot.handlers.dedup import forget_seen
@@ -406,6 +407,7 @@ class BurstMixin(HandlerBase):
                     owner=owner,
                     ticket_store=self.ticket_store,
                     ticket_id=ticket_id,
+                    surface=surface_for(current, chat_id),
                 )
             await persist_memory(self.settings, merged.session, chat_id, ctx)
         return reply, target

@@ -134,6 +134,7 @@ def attachment_from_row(row: sqlite3.Row) -> Attachment:
         sha256=str(row["sha256"] or ""),
         path=str(row["path"] or ""),
         derived_text=str(row["derived_text"] or ""),
+        page_count=int(row["page_count"] or 0),
     )
 
 

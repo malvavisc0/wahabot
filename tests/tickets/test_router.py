@@ -174,3 +174,8 @@ def test_unique_name_without_an_active_ticket_asks(store: TicketStore) -> None:
 
     assert route.kind == RouteKind.ASK
     assert "No active ticket" in route.text
+
+
+def test_bare_save_routes_to_the_save_command(store: TicketStore) -> None:
+    route = route_message(store, operator_event("save"))
+    assert route.kind == RouteKind.SAVE

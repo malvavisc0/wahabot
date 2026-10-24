@@ -371,3 +371,62 @@ def test_held_window_says_when_the_customer_never_wrote(store: TicketStore) -> N
 
     outcome = asyncio.run(run())
     assert "has not written yet" in outcome.confirmation
+
+
+def test_answer_reply_offers_one_save_and_stores_a_candidate(
+    store: TicketStore,
+) -> None:
+    from wahabot.core.answers.service import AnswerService
+    from wahabot.core.answers.store import AnswerStore
+    from wahabot.core.tickets.replies import ANSWER, should_offer_save
+
+    assert should_offer_save(ANSWER)
+    contact, ticket = setup_ticket(store, last_inbound_at=store.now())
+    answers = AnswerService(AnswerStore(store.path))
+    waha = RecordingWaha()
+    outcome = asyncio.run(
+        handle_operator_reply(
+            store,
+            waha,
+            "default",
+            ticket,
+            contact,
+            "It shipped yesterday",
+            complete=completer("answer", "It shipped yesterday."),
+            reply_window_days=7,
+            answer_service=answers,
+        )
+    )
+    assert outcome.sent
+    assert "Reply save." in outcome.confirmation
+    candidate = answers.latest_candidate()
+    assert candidate is not None and candidate.ticket_id == ticket.id
+    assert store.ticket(ticket.id).state == TicketState.DONE.value
+
+    saved = answers.save_latest_candidate()
+    assert saved is not None
+    assert answers.save_latest_candidate() is None
+
+
+def test_action_reply_never_offers_save(store: TicketStore) -> None:
+    from wahabot.core.answers.service import AnswerService
+    from wahabot.core.answers.store import AnswerStore
+
+    contact, ticket = setup_ticket(store, last_inbound_at=store.now())
+    answers = AnswerService(AnswerStore(store.path))
+    outcome = asyncio.run(
+        handle_operator_reply(
+            store,
+            RecordingWaha(),
+            "default",
+            ticket,
+            contact,
+            "refunded 10 EUR",
+            complete=completer("resolution", "We refunded you 10 EUR."),
+            reply_window_days=7,
+            answer_service=answers,
+        )
+    )
+    assert outcome.sent
+    assert "Reply save." not in outcome.confirmation
+    assert answers.latest_candidate() is None

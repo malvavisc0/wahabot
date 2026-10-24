@@ -17,6 +17,8 @@ from wahabot.ai.triage import TriageGate
 from wahabot.ai.workflow import FunctionCallingAgentWorkflow, build_agent
 from wahabot.core import identity
 from wahabot.core.access import SessionConfigReloader, load_session_config
+from wahabot.core.answers.service import AnswerService
+from wahabot.core.answers.store import AnswerStore
 from wahabot.core.db import Database
 from wahabot.core.delivery.intents import IntentStore
 from wahabot.core.intake.sqlite import SqliteIntakeStore
@@ -26,6 +28,7 @@ from wahabot.core.notebook import Notebook, notebook_operation
 from wahabot.core.persistence import forget_memory
 from wahabot.core.recovery import Recovery
 from wahabot.core.runs import chat_lock, contexts
+from wahabot.core.schedule.hours import opening_state
 from wahabot.core.scheduler import TicketScheduler
 from wahabot.core.thread_index import forget_thread_index
 from wahabot.core.tickets.store import TicketStore
@@ -115,8 +118,16 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
     enable_langfuse(settings)
     escalation_channel = EscalationChannel()
     ticket_store = TicketStore(database.path)
+    answer_store = AnswerStore(database.path)
+    answer_service = AnswerService(answer_store)
     ticket_translator = TicketTranslator()
-    scheduler = TicketScheduler(settings, ticket_store, transport, config_reloader)
+    scheduler = TicketScheduler(
+        settings,
+        ticket_store,
+        transport,
+        config_reloader,
+        translator=ticket_translator,
+    )
     triage = (
         TriageGate(settings, transport, channel=escalation_channel)
         if settings.triage_gate and settings.gate_api_base
@@ -138,6 +149,7 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
         ticket_store,
         ticket_translator,
         scheduler,
+        answer_service,
     )
     agent = build_agent(
         settings,
@@ -150,6 +162,14 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
             ticket_operator_language=lambda: (
                 config_reloader.current_config().operator_language
             ),
+            answer_service=answer_service,
+            ticket_schedule=lambda: opening_state(
+                config_reloader.current_config(),
+                int(time.time()),
+                settings.timezone,
+            ),
+            ticket_night_number=lambda: config_reloader.current_config().night_number,
+            ticket_away_message=lambda: config_reloader.current_config().away_message,
         ),
         system_prompt=config.system_prompt,
         prompt_renderer=handlers.render_prompt,
