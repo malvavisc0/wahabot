@@ -5,7 +5,6 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, cast
 
 from loguru import logger
 
@@ -16,6 +15,7 @@ from wahabot.core.tickets.models import (
     Ticket,
     TicketState,
     TicketUpdate,
+    text_field,
 )
 from wahabot.core.tickets.store import TicketStore
 from wahabot.core.transport import Transport
@@ -134,8 +134,7 @@ def parse_kind(raw: str) -> str:
         return AMBIGUOUS
     if not isinstance(value, dict):
         return AMBIGUOUS
-    parsed = cast(dict[str, Any], value)
-    kind = str(parsed.get("kind", "")).strip().lower()
+    kind = text_field(value, "kind").strip().lower()
     return kind if kind in KINDS else AMBIGUOUS
 
 
@@ -198,9 +197,8 @@ def read_held(body: str) -> tuple[str, str]:
         return RESOLUTION, body
     if not isinstance(value, dict):
         return RESOLUTION, body
-    parsed = cast(dict[str, Any], value)
-    kind = str(parsed.get("kind", RESOLUTION))
-    return (kind if kind in KINDS else RESOLUTION, str(parsed.get("draft", "")))
+    kind = text_field(value, "kind") or RESOLUTION
+    return (kind if kind in KINDS else RESOLUTION, text_field(value, "draft"))
 
 
 def confirmation(contact: Contact, ticket: Ticket, kind: str, draft: str) -> str:

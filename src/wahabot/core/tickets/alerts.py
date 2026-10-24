@@ -5,7 +5,6 @@ import hashlib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from loguru import logger
 
@@ -98,7 +97,7 @@ def attachment_lines(attachments: Iterable[Attachment]) -> list[str]:
     return lines
 
 
-def detail_lines(details: dict[str, Any]) -> list[str]:
+def detail_lines(details: dict[str, object]) -> list[str]:
     """Flatten stored details into one line each."""
     return [f"- {key}: {value}" for key, value in details.items() if str(value).strip()]
 
@@ -292,7 +291,7 @@ def send_local(
 ) -> str:
     """Send the stored copy through the matching media endpoint."""
     data = Path(attachment.path).read_bytes()
-    payload: dict[str, Any] = {
+    payload: dict[str, str] = {
         "mimetype": attachment.mime or "application/octet-stream",
         "filename": Path(attachment.path).name,
         "data": base64.b64encode(data).decode(),

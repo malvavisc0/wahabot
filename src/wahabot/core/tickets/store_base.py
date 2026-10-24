@@ -1,10 +1,10 @@
 """Shared connection helpers and row mapping for the ticket stores."""
 
 import hashlib
+import sqlite3
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
 
 from wahabot.core.db.connection import connect, transaction
 from wahabot.core.tickets.models import (
@@ -38,7 +38,7 @@ class StoreBase:
             conn.close()
 
     def query_one[T](
-        self, sql: str, params: Iterable[object], mapper: Callable[[Any], T]
+        self, sql: str, params: Iterable[object], mapper: Callable[[sqlite3.Row], T]
     ) -> T | None:
         """Run a query returning at most one mapped row."""
         conn = connect(self.path)
@@ -49,7 +49,7 @@ class StoreBase:
         return mapper(row) if row is not None else None
 
     def query_all[T](
-        self, sql: str, params: Iterable[object], mapper: Callable[[Any], T]
+        self, sql: str, params: Iterable[object], mapper: Callable[[sqlite3.Row], T]
     ) -> list[T]:
         """Run a query returning mapped rows."""
         conn = connect(self.path)
@@ -60,7 +60,7 @@ class StoreBase:
         return [mapper(row) for row in rows]
 
 
-def contact_from_row(row: Any) -> Contact:
+def contact_from_row(row: sqlite3.Row) -> Contact:
     """Map one contacts row."""
     return Contact(
         id=int(row["id"]),
@@ -79,7 +79,7 @@ def contact_from_row(row: Any) -> Contact:
     )
 
 
-def ticket_from_row(row: Any) -> Ticket:
+def ticket_from_row(row: sqlite3.Row) -> Ticket:
     """Map one tickets row."""
     return Ticket(
         id=int(row["id"]),
@@ -109,7 +109,7 @@ def ticket_from_row(row: Any) -> Ticket:
     )
 
 
-def event_from_row(row: Any) -> TicketEvent:
+def event_from_row(row: sqlite3.Row) -> TicketEvent:
     """Map one ticket_events row."""
     return TicketEvent(
         id=int(row["id"]),
@@ -122,7 +122,7 @@ def event_from_row(row: Any) -> TicketEvent:
     )
 
 
-def attachment_from_row(row: Any) -> Attachment:
+def attachment_from_row(row: sqlite3.Row) -> Attachment:
     """Map one attachments row."""
     return Attachment(
         id=int(row["id"]),

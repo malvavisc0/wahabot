@@ -11,6 +11,8 @@ from wahabot.core.tickets.models import (
     TicketEvent,
     TicketState,
     TicketUpdate,
+    as_mapping,
+    text_field,
 )
 from wahabot.core.tickets.pinned import ticket_marker
 from wahabot.core.tickets.store import TicketStore
@@ -27,5 +29,7 @@ __all__ = [
     "TicketState",
     "TicketStore",
     "TicketUpdate",
+    "as_mapping",
+    "text_field",
     "ticket_marker",
 ]

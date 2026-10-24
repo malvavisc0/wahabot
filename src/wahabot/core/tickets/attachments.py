@@ -3,12 +3,17 @@
 import datetime
 import mimetypes
 from pathlib import Path
-from typing import Any, cast
 
 from loguru import logger
 
 from wahabot.core.models import WahaEvent
-from wahabot.core.tickets.models import Actor, Attachment, EventKind, Ticket
+from wahabot.core.tickets.models import (
+    Actor,
+    Attachment,
+    EventKind,
+    Ticket,
+    text_field,
+)
 from wahabot.core.tickets.store import TicketStore
 from wahabot.core.tickets.store_base import digest
 from wahabot.core.transport import Transport
@@ -35,9 +40,7 @@ def media_kind(event: WahaEvent) -> str:
 
 def event_declared_type(event: WahaEvent) -> str:
     """WAHA's declared media type, or ""."""
-    raw = event.payload.get("_data")
-    data: dict[str, Any] = raw if isinstance(raw, dict) else {}
-    return str(data.get("type") or "")
+    return text_field(event.payload.get("_data"), "type")
 
 
 def kind_from_parts(declared: str, mimetype: str) -> str:
@@ -53,18 +56,12 @@ def kind_from_parts(declared: str, mimetype: str) -> str:
 
 def media_url(event: WahaEvent) -> str:
     """The event's media URL, or "" when it has none."""
-    media = event.payload.get("media")
-    if not isinstance(media, dict):
-        return ""
-    return str(cast(dict[str, Any], media).get("url") or "")
+    return text_field(event.payload.get("media"), "url")
 
 
 def media_mime(event: WahaEvent) -> str:
     """The event's media mimetype, with a generic fallback."""
-    media = event.payload.get("media")
-    if not isinstance(media, dict):
-        return ""
-    return str(cast(dict[str, Any], media).get("mimetype") or "")
+    return text_field(event.payload.get("media"), "mimetype")
 
 
 def byte_cap(kind: str, settings: Settings) -> int:
@@ -183,7 +180,7 @@ def persist_bytes(
     return [attachment]
 
 
-def attachment_metadata(attachments: list[Attachment]) -> list[dict[str, Any]]:
+def attachment_metadata(attachments: list[Attachment]) -> list[dict[str, object]]:
     """Model/operator-facing attachment facts without local paths."""
     return [
         {

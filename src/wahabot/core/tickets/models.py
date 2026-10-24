@@ -1,9 +1,9 @@
 """Ticket domain models shared by the store, services and tools."""
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
 
 
 class TicketState(StrEnum):
@@ -92,7 +92,7 @@ class Ticket:
     urgent: bool = False
     done_by: str | None = None
     summary: str = ""
-    details: dict[str, Any] = field(default_factory=dict)
+    details: dict[str, object] = field(default_factory=dict)
     missing: list[str] = field(default_factory=list)
     external_user_ref: str = ""
     alert_message_ids: list[str] = field(default_factory=list)
@@ -138,7 +138,7 @@ class TicketUpdate:
 
     state: str | None = None
     summary: str | None = None
-    details: dict[str, Any] | None = None
+    details: dict[str, object] | None = None
     missing: list[str] | None = None
     done_by: str | None = None
     urgent: bool | None = None
@@ -157,10 +157,21 @@ def json_list(raw: str) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
 
 
-def json_object(raw: str) -> dict[str, Any]:
+def as_mapping(value: object) -> Mapping[str, object]:
+    """A string-keyed view of a JSON-like object, or an empty mapping."""
+    return value if isinstance(value, Mapping) else {}
+
+
+def text_field(value: object, key: str) -> str:
+    """A string field from a JSON-like object, or ""."""
+    found = as_mapping(value).get(key)
+    return "" if found is None else str(found)
+
+
+def json_object(raw: str) -> dict[str, object]:
     """Decode a JSON object, failing soft to an empty mapping."""
     try:
         value = json.loads(raw or "{}")
     except json.JSONDecodeError:
         return {}
-    return value if isinstance(value, dict) else {}
+    return dict(as_mapping(value))
