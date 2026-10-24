@@ -190,7 +190,12 @@ def serve(
     seed_health(waha, settings.session)
     registration = register_agent_handler(settings, waha=waha)
     register_reaction_handler(registration.transport, registration.agent, settings)
-    register_command_handler(settings, registration.transport, registration.agent)
+    register_command_handler(
+        settings,
+        registration.transport,
+        registration.agent,
+        registration.handlers.ticket_store,
+    )
     register_session_status_handler(registration.transport, settings.session)
     register_forget_handler(settings, registration.agent)
     (settings.journal_dir / settings.session).mkdir(parents=True, exist_ok=True)

@@ -11,6 +11,7 @@ from loguru import logger
 from wahabot.core.tickets.models import (
     Actor,
     Contact,
+    DoneBy,
     EventKind,
     Ticket,
     TicketState,
@@ -37,9 +38,11 @@ _CLASSIFY_PROMPT = (
 )
 
 _DRAFT_PROMPT = (
-    "Draft one WhatsApp message to a customer in {language}. Rephrase only the "
+    "Draft one WhatsApp message to a customer {language_hint}. Rephrase only the "
     "operator's words below; do not add facts, amounts, dates, times or promises. "
-    "Return only the message text.\n\nOperator words:\n{text}"
+    "Match the business's plain, human tone. Return only the message text.\n\n"
+    "Customer's last message (language and context only, never content):\n"
+    "{customer}\n\nOperator words:\n{text}"
 )
 
 _NUMBER_WORDS = {
@@ -76,16 +79,18 @@ _NUMBER_WORDS = {
 
 _UNITS = (
     "days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?|seconds?|"
-    "euros?|eur|usd|dollars?|pounds?|gbp|kg|grams?|g|km|metres?|meters?|%"
+    "euros?|eur|usd|dollars?|pounds?|gbp|kg|grams?|g|km|metres?|meters?"
 )
 _FACT_PATTERNS = (
     re.compile(rf"\d+(?:[.,]\d+)?\s*(?:{_UNITS})\b", re.IGNORECASE),
     re.compile(r"[€$£]\s*\d+(?:[.,]\d+)?"),
     re.compile(r"\d+(?:[.,]\d+)?\s*(?:€|\$|£)"),
+    re.compile(r"\b\d+(?:[.,]\d+)?\s*%"),
     re.compile(r"\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b"),
     re.compile(r"\b\d{1,2}:\d{2}\b"),
     re.compile(r"\b\d{1,2}(?:am|pm)\b"),
     re.compile(r"\b(?:order|ticket|invoice|ref(?:erence)?)\s*#?\s*\d+\b", re.IGNORECASE),
+    re.compile(r"\b\d+(?:[.,]\d+)?\b"),
 )
 _NUMBER_RANGE = re.compile(r"(\d+)\s*(?:-|to|until)\s*(\d+)")
 _UNIT_CANON = {
@@ -144,10 +149,22 @@ async def classify_reply(complete: Completer, operator_text: str) -> str:
     return parse_kind(raw)
 
 
-async def draft_message(complete: Completer, operator_text: str, language: str) -> str:
+async def draft_message(
+    complete: Completer, operator_text: str, language: str, customer_words: str = ""
+) -> str:
     """Draft the customer message from the operator's words only."""
+    hint = (
+        f"in {language}"
+        if language
+        else "in the customer's language (English if unclear)"
+    )
     raw = await asyncio.to_thread(
-        complete, _DRAFT_PROMPT.format(language=language or "en", text=operator_text)
+        complete,
+        _DRAFT_PROMPT.format(
+            language_hint=hint,
+            text=operator_text,
+            customer=customer_words or "(no message available)",
+        ),
     )
     return raw.strip().strip('"')
 
@@ -175,13 +192,25 @@ def fact_tokens(text: str) -> set[str]:
 
 def mismatch_tokens(draft: str, operator_text: str) -> list[str]:
     """Facts in the draft that the operator never wrote."""
-    allowed = fact_tokens(operator_text)
-    return sorted(fact_tokens(draft) - allowed)
+    missing = fact_tokens(draft) - fact_tokens(operator_text)
+    return sorted(token for token in missing if not subsumed(token, missing))
+
+
+def subsumed(token: str, tokens: set[str]) -> bool:
+    """Whether a broader token in the same set already covers *token*."""
+    pattern = re.compile(rf"(?<!\w){re.escape(token)}(?!\w)")
+    return any(token != other and pattern.search(other) for other in tokens)
 
 
 def window_open(last_customer_at: int | None, now: int, window_days: int) -> bool:
     """Whether the reply window still allows a customer send."""
     return last_customer_at is not None and now - last_customer_at <= window_days * 86400
+
+
+def customer_words(store: TicketStore, ticket: Ticket) -> str:
+    """The newest customer message on a ticket, or its summary."""
+    event = store.last_event(ticket.id, EventKind.CUSTOMER_MESSAGE.value)
+    return event.body if event is not None else ticket.summary
 
 
 def held_payload(kind: str, draft: str) -> str:
@@ -231,7 +260,9 @@ async def handle_operator_reply(
                 f"Ticket {ticket.number} is unchanged; rephrase it for the customer."
             )
         )
-    draft = await draft_message(complete, operator_text, contact.language)
+    draft = await draft_message(
+        complete, operator_text, contact.language, customer_words(store, ticket)
+    )
     if not draft:
         return ReplyOutcome(
             confirmation=(
@@ -327,7 +358,7 @@ def send_reply(
         if kind == RESOLUTION
         else TicketState.WAITING_CUSTOMER.value
     )
-    done_by = "operator" if kind == RESOLUTION else None
+    done_by = DoneBy.OPERATOR.value if kind == RESOLUTION else None
     store.update_ticket(
         ticket.id,
         TicketUpdate(state=state, done_by=done_by),
@@ -352,6 +383,9 @@ async def deliver_held(
     """Send a held draft when the customer writes again."""
     event = store.last_event(ticket.id, EventKind.HELD.value)
     if event is None:
+        return None
+    sent = store.last_event(ticket.id, EventKind.SENT.value)
+    if sent is not None and (sent.at, sent.id) > (event.at, event.id):
         return None
     kind, draft = read_held(event.body)
     moment = store.now() if now is None else now

@@ -2,10 +2,12 @@ import asyncio
 from collections.abc import Callable
 
 from tests.harness import RecordingWaha
-from wahabot.core.tickets.models import TicketState, TicketUpdate
+from wahabot.core.tickets.models import Contact, Ticket, TicketState, TicketUpdate
 from wahabot.core.tickets.replies import (
     AMBIGUOUS,
     RESOLUTION,
+    Remember,
+    ReplyOutcome,
     deliver_held,
     fact_tokens,
     handle_operator_reply,
@@ -18,7 +20,9 @@ from wahabot.core.tickets.store import TicketStore
 CUSTOMER = "491555000001@c.us"
 
 
-def setup_ticket(store: TicketStore, *, last_inbound_at: int | None = None):
+def setup_ticket(
+    store: TicketStore, *, last_inbound_at: int | None = None
+) -> tuple[Contact, Ticket]:
     contact = store.upsert_contact(
         CUSTOMER,
         phone=CUSTOMER,
@@ -43,7 +47,17 @@ def completer(kind: str, draft: str) -> Callable[[str], str]:
     return complete
 
 
-def run(store: TicketStore, waha, contact, ticket, words: str, complete, **kwargs):
+def run(
+    store: TicketStore,
+    waha: RecordingWaha,
+    contact: Contact,
+    ticket: Ticket,
+    words: str,
+    complete: Callable[[str], str],
+    *,
+    remember: Remember | None = None,
+    reply_window_days: int = 7,
+) -> ReplyOutcome:
     return asyncio.run(
         handle_operator_reply(
             store,
@@ -53,8 +67,8 @@ def run(store: TicketStore, waha, contact, ticket, words: str, complete, **kwarg
             contact,
             words,
             complete=complete,
-            reply_window_days=kwargs.pop("reply_window_days", 7),
-            **kwargs,
+            reply_window_days=reply_window_days,
+            remember=remember,
         )
     )
 
@@ -72,6 +86,9 @@ def test_fact_tokens_normalize_words_ranges_and_currencies() -> None:
     assert "10 eur" in fact_tokens("refunded 10 euros")
     assert "14:30" in fact_tokens("at 14:30")
     assert mismatch_tokens("on 12/05", "on 11/05") != []
+    assert mismatch_tokens("20", "10 EUR") != []
+    assert mismatch_tokens("5%", "5 EUR") != []
+    assert mismatch_tokens("7-10 days", "5-10 days") != []
 
 
 def test_window_boundaries() -> None:
@@ -211,6 +228,44 @@ def test_held_draft_is_sent_on_the_next_customer_message(store: TicketStore) -> 
     assert outcome is not None and outcome.sent
     assert waha.sent[0][2] == "Le devolvimos 10 EUR."
     assert store.ticket(ticket.id).state == TicketState.DONE.value
+
+    again = asyncio.run(
+        deliver_held(
+            store,
+            waha,
+            "default",
+            store.ticket(ticket.id),
+            store.contact(CUSTOMER),
+        )
+    )
+
+    assert again is None
+    assert len(waha.sent) == 1
+
+
+def test_draft_uses_the_customer_message_when_language_is_unset(
+    store: TicketStore,
+) -> None:
+    customer = "491555000004@c.us"
+    contact = store.upsert_contact(
+        customer, display_name="Smoke Sender", last_inbound_at=store.now()
+    )
+    ticket = store.create_ticket(contact.id, customer, summary="refund")
+    store.update_ticket(ticket.id, TicketUpdate(state=TicketState.NEEDS_YOU.value))
+    store.add_event(ticket.id, "customer", "customer_message", "¿Dónde está mi pedido?")
+    prompts: list[str] = []
+
+    def complete(prompt: str) -> str:
+        prompts.append(prompt)
+        if "Classify one operator reply" in prompt:
+            return f'{{"kind": "{RESOLUTION}"}}'
+        return "Le devolvimos 10 EUR."
+
+    run(store, RecordingWaha(), contact, ticket, "refunded 10 EUR", complete)
+    draft_prompt = next(prompt for prompt in prompts if "Draft one" in prompt)
+
+    assert "customer's language" in draft_prompt
+    assert "¿Dónde está mi pedido?" in draft_prompt
 
 
 class Refusing(RecordingWaha):

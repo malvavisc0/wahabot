@@ -195,7 +195,9 @@ class IngestMixin(HandlerBase):
         command.payload["reply_chat_id"] = str(event.payload.get("from", ""))
         command.payload["reply_to"] = message_id
         try:
-            reply = await run_command(command, self.agent, self.settings, self.waha)
+            reply = await run_command(
+                command, self.agent, self.settings, self.waha, self.ticket_store
+            )
         except Exception as exc:
             # Retry failed runs, even if a tool delivered before the crash;
             # the delivery latch is per-run, not a durable command receipt.

@@ -1,15 +1,18 @@
 import asyncio
+from collections.abc import Callable
 
 from tests.conftest import Bot
 from tests.harness import (
     ME_JID,
     OWN_LID,
+    SESSION,
     image_event,
     tool_call_response,
     voice_event,
     waha_event,
 )
 from tests.wire.support import _wait
+from wahabot.commands import build_command_event
 from wahabot.core.tickets.models import text_field
 
 CUSTOMER = "491555000001@c.us"
@@ -32,7 +35,9 @@ def text_response(text: str) -> dict[str, object]:
     }
 
 
-def selector_for(kind: str, draft: str):
+def selector_for(
+    kind: str, draft: str
+) -> Callable[[dict[str, object]], dict[str, object]]:
     """Answer each request by its exact shape, never by arrival order."""
 
     def selector(body: dict[str, object]) -> dict[str, object]:
@@ -317,3 +322,41 @@ def test_global_pause_is_set_and_cleared_by_command(bot: Bot) -> None:
     bot.post(operator_event("GLOBAL_RESUME", "resume"))
     bot.post(customer_event("GLOBAL_AFTER", "hello again?"))
     assert _wait(lambda: any(entry[1] == CUSTOMER for entry in bot.waha.sent))
+
+
+def test_operator_command_can_look_up_a_ticket(bot: Bot) -> None:
+    store = bot.handlers.ticket_store
+    assert store is not None
+    contact = store.upsert_contact(CUSTOMER, display_name="Smoke Sender")
+    ticket = store.create_ticket(contact.id, contact.chat_id, summary="late order")
+
+    def selector(body: dict[str, object]) -> dict[str, object]:
+        messages = body.get("messages")
+        entries = messages if isinstance(messages, list) else []
+        if any(text_field(message, "role") == "tool" for message in entries):
+            return text_response("ticket found")
+        return tool_call_response(
+            "support_state",
+            {"number": ticket.number},
+            call_id="call_ticket_1",
+        )
+
+    bot.stack.llm.selector = selector
+    bot.post(build_command_event(SESSION, f"what is ticket {ticket.number}?"))
+
+    assert _wait(
+        lambda: any(
+            any(
+                text_field(message, "role") == "tool"
+                for message in (request.get("messages") or [])
+            )
+            for request in bot.stack.llm.requests
+        )
+    )
+    tool_text = "\n".join(
+        text_field(message, "content")
+        for request in bot.stack.llm.requests
+        for message in (request.get("messages") or [])
+        if text_field(message, "role") == "tool"
+    )
+    assert "Smoke Sender" in tool_text

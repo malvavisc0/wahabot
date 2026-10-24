@@ -1,13 +1,19 @@
+import sqlite3
+
 from tests.harness import chat_event
+from wahabot.ai.tools.runcontext import RunTarget
 from wahabot.core.models import WahaEvent
 from wahabot.core.tickets.lifecycle import (
+    Inbound,
     finalize_delivery,
     is_thanks_only,
+    open_ticket,
     record_inbound,
     split_ticket,
 )
 from wahabot.core.tickets.models import TicketState, TicketUpdate
 from wahabot.core.tickets.store import TicketStore
+from wahabot.handlers.ticket_mixin import TicketMixin
 
 CUSTOMER = "491555000001@c.us"
 
@@ -20,7 +26,7 @@ def inbound(
     message_ids: list[str] | None = None,
     close_after_days: int = 5,
     at: int | None = None,
-):
+) -> Inbound:
     raw = chat_event(body=body, mid=mid, chat=CUSTOMER)
     return record_inbound(
         store,
@@ -173,3 +179,72 @@ def test_recovered_inbound_reuses_the_ticket(store: TicketStore) -> None:
 
     assert again.ticket.id == first.ticket.id
     assert len(store.chat_tickets(CUSTOMER, limit=10)) == 1
+
+
+def test_contact_alias_rekeys_the_contact_and_its_ticket(store: TicketStore) -> None:
+    contact = store.upsert_contact(
+        CUSTOMER, phone=CUSTOMER, lid="lid-1@lid", display_name="Smoke Sender"
+    )
+    ticket = store.create_ticket(contact.id, CUSTOMER)
+
+    moved = store.upsert_contact("lid-1@lid", lid="lid-1@lid", last_inbound_at=42)
+
+    assert moved.id == contact.id
+    assert moved.chat_id == "lid-1@lid"
+    assert moved.display_name == "Smoke Sender"
+    assert store.contact(CUSTOMER) is None
+    assert store.ticket(ticket.id).chat_id == "lid-1@lid"
+    active = store.active_ticket("lid-1@lid")
+    assert active is not None and active.id == ticket.id
+
+
+def test_split_refuses_a_closed_ticket(store: TicketStore) -> None:
+    contact = store.upsert_contact(CUSTOMER, display_name="Smoke Sender")
+    ticket = store.create_ticket(contact.id, CUSTOMER, summary="first")
+    store.update_ticket(ticket.id, TicketUpdate(state=TicketState.CLOSED.value))
+
+    try:
+        split_ticket(store, store.ticket(ticket.id), "second issue")
+    except ValueError as exc:
+        assert "open or done" in str(exc)
+    else:
+        raise AssertionError("closed ticket split was accepted")
+
+
+def test_finalize_split_marks_the_open_ticket_with_a_note(
+    store: TicketStore,
+) -> None:
+    contact = store.upsert_contact(CUSTOMER, display_name="Smoke Sender")
+    ticket = store.create_ticket(contact.id, CUSTOMER, summary="first")
+    target = RunTarget(
+        session="default",
+        chat_id=CUSTOMER,
+        ticket_store=store,
+        ticket_id=ticket.id,
+        ticket_split="second issue",
+    )
+
+    TicketMixin().finalize_ticket(target, "delivered_via_tool")
+
+    old = store.ticket(ticket.id)
+    assert old is not None and old.state == TicketState.DONE.value
+    assert any(
+        event.body == "split into a new ticket" for event in store.events(ticket.id)
+    )
+    new = store.latest_ticket(CUSTOMER)
+    assert new is not None and new.id != ticket.id
+    assert new.previous_ticket_id == ticket.id
+
+
+def test_open_ticket_reuses_the_winner_of_a_creation_race(
+    store: TicketStore, monkeypatch
+) -> None:
+    contact = store.upsert_contact(CUSTOMER, display_name="Smoke Sender")
+    existing = store.create_ticket(contact.id, CUSTOMER)
+
+    def conflict(*args: object, **kwargs: object) -> None:
+        raise sqlite3.IntegrityError("active ticket exists")
+
+    monkeypatch.setattr(store, "create_ticket", conflict)
+
+    assert open_ticket(store, contact, 1).id == existing.id

@@ -147,7 +147,9 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
             escalation_channel=escalation_channel,
             ticket_store=ticket_store,
             ticket_translator=ticket_translator,
-            ticket_operator_language=config.operator_language,
+            ticket_operator_language=lambda: (
+                config_reloader.current_config().operator_language
+            ),
         ),
         system_prompt=config.system_prompt,
         prompt_renderer=handlers.render_prompt,

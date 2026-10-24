@@ -36,6 +36,7 @@ from wahabot.ai.workflow import FunctionCallingAgentWorkflow
 from wahabot.core.audit import save_action, save_run_outcome
 from wahabot.core.models import WahaEvent
 from wahabot.core.runs import chat_lock, context_for, persist_memory
+from wahabot.core.tickets.store import TicketStore
 from wahabot.core.transport import Transport
 from wahabot.settings import Settings
 from wahabot.status import (
@@ -107,6 +108,7 @@ async def run_command(
     agent: FunctionCallingAgentWorkflow,
     settings: Settings,
     waha: Transport,
+    ticket_store: TicketStore | None = None,
 ) -> str:
     """Run the agent over the command instruction, on the operator context.
 
@@ -142,7 +144,9 @@ async def run_command(
         logger.debug("Ignoring empty command {id}", id=event.payload.get("id"))
         return ""
     started = time.monotonic()
-    target = RunTarget(session=event.session, chat_id=OPERATOR_CHAT_ID)
+    target = RunTarget(
+        session=event.session, chat_id=OPERATOR_CHAT_ID, ticket_store=ticket_store
+    )
     outcome = "failed"
     failure_class = ""
     try:
@@ -179,7 +183,7 @@ async def run_command(
                 # alone (the arming flag rides the run's own target binding,
                 # so a concurrent chat run can never inherit it).
                 reply, target, budget_error = await run_command_turn(
-                    event, agent, ctx, settings, waha, pinned_note
+                    event, agent, ctx, settings, waha, pinned_note, ticket_store
                 )
             await persist_memory(settings, event.session, OPERATOR_CHAT_ID, ctx)
         outcome, failure_class = command_outcome(reply, target, budget_error)
@@ -211,6 +215,7 @@ async def run_command_turn(
     settings: Settings,
     waha: Transport,
     pinned_note: str,
+    ticket_store: TicketStore | None = None,
 ) -> tuple[str, RunTarget, ContextBudgetError | None]:
     """Run one operator-command turn, classifying its failures.
 
@@ -233,6 +238,7 @@ async def run_command_turn(
             waha=waha,
             armed=True,
             pinned_note=pinned_note,
+            ticket_store=ticket_store,
         )
     except ContextBudgetError as exc:
         logger.warning(
@@ -310,6 +316,7 @@ def register_command_handler(
     settings: Settings,
     waha: Transport,
     agent: FunctionCallingAgentWorkflow,
+    ticket_store: TicketStore | None = None,
 ) -> None:
     """Register the webhook command handler around the shared agent.
 
@@ -334,7 +341,7 @@ def register_command_handler(
             return
         if event.session != settings.session:
             return
-        await run_command(event, agent, settings, waha)
+        await run_command(event, agent, settings, waha, ticket_store)
 
 
 def build_command_event(session: str, instruction: str) -> dict[str, object]:

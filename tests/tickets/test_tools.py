@@ -1,4 +1,5 @@
 import json
+from collections.abc import Iterator
 from contextlib import contextmanager
 
 from tests.harness import ME_JID, RecordingWaha
@@ -9,7 +10,7 @@ from wahabot.ai.tools.tickets import (
     support_state,
     update_ticket,
 )
-from wahabot.core.tickets.models import TicketState, TicketUpdate
+from wahabot.core.tickets.models import Contact, Ticket, TicketState, TicketUpdate
 from wahabot.core.tickets.store import TicketStore
 from wahabot.settings import Settings
 
@@ -18,7 +19,7 @@ OTHER = "491555000002@c.us"
 
 
 @contextmanager
-def target_for(target: RunTarget):
+def target_for(target: RunTarget) -> Iterator[RunTarget]:
     token = bind_target(target)
     try:
         yield target
@@ -26,18 +27,20 @@ def target_for(target: RunTarget):
         reset_target(token)
 
 
-def make_ticket(store: TicketStore, chat: str = CUSTOMER, name: str = "Smoke Sender"):
+def make_ticket(
+    store: TicketStore, chat: str = CUSTOMER, name: str = "Smoke Sender"
+) -> tuple[Contact, Ticket]:
     contact = store.upsert_contact(chat, display_name=name)
     ticket = store.create_ticket(contact.id, chat, summary="issue")
     return contact, ticket
 
 
 def test_customer_support_state_is_fenced_to_its_own_chat(
-    store: TicketStore, settings: Settings
+    store: TicketStore,
 ) -> None:
     _, mine = make_ticket(store)
     _, other = make_ticket(store, OTHER, "Other Person")
-    tool = support_state(settings)
+    tool = support_state()
     target = RunTarget(
         session="default",
         chat_id=CUSTOMER,
@@ -53,10 +56,10 @@ def test_customer_support_state_is_fenced_to_its_own_chat(
 
 
 def test_operator_support_state_can_look_up_by_number(
-    store: TicketStore, settings: Settings
+    store: TicketStore,
 ) -> None:
     contact, ticket = make_ticket(store)
-    tool = support_state(settings)
+    tool = support_state()
     target = RunTarget(
         session="default",
         chat_id=ME_JID,
@@ -72,10 +75,10 @@ def test_operator_support_state_can_look_up_by_number(
 
 
 def test_update_ticket_stages_and_refuses_operator_resolver(
-    store: TicketStore, settings: Settings
+    store: TicketStore,
 ) -> None:
     _, ticket = make_ticket(store)
-    tool = update_ticket(settings)
+    tool = update_ticket()
     target = RunTarget(
         session="default",
         chat_id=CUSTOMER,
@@ -147,10 +150,10 @@ def test_handover_refuses_paths_and_foreign_message_ids(
 
 
 def test_new_ticket_stages_a_split_and_refuses_needs_you(
-    store: TicketStore, settings: Settings
+    store: TicketStore,
 ) -> None:
     _, ticket = make_ticket(store)
-    tool = new_ticket(settings)
+    tool = new_ticket()
     target = RunTarget(
         session="default",
         chat_id=CUSTOMER,
@@ -168,7 +171,14 @@ def test_new_ticket_stages_a_split_and_refuses_needs_you(
         refused = json.loads(tool.fn(summary="second issue"))
 
     assert not refused["ok"]
-    assert "operator" in refused["error"]
+    assert "open or done" in refused["error"]
+
+    store.update_ticket(ticket.id, TicketUpdate(state=TicketState.CLOSED.value))
+    with target_for(target):
+        closed = json.loads(tool.fn(summary="second issue"))
+
+    assert not closed["ok"]
+    assert "open or done" in closed["error"]
 
 
 def test_escalate_refuses_inside_a_ticket_run(
@@ -190,3 +200,39 @@ def test_escalate_refuses_inside_a_ticket_run(
 
     assert not payload["ok"]
     assert "hand_to_operator" in payload["error"]
+
+
+def test_handover_reads_the_operator_language_at_call_time(
+    store: TicketStore, settings: Settings, monkeypatch
+) -> None:
+    from wahabot.status.state import state as status_state
+
+    monkeypatch.setattr(status_state, "operator_jid", ME_JID)
+    _, ticket = make_ticket(store)
+    store.add_event(ticket.id, "customer", "customer_message", "I need a person")
+    language = {"value": ""}
+    translated: list[str] = []
+
+    def translator(text: str, target: str) -> str:
+        translated.append(target)
+        return "TRADUCIDO"
+
+    tool = hand_to_operator(
+        settings,
+        RecordingWaha(),
+        language=lambda: language["value"],
+        translator=translator,
+    )
+    language["value"] = "es"
+    target = RunTarget(
+        session="default",
+        chat_id=CUSTOMER,
+        ticket_store=store,
+        ticket_id=ticket.id,
+    )
+
+    with target_for(target):
+        payload = json.loads(tool.fn(reason="needs a person"))
+
+    assert payload["ok"]
+    assert translated == ["es"]

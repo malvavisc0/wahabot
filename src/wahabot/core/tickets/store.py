@@ -336,6 +336,24 @@ class TicketStore(ContactMixin):
             event_from_row,
         )
 
+    def event_with_message_ids(
+        self, ticket_id: int, message_ids: Iterable[str], kind: str
+    ) -> TicketEvent | None:
+        """The newest event of *kind* carrying any of *message_ids*."""
+        wanted = [item for item in message_ids if item]
+        if not wanted:
+            return None
+        placeholders = ", ".join("?" for _ in wanted)
+        return self.query_one(
+            "SELECT ticket_events.* FROM ticket_events, "
+            + "json_each(ticket_events.message_ids_json) "
+            + "WHERE ticket_events.ticket_id = ? AND ticket_events.kind = ? "
+            + f"AND json_each.value IN ({placeholders}) "
+            + "ORDER BY ticket_events.id DESC LIMIT 1",
+            (ticket_id, kind, *wanted),
+            event_from_row,
+        )
+
     def mark_customer_message(self, ticket_id: int, at: int | None = None) -> None:
         """Move a ticket's last-customer timestamp forward."""
         moment = self.now() if at is None else at
@@ -370,18 +388,12 @@ class TicketStore(ContactMixin):
         """The ticket whose alert or forwarded message carries *message_id*."""
         if not message_id:
             return None
-        for ticket in self.tickets_in_states(
-            (
-                TicketState.OPEN.value,
-                TicketState.WAITING_CUSTOMER.value,
-                TicketState.NEEDS_YOU.value,
-                TicketState.DONE.value,
-                TicketState.CLOSED.value,
-            )
-        ):
-            if message_id in ticket.alert_message_ids:
-                return ticket
-        return None
+        return self.query_one(
+            "SELECT tickets.* FROM tickets, json_each(tickets.alert_message_ids_json) "
+            + "WHERE json_each.value = ? ORDER BY tickets.number DESC LIMIT 1",
+            (message_id,),
+            ticket_from_row,
+        )
 
     def add_attachment(
         self,
@@ -395,7 +407,7 @@ class TicketStore(ContactMixin):
         path: str = "",
         derived_text: str = "",
     ) -> Attachment:
-        """Record one stored attachment, deduped by ticket and message."""
+        """Record one stored attachment."""
         conn = connect(self.path)
         try:
             with transaction(conn):

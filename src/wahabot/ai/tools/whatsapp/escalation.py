@@ -184,8 +184,8 @@ def escalate(waha: Transport, channel: EscalationChannel, settings: Settings) ->
         name="escalate",
         description=(
             "Before replying, forward a participant's report to the fixed human operator "
-            "(not in ticket chats: use hand_to_operator there). "
             "for human help, bot problems, complaints, or refusals. "
+            "Not in ticket chats: use hand_to_operator there. "
             "Not for operator commands. Does not consume the reply allowance. "
             "One successful forward per chat per hour. "
             "On success, confirm this report was forwarded. On "

@@ -108,7 +108,12 @@ class Stack:
         settings_module.get_settings.cache_clear()
         waha = RecordingWaha()
         registration = register_agent_handler(settings, waha=waha)
-        register_command_handler(settings, registration.transport, registration.agent)
+        register_command_handler(
+            settings,
+            registration.transport,
+            registration.agent,
+            registration.handlers.ticket_store,
+        )
         register_reaction_handler(registration.transport, registration.agent, settings)
         register_forget_handler(settings, registration.agent)
         seed_health(registration.transport, SESSION)

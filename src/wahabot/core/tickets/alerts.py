@@ -3,7 +3,7 @@
 import base64
 import hashlib
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
@@ -22,7 +22,7 @@ from wahabot.core.transport import Transport
 
 Translator = Callable[[str, str], str]
 
-_ALERT_FAILED = "Could not attach {count} file(s); they stay stored on the ticket."
+_ALERT_FAILED = "Could not attach {items}; they stay stored on the ticket."
 
 
 @dataclass(slots=True)
@@ -39,7 +39,7 @@ class AlertResult:
         return bool(self.message_ids)
 
 
-def operator_language(config_language: str, contact_language: str = "") -> str:
+def operator_language(config_language: str) -> str:
     """The alert language: the operator's setting, then English."""
     return (config_language or "en").strip() or "en"
 
@@ -73,24 +73,26 @@ def translate_cached(
 
 def last_customer_words(store: TicketStore, ticket: Ticket) -> str:
     """The newest customer message on a ticket."""
-    for event in reversed(store.events(ticket.id)):
-        if event.kind == EventKind.CUSTOMER_MESSAGE.value:
-            return event.body
-    return ticket.summary
+    event = store.last_event(ticket.id, EventKind.CUSTOMER_MESSAGE.value)
+    return event.body if event is not None else ticket.summary
+
+
+def attachment_label(kind: str) -> str:
+    """A short operator-facing label for one attachment kind."""
+    if kind == "image":
+        return "photo"
+    if kind == "voice":
+        return "voice note"
+    if kind == "video":
+        return "video"
+    return "file"
 
 
 def attachment_lines(attachments: Iterable[Attachment]) -> list[str]:
     """Operator-facing descriptions of a ticket's attachments."""
     lines: list[str] = []
     for item in attachments:
-        if item.kind == "voice":
-            label = "Voice note"
-        elif item.kind == "image":
-            label = "Photo"
-        elif item.kind == "video":
-            label = "Video"
-        else:
-            label = "File"
+        label = attachment_label(item.kind).capitalize()
         text = item.derived_text.removeprefix("[voice note] ").strip()
         detail = f": {text}" if text else ""
         lines.append(f"- {label}{detail}")
@@ -217,7 +219,7 @@ def send_alert(
         body="alert sent to the operator",
     )
     if failed.count:
-        notice = _ALERT_FAILED.format(count=failed.count)
+        notice = _ALERT_FAILED.format(items=", ".join(failed.failed))
         try:
             store.append_alert_ids(
                 ticket.id, [waha.send_text(session, destination, notice)]
@@ -230,10 +232,15 @@ def send_alert(
 
 @dataclass(slots=True)
 class ForwardResult:
-    """The forwarded ids and the number of failures."""
+    """The forwarded ids and the labels of attachments that failed."""
 
     ids: list[str]
-    count: int = 0
+    failed: list[str] = field(default_factory=list)
+
+    @property
+    def count(self) -> int:
+        """How many attachments could not be sent."""
+        return len(self.failed)
 
 
 def forward_attachments(
@@ -248,7 +255,7 @@ def forward_attachments(
 ) -> ForwardResult:
     """Forward new attachments, falling back to the stored local file."""
     ids: list[str] = []
-    failed = 0
+    failed: list[str] = []
     selected = set(only_message_ids) if only_message_ids else None
     for attachment in store.attachments(ticket.id):
         if selected is not None and attachment.message_id not in selected:
@@ -259,8 +266,8 @@ def forward_attachments(
         if message_id:
             ids.extend([attachment.message_id, message_id])
         else:
-            failed += 1
-    return ForwardResult(ids=ids, count=failed)
+            failed.append(attachment_label(attachment.kind))
+    return ForwardResult(ids=ids, failed=failed)
 
 
 def forward_one(
@@ -268,7 +275,13 @@ def forward_one(
 ) -> str:
     """Forward one attachment, falling back to a local media send."""
     try:
-        return waha.forward_message(session, destination, attachment.message_id)
+        forwarded = waha.forward_message(session, destination, attachment.message_id)
+        if forwarded:
+            return forwarded
+        logger.info(
+            "Ticket attachment forward returned no id for {id}; using local file",
+            id=attachment.message_id,
+        )
     except Exception as exc:
         logger.info(
             "Ticket attachment forward failed for {id}: {exc}; using local file",

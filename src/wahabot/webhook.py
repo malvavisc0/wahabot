@@ -44,6 +44,12 @@ async def _recovery_loop(app: FastAPI) -> None:
             logger.exception("Intake startup recovery failed")
     while True:
         await asyncio.sleep(RECOVERY_TICK_S)
+        scheduler = getattr(app.state, "ticket_scheduler", None)
+        if scheduler is not None:
+            try:
+                await asyncio.to_thread(scheduler.tick)
+            except Exception as exc:
+                logger.warning("Ticket scheduler tick failed: {exc}", exc=exc)
         recovery = getattr(app.state, "recovery", None)
         if recovery is None:
             continue
@@ -51,12 +57,6 @@ async def _recovery_loop(app: FastAPI) -> None:
             await recovery.tick()
         except Exception as exc:
             logger.warning("Intake recovery tick failed: {exc}", exc=exc)
-        scheduler = getattr(app.state, "ticket_scheduler", None)
-        if scheduler is not None:
-            try:
-                await asyncio.to_thread(scheduler.tick)
-            except Exception as exc:
-                logger.warning("Ticket scheduler tick failed: {exc}", exc=exc)
 
 
 @contextlib.asynccontextmanager

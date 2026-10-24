@@ -143,10 +143,6 @@ class TicketUpdate:
     done_by: str | None = None
     urgent: bool | None = None
 
-    def is_empty(self) -> bool:
-        """Whether nothing was staged."""
-        return self == TicketUpdate()
-
 
 def json_list(raw: str) -> list[str]:
     """Decode a JSON list of strings, failing soft to an empty list."""

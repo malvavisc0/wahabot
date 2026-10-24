@@ -19,7 +19,7 @@ from wahabot.ai.tools.external import (
 )
 from wahabot.ai.tools.image import image_builder
 from wahabot.ai.tools.notebook import notebook_builder
-from wahabot.ai.tools.tickets import build_ticket_tools
+from wahabot.ai.tools.tickets import OperatorLanguage, build_ticket_tools
 from wahabot.ai.tools.whatsapp import (
     EscalationChannel,
     escalate,
@@ -46,7 +46,7 @@ def build_default_tools(
     *,
     ticket_store: TicketStore | None = None,
     ticket_translator: Translator | None = None,
-    ticket_operator_language: str = "",
+    ticket_operator_language: OperatorLanguage = "",
 ) -> list[BaseTool]:
     """Build all bundled tools.
 
