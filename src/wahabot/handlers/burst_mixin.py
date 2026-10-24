@@ -421,12 +421,18 @@ class BurstMixin(HandlerBase):
         """
         merged_burst = await self.merge_burst(buffer, messages)
         if merged_burst is None:
+            # Nothing answerable, but the customer's media-only burst
+            # still belongs on their ticket before its rows settle.
+            if await self.ticket_gate_events(messages):
+                return "operator_owned", None
             return "empty", None
         merged, entries = merged_burst
         chat_id = buffer.key[1]
         message_id = str(merged.payload.get("id", ""))
         turn_ids = [str(event.payload.get("id", "")) for event in messages]
-        if await self.ticket_gate_events([entry.event for entry in entries]):
+        # Every buffered message belongs on the ticket, including media
+        # members the assistant itself could not use.
+        if await self.ticket_gate_events(messages):
             return "operator_owned", None
         reply, target = await self.run_burst_turn(
             buffer, merged, entries, turn_ids=turn_ids, started=started
