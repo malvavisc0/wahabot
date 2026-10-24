@@ -53,8 +53,10 @@ class TicketScheduler:
         close_stale(self.store, config.close_after_days, at=moment)
         self.release_pauses(moment, config)
         self.nudge(moment)
-        self.scheduled_notices(moment, config)
+        # Send the summary first: it lists every needs-you ticket and cancels
+        # their queued individual alerts, so the same opening cannot page twice.
         self.morning_summary(moment, config)
+        self.scheduled_notices(moment, config)
 
     def scheduled_notices(self, moment: int, config: SessionConfig) -> None:
         """Deliver deferred alerts only while the business is open."""

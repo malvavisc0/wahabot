@@ -73,4 +73,3 @@ ALTER TABLE attachments ADD COLUMN page_count INTEGER NOT NULL DEFAULT 0;
 
 ALTER TABLE session_state ADD COLUMN last_summary_date TEXT;
 ALTER TABLE session_state ADD COLUMN summary_message_id TEXT NOT NULL DEFAULT '';
-ALTER TABLE session_state ADD COLUMN night_contact_ready INTEGER NOT NULL DEFAULT 0;

@@ -23,3 +23,32 @@ def test_strict_detection_and_operator_fallback() -> None:
     assert operator_language_for("", "es") == "es"
     assert operator_language_for("de", "es") == "de"
     assert operator_language_for("", "") == "en"
+
+
+def test_save_command_survives_translation() -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from wahabot.core.access import SessionConfig
+    from wahabot.core.tickets.replies import ReplyOutcome
+    from wahabot.handlers.ticket_mixin import TicketMixin
+
+    def translate(text: str, language: str) -> str:
+        assert "Reply save" not in text
+        return text.replace(
+            "Should I answer this myself next time?",
+            "¿Debería responderlo yo la próxima vez?",
+        )
+
+    outcome = ReplyOutcome(
+        confirmation=(
+            "Sent. Ticket 1 done.\nShould I answer this myself next time? Reply save 1."
+        ),
+        save_ticket=1,
+    )
+    handler = SimpleNamespace(ticket_translator=translate)
+    config = SessionConfig(system_prompt="smoke", operator_language="es")
+    text = asyncio.run(TicketMixin.ticket_confirmation(handler, outcome, config))  # type: ignore[arg-type]
+    assert "Reply save 1." in text
+    assert "¿Debería responderlo yo la próxima vez?" in text
+    assert "guardar" not in text

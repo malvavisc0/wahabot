@@ -1,6 +1,7 @@
 """Document extraction: PDF text/OCR, office, plain text and CSV."""
 
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -13,11 +14,12 @@ from wahabot.core.documents.limits import (
     DocumentLimits,
     DocumentText,
     over_limit_notice,
+    page_limit_notice,
     trim_text,
     unreadable_notice,
 )
 from wahabot.core.documents.office import OFFICE_EXTENSIONS, pandoc_text, plain_text
-from wahabot.core.documents.pdf import pdf_ocr, pdf_text
+from wahabot.core.documents.pdf import pdf_ocr, pdf_page_count, pdf_text
 
 PDF_MIMES = frozenset({"application/pdf", "application/x-pdf"})
 TEXT_MIMES = frozenset(
@@ -113,23 +115,48 @@ def bounded(
     )
 
 
+def apply_page_limit(
+    result: DocumentText, total_pages: int, filename: str, limits: DocumentLimits
+) -> DocumentText:
+    """Flag a readable result when only the first pages were extracted."""
+    if total_pages <= limits.max_pages or not result.text:
+        return result
+    return replace(
+        result,
+        status=STATUS_OVER_LIMIT,
+        pages=total_pages,
+        notice=page_limit_notice(filename, limits.max_pages, total_pages),
+    )
+
+
 def extract_pdf(
     path: Path, filename: str, mime: str, limits: DocumentLimits
 ) -> DocumentText:
     """Extract PDF text, falling back to page OCR."""
+    total_pages = pdf_page_count(path, limits)
     text, pages, error = pdf_text(path, limits)
     if text.strip():
-        return bounded(text, STATUS_OK, pages, filename, mime, limits)
+        return apply_page_limit(
+            bounded(text, STATUS_OK, pages, filename, mime, limits),
+            total_pages,
+            filename,
+            limits,
+        )
     ocr_text, ocr_pages, ocr_error = pdf_ocr(path, limits)
     if ocr_text.strip():
-        return bounded(ocr_text, STATUS_OCR, ocr_pages, filename, mime, limits)
+        return apply_page_limit(
+            bounded(ocr_text, STATUS_OCR, ocr_pages, filename, mime, limits),
+            total_pages,
+            filename,
+            limits,
+        )
     notice = unreadable_notice(filename)
     if error or ocr_error:
         notice = f"{notice} ({error or ocr_error})"[:500]
     return DocumentText(
         text="",
         status=STATUS_UNREADABLE,
-        pages=ocr_pages or pages,
+        pages=ocr_pages or pages or total_pages,
         notice=notice,
         filename=filename,
         mime=mime,

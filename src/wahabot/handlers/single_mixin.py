@@ -21,6 +21,7 @@ from wahabot.ai.turn_records import (
     serial_tokens_for,
 )
 from wahabot.core.access import SessionConfig
+from wahabot.core.documents.limits import DOCUMENT_MARKER_KEY
 from wahabot.core.models import WahaEvent
 from wahabot.core.runs import (
     chat_lock,
@@ -231,6 +232,10 @@ class SingleMixin(HandlerBase):
             # media-only turn still belongs on their ticket.
             if await self.ticket_gate_events([event]):
                 return True
+            if event.payload.get(DOCUMENT_MARKER_KEY):
+                # A document with no caption is still a readable turn: the
+                # marker/text were stamped by attachment persistence.
+                return False
             self.settle_intake(event, "silent", "no readable content")
             return True
         return await self.ticket_gate_events([event])

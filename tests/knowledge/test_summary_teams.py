@@ -13,6 +13,7 @@ from wahabot.ai.tools.runcontext import RunTarget, bind_target, fenced_chat, res
 from wahabot.ai.tools.tickets import new_ticket, update_ticket
 from wahabot.core.access import SessionConfig
 from wahabot.core.models import WahaEvent
+from wahabot.core.schedule.deferred import defer_notice
 from wahabot.core.teams.groups import (
     bot_mention_pattern,
     group_participation,
@@ -97,6 +98,66 @@ def test_summary_counts_and_urgent_first(store: TicketStore) -> None:
     assert "URGENT" in text
 
 
+def test_summary_counts_work_done_yesterday(store: TicketStore) -> None:
+    two_days = int(datetime.datetime(2026, 5, 31, 12, tzinfo=datetime.UTC).timestamp())
+    yesterday = int(datetime.datetime(2026, 6, 1, 12, tzinfo=datetime.UTC).timestamp())
+    now = int(datetime.datetime(2026, 6, 2, 8, tzinfo=datetime.UTC).timestamp())
+    contact = store.upsert_contact("491555000099@c.us", display_name="Older")
+    ticket = store.create_ticket(contact.id, contact.chat_id, summary="x", at=two_days)
+    store.update_ticket(
+        ticket.id,
+        TicketUpdate(state=TicketState.DONE.value, done_by=DoneBy.OPERATOR.value),
+        at=yesterday,
+    )
+
+    text = build_summary(store, "default", now, "UTC")
+
+    assert "0 tickets" in text
+    assert "1 by you" in text
+
+
+def test_needs_you_orders_by_waiting_age_not_number(store: TicketStore) -> None:
+    now = int(datetime.datetime(2026, 6, 2, 8, tzinfo=datetime.UTC).timestamp())
+    first_contact = store.upsert_contact("491555000101@c.us", display_name="First")
+    first = store.create_ticket(first_contact.id, first_contact.chat_id, at=now)
+    second_contact = store.upsert_contact("491555000102@c.us", display_name="Second")
+    second = store.create_ticket(second_contact.id, second_contact.chat_id, at=now)
+    store.update_ticket(
+        first.id, TicketUpdate(state=TicketState.NEEDS_YOU.value), at=now - 3600
+    )
+    store.update_ticket(
+        second.id, TicketUpdate(state=TicketState.NEEDS_YOU.value), at=now - 36_000
+    )
+
+    text = build_summary(store, "default", now, "UTC")
+
+    assert text.index(str(second.number)) < text.index(str(first.number))
+
+
+def test_summary_cancels_deferred_alerts_it_already_lists(
+    store: TicketStore,
+) -> None:
+    now = int(datetime.datetime(2026, 6, 2, 8, tzinfo=datetime.UTC).timestamp())
+    contact = store.upsert_contact("491555000103@c.us", display_name="Queued")
+    ticket = store.create_ticket(contact.id, contact.chat_id, at=now - 3600)
+    store.update_ticket(
+        ticket.id, TicketUpdate(state=TicketState.NEEDS_YOU.value), at=now - 3600
+    )
+    defer_notice(store, ticket, "default", ME_JID, "queued alert", now=now, at=now - 3600)
+    assert store.pending_notices(now)
+
+    send_summary(
+        store,
+        RecordingWaha(),
+        "default",
+        ME_JID,
+        now,
+        "UTC",
+        hours={"tue": {"open": "08:00", "close": "17:00"}},
+    )
+    assert store.pending_notices(now) == []
+
+
 def test_summary_once_per_day_and_restart_safe(store: TicketStore) -> None:
     now = int(datetime.datetime(2026, 6, 2, 8, tzinfo=datetime.UTC).timestamp())
     hours = {"tue": {"open": "08:00", "close": "17:00"}}
@@ -128,6 +189,35 @@ def test_team_group_allowlist_override_and_surface() -> None:
     )
     assert group_participation(config, TEAM_GROUP) == "mentioned"
     assert group_participation(config, OTHER_GROUP) == "never"
+
+
+def test_team_group_session_rule_overrides_never() -> None:
+    from types import SimpleNamespace
+
+    from wahabot.handlers.config_mixin import ConfigMixin
+
+    config = SessionConfig(
+        system_prompt="smoke",
+        team_groups=[TEAM_GROUP],
+        group_participation="never",
+    )
+    handler = SimpleNamespace(
+        config_reloader=SimpleNamespace(current_config=lambda: config),
+        settings=SimpleNamespace(timezone="UTC"),
+    )
+    handler.participation_brief = lambda current, target: (  # type: ignore[attr-defined]
+        ConfigMixin.participation_brief(handler, current, target)  # type: ignore[arg-type]
+    )
+    target = RunTarget(session="default", chat_id=TEAM_GROUP)
+    token = bind_target(target)
+    try:
+        rules = ConfigMixin.render_session_rules(handler)  # type: ignore[arg-type]
+    finally:
+        reset_target(token)
+
+    assert "never reply" not in rules
+    assert "reply only when addressed" in rules
+    assert "Internal team group" in rules
     assert surface_for(config, TEAM_GROUP) == "team_group"
     assert surface_for(config, OTHER_GROUP) == "customer"
 

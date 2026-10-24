@@ -69,18 +69,22 @@ def window_bounds(
     return opened, closed
 
 
-def open_now(local: datetime.datetime, zone: ZoneInfo, config: ScheduleConfig) -> bool:
-    """Whether *local* falls inside today's or last night's window."""
+def current_window(
+    local: datetime.datetime, zone: ZoneInfo, config: ScheduleConfig
+) -> tuple[datetime.datetime, datetime.datetime] | None:
+    """The window containing *local*, including last night's overnight window."""
     if not config.hours:
-        return True
+        return None
     today = window_bounds(local.date(), day_hours(config, local.weekday()), zone)
     if today is not None and today[0] <= local < today[1]:
-        return True
+        return today
     yesterday_date = local.date() - datetime.timedelta(days=1)
     yesterday = window_bounds(
         yesterday_date, day_hours(config, yesterday_date.weekday()), zone
     )
-    return yesterday is not None and yesterday[0] <= local < yesterday[1]
+    if yesterday is not None and yesterday[0] <= local < yesterday[1]:
+        return yesterday
+    return None
 
 
 def next_open_after(
@@ -105,9 +109,9 @@ def opening_state(
     """The current opening state for an epoch instant."""
     zone = session_zone(config.timezone, fallback_timezone)
     local = datetime.datetime.fromtimestamp(now, tz=zone)
-    if open_now(local, zone, config):
-        today = window_bounds(local.date(), day_hours(config, local.weekday()), zone)
-        closing = int(today[1].timestamp()) if today is not None else None
+    window = current_window(local, zone, config)
+    if window is not None or not config.hours:
+        closing = int(window[1].timestamp()) if window is not None else None
         return OpeningState(open=True, next_opening=closing, timezone=str(zone))
     return OpeningState(
         open=False,

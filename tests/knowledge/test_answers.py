@@ -66,12 +66,54 @@ def test_candidates_save_once(store: TicketStore) -> None:
     contact = store.upsert_contact("491555000001@c.us")
     ticket = store.create_ticket(contact.id, "491555000001@c.us")
     answers.offer_candidate(ticket.id, "Where is it?", "It shipped yesterday.")
-    saved = answers.save_latest_candidate()
+    saved = answers.save_latest_candidate(ticket.id)
     assert saved is not None and saved.enabled
-    assert answers.save_latest_candidate() is None
+    assert answers.save_latest_candidate(ticket.id) is None
     assert answers.search("shipped")
     with pytest.raises(ValueError):
         answers.offer_candidate(ticket.id, "", "answer")
+
+
+def test_candidates_are_scoped_to_their_ticket(store: TicketStore) -> None:
+    answers = service(store)
+    first_contact = store.upsert_contact("491555000001@c.us")
+    first = store.create_ticket(first_contact.id, "491555000001@c.us")
+    second_contact = store.upsert_contact("491555000002@c.us")
+    second = store.create_ticket(second_contact.id, "491555000002@c.us")
+    answers.offer_candidate(first.id, "First?", "First answer.")
+    answers.offer_candidate(second.id, "Second?", "Second answer.")
+
+    saved = answers.save_latest_candidate(first.id)
+    assert saved is not None and saved.question == "First?"
+    assert answers.save_latest_candidate(first.id) is None
+    assert answers.save_latest_candidate(second.id) is not None
+
+
+def test_over_budget_answers_tell_the_model_to_search(store: TicketStore) -> None:
+    answers = service(store)
+    answers.add("Refund window", "Thirty days from delivery.")
+    section = answers.prompt_section(token_limit=1)
+    assert "search_knowledge" in section
+    assert "too large" in section.lower()
+
+
+def test_search_tool_caps_the_total_payload(store: TicketStore) -> None:
+    answers = service(store)
+    for index in range(5):
+        answers.add(f"Refund question {index}", "x" * 7000)
+    payload = json.loads(search_knowledge(answers).fn(query="refund"))
+    total = sum(
+        len(item["question"]) + len(item["answer"]) for item in payload["answers"]
+    )
+    assert payload["answers"]
+    assert total <= 12_000
+    assert "rendered" not in payload
+
+
+def test_safety_line_is_present_without_answers() -> None:
+    prompt = render_system_prompt("You are a personal assistant.")
+    assert prompt.startswith("Never invent a price, deadline or policy.")
+    assert prompt.endswith("You are a personal assistant.")
 
 
 def test_search_tool_and_prompt_injection(store: TicketStore) -> None:

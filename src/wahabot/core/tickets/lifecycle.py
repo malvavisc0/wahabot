@@ -443,14 +443,17 @@ def close_ticket(
     store: TicketStore, ticket: Ticket, *, actor: str = "operator", at: int | None = None
 ) -> Ticket:
     """Close one ticket without sending anything."""
-    return store.update_ticket(
+    moment = store.now() if at is None else at
+    closed = store.update_ticket(
         ticket.id,
         TicketUpdate(state=TicketState.CLOSED.value),
         actor=actor,
         kind=EventKind.STATE.value,
         body="closed",
-        at=at,
+        at=moment,
     )
+    store.cancel_notices(ticket.id, moment)
+    return closed
 
 
 def reopen_ticket(
@@ -462,14 +465,17 @@ def reopen_ticket(
         raise ValueError(
             f"ticket {ticket.number} cannot reopen while {active.number} is active"
         )
-    return store.update_ticket(
+    moment = store.now() if at is None else at
+    reopened = store.update_ticket(
         ticket.id,
         TicketUpdate(state=TicketState.OPEN.value, done_by=None),
         actor=actor,
         kind=EventKind.STATE.value,
         body="reopened",
-        at=at,
+        at=moment,
     )
+    store.cancel_notices(ticket.id, moment)
+    return reopened
 
 
 def close_overdue(

@@ -287,6 +287,16 @@ def notify_night_number(
         return False
 
 
+def should_defer(state: OpeningState | None, urgent: bool) -> bool:
+    """Whether a non-urgent handover waits for the next opening."""
+    return state is not None and not state.open and not urgent
+
+
+def should_notify_night(urgent: bool, night: str, state: OpeningState | None) -> bool:
+    """Whether an urgent handover should also page the night number."""
+    return bool(urgent and night and state is not None and not state.open)
+
+
 def run_handover(
     store: TicketStore,
     waha: Transport,
@@ -303,7 +313,8 @@ def run_handover(
 ) -> str:
     """Stage, defer or send one validated handover."""
     view = staged_ticket(ticket, target, urgent)
-    if state is not None and not state.open and not urgent:
+    if should_defer(state, urgent):
+        assert state is not None
         return defer_handover(
             store,
             target,
@@ -316,7 +327,7 @@ def run_handover(
             away_template,
         )
     if no_new_handover(store, ticket):
-        return duplicate_handover(
+        envelope = duplicate_handover(
             store,
             waha,
             target,
@@ -328,21 +339,24 @@ def run_handover(
             translator,
             urgent,
         )
-    envelope = send_handover_alert(
-        store,
-        waha,
-        target,
-        ticket,
-        contact,
-        view,
-        selected,
-        language_value,
-        translator,
-        urgent=urgent,
-        suffix="handover",
-        label="handover",
-    )
-    if urgent and night and state is not None and not state.open:
+        if not (urgent and not ticket.urgent):
+            return envelope
+    else:
+        envelope = send_handover_alert(
+            store,
+            waha,
+            target,
+            ticket,
+            contact,
+            view,
+            selected,
+            language_value,
+            translator,
+            urgent=urgent,
+            suffix="handover",
+            label="handover",
+        )
+    if should_notify_night(urgent, night, state):
         notify_night_number(store, waha, target.session, view, night)
     return envelope
 

@@ -10,10 +10,12 @@ from wahabot.core.documents.extract import extract_bytes, is_document
 from wahabot.core.documents.limits import (
     DOCUMENT_MARKER_KEY,
     DOCUMENT_TEXT_KEY,
+    STATUS_UNREADABLE,
     DocumentLimits,
     DocumentText,
     document_marker,
     document_text_payload,
+    mark_document_failure,
     unreadable_notice,
 )
 from wahabot.core.models import WahaEvent
@@ -27,6 +29,7 @@ from wahabot.core.tickets.models import (
 from wahabot.core.tickets.store import TicketStore
 from wahabot.core.tickets.store_base import digest
 from wahabot.core.transport import Transport
+from wahabot.core.waha import MediaTooLargeError
 from wahabot.settings import Settings
 
 _MIME_EXTENSIONS = {
@@ -114,6 +117,54 @@ def media_path(settings: Settings, sha256: str, extension: str, at: int) -> Path
     )
 
 
+def download_event_media(
+    waha: Transport,
+    event: WahaEvent,
+    settings: Settings,
+    kind: str,
+    url: str,
+    mime: str,
+    filename: str,
+) -> bytes | None:
+    """Download one event's media, marking document failures on the turn."""
+    message_id = str(event.payload.get("id", ""))
+    try:
+        return waha.download_media(url, max_bytes=byte_cap(kind, settings))
+    except Exception as exc:
+        logger.warning(
+            "Ticket attachment download failed for {id}: {exc}", id=message_id, exc=exc
+        )
+        if kind == "file" and is_document(mime, filename):
+            mark_document_failure(
+                event, filename, mime, too_large=isinstance(exc, MediaTooLargeError)
+            )
+        return None
+
+
+def extract_document_bytes(
+    data: bytes, mime: str, filename: str, settings: Settings
+) -> DocumentText:
+    """Extract one document, falling back to an unreadable notice."""
+    try:
+        return extract_bytes(
+            data,
+            mime,
+            filename,
+            DocumentLimits.from_settings(settings),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Document extraction failed for {name}: {exc}", name=filename, exc=exc
+        )
+        return DocumentText(
+            text="",
+            status=STATUS_UNREADABLE,
+            notice=unreadable_notice(filename),
+            filename=filename,
+            mime=mime,
+        )
+
+
 def persist_event_attachments(
     store: TicketStore,
     waha: Transport,
@@ -129,37 +180,19 @@ def persist_event_attachments(
     if not kind or not url:
         return []
     message_id = str(event.payload.get("id", ""))
-    try:
-        data = waha.download_media(url, max_bytes=byte_cap(kind, settings))
-    except Exception as exc:
-        logger.warning(
-            "Ticket attachment download failed for {id}: {exc}", id=message_id, exc=exc
-        )
-        return []
     mime = media_mime(event)
     filename = media_filename(event)
+    document = kind == "file" and is_document(mime, filename)
+    data = download_event_media(waha, event, settings, kind, url, mime, filename)
+    if data is None:
+        return []
     derived_text = str(event.payload.get("body", "") or "")
     page_count = 0
-    if kind == "file" and is_document(mime, filename):
-        try:
-            result = extract_bytes(
-                data,
-                mime,
-                filename,
-                DocumentLimits.from_settings(settings),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Document extraction failed for {id}: {exc}", id=message_id, exc=exc
-            )
-            result = DocumentText(
-                text="",
-                status="unreadable",
-                notice=unreadable_notice(filename),
-                filename=filename,
-                mime=mime,
-            )
+    if document:
+        result = extract_document_bytes(data, mime, filename, settings)
         derived_text = result.text or result.notice
+        if result.notice and result.notice not in derived_text:
+            derived_text = f"{derived_text}\n\n{result.notice}".strip()
         page_count = result.pages
         event.payload[DOCUMENT_MARKER_KEY] = document_marker(result)
         event.payload[DOCUMENT_TEXT_KEY] = document_text_payload(result)

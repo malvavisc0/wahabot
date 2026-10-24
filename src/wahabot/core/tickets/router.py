@@ -20,7 +20,7 @@ _CLOSE = re.compile(r"^\s*close\s+(?:ticket\s*)?#?(\d+)\s*$", re.IGNORECASE)
 _REOPEN = re.compile(r"^\s*reopen\s+(?:ticket\s*)?#?(\d+)\s*$", re.IGNORECASE)
 _PAUSE = re.compile(r"^\s*pause(?:\s+(.+))?\s*$", re.IGNORECASE)
 _RESUME = re.compile(r"^\s*resume(?:\s+(.+))?\s*$", re.IGNORECASE)
-_SAVE = re.compile(r"^\s*save\s*$", re.IGNORECASE)
+_SAVE = re.compile(r"^\s*save(?:\s+(?:ticket\s*#?|#)?(\d+))?\s*$", re.IGNORECASE)
 _NUMBERED = re.compile(
     r"^\s*(?:(?:ticket\s*#?|#)(\d+)\b\s*[:.\-]?\s*|(\d+)\s*[:.\-]\s+)(.+)$",
     re.IGNORECASE,
@@ -108,8 +108,15 @@ def route_command(store: TicketStore, body: str) -> Route | None:
     """Recognize the fixed command words."""
     if _WHATS_OPEN.match(body):
         return Route(RouteKind.WHATS_OPEN)
-    if _SAVE.match(body):
-        return Route(RouteKind.SAVE)
+    save = _SAVE.match(body)
+    if save:
+        number = save.group(1)
+        if number is None:
+            return Route(RouteKind.SAVE, text=body)
+        ticket = store.ticket_by_number(int(number))
+        if ticket is None:
+            return Route(RouteKind.ASK, text=f"No ticket with number {number}.")
+        return Route(RouteKind.SAVE, ticket=ticket, text=body)
     for pattern, kind in ((_CLOSE, RouteKind.CLOSE), (_REOPEN, RouteKind.REOPEN)):
         match = pattern.match(body)
         if match:

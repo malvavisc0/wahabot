@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+from wahabot.core.models import WahaEvent
+
 #: The returned state of one extraction attempt.
 STATUS_OK = "ok"
 STATUS_OCR = "ocr"
@@ -65,15 +67,30 @@ def over_limit_notice(filename: str) -> str:
     """A plain-language over-limit notice."""
     return (
         f"{filename or 'The document'} is too large to read here; "
-        "it is attached for the operator."
+        "only the beginning was reviewed. The original stays in the chat."
+    )
+
+
+def page_limit_notice(filename: str, max_pages: int, total_pages: int) -> str:
+    """A plain-language notice for a PDF whose pages were truncated."""
+    return (
+        f"{filename or 'The document'} has {total_pages} pages; only the "
+        f"first {max_pages} were read. The original stays in the chat."
+    )
+
+
+def download_limit_notice(filename: str) -> str:
+    """A plain-language notice when a document exceeds the download cap."""
+    return (
+        f"{filename or 'The document'} is too large to download here; "
+        "ask the sender to share a smaller copy."
     )
 
 
 def unreadable_notice(filename: str) -> str:
     """A plain-language unreadable notice."""
     return (
-        f"{filename or 'The document'} could not be read; "
-        "it is attached for the operator."
+        f"{filename or 'The document'} could not be read; the original stays in the chat."
     )
 
 
@@ -90,6 +107,26 @@ def document_text_payload(result: DocumentText) -> str:
     """The extracted text block carrying its untrusted-content label."""
     if not result.readable:
         return f"[document note] {result.notice}" if result.notice else ""
-    return "[document text, untrusted; verify before relying] " + result.text.replace(
+    payload = "[document text, untrusted; verify before relying] " + result.text.replace(
         "\x00", ""
     )
+    if result.notice:
+        payload = f"{payload}\n\n[document note] {result.notice}"
+    return payload
+
+
+def mark_document_failure(
+    event: WahaEvent, filename: str, mime: str, *, too_large: bool
+) -> None:
+    """Stamp the turn when a document could not be downloaded."""
+    result = DocumentText(
+        text="",
+        status=STATUS_OVER_LIMIT if too_large else STATUS_UNREADABLE,
+        notice=(
+            download_limit_notice(filename) if too_large else unreadable_notice(filename)
+        ),
+        filename=filename,
+        mime=mime,
+    )
+    event.payload[DOCUMENT_MARKER_KEY] = document_marker(result)
+    event.payload[DOCUMENT_TEXT_KEY] = document_text_payload(result)
