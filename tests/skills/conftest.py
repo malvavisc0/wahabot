@@ -78,7 +78,9 @@ def write_skill(
         lines.append(f"events: {{{flags}}}")
         lines.append(f"event_path: {event_path}")
     if sign_events:
-        lines.extend(["sign_events: true", f"signing_secret: {signing_secret}"])
+        lines.append("sign_events: true")
+    if signing_secret:
+        lines.append(f"signing_secret: {signing_secret}")
     (folder / "skill.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return folder
 

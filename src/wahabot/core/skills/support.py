@@ -1,10 +1,19 @@
 """Small request helpers shared by the skill runtime and its tools."""
 
 import json
+from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import parse_qsl, unquote
 
+from wahabot.core.envelope import error as envelope_error
 from wahabot.core.skills.errors import SkillError
-from wahabot.core.skills.guardrails import join_skill_url, substitute_sender
+from wahabot.core.skills.guardrails import (
+    decoded_path,
+    foreign_identifier_error,
+    join_skill_url,
+    substitute_path,
+    substitute_sender,
+)
 from wahabot.core.skills.http import MAX_REQUEST_BYTES, decode_response
 from wahabot.core.skills.loader import load_skill
 from wahabot.core.skills.models import (
@@ -14,24 +23,74 @@ from wahabot.core.skills.models import (
     SkillConfig,
     SkillRequest,
     SkillRuntime,
-    envelope_error,
 )
 from wahabot.core.skills.secrets import SecretStore
 from wahabot.core.skills.store import SkillStore
 from wahabot.core.tickets.models import Ticket
 
 
+def prepare_request(
+    config: SkillConfig,
+    method: str,
+    path: str,
+    query: dict[str, str] | None,
+    body: object,
+    run: SkillRuntime,
+) -> PreparedRequest:
+    """Resolve sender placeholders and build the exact request URL."""
+    raw_path, _, embedded = path.partition("?")
+    path_text = substitute_path(raw_path, run)
+    values: dict[str, str] = {
+        substitute_sender(str(key), run): substitute_sender(str(value), run)
+        for key, value in (query or {}).items()
+    }
+    for key, value in parse_qsl(embedded, keep_blank_values=True):
+        values[substitute_sender(key, run)] = substitute_sender(value, run)
+    clean_body = substitute_body(body, run)
+    return PreparedRequest(
+        method=method,
+        path=path_text,
+        query=values,
+        body=clean_body,
+        url=join_skill_url(config, path_text, values),
+    )
+
+
+def claim_request(name: str, prepared: PreparedRequest, run: SkillRuntime) -> str | None:
+    """Count the attempt, then refuse a repeated or foreign-scoped request."""
+    repeat = (
+        f"{name}:{prepared.method}:{decoded_path(prepared.path)}:"
+        + f"{json.dumps(prepared.query, sort_keys=True)}:{body_text(prepared.body)}"
+    )
+    refused = claim_attempt(run, repeat)
+    if refused is not None:
+        return refused
+    text = decoded_path(
+        " ".join(
+            [
+                prepared.path,
+                json.dumps(prepared.query, sort_keys=True),
+                body_text(prepared.body),
+            ]
+        )
+    )
+    return foreign_identifier_error(text, run)
+
+
 def substitute_body(body: object, run: SkillRuntime) -> object:
     """Fill sender placeholders in a JSON body without changing its shape."""
-    if body is None:
-        return None
+    if body is None or isinstance(body, bytes):
+        return body
     if isinstance(body, str):
         return substitute_sender(body, run)
-    rendered = substitute_sender(json.dumps(body, default=str), run)
-    try:
-        return json.loads(rendered)
-    except json.JSONDecodeError:
-        return rendered
+    if isinstance(body, dict):
+        return {
+            substitute_sender(str(key), run): substitute_body(value, run)
+            for key, value in body.items()
+        }
+    if isinstance(body, list):
+        return [substitute_body(value, run) for value in body]
+    return body
 
 
 def body_text(body: object) -> str:
@@ -104,20 +163,21 @@ def summary_text(name: str, prepared: PreparedRequest, run: SkillRuntime) -> str
         if run.ticket_store is not None and run.ticket_id
         else None
     )
-    person = _person(ticket, run)
-    lines = [f"{name}: {prepared.method} {prepared.path}"]
+    person = person_label(ticket, run)
+    lines = [f"{name}: {prepared.method} {unquote(prepared.path)}"]
     if prepared.query:
         lines.append("Query: " + json.dumps(prepared.query, sort_keys=True))
     if prepared.body is not None:
         lines.append("Body: " + body_text(prepared.body))
     where = f" for {person}" if person else ""
     ticket_text = f" (ticket {ticket.number})" if ticket is not None else ""
-    lines.append(f"{where}{ticket_text}?".strip())
+    lines.append(f"Approve this write{where}{ticket_text}?")
     lines.append("Reply yes.")
     return "\n".join(lines)
 
 
-def _person(ticket: Ticket | None, run: SkillRuntime) -> str:
+def person_label(ticket: Ticket | None, run: SkillRuntime) -> str:
+    """The contact display name for a human-readable confirmation."""
     if ticket is None or run.ticket_store is None:
         return ""
     contact = run.ticket_store.contact(ticket.chat_id)
@@ -125,13 +185,12 @@ def _person(ticket: Ticket | None, run: SkillRuntime) -> str:
 
 
 def secret_error(secrets: SecretStore, config: SkillConfig) -> str | None:
-    """Verify the key exists before a request is staged or sent."""
-    if config.auth.type == "none":
-        return None
-    try:
-        secrets.get(config.auth.secret)
-    except SkillError as exc:
-        return envelope_error(str(exc), skill=config.name)
+    """Verify every referenced secret decrypts before a request is staged or sent."""
+    for ref in config.secret_refs:
+        try:
+            secrets.get(ref)
+        except SkillError as exc:
+            return envelope_error(str(exc), skill=config.name)
     return None
 
 
@@ -147,7 +206,7 @@ def stored_request(
     query = dict(payload.get("query") or {})
     path = str(payload["path"])
     expected = join_skill_url(config, path, query)
-    stored = str(payload.get("url") or "") or expected
+    stored = str(payload.get("url") or "")
     if stored != expected:
         raise SkillError(
             "the staged request no longer matches the current skill configuration"
@@ -159,3 +218,14 @@ def stored_request(
         body=payload.get("body"),
         url=expected,
     )
+
+
+def redact_data(value: object, redact: Callable[[str], str]) -> object:
+    """Redact secret values inside nested SQL result data."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [redact_data(item, redact) for item in value]
+    if isinstance(value, dict):
+        return {str(key): redact_data(item, redact) for key, item in value.items()}
+    return value

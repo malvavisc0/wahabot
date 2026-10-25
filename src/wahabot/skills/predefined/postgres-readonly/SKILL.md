@@ -10,6 +10,6 @@ SQL skills are operator-only in this version. Comments, `ATTACH`,
 results are refused or capped. Store the DSN as the `POSTGRES_DSN`
 secret; it is never returned to the model, web layer, logs or errors.
 
-There is no safe automatic check for a SQL skill. Add one only when a
-read-only health view exists, otherwise enable it after the operator
-verifies the connection manually.
+The safe check is a read-only `SELECT 1` probe before the skill can be
+enabled; it does not prove that your own tables are reachable, so verify a
+real lookup with the operator chat after enabling.

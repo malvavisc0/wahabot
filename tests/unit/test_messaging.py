@@ -30,6 +30,7 @@ from wahabot.ai.messages import (
     is_replyable,
     jid_string,
     replies_to_bot,
+    sender_jid,
     turn_addressed_note,
 )
 from wahabot.ai.scrub import strip_spoofed_markers
@@ -531,3 +532,19 @@ def test_chat_metadata_preserves_known_false_and_zero_fields() -> None:
     large = summarize_chat(CHAT_ID, {"participants": roster})
     assert large["participants"] == 21
     assert "participant_list" not in large
+
+
+def test_sender_jid_prefers_the_participant_and_never_a_group() -> None:
+    group = WahaEvent(
+        event="message",
+        session=SESSION,
+        payload={"from": CHAT_ID, "participant": "491555000001@c.us"},
+    )
+    group_from_me = WahaEvent(
+        event="message",
+        session=SESSION,
+        payload={"from": CHAT_ID, "fromMe": True},
+    )
+
+    assert sender_jid(group) == "491555000001@c.us"
+    assert sender_jid(group_from_me) == ""

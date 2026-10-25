@@ -1,10 +1,11 @@
 from pathlib import Path
 
 from tests.harness import RecordingWaha
-from tests.skills.conftest import write_skill
+from tests.skills.conftest import SENDER, json_body, write_skill
 
 from wahabot.core.skills.drafts import SkillDraftService
 from wahabot.core.skills.loader import import_skill
+from wahabot.core.skills.models import SkillRun
 from wahabot.core.skills.service import SkillService
 
 
@@ -184,3 +185,44 @@ def test_a_sql_skill_passes_its_read_only_probe_and_can_enable(
     assert result.passed is True
     assert skill_store.get("customer-sql").test_state == "passed"
     assert drafts.enable("customer-sql") is True
+
+
+def test_a_3xx_safe_check_is_not_a_pass(
+    tmp_path: Path, skill_store, secret_store, fake_rest, monkeypatch
+) -> None:
+    from wahabot.core.skills.models import HttpResult
+
+    drafts, _folder = draft_service(tmp_path, skill_store, secret_store, fake_rest)
+    monkeypatch.setattr(
+        drafts.service,
+        "test_probe",
+        lambda *_args: HttpResult(status=304, text="", truncated=False),
+    )
+
+    result = drafts.run_test("customer-records")
+
+    assert result.passed is False
+    assert drafts.enable("customer-records") is False
+
+
+def test_editing_an_enabled_skill_blocks_calls_until_retested(
+    tmp_path: Path, skill_store, secret_store, fake_rest
+) -> None:
+    drafts, _folder = draft_service(tmp_path, skill_store, secret_store, fake_rest)
+    assert drafts.run_test("customer-records").passed is True
+    assert drafts.enable("customer-records") is True
+    config = tmp_path / "skills" / "customer-records" / "skill.yaml"
+    config.write_text(
+        config.read_text().replace("customer_chats: read", "customer_chats: none")
+    )
+    run = SkillRun(session="test", chat_id=SENDER, surface="customer")
+
+    result = json_body(
+        drafts.service.execute_http(
+            "customer-records", "GET", "/records", None, None, run
+        )
+    )
+
+    assert result["ok"] is False
+    assert "configuration changed" in result["error"]
+    assert skill_store.get("customer-records").test_state == "stale"

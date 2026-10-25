@@ -4,18 +4,18 @@ import json
 import time
 from pathlib import Path
 
+from wahabot.core.envelope import error as envelope_error
 from wahabot.core.skills.errors import SkillError
 from wahabot.core.skills.execution import (
     CALL_PATH_CAP,
     REQUEST_JSON_CAP,
+    append_call,
     note_failure,
-    record_call,
     record_ticket,
 )
 from wahabot.core.skills.models import (
     PreparedRequest,
     SkillRuntime,
-    envelope_error,
 )
 from wahabot.core.skills.secrets import SecretStore
 from wahabot.core.skills.store import SkillStore
@@ -32,7 +32,7 @@ class SkillAuditMixin:
     secrets: SecretStore  # pyright: ignore[reportUninitializedInstanceVariable]
     transport: Transport  # pyright: ignore[reportUninitializedInstanceVariable]
 
-    def _record_refusal(
+    def record_refusal(
         self,
         name: str,
         run: SkillRuntime,
@@ -51,21 +51,24 @@ class SkillAuditMixin:
             parsed = None
         if parsed is not None:
             reason = str(parsed.get("error") or envelope)
-        safe = self._safe(reason)
-        self._record(
+        safe = self.safe_text(reason)
+        safe_path = self.safe_text(path)
+        self.record_call(
             name=name,
             run=run,
             method=method,
-            path=path,
+            path=safe_path,
             status=None,
             duration=int((time.monotonic() - started) * 1000),
             outcome="refused",
             error=safe,
             request="",
         )
-        record_ticket(run, f"{name} {method} {path[:CALL_PATH_CAP]} refused", "refused")
+        record_ticket(
+            run, f"{name} {method} {safe_path[:CALL_PATH_CAP]} refused", "refused"
+        )
 
-    def _record(
+    def record_call(
         self,
         *,
         name: str,
@@ -78,7 +81,8 @@ class SkillAuditMixin:
         error: str,
         request: str,
     ) -> None:
-        record_call(
+        """Append one skill call and its audit entry with redacted text."""
+        append_call(
             store=self.store,
             data_dir=self.data_dir,
             session=self.session,
@@ -94,7 +98,8 @@ class SkillAuditMixin:
             redact=self.secrets.redact,
         )
 
-    def _note_failure(self, name: str, error: str) -> None:
+    def count_failure(self, name: str, error: str) -> None:
+        """Increment the failure streak and alert at the threshold."""
         note_failure(
             store=self.store,
             transport=self.transport,
@@ -104,17 +109,19 @@ class SkillAuditMixin:
             redact=self.secrets.redact,
         )
 
-    def _safe(self, text: str) -> str:
+    def safe_text(self, text: str) -> str:
+        """Redact known secret values, returning the text on redaction failure."""
         try:
             return self.secrets.redact(text)
         except SkillError:
             return text
 
-    def _fail_event(
+    def fail_event(
         self, name: str, run: SkillRuntime, prepared: PreparedRequest, error: str
     ) -> None:
-        safe = self._safe(error)
-        self._record(
+        """Audit a failed event delivery and count it."""
+        safe = self.safe_text(error)
+        self.record_call(
             name=name,
             run=run,
             method="POST",
@@ -125,21 +132,25 @@ class SkillAuditMixin:
             error=safe,
             request=request_json(prepared),
         )
-        self._note_failure(name, safe)
+        self.count_failure(name, safe)
 
-    def _fail_sql(self, name: str, run: SkillRuntime, error: str, started: float) -> str:
-        safe = self._safe(error)
-        self._record(
+    def fail_sql(
+        self, name: str, run: SkillRuntime, query: str, error: str, started: float
+    ) -> str:
+        """Audit one failed SQL call with its query, and count the failure."""
+        safe = self.safe_text(error)
+        safe_query = self.safe_text(query)
+        self.record_call(
             name=name,
             run=run,
             method="SQL",
-            path=safe[:CALL_PATH_CAP],
+            path=safe_query[:CALL_PATH_CAP],
             status=None,
             duration=int((time.monotonic() - started) * 1000),
             outcome="failed",
             error=safe,
-            request=safe[:REQUEST_JSON_CAP],
+            request=safe_query[:REQUEST_JSON_CAP],
         )
         record_ticket(run, f"{name} SQL failed", "failed")
-        self._note_failure(name, safe)
+        self.count_failure(name, safe)
         return envelope_error(safe, skill=name)

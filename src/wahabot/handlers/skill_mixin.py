@@ -4,7 +4,7 @@ import asyncio
 from typing import override
 
 from wahabot.core.models import WahaEvent
-from wahabot.core.tickets.router import Route, RouteKind
+from wahabot.core.tickets.router import Route, RouteKind, is_affirmative
 from wahabot.handlers.base import HandlerBase
 
 
@@ -35,7 +35,7 @@ class SkillMixin(HandlerBase):
                 "More than one staged request is waiting; quote the one you mean.",
             )
             return True
-        approve = route.text.strip().lower().startswith("y")
+        approve = is_affirmative(route.text.strip())
         text = await asyncio.to_thread(service.confirm, request.id, approve=approve)
         await self.ticket_send_operator(event, text)
         return True

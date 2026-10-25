@@ -1,9 +1,9 @@
 """Draft lifecycle: safe tests, configuration hashes and enable gating."""
 
-import hashlib
-import json
 from pathlib import Path
 
+from wahabot.core.skills.configuration import config_or_none
+from wahabot.core.skills.configuration import configuration_hash as fingerprint
 from wahabot.core.skills.errors import SkillError
 from wahabot.core.skills.guardrails import is_write_method
 from wahabot.core.skills.loader import load_skill
@@ -77,14 +77,18 @@ class SkillDraftService:
             config = load_skill(name, self.skills_dir)
         except SkillError as exc:
             return SkillTestResult(False, str(exc))
+        secret_problem = self.secret_problem(config)
+        if secret_problem is not None:
+            self.record_test(name, False, secret_problem)
+            return SkillTestResult(False, secret_problem)
         if config.kind == "sql":
             try:
                 result = self.service.test_sql_probe(name)
             except SkillError as exc:
                 reason = str(exc)
-                self._record(name, False, reason)
+                self.record_test(name, False, reason)
                 return SkillTestResult(False, reason)
-            self._record(name, result.passed, result.reason)
+            self.record_test(name, result.passed, result.reason)
             return result
         if config.test is None or not config.test.configured:
             reason = (
@@ -105,12 +109,21 @@ class SkillDraftService:
             result = self.service.test_probe(name, method, config.test.path)
         except SkillError as exc:
             reason = str(exc)
-            self._record(name, False, reason)
+            self.record_test(name, False, reason)
             return SkillTestResult(False, reason)
-        passed = result.status < 400
+        passed = 200 <= result.status < 300
         reason = f"safe check returned HTTP {result.status}"
-        self._record(name, passed, reason)
+        self.record_test(name, passed, reason)
         return SkillTestResult(passed, reason)
+
+    def secret_problem(self, config: SkillConfig) -> str | None:
+        """Refuse a skill whose referenced secrets are missing or undecryptable."""
+        for ref in config.secret_refs:
+            try:
+                self.secrets.get(ref)
+            except SkillError as exc:
+                return str(exc)
+        return None
 
     def refresh_staleness(self, name: str) -> None:
         """Mark a passed test stale when its covered configuration changed."""
@@ -136,6 +149,18 @@ class SkillDraftService:
             return False
         if skill.test_state != "passed" or not skill.test_config_hash:
             return False
+        config = config_or_none(name, self.skills_dir)
+        if config is None:
+            return False
+        problem = self.secret_problem(config)
+        if problem is not None:
+            self.store.set_test(
+                name,
+                state="failed",
+                reason=problem,
+                config_hash=skill.test_config_hash,
+            )
+            return False
         if self.configuration_hash(name) != skill.test_config_hash:
             self.store.set_test(
                 name,
@@ -153,40 +178,10 @@ class SkillDraftService:
 
     def configuration_hash(self, name: str) -> str:
         """A hash of everything a test result must cover."""
-        skill = self.store.get(name)
-        if skill is None:
-            return ""
-        config = _config_or_none(name, self.skills_dir)
-        secret_material = "".join(
-            self.secrets.ciphertext(ref) for ref in (config.secret_refs if config else [])
-        )
-        material = {
-            "skill": {
-                "name": skill.name,
-                "base_urls": skill.base_urls,
-                "auth_type": skill.auth_type,
-                "secret_ref": skill.secret_ref,
-                "customer_chats": skill.customer_chats,
-                "writes_need_operator": skill.writes_need_operator,
-                "instructions": skill.instructions,
-                "skill_md": skill.skill_md,
-                "draft_inputs": skill.draft_inputs,
-            },
-            "config": config.model_dump() if config is not None else {},
-            "secret": secret_material,
-        }
-        return hashlib.sha256(
-            json.dumps(material, sort_keys=True, default=str).encode()
-        ).hexdigest()
+        return fingerprint(self.store, self.secrets, self.skills_dir, name)
 
-    def _record(self, name: str, passed: bool, reason: str) -> None:
+    def record_test(self, name: str, passed: bool, reason: str) -> None:
+        """Store the test state and, for a pass, the configuration it covered."""
         state = "passed" if passed else "failed"
         config_hash = self.configuration_hash(name) if passed else ""
         self.store.set_test(name, state=state, reason=reason, config_hash=config_hash)
-
-
-def _config_or_none(name: str, skills_dir: Path) -> SkillConfig | None:
-    try:
-        return load_skill(name, skills_dir)
-    except SkillError:
-        return None

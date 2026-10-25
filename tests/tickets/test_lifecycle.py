@@ -436,3 +436,13 @@ def test_is_paused_matches_any_contact_alias(store: TicketStore) -> None:
     store.set_chat_paused("491555000001@c.us", None)
     store.set_chat_paused("999@lid", 2000)
     assert is_paused(store, "default", inbound, 1500)
+
+
+def test_a_new_ticket_inherits_the_contact_external_ref(store: TicketStore) -> None:
+    contact = store.upsert_contact(
+        CUSTOMER, phone=CUSTOMER, external_user_ref="fictional-user-77"
+    )
+
+    ticket = open_ticket(store, contact, moment=100)
+
+    assert ticket.external_user_ref == "fictional-user-77"

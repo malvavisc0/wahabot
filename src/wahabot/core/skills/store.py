@@ -56,14 +56,14 @@ class SkillStore:
             with transaction(conn):
                 conn.execute(
                     f"INSERT INTO skills ({_SKILL_COLUMNS}) VALUES ("
-                    + ",".join("?" for _ in _skill_columns())
+                    + ",".join("?" for _ in skill_columns())
                     + ") ON CONFLICT(name) DO UPDATE SET "
                     + ", ".join(
                         f"{column}=excluded.{column}"
-                        for column in _skill_columns()
-                        if column != "name"
+                        for column in skill_columns()
+                        if column not in ("name", "created_at")
                     ),
-                    _skill_values(skill),
+                    skill_values(skill),
                 )
         finally:
             conn.close()
@@ -97,14 +97,14 @@ class SkillStore:
 
     def set_enabled(self, name: str, enabled: bool) -> None:
         """Flip one skill's enabled flag."""
-        self._execute(
+        self.run_update(
             "UPDATE skills SET enabled = ?, updated_at = ? WHERE name = ?",
             (int(enabled), self.now(), name),
         )
 
     def save_draft_inputs(self, name: str, inputs: dict[str, object]) -> None:
         """Persist the resumable draft inputs."""
-        self._execute(
+        self.run_update(
             "UPDATE skills SET draft_inputs_json = ?, updated_at = ? WHERE name = ?",
             (json.dumps(inputs, sort_keys=True), self.now(), name),
         )
@@ -142,7 +142,7 @@ class SkillStore:
         at: int | None = None,
     ) -> None:
         """Store one test result and the configuration hash it covered."""
-        self._execute(
+        self.run_update(
             "UPDATE skills SET test_state = ?, test_reason = ?, "
             + "test_config_hash = ?, last_tested_at = ?, updated_at = ? "
             + "WHERE name = ?",
@@ -158,17 +158,25 @@ class SkillStore:
 
     def record_failure(self, name: str) -> int:
         """Increment one skill's consecutive failure count and return it."""
-        self._execute(
-            "UPDATE skills SET failure_count = failure_count + 1, updated_at = ? "
-            + "WHERE name = ?",
-            (self.now(), name),
-        )
-        skill = self.get(name)
-        return skill.failure_count if skill is not None else 0
+        moment = self.now()
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                conn.execute(
+                    "UPDATE skills SET failure_count = failure_count + 1, "
+                    + "updated_at = ? WHERE name = ?",
+                    (moment, name),
+                )
+                row = conn.execute(
+                    "SELECT failure_count FROM skills WHERE name = ?", (name,)
+                ).fetchone()
+        finally:
+            conn.close()
+        return int(row["failure_count"]) if row is not None else 0
 
     def reset_failures(self, name: str) -> None:
         """Clear a skill's consecutive failure count after a success."""
-        self._execute("UPDATE skills SET failure_count = 0 WHERE name = ?", (name,))
+        self.run_update("UPDATE skills SET failure_count = 0 WHERE name = ?", (name,))
 
     def add_call(self, call: SkillCall) -> int:
         """Append one call row and return its id."""
@@ -210,7 +218,7 @@ class SkillStore:
             ).fetchall()
         finally:
             conn.close()
-        return [_call_from_row(row) for row in rows]
+        return [call_from_row(row) for row in rows]
 
     def create_request(
         self,
@@ -237,11 +245,11 @@ class SkillStore:
                 ).fetchone()
         finally:
             conn.close()
-        return _request_from_row(row)
+        return request_from_row(row)
 
     def set_operator_message(self, request_id: int, message_id: str) -> None:
         """Store the self-chat message id a yes/no reply can quote."""
-        self._execute(
+        self.run_update(
             "UPDATE skill_requests SET operator_message_id = ? WHERE id = ?",
             (message_id, request_id),
         )
@@ -256,7 +264,7 @@ class SkillStore:
             ).fetchone()
         finally:
             conn.close()
-        return _request_from_row(row) if row is not None else None
+        return request_from_row(row) if row is not None else None
 
     def latest_pending(self) -> SkillRequest | None:
         """The newest request still waiting for a yes/no."""
@@ -274,12 +282,12 @@ class SkillStore:
             ).fetchall()
         finally:
             conn.close()
-        return [_request_from_row(row) for row in rows]
+        return [request_from_row(row) for row in rows]
 
     def expire_requests(self, *, now: int | None = None) -> None:
         """Refuse pending requests that have waited longer than the TTL."""
         moment = self.now() if now is None else now
-        self._execute(
+        self.run_update(
             "UPDATE skill_requests SET state = 'refused', resolved_at = ? "
             + "WHERE state = 'pending' AND created_at < ?",
             (moment, moment - PENDING_REQUEST_TTL_S),
@@ -290,7 +298,7 @@ class SkillStore:
         if not message_id:
             return None
         self.expire_requests()
-        return self._one_request(
+        return self.pending_message_request(
             "SELECT {columns} FROM skill_requests WHERE state = 'pending' "
             + "AND operator_message_id = ? ORDER BY id DESC LIMIT 1",
             (message_id,),
@@ -316,26 +324,30 @@ class SkillStore:
 
     def resolve_request(self, request_id: int, state: str) -> None:
         """Mark one claimed request done, failed or refused."""
-        self._execute(
+        self.run_update(
             "UPDATE skill_requests SET state = ?, resolved_at = ? WHERE id = ?",
             (state, self.now(), request_id),
         )
 
     def secret_exists(self, name: str) -> bool:
         """Whether a secret row exists for *name*."""
-        return self._scalar("SELECT 1 FROM secrets WHERE name = ?", (name,)) is not None
+        return (
+            self.query_scalar("SELECT 1 FROM secrets WHERE name = ?", (name,)) is not None
+        )
 
-    def _one_request(
+    def pending_message_request(
         self, query: str, params: tuple[object, ...] = ()
     ) -> SkillRequest | None:
+        """The one request selected by a caller-supplied pending query."""
         conn = connect(self.path)
         try:
             row = conn.execute(query.format(columns=_REQUEST_COLUMNS), params).fetchone()
         finally:
             conn.close()
-        return _request_from_row(row) if row is not None else None
+        return request_from_row(row) if row is not None else None
 
-    def _scalar(self, query: str, params: tuple[object, ...]) -> object:
+    def query_scalar(self, query: str, params: tuple[object, ...]) -> object:
+        """The first column of one row, or None."""
         conn = connect(self.path)
         try:
             row = conn.execute(query, params).fetchone()
@@ -343,7 +355,8 @@ class SkillStore:
             conn.close()
         return None if row is None else row[0]
 
-    def _execute(self, query: str, params: tuple[object, ...]) -> None:
+    def run_update(self, query: str, params: tuple[object, ...]) -> None:
+        """Run one write in its own transaction."""
         conn = connect(self.path)
         try:
             with transaction(conn):
@@ -352,11 +365,13 @@ class SkillStore:
             conn.close()
 
 
-def _skill_columns() -> tuple[str, ...]:
+def skill_columns() -> tuple[str, ...]:
+    """The skill table columns in insert order."""
     return tuple(column.strip() for column in _SKILL_COLUMNS.split(","))
 
 
-def _skill_values(skill: Skill) -> tuple[object, ...]:
+def skill_values(skill: Skill) -> tuple[object, ...]:
+    """The insert values matching :func:`skill_columns`."""
     return (
         skill.name,
         skill.lifecycle,
@@ -382,7 +397,8 @@ def _skill_values(skill: Skill) -> tuple[object, ...]:
     )
 
 
-def _call_from_row(row: sqlite3.Row) -> SkillCall:
+def call_from_row(row: sqlite3.Row) -> SkillCall:
+    """Map one ``skill_calls`` row."""
     return SkillCall(
         id=int(row["id"]),
         skill=str(row["skill"]),
@@ -400,7 +416,8 @@ def _call_from_row(row: sqlite3.Row) -> SkillCall:
     )
 
 
-def _request_from_row(row: sqlite3.Row) -> SkillRequest:
+def request_from_row(row: sqlite3.Row) -> SkillRequest:
+    """Map one ``skill_requests`` row."""
     return SkillRequest(
         id=int(row["id"]),
         skill=str(row["skill"]),

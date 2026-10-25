@@ -133,3 +133,108 @@ def test_a_sql_skill_cannot_subscribe_to_ticket_events(
 
     with pytest.raises(SkillError, match="events"):
         import_skill(source, tmp_path / "skills", skill_store)
+
+
+def test_the_config_carries_the_live_skill_docs(tmp_path: Path) -> None:
+    source = write_skill(
+        tmp_path, "customer-records", "https://crm.example/api", auth="{type: none}"
+    )
+
+    assert "# customer-records" in read_config(source).skill_md
+
+
+def test_load_refuses_a_folder_that_declares_another_name(
+    tmp_path: Path, skill_store
+) -> None:
+    from wahabot.core.skills.loader import load_skill
+
+    source = write_skill(
+        tmp_path, "customer-records", "https://crm.example/api", auth="{type: none}"
+    )
+    import_skill(source, tmp_path / "skills", skill_store)
+    installed = tmp_path / "skills" / "renamed"
+    (tmp_path / "skills" / "customer-records").rename(installed)
+
+    with pytest.raises(SkillError, match="declares"):
+        load_skill("renamed", tmp_path / "skills")
+
+
+def test_reimport_preserves_the_original_creation_time(
+    tmp_path: Path, skill_store
+) -> None:
+    from wahabot.core.skills.models import Skill
+
+    first = skill_store.upsert(
+        Skill(name="customer-records", lifecycle="configured", created_at=111)
+    )
+    second = skill_store.upsert(
+        Skill(name="customer-records", lifecycle="configured", created_at=222)
+    )
+
+    assert first.created_at == 111
+    assert second.created_at == 111
+
+
+def test_an_unused_signing_secret_is_not_required(tmp_path: Path, skill_store) -> None:
+    source = write_skill(
+        tmp_path,
+        "customer-records",
+        "https://crm.example/api",
+        auth="{type: none}",
+        signing_secret="UNUSED_SECRET",
+    )
+
+    imported = import_skill(source, tmp_path / "skills", skill_store)
+
+    assert imported.name == "customer-records"
+
+
+def test_an_unknown_event_name_is_refused(tmp_path: Path) -> None:
+    source = write_skill(
+        tmp_path,
+        "customer-records",
+        "https://crm.example/api",
+        auth="{type: none}",
+        events={"completed": True},
+    )
+
+    with pytest.raises(SkillError, match="unknown event"):
+        read_config(source)
+
+
+def test_a_bitcoin_style_port_is_refused(tmp_path: Path) -> None:
+    source = write_skill(
+        tmp_path,
+        "customer-records",
+        "https://crm.example:not-a-port/api",
+        auth="{type: none}",
+    )
+
+    with pytest.raises(SkillError, match="invalid port"):
+        read_config(source)
+
+
+def test_a_traversing_safe_check_path_is_refused(tmp_path: Path) -> None:
+    source = write_skill(
+        tmp_path,
+        "customer-records",
+        "https://crm.example/api",
+        auth="{type: none}",
+        test_check="{method: GET, path: /../admin}",
+    )
+
+    with pytest.raises(SkillError, match="base URL"):
+        read_config(source)
+
+
+def test_a_double_encoded_traversing_test_path_is_refused(tmp_path: Path) -> None:
+    source = write_skill(
+        tmp_path,
+        "customer-records",
+        "https://crm.example/api",
+        auth="{type: none}",
+        test_check="{method: GET, path: /%252e%252e/admin}",
+    )
+
+    with pytest.raises(SkillError, match="base URL"):
+        read_config(source)

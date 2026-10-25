@@ -96,15 +96,17 @@ disabled configured row:
 uv run wahabot skills import ./customer-records          # configure only
 uv run wahabot skills test customer-records              # safe read check only
 uv run wahabot skills import ./customer-records --enable # import + safe test + enable
+uv run wahabot skills enable customer-records
+uv run wahabot skills disable customer-records           # required before re-import
 uv run wahabot skills list
 ```
 
 `--enable` and `skills test` run only the prepared read (`GET`/`HEAD`/`OPTIONS`)
-from `skill.yaml`; a write is never used as a test, and a skill with no safe
-check stays inactive with an explanation. Configure the secret before import:
+from `skill.yaml`; a write is never used as a test, and a non-SQL skill with no
+safe check stays inactive with an explanation. Configure the secret before import:
 
 ```bash
-export WAHABOT_SECRET_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+export WAHABOT_SECRET_KEY="$(uv run python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
 ```
 
 Store each credential through the skill backend (`secrets` table); do not put
@@ -114,19 +116,18 @@ The key is required only for skills that reference a secret.
 HTTP skills get a base-URL lock, address checks (loopback, link-local,
 metadata and private ranges are refused unless the skill's own base is
 private), same-host redirect limits with IP pinning, sender-only substitution,
-per-turn/repeat limits and body/response/time caps. Customer and team-group
-writes are staged in `skill_requests` and confirm in the self-chat with the
-exact prepared request; reply `yes` (quote the message when more than one is
-pending). Team-group writes always need the operator's yes. Operator writes
+per-turn/repeat limits and body/response/time caps. Customer writes are staged
+in `skill_requests` unless `writes_need_operator` is false; team-group writes
+always ask. Approvals confirm in the self-chat with the exact prepared request;
+reply `yes` (quote the message when more than one is pending). Operator writes
 execute directly.
 
 SQL skills are operator-only: one `SELECT` or `WITH ... SELECT`, SQLite opened
 `mode=ro` or Postgres through a read-only user/transaction, with comment,
 multi-statement, `ATTACH`/`PRAGMA` and mutation refusal plus row/column/byte/
-time caps. Install the optional driver with `uv sync --extra postgres` (or
-`pip install "wahabot[postgres]"`); without it the tool returns a clear error
-instead of crashing. Draft SQL skills are tested with a harmless read-only
-`SELECT 1` probe before they can be enabled.
+time caps. Install the optional driver with `uv sync --extra postgres`; without
+it the tool returns a clear error instead of crashing. Draft SQL skills are
+tested with a harmless read-only `SELECT 1` probe before they can be enabled.
 
 Enabled event skills run in the background after the ticket transaction commits
 for `opened`, `needs_you`, `done` and `closed`. A failure is logged and never

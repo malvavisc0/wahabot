@@ -1,10 +1,12 @@
 """CLI entrypoints and commands for wahabot."""
 
+import contextlib
 import datetime
 import json
 from importlib.metadata import version as get_version
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 import typer
 import uvicorn
@@ -23,7 +25,8 @@ from wahabot.core.db import Database
 from wahabot.core.notebook import Notebook
 from wahabot.core.schedule.hours import effective_timezone
 from wahabot.core.skills.drafts import SkillDraftService
-from wahabot.core.skills.loader import import_skill
+from wahabot.core.skills.errors import SkillError
+from wahabot.core.skills.loader import import_skill, load_skill
 from wahabot.core.skills.secrets import SecretStore
 from wahabot.core.skills.service import SkillService
 from wahabot.core.skills.store import SkillStore
@@ -50,7 +53,7 @@ sessions_app = typer.Typer(
 app.add_typer(sessions_app, name="sessions")
 skills_app = typer.Typer(
     name="skills",
-    help="List, import and test configured skills.",
+    help="List, import, test, enable and disable configured skills.",
     no_args_is_help=True,
 )
 app.add_typer(skills_app, name="skills")
@@ -78,21 +81,18 @@ def skill_runtime(
     return store, SkillDraftService(store, secrets, settings.skills_dir, service)
 
 
-def skill_host(skill: Any) -> str:
+def skill_host(base_urls: list[str]) -> str:
     """The base host only: never a credential-bearing URL."""
-    urls = getattr(skill, "base_urls", [])
-    if not urls:
+    if not base_urls:
         return "local SQL"
-    from urllib.parse import urlsplit
-
-    return urlsplit(str(urls[0])).hostname or "unknown"
+    return urlsplit(base_urls[0]).hostname or "unknown"
 
 
 @skills_app.command("list")
 def skills_list() -> None:
     """List configured skills without URLs or secrets."""
     settings = get_settings()
-    store, _drafts = skill_runtime(settings)
+    store, drafts = skill_runtime(settings)
     skills = store.list()
     if not skills:
         console.print("[dim]No skills configured.[/]")
@@ -101,13 +101,18 @@ def skills_list() -> None:
     for column in ("name", "lifecycle", "enabled", "test", "chats", "host"):
         table.add_column(column)
     for skill in skills:
+        drafts.refresh_staleness(skill.name)
+        skill = store.get(skill.name) or skill
+        base_urls = skill.base_urls
+        with contextlib.suppress(SkillError):
+            base_urls = load_skill(skill.name, settings.skills_dir).effective_base_urls
         table.add_row(
             skill.name,
             skill.lifecycle,
             "yes" if skill.enabled else "no",
             skill.test_state,
             skill.customer_chats,
-            skill_host(skill),
+            skill_host(base_urls),
         )
     console.print(table)
 
@@ -160,6 +165,46 @@ def skills_test(
         console.print(f"[yellow]FAIL[/] {name}: {result.reason}")
         raise typer.Exit(1)
     console.print(f"[green]PASS[/] {name}: {result.reason}")
+
+
+@skills_app.command("enable")
+def skills_enable(
+    name: str = typer.Argument(help="Skill name."),
+) -> None:
+    """Enable a tested, current skill."""
+    settings = get_settings()
+    try:
+        store, drafts = skill_runtime(settings)
+        skill = store.get(name)
+        if skill is None:
+            raise typer.BadParameter(f"unknown skill: {name}")
+        if not drafts.enable(name):
+            current = store.get(name) or skill
+            reason = current.test_reason or current.test_state
+            raise typer.BadParameter(f"{name} stays inactive: {reason}")
+    except typer.BadParameter:
+        raise
+    except Exception as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    cli_helpers.ok(console, f"Enabled [bold]{name}[/].")
+
+
+@skills_app.command("disable")
+def skills_disable(
+    name: str = typer.Argument(help="Skill name."),
+) -> None:
+    """Disable a skill without deleting its configuration."""
+    settings = get_settings()
+    try:
+        store, drafts = skill_runtime(settings)
+        if store.get(name) is None:
+            raise typer.BadParameter(f"unknown skill: {name}")
+        drafts.disable(name)
+    except typer.BadParameter:
+        raise
+    except Exception as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    cli_helpers.ok(console, f"Disabled [bold]{name}[/].")
 
 
 @app.command()

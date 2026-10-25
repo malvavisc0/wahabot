@@ -168,6 +168,7 @@ def open_ticket(
             contact.id,
             contact.chat_id,
             previous_ticket_id=previous_ticket_id,
+            external_user_ref=contact.external_user_ref,
             at=moment,
         )
     except sqlite3.IntegrityError:

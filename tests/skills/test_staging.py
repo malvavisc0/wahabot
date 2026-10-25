@@ -145,3 +145,57 @@ def test_declining_a_staged_write_is_audited(
         )
     finally:
         status_state.operator_jid = previous
+
+
+def test_a_permission_change_blocks_a_staged_write(
+    tmp_path: Path, skill_store, secret_store, fake_rest
+) -> None:
+    from wahabot.core.skills.drafts import SkillDraftService
+
+    folder = write_skill(
+        tmp_path, "customer-records", fake_rest.base, customer_chats="read_write"
+    )
+    import_skill(folder, tmp_path / "skills", skill_store)
+    tickets = TicketStore(skill_store.path)
+    contact = tickets.upsert_contact(SENDER, phone=SENDER)
+    ticket = tickets.create_ticket(contact.id, SENDER)
+    service = SkillService(
+        skill_store,
+        secret_store,
+        tmp_path / "skills",
+        "test",
+        RecordingWaha(),
+        ticket_store=tickets,
+    )
+    drafts = SkillDraftService(skill_store, secret_store, tmp_path / "skills", service)
+    assert drafts.run_test("customer-records").passed is True
+    assert drafts.enable("customer-records") is True
+    run = SkillRun(
+        session="test",
+        chat_id=SENDER,
+        surface="customer",
+        ticket_id=ticket.id,
+        ticket_store=tickets,
+    )
+    previous = status_state.operator_jid
+    status_state.operator_jid = ME_JID
+    try:
+        service.execute_http(
+            "customer-records", "POST", "/leads", None, {"name": "Smoke"}, run
+        )
+        pending = skill_store.latest_pending()
+        assert pending is not None
+        config = tmp_path / "skills" / "customer-records" / "skill.yaml"
+        config.write_text(
+            config.read_text().replace(
+                "writes_need_operator: true", "writes_need_operator: false"
+            )
+        )
+
+        result = service.confirm(pending.id, approve=True)
+
+        assert "failed" in result.lower()
+        assert fake_rest.lead_count() == 0
+        assert skill_store.request(pending.id).state == "failed"
+    finally:
+        status_state.operator_jid = previous

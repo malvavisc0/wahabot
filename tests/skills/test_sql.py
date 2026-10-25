@@ -2,7 +2,7 @@ import sqlite3
 from pathlib import Path
 
 from tests.harness import RecordingWaha
-from tests.skills.conftest import json_body, write_skill
+from tests.skills.conftest import SECRET_VALUE, json_body, write_skill
 
 from wahabot.core.skills.loader import import_skill
 from wahabot.core.skills.models import SkillRun
@@ -60,8 +60,17 @@ def test_a_write_is_refused(tmp_path: Path, skill_store, secret_store) -> None:
     result = json_body(
         service.execute_sql("customer-sql", "DELETE FROM records WHERE id = 1", run)
     )
+    merge = json_body(
+        service.execute_sql(
+            "customer-sql",
+            "WITH x AS (SELECT 1) MERGE INTO records USING x ON true "
+            "WHEN MATCHED THEN DELETE",
+            run,
+        )
+    )
 
     assert result["ok"] is False
+    assert merge["ok"] is False
     assert "read" in result["error"].lower()
 
 
@@ -165,3 +174,93 @@ def test_replace_function_and_punctuation_inside_literals_are_allowed(
         run = SkillRun(session="test", surface="operator", armed=True)
         result = json_body(service.execute_sql("customer-sql", query, run))
         assert result["ok"] is True, result
+
+
+def test_a_refused_query_does_not_count_as_a_runtime_failure(
+    tmp_path: Path, skill_store, secret_store
+) -> None:
+    service, run = sql_setup(tmp_path, skill_store, secret_store)
+    before = skill_store.get("customer-sql")
+
+    for query in (
+        "DELETE FROM records",
+        "PRAGMA journal_mode=DELETE",
+        "SELECT 1; SELECT 2",
+    ):
+        assert json_body(service.execute_sql("customer-sql", query, run))["ok"] is False
+
+    after = skill_store.get("customer-sql")
+    assert after is not None and before is not None
+    assert after.failure_count == before.failure_count
+    assert after.test_state == before.test_state
+
+
+def test_a_failed_query_is_audited_with_its_text(
+    tmp_path: Path, skill_store, secret_store
+) -> None:
+    service, run = sql_setup(tmp_path, skill_store, secret_store)
+
+    result = json_body(
+        service.execute_sql("customer-sql", "SELECT * FROM missing_table", run)
+    )
+
+    assert result["ok"] is False
+    call = skill_store.calls("customer-sql")[0]
+    assert "missing_table" in call.path
+    assert "missing_table" in call.request_json
+
+
+def test_column_truncation_sets_the_truncated_flag(
+    tmp_path: Path, skill_store, secret_store
+) -> None:
+    service, run = sql_setup(tmp_path, skill_store, secret_store)
+    import wahabot.core.skills.sql as sql_module
+
+    original = sql_module.MAX_COLUMNS
+    sql_module.MAX_COLUMNS = 1
+    try:
+        result = json_body(
+            service.execute_sql("customer-sql", "SELECT id, name FROM records", run)
+        )
+    finally:
+        sql_module.MAX_COLUMNS = original
+
+    assert result["ok"] is True
+    assert result["columns"] == ["id"]
+    assert result["truncated"] is True
+
+
+def test_a_successful_sql_probe_resets_the_failure_streak(
+    tmp_path: Path, skill_store, secret_store
+) -> None:
+    service, _run = sql_setup(tmp_path, skill_store, secret_store)
+    for _ in range(3):
+        skill_store.record_failure("customer-sql")
+
+    result = service.test_sql_probe("customer-sql")
+
+    assert result.passed is True
+    assert skill_store.get("customer-sql").failure_count == 0
+
+
+def test_sql_results_redact_stored_secrets(
+    tmp_path: Path, skill_store, secret_store
+) -> None:
+    service, run = sql_setup(tmp_path, skill_store, secret_store)
+
+    result = json_body(
+        service.execute_sql("customer-sql", f"SELECT '{SECRET_VALUE}' AS token", run)
+    )
+
+    assert result["ok"] is True
+    assert result["rows"][0]["token"] == "***"
+
+
+def test_non_finite_floats_stay_json_safe(
+    tmp_path: Path, skill_store, secret_store
+) -> None:
+    service, run = sql_setup(tmp_path, skill_store, secret_store)
+
+    result = json_body(service.execute_sql("customer-sql", "SELECT 1e999 AS value", run))
+
+    assert result["rows"][0]["value"] == "inf"

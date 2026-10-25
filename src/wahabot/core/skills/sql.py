@@ -2,13 +2,14 @@
 
 import importlib
 import json
+import math
 import re
 import sqlite3
 import time
 from pathlib import Path
 from typing import Any
 
-from wahabot.core.skills.errors import SkillError
+from wahabot.core.skills.errors import QueryRefused, SkillError
 from wahabot.core.skills.models import SkillConfig
 
 MAX_ROWS = 200
@@ -18,8 +19,8 @@ TIMEOUT_S = 15.0
 
 _FIRST = re.compile(r"^\s*([a-zA-Z]+)")
 _FORBIDDEN = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|ATTACH|DETACH|PRAGMA|VACUUM|CREATE|DROP|"
-    + r"ALTER|TRIGGER|REINDEX|GRANT|REVOKE|COPY|CALL|EXECUTE)\b",
+    r"\b(INSERT|UPDATE|DELETE|MERGE|TRUNCATE|ATTACH|DETACH|PRAGMA|VACUUM|"
+    + r"CREATE|DROP|ALTER|TRIGGER|REINDEX|GRANT|REVOKE|COPY|CALL|EXECUTE)\b",
     re.IGNORECASE,
 )
 _REPLACE_STATEMENT = re.compile(r"\bREPLACE\s+INTO\b", re.IGNORECASE)
@@ -39,13 +40,13 @@ def validate_read_query(query: str) -> str:
     """One SELECT or WITH...SELECT, with comments and extra statements refused."""
     cleaned = query.strip().rstrip(";").strip()
     if not cleaned:
-        raise SkillError("the SQL query is empty")
-    _require_single_statement(cleaned)
-    _require_read_shape(cleaned)
+        raise QueryRefused("the SQL query is empty")
+    require_single_statement(cleaned)
+    require_read_shape(cleaned)
     return cleaned
 
 
-def _without_literals(query: str) -> str:
+def without_literals(query: str) -> str:
     """Blank string literals and quoted identifiers for structure checks."""
     rendered: list[str] = []
     quote = ""
@@ -70,31 +71,35 @@ def _without_literals(query: str) -> str:
     return "".join(rendered)
 
 
-def _require_single_statement(query: str) -> None:
-    structure = _without_literals(query)
+def require_single_statement(query: str) -> None:
+    """Refuse comments and semicolons outside literals."""
+    structure = without_literals(query)
     if "--" in structure or "/*" in structure or "*/" in structure:
-        raise SkillError("SQL comments are refused; they can hide a second statement")
+        raise QueryRefused("SQL comments are refused; they can hide a second statement")
     if ";" in structure:
-        raise SkillError("only one statement is allowed")
+        raise QueryRefused("only one statement is allowed")
 
 
-def _require_read_shape(query: str) -> None:
-    structure = _without_literals(query)
+def require_read_shape(query: str) -> None:
+    """Require a top-level SELECT or WITH...SELECT without mutations."""
+    structure = without_literals(query)
     first = _FIRST.match(structure)
     keyword = first.group(1).upper() if first else ""
     if keyword not in ("SELECT", "WITH"):
-        raise SkillError("only read-only SELECT or WITH...SELECT queries are allowed")
+        raise QueryRefused("only read-only SELECT or WITH...SELECT queries are allowed")
     if keyword == "WITH" and not re.search(r"\bSELECT\b", structure, re.IGNORECASE):
-        raise SkillError("a WITH query must end in SELECT")
+        raise QueryRefused("a WITH query must end in SELECT")
     if _REPLACE_STATEMENT.search(structure) or _FORBIDDEN.search(structure):
-        raise SkillError("only non-mutating read queries are allowed")
+        raise QueryRefused("only non-mutating read queries are allowed")
 
 
 def query_sqlite(path: Path, query: str) -> dict[str, object]:
     """Run one bounded read query against a SQLite file opened read-only."""
+    if not path.is_absolute():
+        raise SkillError("the configured SQLite path must be absolute")
     if not path.is_file():
         raise SkillError("the configured SQLite database does not exist")
-    uri = f"file:{path}?mode=ro"
+    uri = path.as_uri() + "?mode=ro"
     deadline = time.monotonic() + TIMEOUT_S
     try:
         conn = sqlite3.connect(uri, uri=True, timeout=TIMEOUT_S)
@@ -103,14 +108,15 @@ def query_sqlite(path: Path, query: str) -> dict[str, object]:
         conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 10_000)
         try:
             cursor = conn.execute(query)
-            columns = [str(item[0]) for item in cursor.description or ()][:MAX_COLUMNS]
+            all_columns = [str(item[0]) for item in cursor.description or ()]
+            columns = all_columns[:MAX_COLUMNS]
             raw_rows = cursor.fetchmany(MAX_ROWS + 1)
-            rows, truncated = _bounded_rows(raw_rows, columns)
+            rows, truncated = bounded_rows(raw_rows, columns)
             return {
                 "columns": columns,
                 "rows": rows,
                 "row_count": len(rows),
-                "truncated": truncated,
+                "truncated": truncated or len(all_columns) > MAX_COLUMNS,
             }
         finally:
             conn.close()
@@ -129,14 +135,15 @@ def query_postgres(dsn: str, query: str) -> dict[str, object]:
             conn.execute("SET TRANSACTION READ ONLY")
             conn.execute(f"SET LOCAL statement_timeout = {int(TIMEOUT_S * 1000)}")
             cursor.execute(query)
-            columns = [str(item[0]) for item in cursor.description or ()][:MAX_COLUMNS]
+            all_columns = [str(item[0]) for item in cursor.description or ()]
+            columns = all_columns[:MAX_COLUMNS]
             raw_rows = cursor.fetchmany(MAX_ROWS + 1)
-            rows, truncated = _bounded_rows(raw_rows, columns)
+            rows, truncated = bounded_rows(raw_rows, columns)
             return {
                 "columns": columns,
                 "rows": rows,
                 "row_count": len(rows),
-                "truncated": truncated,
+                "truncated": truncated or len(all_columns) > MAX_COLUMNS,
             }
     except Exception as exc:
         if isinstance(exc, SkillError):
@@ -156,14 +163,15 @@ def execute_query(config: SkillConfig, query: str, secret: str = "") -> dict[str
     return query_postgres(secret, cleaned)
 
 
-def _bounded_rows(
+def bounded_rows(
     raw_rows: list[Any], columns: list[str]
 ) -> tuple[list[dict[str, object]], bool]:
+    """Rows bounded by count and serialized bytes, plus a truncation flag."""
     truncated = len(raw_rows) > MAX_ROWS
     rows: list[dict[str, object]] = []
     size = 0
     for raw in raw_rows[:MAX_ROWS]:
-        row = _row_dict(raw, columns)
+        row = row_dict(raw, columns)
         size += len(json.dumps(row, default=str))
         if size > MAX_BYTES:
             truncated = True
@@ -172,14 +180,18 @@ def _bounded_rows(
     return rows, truncated
 
 
-def _row_dict(raw: Any, columns: list[str]) -> dict[str, object]:
+def row_dict(raw: Any, columns: list[str]) -> dict[str, object]:
+    """One row keyed by the selected column names."""
     values = list(raw)[: len(columns)]
     return {
-        column: _json_value(value) for column, value in zip(columns, values, strict=False)
+        column: json_value(value) for column, value in zip(columns, values, strict=False)
     }
 
 
-def _json_value(value: object) -> object:
+def json_value(value: object) -> object:
+    """Keep finite JSON scalars; stringify anything else so the envelope encodes."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)

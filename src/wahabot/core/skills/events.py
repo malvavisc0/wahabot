@@ -31,7 +31,7 @@ class EventDispatcher:
         self._worker: threading.Thread | None = None
         if background:
             self._worker = threading.Thread(
-                target=self._work, name="skill-events", daemon=True
+                target=self.work, name="skill-events", daemon=True
             )
             self._worker.start()
 
@@ -41,7 +41,7 @@ class EventDispatcher:
             self._queue.put((event_kind, ticket))
             return
         try:
-            self._emit(event_kind, ticket)
+            self.emit_events(event_kind, ticket)
         except Exception:
             logger.exception("Skill event dispatch failed for {kind}", kind=event_kind)
 
@@ -56,7 +56,16 @@ class EventDispatcher:
             time.sleep(0.01)
         return True
 
-    def _work(self) -> None:
+    def stop(self, timeout: float = 30.0) -> None:
+        """Flush queued events, then stop the background worker."""
+        if not self._background or self._worker is None:
+            return
+        self.flush(timeout)
+        self._queue.put(None)
+        self._worker.join(timeout)
+
+    def work(self) -> None:
+        """Consume queued events in order until the stop sentinel."""
         while True:
             item = self._queue.get()
             try:
@@ -64,7 +73,7 @@ class EventDispatcher:
                     return
                 event_kind, ticket = item
                 try:
-                    self._emit(event_kind, ticket)
+                    self.emit_events(event_kind, ticket)
                 except Exception:
                     logger.exception(
                         "Skill event dispatch failed for {kind}", kind=event_kind
@@ -72,7 +81,9 @@ class EventDispatcher:
             finally:
                 self._queue.task_done()
 
-    def _emit(self, event_kind: str, ticket: Ticket) -> None:
+    def emit_events(self, event_kind: str, ticket: Ticket) -> None:
+        """Deliver one committed transition to every subscribed enabled skill."""
+        contact_ref = self.contact_ref(ticket)
         for skill in self.service.store.enabled():
             try:
                 config = load_skill(skill.name, self.service.skills_dir)
@@ -80,7 +91,7 @@ class EventDispatcher:
                 continue
             if not config.events.get(event_kind):
                 continue
-            payload = event_payload(event_kind, ticket)
+            payload = event_payload(event_kind, ticket, contact_ref=contact_ref)
             body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
             headers = {
                 "Content-Type": "application/json",
@@ -101,9 +112,18 @@ class EventDispatcher:
                     signing_secret.encode(), body, hashlib.sha256
                 ).hexdigest()
                 headers["X-Wahabot-Signature"] = f"sha256={digest}"
-            self._deliver(skill.name, body, headers)
+            self.deliver(skill.name, body, headers)
 
-    def _deliver(self, name: str, body: bytes, headers: dict[str, str]) -> None:
+    def contact_ref(self, ticket: Ticket) -> str:
+        """The current external identity on the contact, else the ticket snapshot."""
+        store = self.service.ticket_store
+        contact = store.contact(ticket.chat_id) if store is not None else None
+        return (contact.external_user_ref if contact is not None else "") or (
+            ticket.external_user_ref
+        )
+
+    def deliver(self, name: str, body: bytes, headers: dict[str, str]) -> None:
+        """Bounded retries; the event id lets receivers deduplicate."""
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 self.service.send_event(name, body, headers)
@@ -117,7 +137,9 @@ class EventDispatcher:
                 )
 
 
-def event_payload(event_kind: str, ticket: Ticket) -> dict[str, object]:
+def event_payload(
+    event_kind: str, ticket: Ticket, *, contact_ref: str = ""
+) -> dict[str, object]:
     """The stable payload: no message bodies, no phone numbers."""
     at = ticket.updated_at or int(time.time())
     return {
@@ -126,7 +148,7 @@ def event_payload(event_kind: str, ticket: Ticket) -> dict[str, object]:
         "ticket": ticket.number,
         "state": ticket.state,
         "done_by": ticket.done_by or "",
-        "contact_ref": ticket.external_user_ref,
+        "contact_ref": contact_ref or ticket.external_user_ref,
         "timestamp": at,
     }
 
