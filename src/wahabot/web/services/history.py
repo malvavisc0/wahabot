@@ -345,17 +345,35 @@ def translate_cached(store: TicketStore, text: str, target: str, translate: Any)
     return rendered or text
 
 
-def attachment_views(attachments: list[Attachment]) -> list[AttachmentView]:
-    """Map stored attachments to the template's inline view."""
-    return [
-        AttachmentView(
-            id=item.id,
-            kind=item.kind,
-            mime=item.mime,
-            derived_text=item.derived_text,
+def attachment_views(
+    attachments: list[Attachment],
+    *,
+    lang: str = "originals",
+    language: str = "",
+    translate: Any = None,
+    store: TicketStore | None = None,
+) -> list[AttachmentView]:
+    """Map attachments inline, translating a voice transcript with the thread."""
+    views: list[AttachmentView] = []
+    for item in attachments:
+        derived = item.derived_text
+        if (
+            derived
+            and lang != "originals"
+            and language.strip().lower() not in {"", "en"}
+            and translate is not None
+            and store is not None
+        ):
+            derived = translate_cached(store, derived, "en", translate)
+        views.append(
+            AttachmentView(
+                id=item.id,
+                kind=item.kind,
+                mime=item.mime,
+                derived_text=derived,
+            )
         )
-        for item in attachments
-    ]
+    return views
 
 
 def describe_event(
@@ -419,7 +437,13 @@ def entry_for(
         style=style,
         internal=internal,
         outgoing=outgoing,
-        attachments=attachment_views(inline),
+        attachments=attachment_views(
+            inline,
+            lang=lang,
+            language=language,
+            translate=translate,
+            store=store,
+        ),
     )
 
 
@@ -488,6 +512,11 @@ def add_orphan_entry(
     ticket: Ticket,
     entries: list[ThreadEntry],
     attachments: list[Attachment],
+    *,
+    lang: str,
+    language: str,
+    translate: Any,
+    store: TicketStore,
 ) -> None:
     """Show attachments that no event referenced instead of hiding them."""
     attached_ids = {
@@ -505,7 +534,13 @@ def add_orphan_entry(
             style="internal",
             internal=True,
             outgoing=False,
-            attachments=attachment_views(orphaned),
+            attachments=attachment_views(
+                orphaned,
+                lang=lang,
+                language=language,
+                translate=translate,
+                store=store,
+            ),
         )
     )
 
@@ -538,7 +573,15 @@ def ticket_page(
         lang=lang,
         translate=translate,
     )
-    add_orphan_entry(ticket, entries, attachments)
+    add_orphan_entry(
+        ticket,
+        entries,
+        attachments,
+        lang=lang,
+        language=contact.language if contact is not None else "",
+        translate=translate,
+        store=store,
+    )
     calls = call_views(skill_store, ticket.id, {ticket.id: ticket.number})
     toggle_url, toggle_label = toggle_values(ticket, lang, back)
     return TicketPage(

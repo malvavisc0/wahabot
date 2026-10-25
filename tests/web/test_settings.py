@@ -141,6 +141,54 @@ def test_who_rejects_invalid_number_without_writing(auth_client: TestClient, bot
     assert read_config(bot) == before
 
 
+def test_who_flags_a_number_not_on_whatsapp(
+    auth_client: TestClient, bot, monkeypatch
+) -> None:
+    """A number WAHA does not know is refused, never silently stored."""
+    monkeypatch.setattr(bot.waha, "get_chat_overview", lambda session, chat_id: {})
+    before = read_config(bot)
+    token = csrf_of(auth_client.get("/app/settings").text)
+    response = auth_client.post(
+        "/app/settings/who",
+        data={"whitelist": "491555000002", "blacklist": "", "csrf_token": token},
+    )
+    assert response.status_code == 400
+    assert "not on WhatsApp" in response.text
+    assert read_config(bot) == before
+
+
+def test_team_groups_list_and_save(auth_client: TestClient, bot, monkeypatch) -> None:
+    """A connected group is offered by name and saved as an enabled id."""
+    monkeypatch.setattr(
+        bot.waha,
+        "list_chats",
+        lambda session: [
+            {
+                "id": "120363000000000001@g.us",
+                "name": "Bridge Club Crew",
+                "participants": [{"id": "491555000001@c.us"}],
+            }
+        ],
+    )
+    page = auth_client.get("/app/settings")
+    assert "Bridge Club Crew" in page.text
+    token = csrf_of(page.text)
+    response = auth_client.post(
+        "/app/settings/who",
+        data={
+            "whitelist": "",
+            "blacklist": "",
+            "team_groups": "120363000000000001@g.us",
+            "group_participation": "mentioned",
+            "csrf_token": token,
+        },
+    )
+    assert response.status_code == 200
+    config = read_config(bot)
+    assert config["team_groups"] == ["120363000000000001@g.us"]
+    assert config["group_participation"] == "mentioned"
+
+
 def test_hours_save_and_preview(auth_client: TestClient, bot) -> None:
     """Hours, timezone and reply window persist and the preview fills slots."""
     token = csrf_of(auth_client.get("/app/settings").text)

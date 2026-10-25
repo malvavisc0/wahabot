@@ -83,6 +83,12 @@ def test_translation_is_cached_and_toggleable(
 ) -> None:
     """English is translated once, cached by source hash, and toggled."""
     ticket = seed_ticket(store, language="es")
+    store.add_attachment(
+        ticket.id, "msg-voice", "voice", derived_text="hola voice transcript"
+    )
+    store.extend_event_message_ids(
+        store.events(ticket.id)[0].id, ["msg-voice"]
+    )
     calls: list[str] = []
 
     def translate(text: str, target: str) -> str:
@@ -92,6 +98,7 @@ def test_translation_is_cached_and_toggleable(
     auth_client.app.state.web_translate = translate
     first = auth_client.get(f"/app/history/{ticket.number}")
     assert "EN: hola" in first.text
+    assert "EN: hola voice transcript" in first.text
     assert calls
     auth_client.app.state.web_translate = lambda text, target: (_ for _ in ()).throw(
         AssertionError("cache miss")
@@ -102,6 +109,7 @@ def test_translation_is_cached_and_toggleable(
         f"/app/history/{ticket.number}", params={"lang": "originals"}
     )
     assert "hola, abren" in originals.text
+    assert "hola voice transcript" in originals.text
     assert "Show English translation" in originals.text
 
 
@@ -131,6 +139,11 @@ def test_media_requires_cookie_and_streams(
     assert "inline" in response.headers["content-disposition"]
     head = auth_client.head(f"/app/media/{attachment.id}")
     assert head.status_code == 200
+    ranged = auth_client.get(
+        f"/app/media/{attachment.id}", headers={"Range": "bytes=0-3"}
+    )
+    assert ranged.status_code == 206
+    assert ranged.content == SMOKE_PNG[:4]
     assert auth_client.get("/app/media/9999").status_code == 404
     traversal = auth_client.get("/app/media/../../etc/passwd")
     assert traversal.status_code == 404
