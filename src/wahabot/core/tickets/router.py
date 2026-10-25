@@ -122,10 +122,16 @@ def route_message(
 def route_skill_confirmation(
     store: SkillStore | None, body: str, quoted: str
 ) -> Route | None:
-    """A quoted or latest staged write answered with yes/no."""
+    """A quoted or single staged write answered with yes/no."""
     if store is None or not (_YES.match(body) or _NO.match(body)):
         return None
-    request = store.pending_for_message(quoted) if quoted else store.latest_pending()
+    if quoted:
+        request = store.pending_for_message(quoted)
+    else:
+        pending = store.pending_requests()
+        if len(pending) > 1:
+            return Route(RouteKind.SKILL_CONFIRM, text=body)
+        request = pending[0] if pending else None
     if request is None:
         return None
     return Route(RouteKind.SKILL_CONFIRM, text=body, skill_request=request)

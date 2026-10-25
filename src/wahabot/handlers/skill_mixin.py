@@ -26,8 +26,14 @@ class SkillMixin(HandlerBase):
             return False
         service = self.skill_service
         request = route.skill_request
-        if service is None or request is None:
+        if service is None:
             await self.ticket_send_operator(event, "No staged request is waiting.")
+            return True
+        if request is None:
+            await self.ticket_send_operator(
+                event,
+                "More than one staged request is waiting; quote the one you mean.",
+            )
             return True
         approve = route.text.strip().lower().startswith("y")
         text = await asyncio.to_thread(service.confirm, request.id, approve=approve)

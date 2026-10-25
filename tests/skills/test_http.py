@@ -176,3 +176,9 @@ def test_every_call_is_logged_with_its_safe_path(
     assert calls[0].status == 200
     assert calls[0].outcome == "ok"
     assert "sk-fictional-smoke-key" not in str(calls[0])
+
+
+def test_system_runs_are_attributed_to_system() -> None:
+    from wahabot.core.skills.execution import _initiator
+
+    assert _initiator(SkillRun(session="test", surface="system", armed=True)) == "system"

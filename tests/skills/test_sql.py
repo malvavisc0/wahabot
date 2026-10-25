@@ -151,3 +151,17 @@ def test_a_missing_postgres_driver_is_a_clear_error(
     assert result["ok"] is False
     assert "driver" in result["error"].lower()
     assert "postgres" in result["error"].lower()
+
+
+def test_replace_function_and_punctuation_inside_literals_are_allowed(
+    tmp_path: Path, skill_store, secret_store
+) -> None:
+    service, _run = sql_setup(tmp_path, skill_store, secret_store)
+    for query in (
+        "SELECT REPLACE(name, 'record', 'row') FROM records",
+        "SELECT 'hello;world'",
+        "SELECT * FROM records WHERE name = 'delete this'",
+    ):
+        run = SkillRun(session="test", surface="operator", armed=True)
+        result = json_body(service.execute_sql("customer-sql", query, run))
+        assert result["ok"] is True, result

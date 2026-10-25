@@ -106,3 +106,30 @@ def test_load_skill_reads_the_folder_configuration(tmp_path: Path, skill_store) 
     assert config.events["done"] is True
     assert config.sign_events is True
     assert config.signing_secret == "SIGNING_KEY"
+
+
+def test_a_base_url_with_a_query_is_refused(tmp_path: Path, skill_store) -> None:
+    source = write_skill(
+        tmp_path, "customer-records", "https://crm.example/api?key=value"
+    )
+
+    with pytest.raises(SkillError, match="base URL"):
+        import_skill(source, tmp_path / "skills", skill_store)
+
+
+def test_a_sql_skill_cannot_subscribe_to_ticket_events(
+    tmp_path: Path, skill_store
+) -> None:
+    source = write_skill(
+        tmp_path,
+        "customer-sql",
+        "",
+        kind="sql",
+        auth="{type: none}",
+        customer_chats="none",
+        events={"done": True},
+        sql=f"{{engine: sqlite, sqlite_path: {tmp_path / 'customer.sqlite3'}}}",
+    )
+
+    with pytest.raises(SkillError, match="events"):
+        import_skill(source, tmp_path / "skills", skill_store)

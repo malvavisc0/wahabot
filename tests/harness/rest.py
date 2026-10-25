@@ -17,6 +17,7 @@ class FakeRest:
     base: str
     other: str
     writes: list[dict[str, Any]] = field(default_factory=list)
+    hook_status: int = 200
     hooks: list[dict[str, Any]] = field(default_factory=list)
 
     def lead_count(self) -> int:
@@ -82,6 +83,10 @@ def app(rest: FakeRest, other_port: dict[str, int]) -> FastAPI:
     def redirect_same() -> RedirectResponse:
         return RedirectResponse("/health", status_code=302)
 
+    @application.get("/api/redirect-outside")
+    def redirect_outside() -> RedirectResponse:
+        return RedirectResponse("/records", status_code=302)
+
     @application.get("/redirect-other")
     def redirect_other() -> RedirectResponse:
         return RedirectResponse(
@@ -89,7 +94,7 @@ def app(rest: FakeRest, other_port: dict[str, int]) -> FastAPI:
         )
 
     @application.post("/hook")
-    async def hook(request: Request) -> dict[str, bool]:
+    async def hook(request: Request) -> JSONResponse:
         rest.hooks.append(
             {
                 "body": await request.body(),
@@ -98,7 +103,7 @@ def app(rest: FakeRest, other_port: dict[str, int]) -> FastAPI:
                 "timestamp": request.headers.get("x-wahabot-timestamp", ""),
             }
         )
-        return {"ok": True}
+        return JSONResponse({"ok": rest.hook_status < 400}, status_code=rest.hook_status)
 
     return application
 
