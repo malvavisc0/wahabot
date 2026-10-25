@@ -74,6 +74,12 @@ services:
       WAHABOT_SHELL_TIMEOUT: ${WAHABOT_SHELL_TIMEOUT:-30}
       WAHABOT_SHELL_MAX_OUTPUT: ${WAHABOT_SHELL_MAX_OUTPUT:-2000}
       WAHABOT_SESSION: ${WAHABOT_SESSION:-default}
+      # Operator web app. Empty secrets fail closed; /health and the
+      # WAHA webhook stay up so the bot keeps working in WhatsApp.
+      WAHABOT_WEB_PASSPHRASE_HASH: ${WAHABOT_WEB_PASSPHRASE_HASH:-}
+      WAHABOT_WEB_SESSION_KEY: ${WAHABOT_WEB_SESSION_KEY:-}
+      WAHABOT_PUBLIC_ORIGIN: ${WAHABOT_PUBLIC_ORIGIN:-}
+      WAHABOT_WEB_TRUSTED_PROXY: ${WAHABOT_WEB_TRUSTED_PROXY:-false}
       # Base64 32-byte Fernet key for skill credentials. Empty keeps
       # secret-bearing skills disabled; skill writes refuse without it.
       WAHABOT_SECRET_KEY: ${WAHABOT_SECRET_KEY:-}
