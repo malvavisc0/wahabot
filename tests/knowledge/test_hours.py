@@ -4,6 +4,7 @@ import datetime
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from tests.harness import ME_JID, RecordingWaha
@@ -11,13 +12,14 @@ from tests.harness import ME_JID, RecordingWaha
 from wahabot.ai.tools.runcontext import RunTarget, bind_target, reset_target
 from wahabot.ai.tools.tickets import hand_to_operator
 from wahabot.core.access import SessionConfig
-from wahabot.core.schedule.deferred import defer_notice, due_notices
+from wahabot.core.schedule.deferred import defer_notice, deliver_due_notices, due_notices
 from wahabot.core.schedule.hours import (
     next_opening,
     opening_state,
     render_away_message,
 )
 from wahabot.core.schedule.models import OpeningState
+from wahabot.core.scheduler import TicketScheduler
 from wahabot.core.tickets.lifecycle import close_ticket
 from wahabot.core.tickets.models import TicketState, TicketUpdate
 from wahabot.core.tickets.store import TicketStore
@@ -110,13 +112,13 @@ def test_deferred_notice_and_night_readiness(store: TicketStore) -> None:
     store.upsert_contact(NIGHT, phone=NIGHT)
     assert store.night_ready(NIGHT)
 
-    defer_notice(store, ticket, "default", ME_JID, "queued", now=100, at=100)
+    defer_notice(store, ticket, "default", ME_JID, "queued", not_before=100, at=100)
     assert due_notices(store, 99) == []
     assert len(due_notices(store, 101)) == 1
     assert store.pending_notices(102)[0].text == "queued"
 
     # A retried handover updates the one pending notice instead of queuing twice.
-    defer_notice(store, ticket, "default", ME_JID, "updated", now=100, at=101)
+    defer_notice(store, ticket, "default", ME_JID, "updated", not_before=100, at=101)
     pending = store.pending_notices(102)
     assert len(pending) == 1 and pending[0].text == "updated"
 
@@ -177,6 +179,8 @@ def test_urgent_after_hours_uses_the_night_number(
     tool = hand_to_operator(
         settings,
         waha,
+        language="es",
+        translator=lambda text, language: f"{language}:{text}",
         schedule=lambda: state,
         night_number=lambda: NIGHT,
     )
@@ -193,6 +197,8 @@ def test_urgent_after_hours_uses_the_night_number(
     assert payload["ok"] and not payload.get("deferred")
     recipients = [item[1] for item in waha.sent]
     assert ME_JID in recipients and night.chat_id in recipients
+    night_text = next(item[2] for item in waha.sent if item[1] == night.chat_id)
+    assert night_text.startswith("es:")
 
 
 def test_unready_night_number_is_never_messaged_first(
@@ -224,3 +230,126 @@ def test_unready_night_number_is_never_messaged_first(
 
     assert payload["ok"]
     assert [item[1] for item in waha.sent] == [ME_JID]
+
+
+def test_night_contact_lid_alias_matches_its_phone_but_not_groups(
+    store: TicketStore,
+) -> None:
+    lid = store.upsert_contact("491555000009@lid", phone="491555000009@s.whatsapp.net")
+    found = store.contact_by_phone("491555000009")
+    assert found is not None and found.id == lid.id
+    assert store.night_ready("491555000009")
+
+    store.upsert_contact("491555000010@g.us")
+    assert not store.night_ready("491555000010")
+
+
+def test_urgent_handover_cancels_a_queued_notice(
+    store: TicketStore, settings: Settings, monkeypatch
+) -> None:
+    from wahabot.status.state import state as status_state
+
+    monkeypatch.setattr(status_state, "operator_jid", ME_JID)
+    contact = store.upsert_contact(CUSTOMER, display_name="Smoke Sender")
+    ticket = store.create_ticket(contact.id, CUSTOMER, summary="urgent leak")
+    store.add_event(ticket.id, "customer", "customer_message", "water everywhere")
+    store.update_ticket(
+        ticket.id, TicketUpdate(state=TicketState.NEEDS_YOU.value), at=store.now()
+    )
+    defer_notice(
+        store, ticket, "default", ME_JID, "queued", not_before=store.now(), at=store.now()
+    )
+    assert store.pending_notices(store.now() + 1)
+
+    waha = RecordingWaha()
+    state = OpeningState(open=False, next_opening=store.now() + 3600, timezone="UTC")
+    tool = hand_to_operator(
+        settings,
+        waha,
+        schedule=lambda: state,
+        night_number=lambda: NIGHT,
+    )
+    target = RunTarget(
+        session="default",
+        chat_id=CUSTOMER,
+        surface="customer",
+        ticket_store=store,
+        ticket_id=ticket.id,
+    )
+    with target_for(target):
+        payload = json.loads(tool.fn(reason="urgent leak", urgent=True))
+
+    assert payload["ok"] and not payload.get("deferred")
+    assert store.pending_notices(store.now() + 1) == []
+
+
+def test_nudge_stays_silent_outside_hours(
+    store: TicketStore, settings: Settings, monkeypatch
+) -> None:
+    from wahabot.status.state import state as status_state
+
+    monkeypatch.setattr(status_state, "operator_jid", ME_JID)
+    now = store.now()
+    contact = store.upsert_contact(CUSTOMER, display_name="Smoke Sender")
+    ticket = store.create_ticket(contact.id, CUSTOMER, summary="late")
+    store.update_ticket(
+        ticket.id, TicketUpdate(state=TicketState.NEEDS_YOU.value), at=now - 100
+    )
+    store.add_event(ticket.id, "assistant", "alert", "alert", at=now - 100)
+    store.add_event(ticket.id, "customer", "customer_message", "again", at=now - 50)
+    closed = {
+        day: {"closed": True} for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    }
+    config = SessionConfig(system_prompt="smoke", timezone="UTC", hours=closed)
+    reloader = SimpleNamespace(current_config=lambda: config)
+    waha = RecordingWaha()
+    scheduler = TicketScheduler(settings, store, waha, reloader)  # type: ignore[arg-type]
+
+    assert scheduler.nudge_due(store.ticket(ticket.id), now)
+    scheduler.nudge(now, config)
+
+    assert waha.sent == []
+
+
+def test_delivered_notice_is_quote_routable(store: TicketStore) -> None:
+    contact = store.upsert_contact(CUSTOMER, display_name="Smoke Sender")
+    ticket = store.create_ticket(contact.id, CUSTOMER)
+    store.update_ticket(
+        ticket.id, TicketUpdate(state=TicketState.NEEDS_YOU.value), at=100
+    )
+    defer_notice(store, ticket, "default", ME_JID, "queued", not_before=100, at=100)
+
+    waha = RecordingWaha()
+    deliver_due_notices(store, waha, 101)
+
+    assert len(waha.sent) == 1
+    assert store.ticket_for_alert_message(f"true_{ME_JID}_SENT1") is not None
+
+
+def test_nudge_is_quote_routable(
+    store: TicketStore, settings: Settings, monkeypatch
+) -> None:
+    from wahabot.status.state import state as status_state
+
+    monkeypatch.setattr(status_state, "operator_jid", ME_JID)
+    now = store.now()
+    contact = store.upsert_contact(CUSTOMER, display_name="Smoke Sender")
+    ticket = store.create_ticket(contact.id, CUSTOMER, summary="late")
+    store.update_ticket(
+        ticket.id, TicketUpdate(state=TicketState.NEEDS_YOU.value), at=now - 100
+    )
+    store.add_event(ticket.id, "assistant", "alert", "alert", at=now - 100)
+    store.add_event(ticket.id, "customer", "customer_message", "again", at=now - 50)
+    always = {
+        day: {"open": "00:00", "close": "00:00"}
+        for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    }
+    config = SessionConfig(system_prompt="smoke", timezone="UTC", hours=always)
+    reloader = SimpleNamespace(current_config=lambda: config)
+    waha = RecordingWaha()
+    scheduler = TicketScheduler(settings, store, waha, reloader)  # type: ignore[arg-type]
+
+    scheduler.nudge(now, config)
+
+    assert len(waha.sent) == 1
+    assert store.ticket_for_alert_message(f"true_{ME_JID}_SENT1") is not None

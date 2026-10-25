@@ -28,7 +28,7 @@ placeholder expansion.
 | `reply_window_days` | `integer` | `7` | Recovered rows older than this many days become operator-required work and get no customer reply. Also bounds an operator relay: older customer chats hold the draft until the customer writes again. Bounds 1–30; hot-reloaded. |
 | `close_after_days` | `integer` | `5` | Days a done ticket waits before it auto-closes; a customer message inside the window reopens it. Open or waiting tickets untouched for the same window also close. Bounds 1–365; hot-reloaded. |
 | `pause_after_human_hours` | `integer` | `2` | Hours a human-operator message pauses the assistant in that chat. Bounds 0–168; `0` disables the pause. |
-| `operator_language` | `string` | `""` | Language for operator alerts and confirmations. Empty falls back to English, then the customer's detected language. |
+| `operator_language` | `string` | `""` | Language for operator alerts and confirmations. Empty falls back to English; confirmations also use the operator's detected language. |
 | `timezone` | `string` | `""` | IANA zone for support hours and local-day summaries (e.g. `Europe/Madrid`). Empty falls back to `WAHABOT_TIMEZONE`. An unknown zone is rejected at load. |
 | `hours` | `object` | `{}` | Opening hours keyed `mon`…`sun`, each `{"open": "09:00", "close": "17:00"}` or `{"closed": true}`. Empty means always open. An overnight window (`22:00`–`02:00`) is supported. |
 | `away_message` | `string` | `""` | Customer-facing outside-hours text. `{ticket}` and `{next_opening}` are filled by code; empty uses the bundled wording. |
@@ -137,12 +137,12 @@ still route.
 The operator can publish question/answer pairs by replying to a ticket
 alert with an explanation. The reply classifier marks it as an
 `answer` (not a business action), sends the customer relay, and asks
-`Should I answer this myself next time? Reply save.` A bare `save` in
-the self-chat saves that candidate once; a second `save` reports that
-there is nothing to save.
+`Should I answer this myself next time? Reply save N.` (N is the
+ticket number). A bare `save` also works and targets the newest unsaved
+candidate; a second `save` reports that there is nothing to save.
 
 Enabled answers are injected as one whole `# Answers` section when the
-set fits `answers_token_limit` (6000 tokens). A set that does not fit
+set fits the 6000-token budget. A set that does not fit
 is not pasted at all; the model searches it with `search_knowledge`.
 Answers are reference material: they never outrank safety or the
 session's Instructions, and returned hits are recorded in

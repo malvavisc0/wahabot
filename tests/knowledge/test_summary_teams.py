@@ -90,7 +90,7 @@ def test_summary_counts_and_urgent_first(store: TicketStore) -> None:
         at=yesterday,
     )
 
-    text = build_summary(store, "default", now, "UTC")
+    text = build_summary(store, now, "UTC")
     assert "4 tickets" in text
     assert "1 done by the assistant" in text
     assert "1 by you" in text
@@ -110,7 +110,7 @@ def test_summary_counts_work_done_yesterday(store: TicketStore) -> None:
         at=yesterday,
     )
 
-    text = build_summary(store, "default", now, "UTC")
+    text = build_summary(store, now, "UTC")
 
     assert "0 tickets" in text
     assert "1 by you" in text
@@ -129,7 +129,7 @@ def test_needs_you_orders_by_waiting_age_not_number(store: TicketStore) -> None:
         second.id, TicketUpdate(state=TicketState.NEEDS_YOU.value), at=now - 36_000
     )
 
-    text = build_summary(store, "default", now, "UTC")
+    text = build_summary(store, now, "UTC")
 
     assert text.index(str(second.number)) < text.index(str(first.number))
 
@@ -143,7 +143,9 @@ def test_summary_cancels_deferred_alerts_it_already_lists(
     store.update_ticket(
         ticket.id, TicketUpdate(state=TicketState.NEEDS_YOU.value), at=now - 3600
     )
-    defer_notice(store, ticket, "default", ME_JID, "queued alert", now=now, at=now - 3600)
+    defer_notice(
+        store, ticket, "default", ME_JID, "queued alert", not_before=now, at=now - 3600
+    )
     assert store.pending_notices(now)
 
     send_summary(
@@ -156,6 +158,7 @@ def test_summary_cancels_deferred_alerts_it_already_lists(
         hours={"tue": {"open": "08:00", "close": "17:00"}},
     )
     assert store.pending_notices(now) == []
+    assert store.last_event(ticket.id, "nudge") is not None
 
 
 def test_summary_once_per_day_and_restart_safe(store: TicketStore) -> None:

@@ -7,7 +7,7 @@ from wahabot.core.tickets.store_base import StoreBase
 
 
 class ScheduleMixin(StoreBase):
-    """Summary dates, night readiness and outside-hours notices."""
+    """Summary dates and outside-hours notices."""
 
     def last_summary_date(self, session: str) -> str | None:
         """The local date of the last sent morning summary, or None."""
@@ -59,19 +59,6 @@ class ScheduleMixin(StoreBase):
                 )
         finally:
             conn.close()
-
-    def night_ready(self, number: str) -> bool:
-        """Whether the night number is a known contact (it wrote first)."""
-        wanted = "".join(ch for ch in number.split("@", 1)[0] if ch.isdigit())
-        if not wanted:
-            return False
-        row = self.query_one(
-            "SELECT 1 AS found FROM contacts WHERE phone = ? "
-            + "OR chat_id = ? OR chat_id LIKE ? LIMIT 1",
-            (wanted, f"{wanted}@c.us", f"{wanted}@%"),
-            lambda item: int(item["found"]),
-        )
-        return bool(row)
 
     def defer_notice(
         self,

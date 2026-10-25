@@ -47,6 +47,18 @@ def test_quote_routes_every_alert_and_forwarded_id(store: TicketStore) -> None:
         assert route.ticket.number == ticket.number
 
 
+def test_commands_win_over_quoting_an_alert(store: TicketStore) -> None:
+    _contact, ticket = make_ticket(store, CUSTOMER, "Smoke Sender", "QC")
+    store.append_alert_ids(ticket.id, ["true_alert"])
+
+    route = route_message(
+        store, operator_event(f"close {ticket.number}", quote="true_alert")
+    )
+
+    assert route.kind == RouteKind.CLOSE
+    assert route.ticket is not None and route.ticket.id == ticket.id
+
+
 def test_number_and_unique_name_both_route(store: TicketStore) -> None:
     _, ticket = make_ticket(store, CUSTOMER, "Smoke Sender", "N")
 

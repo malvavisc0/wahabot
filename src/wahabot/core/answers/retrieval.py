@@ -2,7 +2,7 @@
 
 from collections.abc import Iterable
 
-from wahabot.core.answers.models import Answer, AnswerHit
+from wahabot.core.answers.models import Answer
 from wahabot.core.tokens import text_tokens
 
 #: Default whole-set injection cap, in tokens.
@@ -40,16 +40,3 @@ def render_answers_section(
         lines.append("")
     rendered = "\n".join(lines).strip()
     return rendered if text_tokens(rendered) <= token_limit else ""
-
-
-def render_search_results(hits: Iterable[AnswerHit]) -> str:
-    """Render search hits for the model, with ids and both texts."""
-    items = list(hits)
-    if not items:
-        return "No answers matched."
-    lines = ["Published answers (best match first):"]
-    for hit in items:
-        lines.append(
-            f"- id {hit.answer.id}: Q: {hit.answer.question} | A: {hit.answer.answer}"
-        )
-    return "\n".join(lines)

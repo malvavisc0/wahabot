@@ -497,9 +497,10 @@ open-domain behavior.
 A ticket reply classified as `answer` stores the customer's question
 and the operator's confirmed draft as an unsaved candidate. The
 confirmation gets one line: `Should I answer this myself next time?
-Reply save.` A bare `save` in the self-chat calls
-`AnswerService.save_latest_candidate`, which stamps `saved_at` and can
-never create the same candidate twice. Action-shaped replies
+Reply save N.` (N is the ticket number). A bare `save` also works and
+targets the newest unsaved candidate. `AnswerService.save_candidate`
+stamps `saved_at` atomically and can never create the same candidate
+twice. Action-shaped replies
 (`resolution`, `instruction`) never offer it.
 
 ### Documents
@@ -553,9 +554,9 @@ it.
 ### Language
 
 Ticket language detection stays in `core/tickets/language` (phase 2's
-strict stopword detector), stored on the contact. Operator alerts and
-confirmations use `operator_language`, then the customer's detected
-language, then English; translations are cached per session. The relay
+strict stopword detector), stored on the contact. Operator alerts use
+`operator_language`, then English; confirmations also fall back to the
+operator's detected language. Translations are cached per session. The relay
 draft and the pinned reply rule follow the customer's stored language,
 and an unknown language falls back to English rather than guessing.
 

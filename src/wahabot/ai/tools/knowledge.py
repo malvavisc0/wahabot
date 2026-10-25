@@ -5,6 +5,7 @@ from llama_index.core.tools import BaseTool, FunctionTool
 from wahabot.ai.tools.envelope import ok
 from wahabot.ai.tools.runcontext import log_action_reason
 from wahabot.ai.tools.schemas import SearchKnowledgeSchema
+from wahabot.core.answers.models import AnswerHit
 from wahabot.core.answers.retrieval import (
     ANSWERS_SEARCH_CHARS_LIMIT,
     ANSWERS_SEARCH_LIMIT,
@@ -23,8 +24,9 @@ def search_knowledge(service: AnswerService | None) -> BaseTool:
         log_action_reason("search_knowledge", reason, query=query)
         if service is None:
             return ok(answers=[], message="No published answers are available.")
-        hits = service.search(query, limit=ANSWERS_SEARCH_LIMIT)
+        hits = service.search(query, limit=ANSWERS_SEARCH_LIMIT, record=False)
         selected: list[dict[str, object]] = []
+        returned: list[AnswerHit] = []
         used = 0
         for hit in hits:
             size = len(hit.answer.question) + len(hit.answer.answer)
@@ -37,7 +39,9 @@ def search_knowledge(service: AnswerService | None) -> BaseTool:
                     "answer": hit.answer.answer,
                 }
             )
+            returned.append(hit)
             used += size
+        service.record_hits(returned)
         return ok(answers=selected)
 
     return FunctionTool.from_defaults(
