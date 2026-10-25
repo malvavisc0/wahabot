@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 from loguru import logger
 
-from wahabot.core.tickets.models import ACTIVE_STATES, Ticket, TicketState
+from wahabot.core.tickets.models import Ticket, TicketState
 
 
 class LifecycleMixin:
@@ -31,5 +31,8 @@ class LifecycleMixin:
             self.notify("done", ticket)
         elif ticket.state == TicketState.CLOSED.value:
             self.notify("closed", ticket)
-        elif ticket.state in ACTIVE_STATES:
+        elif ticket.state == TicketState.OPEN.value and previous in (
+            TicketState.DONE.value,
+            TicketState.CLOSED.value,
+        ):
             self.notify("opened", ticket)

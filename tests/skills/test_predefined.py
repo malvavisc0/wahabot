@@ -145,3 +145,51 @@ def test_all_four_ticket_events_fire_after_the_transition(
     events = [json.loads(hook["body"])["event"] for hook in fake_rest.hooks]
     assert events == ["opened", "needs_you", "done", "closed"]
     assert all("body" not in json.loads(hook["body"]) for hook in fake_rest.hooks)
+
+
+def test_active_state_shuffles_do_not_repeat_opened(tmp_path: Path, skill_store) -> None:
+    events: list[str] = []
+    tickets = TicketStore(
+        skill_store.path, on_event=lambda kind, _ticket: events.append(kind)
+    )
+    contact = tickets.upsert_contact(SENDER, phone=SENDER)
+    ticket = tickets.create_ticket(contact.id, SENDER)
+
+    tickets.update_ticket(
+        ticket.id, TicketUpdate(state="waiting_customer"), actor="assistant"
+    )
+    tickets.update_ticket(ticket.id, TicketUpdate(state="open"), actor="assistant")
+    tickets.update_ticket(ticket.id, TicketUpdate(state="done"), actor="assistant")
+    tickets.update_ticket(ticket.id, TicketUpdate(state="open"), actor="assistant")
+    tickets.update_ticket(ticket.id, TicketUpdate(state="closed"), actor="assistant")
+
+    assert events == ["opened", "done", "opened", "closed"]
+
+
+def test_event_http_errors_are_retried_and_counted(
+    tmp_path: Path, skill_store, secret_store, fake_rest
+) -> None:
+    folder = write_skill(
+        tmp_path,
+        "send-to-url",
+        fake_rest.base,
+        auth="{type: none}",
+        customer_chats="none",
+        events={"done": True},
+    )
+    import_skill(folder, tmp_path / "skills", skill_store)
+    skill_store.set_enabled("send-to-url", True)
+    fake_rest.hook_status = 500
+    service = SkillService(
+        skill_store, secret_store, tmp_path / "skills", "test", RecordingWaha()
+    )
+    tickets = TicketStore(skill_store.path, on_event=EventDispatcher(service).emit)
+    contact = tickets.upsert_contact(SENDER, phone=SENDER)
+    ticket = tickets.create_ticket(contact.id, SENDER)
+
+    tickets.update_ticket(ticket.id, TicketUpdate(state="done", done_by="assistant"))
+
+    assert len(fake_rest.hooks) == 3
+    skill = skill_store.get("send-to-url")
+    assert skill.failure_count == 3
+    assert skill.test_state == "failed"

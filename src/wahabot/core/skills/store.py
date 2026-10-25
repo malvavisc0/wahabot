@@ -27,6 +27,7 @@ _REQUEST_COLUMNS = (
     "id, skill, ticket_id, chat_id, request_json, summary, state, "
     "operator_message_id, created_at, resolved_at"
 )
+PENDING_REQUEST_TTL_S = 24 * 60 * 60
 
 
 class SkillStore:
@@ -259,15 +260,36 @@ class SkillStore:
 
     def latest_pending(self) -> SkillRequest | None:
         """The newest request still waiting for a yes/no."""
-        return self._one_request(
-            "SELECT {columns} FROM skill_requests WHERE state = 'pending' "
-            + "ORDER BY id DESC LIMIT 1"
+        pending = self.pending_requests()
+        return pending[0] if pending else None
+
+    def pending_requests(self) -> list[SkillRequest]:
+        """Every actionable pending request, newest first."""
+        self.expire_requests()
+        conn = connect(self.path)
+        try:
+            rows = conn.execute(
+                f"SELECT {_REQUEST_COLUMNS} FROM skill_requests "
+                + "WHERE state = 'pending' ORDER BY id DESC"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [_request_from_row(row) for row in rows]
+
+    def expire_requests(self, *, now: int | None = None) -> None:
+        """Refuse pending requests that have waited longer than the TTL."""
+        moment = self.now() if now is None else now
+        self._execute(
+            "UPDATE skill_requests SET state = 'refused', resolved_at = ? "
+            + "WHERE state = 'pending' AND created_at < ?",
+            (moment, moment - PENDING_REQUEST_TTL_S),
         )
 
     def pending_for_message(self, message_id: str) -> SkillRequest | None:
         """The pending request whose self-chat message was quoted."""
         if not message_id:
             return None
+        self.expire_requests()
         return self._one_request(
             "SELECT {columns} FROM skill_requests WHERE state = 'pending' "
             + "AND operator_message_id = ? ORDER BY id DESC LIMIT 1",
@@ -276,13 +298,15 @@ class SkillStore:
 
     def claim_request(self, request_id: int) -> SkillRequest | None:
         """Atomically claim a pending request; None when it was already handled."""
+        self.expire_requests()
+        moment = self.now()
         conn = connect(self.path)
         try:
             with transaction(conn):
                 cursor = conn.execute(
                     "UPDATE skill_requests SET state = 'approved', resolved_at = ? "
-                    + "WHERE id = ? AND state = 'pending'",
-                    (self.now(), request_id),
+                    + "WHERE id = ? AND state = 'pending' AND created_at >= ?",
+                    (moment, request_id, moment - PENDING_REQUEST_TTL_S),
                 )
                 if cursor.rowcount != 1:
                     return None

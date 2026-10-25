@@ -77,6 +77,15 @@ class SkillDraftService:
             config = load_skill(name, self.skills_dir)
         except SkillError as exc:
             return SkillTestResult(False, str(exc))
+        if config.kind == "sql":
+            try:
+                result = self.service.test_sql_probe(name)
+            except SkillError as exc:
+                reason = str(exc)
+                self._record(name, False, reason)
+                return SkillTestResult(False, reason)
+            self._record(name, result.passed, result.reason)
+            return result
         if config.test is None or not config.test.configured:
             reason = (
                 "No safe check is configured in skill.yaml; add "

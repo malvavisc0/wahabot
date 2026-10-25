@@ -5,7 +5,7 @@ from pathlib import Path
 
 from wahabot.core.skills.errors import SkillError
 from wahabot.core.skills.guardrails import join_skill_url, substitute_sender
-from wahabot.core.skills.http import decode_response
+from wahabot.core.skills.http import MAX_REQUEST_BYTES, decode_response
 from wahabot.core.skills.loader import load_skill
 from wahabot.core.skills.models import (
     MAX_SKILL_CALLS_PER_TURN,
@@ -54,6 +54,16 @@ def body_bytes(body: object) -> bytes | None:
     return body_text(body).encode()
 
 
+def request_error(method: str, body: object) -> str | None:
+    """Refuse unsupported methods and oversized request bodies."""
+    allowed = {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}
+    if method not in allowed:
+        return f"unsupported HTTP method: {method}"
+    if len(body_bytes(body) or b"") > MAX_REQUEST_BYTES:
+        return f"the request body exceeds {MAX_REQUEST_BYTES} bytes"
+    return None
+
+
 def request_json(prepared: PreparedRequest) -> str:
     """The redactable request shape stored with a call."""
     return json.dumps(
@@ -99,7 +109,7 @@ def summary_text(name: str, prepared: PreparedRequest, run: SkillRuntime) -> str
     if prepared.query:
         lines.append("Query: " + json.dumps(prepared.query, sort_keys=True))
     if prepared.body is not None:
-        lines.append("Body: " + body_text(prepared.body)[:600])
+        lines.append("Body: " + body_text(prepared.body))
     where = f" for {person}" if person else ""
     ticket_text = f" (ticket {ticket.number})" if ticket is not None else ""
     lines.append(f"{where}{ticket_text}?".strip())
@@ -136,10 +146,16 @@ def stored_request(
     payload = json.loads(request.request_json)
     query = dict(payload.get("query") or {})
     path = str(payload["path"])
+    expected = join_skill_url(config, path, query)
+    stored = str(payload.get("url") or "") or expected
+    if stored != expected:
+        raise SkillError(
+            "the staged request no longer matches the current skill configuration"
+        )
     return config, PreparedRequest(
         method=str(payload["method"]),
         path=path,
         query=query,
         body=payload.get("body"),
-        url=str(payload.get("url") or "") or join_skill_url(config, path, query),
+        url=expected,
     )

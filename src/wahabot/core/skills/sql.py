@@ -18,10 +18,11 @@ TIMEOUT_S = 15.0
 
 _FIRST = re.compile(r"^\s*([a-zA-Z]+)")
 _FORBIDDEN = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|REPLACE|ATTACH|DETACH|PRAGMA|VACUUM|CREATE|DROP|"
+    r"\b(INSERT|UPDATE|DELETE|ATTACH|DETACH|PRAGMA|VACUUM|CREATE|DROP|"
     + r"ALTER|TRIGGER|REINDEX|GRANT|REVOKE|COPY|CALL|EXECUTE)\b",
     re.IGNORECASE,
 )
+_REPLACE_STATEMENT = re.compile(r"\bREPLACE\s+INTO\b", re.IGNORECASE)
 
 
 def load_psycopg() -> Any:
@@ -44,21 +45,48 @@ def validate_read_query(query: str) -> str:
     return cleaned
 
 
+def _without_literals(query: str) -> str:
+    """Blank string literals and quoted identifiers for structure checks."""
+    rendered: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(query):
+        char = query[index]
+        if quote:
+            if char == quote:
+                if index + 1 < len(query) and query[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = ""
+            rendered.append(" ")
+            index += 1
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+            rendered.append(" ")
+        else:
+            rendered.append(char)
+        index += 1
+    return "".join(rendered)
+
+
 def _require_single_statement(query: str) -> None:
-    if "--" in query or "/*" in query or "*/" in query:
+    structure = _without_literals(query)
+    if "--" in structure or "/*" in structure or "*/" in structure:
         raise SkillError("SQL comments are refused; they can hide a second statement")
-    if ";" in query:
+    if ";" in structure:
         raise SkillError("only one statement is allowed")
 
 
 def _require_read_shape(query: str) -> None:
-    first = _FIRST.match(query)
+    structure = _without_literals(query)
+    first = _FIRST.match(structure)
     keyword = first.group(1).upper() if first else ""
     if keyword not in ("SELECT", "WITH"):
         raise SkillError("only read-only SELECT or WITH...SELECT queries are allowed")
-    if keyword == "WITH" and not re.search(r"\bSELECT\b", query, re.IGNORECASE):
+    if keyword == "WITH" and not re.search(r"\bSELECT\b", structure, re.IGNORECASE):
         raise SkillError("a WITH query must end in SELECT")
-    if _FORBIDDEN.search(query):
+    if _REPLACE_STATEMENT.search(structure) or _FORBIDDEN.search(structure):
         raise SkillError("only non-mutating read queries are allowed")
 
 

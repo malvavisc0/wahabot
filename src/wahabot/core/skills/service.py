@@ -26,9 +26,6 @@ from wahabot.core.skills.errors import SkillError
 from wahabot.core.skills.execution import (
     CALL_PATH_CAP,
     REQUEST_JSON_CAP,
-    note_failure,
-    record_call,
-    record_confirmed_ticket,
     record_ticket,
 )
 from wahabot.core.skills.guardrails import (
@@ -39,7 +36,7 @@ from wahabot.core.skills.guardrails import (
     needs_confirmation,
     substitute_sender,
 )
-from wahabot.core.skills.http import MAX_REQUEST_BYTES, decode_response, http_call
+from wahabot.core.skills.http import decode_response, http_call
 from wahabot.core.skills.loader import load_skill
 from wahabot.core.skills.models import (
     HttpResult,
@@ -48,10 +45,12 @@ from wahabot.core.skills.models import (
     SkillConfig,
     SkillRun,
     SkillRuntime,
+    SkillTestResult,
     envelope_error,
     envelope_ok,
 )
 from wahabot.core.skills.secrets import SecretStore
+from wahabot.core.skills.service_audit import SkillAuditMixin
 from wahabot.core.skills.sql import execute_query
 from wahabot.core.skills.store import SkillStore
 from wahabot.core.skills.support import (
@@ -59,6 +58,7 @@ from wahabot.core.skills.support import (
     body_text,
     claim_attempt,
     render_result,
+    request_error,
     request_json,
     secret_error,
     stored_request,
@@ -70,16 +70,7 @@ from wahabot.core.transport import Transport
 from wahabot.status import state as status_state
 
 
-def _request_error(method: str, body: object) -> str | None:
-    allowed = {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}
-    if method not in allowed:
-        return f"unsupported HTTP method: {method}"
-    if len(body_bytes(body) or b"") > MAX_REQUEST_BYTES:
-        return f"the request body exceeds {MAX_REQUEST_BYTES} bytes"
-    return None
-
-
-class SkillService:
+class SkillService(SkillAuditMixin):
     """Run one skill call, enforcing every code-owned guardrail."""
 
     def __init__(
@@ -132,6 +123,7 @@ class SkillService:
         method = method.strip().upper()
         config, prepared, error = self._http_attempt(name, method, path, query, body, run)
         if error is not None:
+            self._record_refusal(name, run, method, path, error, started)
             return error
         assert config is not None and prepared is not None
         if is_write_method(method) and needs_confirmation(config, run):
@@ -151,9 +143,9 @@ class SkillService:
         if error is not None:
             return None, None, error
         assert config is not None
-        request_error = _request_error(method, body)
-        if request_error is not None:
-            return None, None, envelope_error(request_error, skill=name)
+        request_problem = request_error(method, body)
+        if request_problem is not None:
+            return None, None, envelope_error(request_problem, skill=name)
         key_error = secret_error(self.secrets, config)
         if key_error is not None:
             return None, None, key_error
@@ -192,11 +184,14 @@ class SkillService:
         started = time.monotonic()
         config, error = self._sql_config(name, run)
         if error is not None:
+            self._record_refusal(name, run, "SQL", query, error, started)
             return error
         assert config is not None and config.sql is not None
         refused = claim_attempt(run, f"{name}:SQL:{query}")
         if refused is not None:
-            return envelope_error(refused, skill=name)
+            error = envelope_error(refused, skill=name)
+            self._record_refusal(name, run, "SQL", query, error, started)
+            return error
         try:
             secret = (
                 self.secrets.get(config.sql.dsn_secret) if config.sql.dsn_secret else ""
@@ -215,6 +210,7 @@ class SkillService:
             error="",
             request=query[:REQUEST_JSON_CAP],
         )
+        record_ticket(run, f"{name} SQL query -> ok", "ok")
         self.store.reset_failures(name)
         return envelope_ok(skill=name, **result)
 
@@ -238,33 +234,64 @@ class SkillService:
 
     def confirm(self, request_id: int, *, approve: bool) -> str:
         """Execute one staged write exactly once, or decline it."""
+        started = time.monotonic()
         request = self.store.claim_request(request_id)
         if request is None:
             return "That request was already handled."
+        run = SkillRun(
+            session=self.session,
+            chat_id=request.chat_id,
+            surface="operator",
+            armed=True,
+            ticket_id=request.ticket_id or 0,
+            ticket_store=self.ticket_store,
+        )
         if not approve:
+            self._record(
+                name=request.skill,
+                run=run,
+                method="CONFIRM",
+                path="",
+                status=None,
+                duration=int((time.monotonic() - started) * 1000),
+                outcome="refused",
+                error="the operator declined the staged write",
+                request=request.request_json,
+            )
+            record_ticket(run, f"{request.skill} staged write declined", "refused")
             self.store.resolve_request(request_id, "refused")
             return "Request declined."
         try:
             config, prepared = stored_request(self.store, self.skills_dir, request)
-            run = SkillRun(
-                session=self.session,
-                chat_id=request.chat_id,
-                surface="operator",
-                armed=True,
-                ticket_id=request.ticket_id or 0,
-                ticket_store=self.ticket_store,
-            )
             result = self._perform(config, prepared, run)
         except (SkillError, KeyError, ValueError, TypeError) as exc:
+            safe = self._safe(str(exc))
+            self._record(
+                name=request.skill,
+                run=run,
+                method="CONFIRM",
+                path="",
+                status=None,
+                duration=int((time.monotonic() - started) * 1000),
+                outcome="failed",
+                error=safe,
+                request=request.request_json,
+            )
+            record_ticket(run, f"{request.skill} staged write failed", "failed")
+            self._note_failure(request.skill, safe)
             self.store.resolve_request(request_id, "failed")
-            return f"Request failed: {self._safe(str(exc))}"
+            return f"Request failed: {safe}"
+        if not 200 <= result.status < 300:
+            self.store.resolve_request(request_id, "failed")
+            return f"Request failed: HTTP {result.status}"
         self.store.resolve_request(request_id, "done")
-        record_confirmed_ticket(self.ticket_store, self.session, request, "ok")
         return f"Done: {self._safe(render_result(result))}"
 
     def send_event(self, name: str, body: bytes, headers: dict[str, str]) -> HttpResult:
         """Post one event payload from the system, without staging."""
         config = enabled_config(self.store, self.skills_dir, name)
+        if config.kind != "http":
+            raise SkillError("only HTTP skills can send ticket events")
         url = join_skill_url(config, config.event_path or "/events")
         prepared = PreparedRequest(
             method="POST",
@@ -275,10 +302,13 @@ class SkillService:
         )
         run = SkillRun(session=self.session, surface="system", armed=True)
         try:
-            return self._perform(config, prepared, run, extra_headers=headers)
+            result = self._perform(config, prepared, run, extra_headers=headers)
         except SkillError as exc:
             self._fail_event(name, run, prepared, str(exc))
             raise
+        if not 200 <= result.status < 300:
+            raise SkillError(f"the event endpoint returned HTTP {result.status}")
+        return result
 
     def test_probe(self, name: str, method: str, path: str) -> HttpResult:
         """Run a configured safe check against a disabled draft."""
@@ -286,6 +316,8 @@ class SkillService:
         if skill is None:
             raise SkillError("that skill is not configured")
         config = load_skill(name, self.skills_dir)
+        if config.kind != "http":
+            raise SkillError("safe HTTP probes are only available for HTTP skills")
         prepared = self._prepare(config, method, path, None, None, SkillRun(armed=True))
         run = SkillRun(
             session=self.session,
@@ -294,7 +326,19 @@ class SkillService:
             ticket_id=0,
             ticket_store=self.ticket_store,
         )
-        return self._perform(config, prepared, run)
+        return self._perform(config, prepared, run, note_failures=False)
+
+    def test_sql_probe(self, name: str) -> SkillTestResult:
+        """Run a harmless read-only query against one draft SQL skill."""
+        skill = self.store.get(name)
+        if skill is None:
+            raise SkillError("that skill is not configured")
+        config = load_skill(name, self.skills_dir)
+        if config.kind != "sql" or config.sql is None:
+            raise SkillError("that skill is not a SQL skill")
+        secret = self.secrets.get(config.sql.dsn_secret) if config.sql.dsn_secret else ""
+        execute_query(config, "SELECT 1", secret)
+        return SkillTestResult(True, "read-only SQL probe passed")
 
     def _usable_config(
         self, name: str, run: SkillRuntime, *, write: bool
@@ -351,26 +395,28 @@ class SkillService:
     ) -> str:
         operator = status_state.operator_jid
         if not operator:
-            return envelope_error(
+            error = envelope_error(
                 "the operator self-chat is not known; the write was not staged",
                 skill=name,
             )
+            self._record_refusal(
+                name, run, prepared.method, prepared.path, error, started
+            )
+            return error
         summary = self.secrets.redact(summary_text(name, prepared, run))
         request = self.store.create_request(
             skill=name,
             ticket_id=run.ticket_id or None,
             chat_id=run.chat_id,
-            request_json=self.secrets.redact(
-                json.dumps(
-                    {
-                        "method": prepared.method,
-                        "path": prepared.path,
-                        "query": prepared.query,
-                        "body": prepared.body,
-                        "url": prepared.url,
-                    },
-                    sort_keys=True,
-                )
+            request_json=json.dumps(
+                {
+                    "method": prepared.method,
+                    "path": prepared.path,
+                    "query": prepared.query,
+                    "body": prepared.body,
+                    "url": prepared.url,
+                },
+                sort_keys=True,
             ),
             summary=summary,
         )
@@ -382,10 +428,26 @@ class SkillService:
                 error=type(exc).__name__,
             )
             self.store.resolve_request(request.id, "refused")
-            return envelope_error(
+            error = envelope_error(
                 "the confirmation message could not be sent; the write was not staged",
                 skill=name,
             )
+            safe = self._safe(error)
+            self._record(
+                name=name,
+                run=run,
+                method=prepared.method,
+                path=prepared.path,
+                status=None,
+                duration=int((time.monotonic() - started) * 1000),
+                outcome="failed",
+                error=safe,
+                request=request.request_json,
+            )
+            record_ticket(
+                run, f"{name} {prepared.method} {prepared.path} not staged", "failed"
+            )
+            return error
         self.store.set_operator_message(request.id, message_id)
         self._record(
             name=name,
@@ -397,6 +459,11 @@ class SkillService:
             outcome="staged",
             error="",
             request=request.request_json,
+        )
+        record_ticket(
+            run,
+            f"{name} {prepared.method} {prepared.path} staged for the operator",
+            "staged",
         )
         return envelope_ok(
             skill=name,
@@ -434,6 +501,7 @@ class SkillService:
         prepared: PreparedRequest,
         run: SkillRuntime,
         extra_headers: dict[str, str] | None = None,
+        note_failures: bool = True,
     ) -> HttpResult:
         headers: dict[str, str] = {"Accept": "application/json"}
         if config.auth.type != "none":
@@ -462,6 +530,9 @@ class SkillService:
             text=safe_body,
             truncated=result.truncated,
         )
+        succeeded = 200 <= result.status < 300
+        outcome = "ok" if succeeded else "failed"
+        error = "" if succeeded else f"the skill returned HTTP {result.status}"
         self._record(
             name=config.name,
             run=run,
@@ -469,16 +540,19 @@ class SkillService:
             path=prepared.path,
             status=result.status,
             duration=duration,
-            outcome="ok",
-            error="",
+            outcome=outcome,
+            error=error,
             request=request_json(prepared),
         )
         record_ticket(
             run,
             f"{config.name} {prepared.method} {prepared.path} -> {result.status}",
-            "ok",
+            outcome,
         )
-        self.store.reset_failures(config.name)
+        if succeeded:
+            self.store.reset_failures(config.name)
+        elif note_failures:
+            self._note_failure(config.name, error)
         return redacted
 
     def _fail_http(
@@ -504,82 +578,3 @@ class SkillService:
         record_ticket(run, f"{name} {prepared.method} {prepared.path} failed", "failed")
         self._note_failure(name, safe)
         return envelope_error(safe, skill=name)
-
-    def _fail_event(
-        self, name: str, run: SkillRuntime, prepared: PreparedRequest, error: str
-    ) -> None:
-        safe = self._safe(error)
-        self._record(
-            name=name,
-            run=run,
-            method="POST",
-            path=prepared.path,
-            status=None,
-            duration=0,
-            outcome="failed",
-            error=safe,
-            request=request_json(prepared),
-        )
-        self._note_failure(name, safe)
-
-    def _fail_sql(self, name: str, run: SkillRuntime, error: str, started: float) -> str:
-        safe = self._safe(error)
-        self._record(
-            name=name,
-            run=run,
-            method="SQL",
-            path=safe[:CALL_PATH_CAP],
-            status=None,
-            duration=int((time.monotonic() - started) * 1000),
-            outcome="failed",
-            error=safe,
-            request=safe[:REQUEST_JSON_CAP],
-        )
-        record_ticket(run, f"{name} SQL failed", "failed")
-        self._note_failure(name, safe)
-        return envelope_error(safe, skill=name)
-
-    def _record(
-        self,
-        *,
-        name: str,
-        run: SkillRuntime,
-        method: str,
-        path: str,
-        status: int | None,
-        duration: int,
-        outcome: str,
-        error: str,
-        request: str,
-    ) -> None:
-        record_call(
-            store=self.store,
-            data_dir=self.data_dir,
-            session=self.session,
-            name=name,
-            run=run,
-            method=method,
-            path=path,
-            status=status,
-            duration_ms=duration,
-            outcome=outcome,
-            error=error,
-            request_json=request,
-            redact=self.secrets.redact,
-        )
-
-    def _note_failure(self, name: str, error: str) -> None:
-        note_failure(
-            store=self.store,
-            transport=self.transport,
-            session=self.session,
-            name=name,
-            error=error,
-            redact=self.secrets.redact,
-        )
-
-    def _safe(self, text: str) -> str:
-        try:
-            return self.secrets.redact(text)
-        except SkillError:
-            return text

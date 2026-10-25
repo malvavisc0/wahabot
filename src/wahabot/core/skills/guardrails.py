@@ -5,14 +5,13 @@ import posixpath
 import re
 import socket
 from dataclasses import dataclass
-from urllib.parse import unquote, urlencode, urlsplit, urlunsplit
+from urllib.parse import SplitResult, unquote, urlencode, urlsplit, urlunsplit
 
 from wahabot.core.skills.errors import SkillError
 from wahabot.core.skills.models import READ_METHODS, SkillConfig, SkillRuntime
 from wahabot.core.tickets.models import Contact, Ticket
 
 _PHONE = re.compile(r"\+\d[\d\s().-]{6,}\d")
-_LONG_DIGITS = re.compile(r"(?<!\d)\d{9,15}(?!\d)")
 _JID = re.compile(r"\b\d+(?:-\d+)?@[a-z.]+", re.IGNORECASE)
 _METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254"})
 
@@ -40,8 +39,11 @@ def join_skill_url(
 ) -> str:
     """Build a request URL locked to one configured base path."""
     decoded, embedded = _relative_path(path)
-    base = urlsplit(config.effective_base_urls[0])
-    base_path = base.path.rstrip("/")
+    urls = config.effective_base_urls
+    if not urls:
+        raise EndpointRefused("the skill has no base URL")
+    base = urlsplit(urls[0])
+    base_path = posixpath.normpath(base.path or "/").rstrip("/")
     relative = decoded.lstrip("/")
     joined = posixpath.normpath(f"{base_path}/{relative}") if relative else base_path
     _require_under_base(joined, base_path)
@@ -49,6 +51,39 @@ def join_skill_url(
         part for part in (embedded, urlencode(query, doseq=True) if query else "") if part
     ]
     return urlunsplit((base.scheme, base.netloc, joined or "/", "&".join(pieces), ""))
+
+
+def url_under_base(config: SkillConfig, url: str) -> bool:
+    """Whether *url* still points inside one configured base path."""
+    candidate = urlsplit(url)
+    if candidate.username or candidate.password:
+        return False
+    path = _safe_request_path(candidate.path)
+    if path is None:
+        return False
+    return any(
+        _same_origin_and_path(candidate, base_url, path)
+        for base_url in config.effective_base_urls
+    )
+
+
+def _safe_request_path(raw: str) -> str | None:
+    decoded = unquote(raw or "/")
+    if "\\" in decoded or ".." in decoded.split("/"):
+        return None
+    return posixpath.normpath(decoded)
+
+
+def _same_origin_and_path(candidate: SplitResult, base_url: str, path: str) -> bool:
+    base = urlsplit(base_url)
+    if (candidate.scheme, candidate.hostname, candidate.port) != (
+        base.scheme,
+        base.hostname,
+        base.port,
+    ):
+        return False
+    base_path = posixpath.normpath(base.path or "/").rstrip("/")
+    return not base_path or path == base_path or path.startswith(base_path + "/")
 
 
 def _relative_path(path: str) -> tuple[str, str]:
@@ -260,10 +295,8 @@ def _jid_error(text: str, allowed: set[str]) -> str | None:
 
 
 def _number_error(text: str, allowed: set[str]) -> str | None:
-    candidates = [match.group() for match in _PHONE.finditer(text)]
-    candidates += [match.group() for match in _LONG_DIGITS.finditer(text)]
-    for candidate in candidates:
-        digits = _digits(candidate)
+    for match in _PHONE.finditer(text):
+        digits = _digits(match.group())
         if digits and digits not in allowed:
             return (
                 "the request names another person; "
@@ -275,10 +308,14 @@ def _number_error(text: str, allowed: set[str]) -> str | None:
 def _contact_error(text: str, run: SkillRuntime, allowed: set[str]) -> str | None:
     if run.ticket_store is None:
         return None
+    _ticket, own_contact = _ticket_and_contact(run)
     folded = text.casefold()
+    compact = re.sub(r"[\s().+-]", "", text)
     for contact in run.ticket_store.contacts():
+        if own_contact is not None and contact.chat_id == own_contact.chat_id:
+            continue
         for value in (contact.phone, contact.chat_id, contact.external_user_ref):
-            if _foreign_value(value, folded, allowed):
+            if _foreign_value(value, folded, compact, allowed):
                 return (
                     "the request names another person; "
                     "customer skills may only see the sender"
@@ -286,13 +323,16 @@ def _contact_error(text: str, run: SkillRuntime, allowed: set[str]) -> str | Non
     return None
 
 
-def _foreign_value(value: str, folded: str, allowed: set[str]) -> bool:
-    return bool(
-        value
-        and len(_digits(value)) >= 7
-        and value.casefold() in folded
-        and _digits(value) not in allowed
-    )
+def _foreign_value(value: str, folded: str, compact: str, allowed: set[str]) -> bool:
+    if not value:
+        return False
+    digits = _digits(value)
+    if digits and digits in allowed:
+        return False
+    normalized = value.casefold()
+    if normalized in folded and (len(digits) >= 7 or len(normalized) >= 4):
+        return True
+    return len(digits) >= 7 and digits in compact
 
 
 def _allowed_identifiers(run: SkillRuntime) -> set[str]:

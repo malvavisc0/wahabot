@@ -13,6 +13,7 @@ from wahabot.core.skills.guardrails import (
     ensure_public_endpoint,
     pinned_request,
     same_origin,
+    url_under_base,
 )
 from wahabot.core.skills.models import HttpResult, SkillConfig
 
@@ -62,9 +63,13 @@ def _next_redirect(
     if count >= MAX_REDIRECTS:
         raise EndpointRefused("the skill request exceeded the redirect limit")
     next_url = urljoin(current, location)
-    if not same_origin(next_url, first) or not _origin_allowed(next_url, config):
+    if (
+        not same_origin(next_url, first)
+        or not _origin_allowed(next_url, config)
+        or not url_under_base(config, next_url)
+    ):
         raise EndpointRefused(
-            "a redirect changed the host; the skill's base URL still owns the request"
+            "a redirect changed the host or left the skill's configured base URL"
         )
     return next_url
 

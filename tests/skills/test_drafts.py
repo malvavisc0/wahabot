@@ -154,3 +154,33 @@ def test_create_draft_saves_partial_inputs_and_stage(
     assert updated.draft_inputs["base_url"] == "https://crm.example/api"
     assert updated.draft_inputs["customer_chats"] == "read"
     assert drafts.enable("customer-records") is False
+
+
+def test_a_sql_skill_passes_its_read_only_probe_and_can_enable(
+    tmp_path: Path, skill_store, secret_store
+) -> None:
+    import sqlite3
+
+    database = tmp_path / "customer.sqlite3"
+    sqlite3.connect(database).execute("CREATE TABLE records (id INTEGER)")
+    folder = write_skill(
+        tmp_path,
+        "customer-sql",
+        "",
+        kind="sql",
+        auth="{type: none}",
+        customer_chats="none",
+        test_check="{}",
+        sql=f"{{engine: sqlite, sqlite_path: {database}}}",
+    )
+    import_skill(folder, tmp_path / "skills", skill_store)
+    service = SkillService(
+        skill_store, secret_store, tmp_path / "skills", "test", RecordingWaha()
+    )
+    drafts = SkillDraftService(skill_store, secret_store, tmp_path / "skills", service)
+
+    result = drafts.run_test("customer-sql")
+
+    assert result.passed is True
+    assert skill_store.get("customer-sql").test_state == "passed"
+    assert drafts.enable("customer-sql") is True

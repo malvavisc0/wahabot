@@ -132,7 +132,7 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
         data_dir=settings.data_dir,
         ticket_store=ticket_store,
     )
-    ticket_store.on_event = EventDispatcher(skill_service).emit
+    ticket_store.on_event = EventDispatcher(skill_service, background=True).emit
     answer_store = AnswerStore(database.path)
     answer_service = AnswerService(answer_store)
     ticket_translator = TicketTranslator()

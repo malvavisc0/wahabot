@@ -6,10 +6,9 @@ from pathlib import Path
 from loguru import logger
 
 from wahabot.core.audit import save_action
-from wahabot.core.skills.models import SkillCall, SkillRequest, SkillRun, SkillRuntime
+from wahabot.core.skills.models import SkillCall, SkillRuntime
 from wahabot.core.skills.store import SkillStore
 from wahabot.core.tickets.models import Actor, EventKind
-from wahabot.core.tickets.store import TicketStore
 from wahabot.core.transport import Transport
 from wahabot.status import state as status_state
 
@@ -88,21 +87,6 @@ def record_ticket(run: SkillRuntime, body: str, outcome: str) -> None:
         logger.exception("Could not write the skill ticket event")
 
 
-def record_confirmed_ticket(
-    ticket_store: TicketStore | None, session: str, request: SkillRequest, outcome: str
-) -> None:
-    """Add the confirmation outcome to the staged write's ticket."""
-    run = SkillRun(
-        session=session,
-        chat_id=request.chat_id,
-        surface="operator",
-        armed=True,
-        ticket_id=request.ticket_id or 0,
-        ticket_store=ticket_store,
-    )
-    record_ticket(run, f"{request.skill} staged write [{outcome}]", outcome)
-
-
 def note_failure(
     *,
     store: SkillStore,
@@ -138,8 +122,10 @@ def note_failure(
 
 
 def _initiator(run: SkillRuntime) -> str:
-    if run.armed or run.surface in ("operator", "system"):
-        return "operator" if run.surface == "operator" or run.armed else "system"
+    if run.surface == "system":
+        return "system"
+    if run.armed or run.surface == "operator":
+        return "operator"
     return "assistant"
 
 

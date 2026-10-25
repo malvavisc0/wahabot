@@ -934,9 +934,12 @@ Each call is written to `skill_calls`, the ticket's `skill_call` event and the
 audit journal with skill, method, safe path, status, duration, initiator,
 ticket and outcome. Three consecutive failures notify the self-chat and mark
 the test failed; a success resets the streak. Drafts become enableable only
-after a current passing safe check whose configuration hash still matches.
-Ticket `opened`, `needs_you`, `done` and `closed` events dispatch after the
-ticket transaction commits; delivery failures never roll back the ticket.
+after a current passing check whose configuration hash still matches: an HTTP
+safe check, or a read-only SQL probe for SQL skills. Ticket `opened`,
+`needs_you`, `done` and `closed` events dispatch in the background after the
+ticket transaction commits; delivery failures never roll back or block the
+ticket.
+
 `send-to-url` signs a stable payload with HMAC-SHA256, retries boundedly,
 repeats a stable event id for receiver deduplication, and omits message bodies.
 

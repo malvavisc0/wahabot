@@ -112,6 +112,10 @@ def _validate_auth(config: SkillConfig) -> None:
 
 
 def _validate_events(config: SkillConfig) -> None:
+    if config.kind != "http":
+        if any(config.events.values()) or config.sign_events:
+            raise ValueError("only HTTP skills can send ticket events")
+        return
     if config.event_path and not config.event_path.startswith("/"):
         raise ValueError("event_path must start with /")
     if config.sign_events and not config.signing_secret.strip():
@@ -134,6 +138,8 @@ def check_base_url(value: str) -> None:
         raise ValueError(f"base URL is not http(s) with a host: {value}")
     if parsed.username or parsed.password:
         raise ValueError("base URL must not carry credentials")
+    if parsed.query:
+        raise ValueError("base URL must not carry a query")
     if parsed.fragment:
         raise ValueError("base URL must not carry a fragment")
 

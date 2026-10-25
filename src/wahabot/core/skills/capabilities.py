@@ -52,10 +52,13 @@ def prompt_section(store: SkillStore, skills_dir: Path, run: SkillRuntime) -> st
     for skill, config in skills:
         lines.append(f"- {skill.name}: {capability_line(skill, config)}")
     docs = docs_for_run(run, skills)
-    if not docs and any(
-        skill.skill_md or config.instructions for skill, config in skills
-    ):
-        lines.append("The skill docs exceed the prompt budget; call read_skill(name).")
+    documented = sum(
+        1 for skill, config in skills if skill.skill_md or config.instructions
+    )
+    if len(docs) < documented:
+        lines.append(
+            "Some skill docs exceed the prompt budget; call read_skill(name) for those."
+        )
     for name, text in docs.items():
         lines.append(f"\n## {name}\n{text}")
     return "\n".join(lines)
@@ -74,12 +77,12 @@ def capability_summary(store: SkillStore, skills_dir: Path) -> str:
 
 def read_skill(store: SkillStore, skills_dir: Path, name: str, run: SkillRuntime) -> str:
     """Read docs on demand when they exceeded the prompt budget."""
-    cached = run.skill_docs.get(name)
-    if cached is not None:
-        return envelope_ok(skill=name, docs=cached)
     allowed = {skill.name for skill, _config in active_skills(store, skills_dir, run)}
     if name not in allowed:
         return envelope_error("that skill is not active in this run")
+    cached = run.skill_docs.get(name)
+    if cached is not None:
+        return envelope_ok(skill=name, docs=cached)
     skill = store.get(name)
     if skill is None:
         return envelope_error("that skill is not configured")
@@ -104,19 +107,24 @@ def capability_line(skill: Skill, config: SkillConfig) -> str:
 def docs_for_run(
     run: SkillRuntime, skills: list[tuple[Skill, SkillConfig]]
 ) -> dict[str, str]:
-    """The docs to inject, or none when the budget needs read_skill instead."""
-    if run.skill_docs:
-        return run.skill_docs
+    """The docs that fit the prompt budget; the rest remain on-demand."""
     candidates = {
         skill.name: skill.skill_md or config.instructions
         for skill, config in skills
         if skill.skill_md or config.instructions
     }
-    total = text_tokens("\n".join(candidates.values())) if candidates else 0
-    if total <= SKILL_DOC_TOKEN_BUDGET:
-        run.skill_docs.update(candidates)
-        return run.skill_docs
-    return {}
+    if not candidates:
+        return {}
+    selected: dict[str, str] = {}
+    total = 0
+    for name, text in candidates.items():
+        size = text_tokens(text)
+        if total + size > SKILL_DOC_TOKEN_BUDGET:
+            continue
+        selected[name] = text
+        total += size
+    run.skill_docs.update(selected)
+    return selected
 
 
 def enabled_config(store: SkillStore, skills_dir: Path, name: str) -> SkillConfig:

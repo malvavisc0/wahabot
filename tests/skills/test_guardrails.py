@@ -169,3 +169,77 @@ def test_an_operator_run_may_look_up_another_person(
     )
 
     assert result["ok"] is True
+
+
+def test_a_same_host_redirect_outside_the_base_path_is_refused(
+    tmp_path: Path, skill_store, secret_store, fake_rest
+) -> None:
+    folder = write_skill(tmp_path, "customer-records", f"{fake_rest.base}/api")
+    import_skill(folder, tmp_path / "skills", skill_store)
+    skill_store.set_enabled("customer-records", True)
+    service = SkillService(
+        skill_store, secret_store, tmp_path / "skills", "test", RecordingWaha()
+    )
+    run = SkillRun(session="test", surface="operator", armed=True)
+
+    result = json_body(
+        service.execute_http(
+            "customer-records", "GET", "/redirect-outside", None, None, run
+        )
+    )
+
+    assert result["ok"] is False
+
+
+def test_an_order_number_is_not_mistaken_for_a_foreign_phone(
+    tmp_path: Path, skill_store, secret_store, fake_rest
+) -> None:
+    service, run, _tickets = _customer_run(tmp_path, skill_store, secret_store, fake_rest)
+
+    result = json_body(
+        service.execute_http(
+            "customer-records", "GET", "/records", {"order": "123456789"}, None, run
+        )
+    )
+
+    assert result["ok"] is True
+
+
+def test_an_alphanumeric_external_ref_of_another_contact_is_refused(
+    tmp_path: Path, skill_store, secret_store, fake_rest
+) -> None:
+    service, run, tickets = _customer_run(tmp_path, skill_store, secret_store, fake_rest)
+    tickets.upsert_contact(
+        "491555000002@c.us", phone="491555000002@c.us", external_user_ref="user-88"
+    )
+
+    result = json_body(
+        service.execute_http(
+            "customer-records", "GET", "/records", {"ref": "user-88"}, None, run
+        )
+    )
+
+    assert result["ok"] is False
+
+
+def _customer_run(tmp_path, skill_store, secret_store, fake_rest):
+    folder = write_skill(tmp_path, "customer-records", fake_rest.base)
+    import_skill(folder, tmp_path / "skills", skill_store)
+    skill_store.set_enabled("customer-records", True)
+    service = SkillService(
+        skill_store, secret_store, tmp_path / "skills", "test", RecordingWaha()
+    )
+    tickets = TicketStore(skill_store.path)
+    tickets.upsert_contact(
+        "491555000002@c.us", phone="491555000002@c.us", display_name="Other"
+    )
+    contact = tickets.upsert_contact(SENDER, phone=SENDER, display_name="Smoke")
+    ticket = tickets.create_ticket(contact.id, SENDER)
+    run = SkillRun(
+        session="test",
+        chat_id=SENDER,
+        surface="customer",
+        ticket_id=ticket.id,
+        ticket_store=tickets,
+    )
+    return service, run, tickets

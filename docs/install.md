@@ -125,11 +125,12 @@ SQL skills are operator-only: one `SELECT` or `WITH ... SELECT`, SQLite opened
 multi-statement, `ATTACH`/`PRAGMA` and mutation refusal plus row/column/byte/
 time caps. Install the optional driver with `uv sync --extra postgres` (or
 `pip install "wahabot[postgres]"`); without it the tool returns a clear error
-instead of crashing.
+instead of crashing. Draft SQL skills are tested with a harmless read-only
+`SELECT 1` probe before they can be enabled.
 
-Enabled event skills run after the ticket transaction commits for `opened`,
-`needs_you`, `done` and `closed`. A failure is logged and never rolls back the
-ticket. `send-to-url` sends a stable, bounded JSON payload signed with
+Enabled event skills run in the background after the ticket transaction commits
+for `opened`, `needs_you`, `done` and `closed`. A failure is logged and never
+rolls back the ticket. `send-to-url` sends a stable, bounded JSON payload signed with
 HMAC-SHA256; it carries no message bodies by default. The web authoring UI,
 marketplace, workflow builder and arbitrary code execution are Phase 5 work.
 

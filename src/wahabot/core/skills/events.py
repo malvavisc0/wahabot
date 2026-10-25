@@ -3,6 +3,8 @@
 import hashlib
 import hmac
 import json
+import queue
+import threading
 import time
 
 from loguru import logger
@@ -16,17 +18,59 @@ MAX_ATTEMPTS = 3
 
 
 class EventDispatcher:
-    """Deliver ticket lifecycle events to every enabled event skill."""
+    """Deliver ticket lifecycle events to every enabled event skill.
 
-    def __init__(self, service: SkillService) -> None:
+    Production wiring uses ``background=True`` so webhook latency never blocks
+    the ticket transaction path. Tests can keep the default synchronous mode.
+    """
+
+    def __init__(self, service: SkillService, *, background: bool = False) -> None:
         self.service = service
+        self._background = background
+        self._queue: queue.Queue[tuple[str, Ticket] | None] = queue.Queue()
+        self._worker: threading.Thread | None = None
+        if background:
+            self._worker = threading.Thread(
+                target=self._work, name="skill-events", daemon=True
+            )
+            self._worker.start()
 
     def emit(self, event_kind: str, ticket: Ticket) -> None:
-        """Run the configured event skills; never raise into the ticket path."""
+        """Queue or run the configured event skills; never raise into tickets."""
+        if self._background:
+            self._queue.put((event_kind, ticket))
+            return
         try:
             self._emit(event_kind, ticket)
         except Exception:
             logger.exception("Skill event dispatch failed for {kind}", kind=event_kind)
+
+    def flush(self, timeout: float = 30.0) -> bool:
+        """Wait for queued deliveries; useful for tests and graceful shutdown."""
+        if not self._background:
+            return True
+        deadline = time.monotonic() + timeout
+        while self._queue.unfinished_tasks:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+        return True
+
+    def _work(self) -> None:
+        while True:
+            item = self._queue.get()
+            try:
+                if item is None:
+                    return
+                event_kind, ticket = item
+                try:
+                    self._emit(event_kind, ticket)
+                except Exception:
+                    logger.exception(
+                        "Skill event dispatch failed for {kind}", kind=event_kind
+                    )
+            finally:
+                self._queue.task_done()
 
     def _emit(self, event_kind: str, ticket: Ticket) -> None:
         for skill in self.service.store.enabled():
