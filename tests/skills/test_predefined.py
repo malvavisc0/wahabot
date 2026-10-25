@@ -193,3 +193,36 @@ def test_event_http_errors_are_retried_and_counted(
     skill = skill_store.get("send-to-url")
     assert skill.failure_count == 3
     assert skill.test_state == "failed"
+
+
+def test_an_event_uses_the_contacts_current_external_ref(
+    tmp_path: Path, skill_store, secret_store, fake_rest
+) -> None:
+    folder = write_skill(
+        tmp_path,
+        "send-to-url",
+        fake_rest.base,
+        auth="{type: none}",
+        customer_chats="none",
+        events={"done": True},
+    )
+    import_skill(folder, tmp_path / "skills", skill_store)
+    skill_store.set_enabled("send-to-url", True)
+    tickets = TicketStore(skill_store.path)
+    service = SkillService(
+        skill_store,
+        secret_store,
+        tmp_path / "skills",
+        "test",
+        RecordingWaha(),
+        ticket_store=tickets,
+    )
+    tickets.on_event = EventDispatcher(service).emit
+    contact = tickets.upsert_contact(SENDER, phone=SENDER)
+    ticket = tickets.create_ticket(contact.id, SENDER)
+    tickets.upsert_contact(SENDER, external_user_ref="fictional-user-99")
+
+    tickets.update_ticket(ticket.id, TicketUpdate(state="done"), actor="assistant")
+
+    payload = json.loads(fake_rest.hooks[-1]["body"])
+    assert payload["contact_ref"] == "fictional-user-99"

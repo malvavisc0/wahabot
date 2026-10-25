@@ -17,7 +17,7 @@ CALL_PATH_CAP = 300
 REQUEST_JSON_CAP = 4000
 
 
-def record_call(
+def append_call(
     *,
     store: SkillStore,
     data_dir: Path | None,
@@ -34,18 +34,19 @@ def record_call(
     redact: Callable[[str], str],
 ) -> None:
     """Append the skill call and its audit entry."""
-    safe = _safe(redact, request_json)
-    safe_error = _safe(redact, error)[:CALL_PATH_CAP]
-    initiator = _initiator(run)
+    safe = redacted(redact, request_json)
+    safe_error = redacted(redact, error)[:CALL_PATH_CAP]
+    safe_path = redacted(redact, path)[:CALL_PATH_CAP]
+    started_by = initiator(run)
     store.add_call(
         SkillCall(
             id=0,
             skill=name,
             ticket_id=run.ticket_id or None,
             chat_id=run.chat_id,
-            started_by=initiator,
+            started_by=started_by,
             method=method,
-            path=path[:CALL_PATH_CAP],
+            path=safe_path,
             status=status,
             duration_ms=duration_ms,
             outcome=outcome,
@@ -62,10 +63,10 @@ def record_call(
             chat_id=run.chat_id,
             skill=name,
             method=method,
-            path=path[:CALL_PATH_CAP],
+            path=safe_path,
             status=status,
             duration_ms=duration_ms,
-            started_by=initiator,
+            started_by=started_by,
             ticket_id=run.ticket_id or None,
             outcome=outcome,
             error=safe_error,
@@ -100,7 +101,7 @@ def note_failure(
     count = store.record_failure(name)
     if count != FAILURE_NOTIFY_THRESHOLD:
         return
-    safe = _safe(redact, error)
+    safe = redacted(redact, error)
     skill = store.get(name)
     store.set_test(
         name,
@@ -121,7 +122,8 @@ def note_failure(
         logger.warning("Could not notify the skill failure")
 
 
-def _initiator(run: SkillRuntime) -> str:
+def initiator(run: SkillRuntime) -> str:
+    """Who started the call, for the audit row."""
     if run.surface == "system":
         return "system"
     if run.armed or run.surface == "operator":
@@ -129,7 +131,8 @@ def _initiator(run: SkillRuntime) -> str:
     return "assistant"
 
 
-def _safe(redact: Callable[[str], str], text: str) -> str:
+def redacted(redact: Callable[[str], str], text: str) -> str:
+    """Redact secrets, falling back to the original text if redaction fails."""
     try:
         return redact(text)
     except Exception:

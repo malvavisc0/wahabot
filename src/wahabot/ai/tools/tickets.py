@@ -222,6 +222,8 @@ def link_ticket_user() -> BaseTool:
         target = current_target()
         if not target.armed and target.surface != "operator":
             return error("linking an external user reference is operator-only")
+        if not user_ref.strip():
+            return error("user_ref must not be empty")
         store: TicketStore | None = target.ticket_store
         if store is None:
             return error("tickets are not available for this run")

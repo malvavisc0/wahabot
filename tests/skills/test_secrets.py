@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -47,3 +48,18 @@ def test_secret_values_never_appear_in_the_row(secret_store: SecretStore) -> Non
     assert row is not None
     assert SECRET_VALUE not in str(row[0])
     assert str(row[0]).startswith("gAAAA")
+
+
+def test_redaction_removes_url_and_json_encoded_echoes(
+    secret_store: SecretStore,
+) -> None:
+    value = 'a/b"c'
+    secret_store.put("ENCODED_KEY", value)
+
+    redacted = secret_store.redact(
+        f"plain {value} url a%2Fb%22c json {json.dumps(value)[1:-1]}"
+    )
+
+    assert value not in redacted
+    assert "a%2Fb%22c" not in redacted
+    assert json.dumps(value)[1:-1] not in redacted

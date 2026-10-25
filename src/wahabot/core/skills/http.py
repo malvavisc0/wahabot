@@ -37,35 +37,55 @@ def http_call(
         raise SkillError(f"the request body exceeds {MAX_REQUEST_BYTES} bytes")
     allow_private = allows_private(config)
     current = url
+    current_method = method
+    current_body = body
     for redirect_count in range(MAX_REDIRECTS + 1):
-        if not (_origin_allowed(current, config)):
+        if not origin_allowed(current, config) or not url_under_base(config, current):
             raise EndpointRefused("the request left the skill's configured base URL")
         address = ensure_public_endpoint(current, allow_private=allow_private)
         pinned, host_headers, extensions = pinned_request(current, address)
-        result, location = _send(
-            method,
+        result, location = send_pinned(
+            current_method,
             pinned,
             {**headers, **host_headers},
-            body,
+            current_body,
             extensions,
         )
         if result is None:
             raise SkillError("the skill request returned no response")
         if result.status not in REDIRECT_CODES or not location:
             return result
-        current = _next_redirect(current, url, location, config, redirect_count)
+        current = next_redirect(current, url, location, config, redirect_count)
+        current_method, current_body = redirected_request(
+            current_method, current_body, result.status
+        )
+        if current_body is None:
+            headers.pop("Content-Type", None)
     raise EndpointRefused("the skill request exceeded the redirect limit")
 
 
-def _next_redirect(
+def redirected_request(
+    method: str, body: bytes | None, status: int
+) -> tuple[str, bytes | None]:
+    """HTTP redirect semantics: 303 and the 301/302 write fallback become GET."""
+    upper = method.upper()
+    if status == 303 and upper != "HEAD":
+        return "GET", None
+    if status in (301, 302) and upper not in ("GET", "HEAD"):
+        return "GET", None
+    return method, body
+
+
+def next_redirect(
     current: str, first: str, location: str, config: SkillConfig, count: int
 ) -> str:
+    """Resolve a Location, refusing an origin change or base-path escape."""
     if count >= MAX_REDIRECTS:
         raise EndpointRefused("the skill request exceeded the redirect limit")
     next_url = urljoin(current, location)
     if (
         not same_origin(next_url, first)
-        or not _origin_allowed(next_url, config)
+        or not origin_allowed(next_url, config)
         or not url_under_base(config, next_url)
     ):
         raise EndpointRefused(
@@ -74,13 +94,14 @@ def _next_redirect(
     return next_url
 
 
-def _send(
+def send_pinned(
     method: str,
     url: str,
     headers: dict[str, str],
     body: bytes | None,
     extensions: dict[str, object],
 ) -> tuple[HttpResult | None, str]:
+    """Send one pinned request and read a bounded response."""
     timeout = httpx.Timeout(REQUEST_TIMEOUT_S)
     try:
         with (
@@ -114,12 +135,15 @@ def _send(
             )
     except httpx.TimeoutException as exc:
         raise SkillError("the skill request timed out") from exc
+    except httpx.InvalidURL as exc:
+        raise SkillError("the skill request URL is not valid") from exc
     except httpx.HTTPError as exc:
         logger.debug("Skill HTTP transport failed: {error}", error=type(exc).__name__)
         raise SkillError("the skill request failed before a response") from exc
 
 
-def _origin_allowed(url: str, config: SkillConfig) -> bool:
+def origin_allowed(url: str, config: SkillConfig) -> bool:
+    """Whether a URL belongs to one of the skill's configured origins."""
     return any(same_origin(url, base) for base in config.effective_base_urls)
 
 

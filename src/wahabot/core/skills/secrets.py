@@ -1,7 +1,9 @@
 """Fernet encryption for skill credentials, with redaction helpers."""
 
+import json
 import sqlite3
 from pathlib import Path
+from urllib.parse import quote
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -61,8 +63,13 @@ class SecretStore:
         return str(row[0]) if row is not None else ""
 
     def redact(self, text: str) -> str:
-        """Remove every stored secret from *text* at the HTTP boundary."""
-        return redact_secrets(text, self.values())
+        """Remove every stored secret, including URL/JSON-encoded echoes."""
+        values = self.values()
+        variants = set(values)
+        for value in values:
+            variants.add(quote(value, safe=""))
+            variants.add(json.dumps(value)[1:-1])
+        return redact_secrets(text, list(variants))
 
     def values(self) -> list[str]:
         """Every decryptable secret value; wrong keys are ignored, never leaked."""

@@ -6,10 +6,11 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, unquote, urlsplit
 
 from pydantic import BaseModel, Field, model_validator
 
+from wahabot.core.skills.errors import SkillError
 from wahabot.core.tickets.store import TicketStore
 
 SAFE_NAME = re.compile(r"^[a-z0-9-]+$")
@@ -63,16 +64,17 @@ class SkillConfig(BaseModel):
     signing_secret: str = ""
     sql: SqlConfig | None = None
     instructions: str = ""
+    skill_md: str = ""
 
     @model_validator(mode="after")
     def validate_skill(self) -> SkillConfig:
         """Enforce the folder contract shared by import and enable."""
         if not SAFE_NAME.fullmatch(self.name):
             raise ValueError("skill name must match [a-z0-9-]+")
-        _validate_http(self)
-        _validate_auth(self)
-        _validate_events(self)
-        _validate_sql(self)
+        validate_http(self)
+        validate_auth(self)
+        validate_events(self)
+        validate_sql(self)
         return self
 
     @property
@@ -85,16 +87,20 @@ class SkillConfig(BaseModel):
 
     @property
     def secret_refs(self) -> list[str]:
-        """Every secret name the folder references."""
-        refs = [self.auth.secret] if self.auth.type != "none" else []
-        if self.signing_secret:
-            refs.append(self.signing_secret)
-        if self.sql is not None and self.sql.dsn_secret:
+        """Every secret name the folder actually uses for its kind."""
+        refs: list[str] = []
+        if self.kind == "http":
+            if self.auth.type != "none":
+                refs.append(self.auth.secret)
+            if self.sign_events and self.signing_secret:
+                refs.append(self.signing_secret)
+        elif self.sql is not None and self.sql.dsn_secret:
             refs.append(self.sql.dsn_secret)
         return list(dict.fromkeys(ref for ref in refs if ref))
 
 
-def _validate_http(config: SkillConfig) -> None:
+def validate_http(config: SkillConfig) -> None:
+    """One base URL contract for HTTP skills; SQL skills need their block."""
     if config.kind != "http":
         if config.sql is None:
             raise ValueError("a SQL skill needs a sql block")
@@ -104,25 +110,57 @@ def _validate_http(config: SkillConfig) -> None:
         raise ValueError("an HTTP skill needs a base_url")
     for url in urls:
         check_base_url(url)
+    if config.test is not None and config.test.path:
+        check_relative_path(config.test.path)
 
 
-def _validate_auth(config: SkillConfig) -> None:
+def validate_auth(config: SkillConfig) -> None:
+    """A non-none auth type must name the secret it needs."""
     if config.auth.type != "none" and not config.auth.secret.strip():
         raise ValueError("the auth type needs a secret reference")
 
 
-def _validate_events(config: SkillConfig) -> None:
+def validate_events(config: SkillConfig) -> None:
+    """Only HTTP skills may subscribe, with the four known event names."""
+    unknown = set(config.events) - {"opened", "needs_you", "done", "closed"}
+    if unknown:
+        raise ValueError("unknown event(s): " + ", ".join(sorted(unknown)))
     if config.kind != "http":
         if any(config.events.values()) or config.sign_events:
             raise ValueError("only HTTP skills can send ticket events")
         return
-    if config.event_path and not config.event_path.startswith("/"):
-        raise ValueError("event_path must start with /")
+    if config.event_path:
+        if not config.event_path.startswith("/"):
+            raise ValueError("event_path must start with /")
+        check_relative_path(config.event_path)
     if config.sign_events and not config.signing_secret.strip():
         raise ValueError("signed events need a signing_secret reference")
 
 
-def _validate_sql(config: SkillConfig) -> None:
+def check_relative_path(value: str) -> None:
+    """Refuse an absolute, traversal, backslash or control path."""
+    parsed = urlsplit(value)
+    if parsed.scheme or parsed.netloc or parsed.fragment or "#" in value:
+        raise ValueError("skill paths must be relative to the base URL")
+    decoded = repeat_unquote(value)
+    if ".." in decoded.split("/") or value.startswith("//"):
+        raise ValueError("skill paths must stay under the base URL")
+    check_base_path(decoded)
+
+
+def repeat_unquote(value: str) -> str:
+    """Decode repeatedly so double-encoded escapes are visible."""
+    decoded = unquote(value)
+    for _ in range(4):
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    return decoded
+
+
+def validate_sql(config: SkillConfig) -> None:
+    """A SQL block needs the path or DSN secret its engine reads."""
     if config.sql is None:
         return
     if config.sql.engine == "sqlite" and not config.sql.sqlite_path.strip():
@@ -134,14 +172,45 @@ def _validate_sql(config: SkillConfig) -> None:
 def check_base_url(value: str) -> None:
     """Validate one base URL: HTTP(S), a host, no credentials, no fragment."""
     parsed = urlsplit(value)
+    check_base_parts(parsed)
+    require_valid_port(parsed)
+
+
+def check_base_parts(parsed: SplitResult) -> None:
+    """Validate a base URL's scheme, host and path."""
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise ValueError(f"base URL is not http(s) with a host: {value}")
+        raise ValueError("base URL must be http(s) and name a host")
     if parsed.username or parsed.password:
         raise ValueError("base URL must not carry credentials")
-    if parsed.query:
-        raise ValueError("base URL must not carry a query")
-    if parsed.fragment:
-        raise ValueError("base URL must not carry a fragment")
+    if parsed.query or parsed.fragment:
+        raise ValueError("base URL must not carry a query or fragment")
+    check_base_host(parsed.hostname)
+    check_base_path(parsed.path)
+
+
+def check_base_host(hostname: str) -> None:
+    """Refuse whitespace or control characters in a configured host."""
+    if any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in hostname):
+        raise ValueError("base URL host must not contain whitespace or controls")
+
+
+def check_base_path(path: str) -> None:
+    """Refuse backslashes or control characters in a configured base path."""
+    decoded = unquote(path)
+    if "\\" in decoded:
+        raise ValueError("base URL path must not contain a backslash")
+    if any(ord(char) < 32 or ord(char) == 127 for char in decoded):
+        raise ValueError("base URL path must not contain control characters")
+
+
+def require_valid_port(parsed: SplitResult) -> None:
+    """Refuse a malformed or zero port on a configured base URL."""
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("base URL has an invalid port") from exc
+    if port == 0:
+        raise ValueError("base URL has an invalid port")
 
 
 @dataclass(slots=True)
@@ -216,6 +285,8 @@ class SkillRun:
 
     session: str = ""
     chat_id: str = ""
+    sender_id: str = ""
+    sender_phone: str = ""
     surface: str = ""
     armed: bool = False
     ticket_id: int = 0
@@ -230,6 +301,8 @@ class SkillRuntime(Protocol):
 
     session: str
     chat_id: str
+    sender_id: str
+    sender_phone: str
     surface: str
     armed: bool
     ticket_id: int
@@ -265,16 +338,6 @@ class SkillTestResult:
 
     passed: bool
     reason: str
-
-
-def envelope_ok(**fields: object) -> str:
-    """The shared success envelope as a JSON string."""
-    return json.dumps({"ok": True, **fields}, ensure_ascii=False)
-
-
-def envelope_error(message: str, **fields: object) -> str:
-    """The shared failure envelope as a JSON string."""
-    return json.dumps({"ok": False, "error": message, **fields}, ensure_ascii=False)
 
 
 def skill_from_row(row: sqlite3.Row) -> Skill:
@@ -330,5 +393,5 @@ def json_object(raw: str) -> dict[str, object]:
 def skill_folder(skills_dir: Path, name: str) -> Path:
     """The folder of one validated skill name."""
     if not SAFE_NAME.fullmatch(name):
-        raise ValueError(f"invalid skill name: {name!r}")
+        raise SkillError(f"invalid skill name: {name!r}")
     return skills_dir / name

@@ -5,7 +5,7 @@ import posixpath
 import re
 import socket
 from dataclasses import dataclass
-from urllib.parse import SplitResult, unquote, urlencode, urlsplit, urlunsplit
+from urllib.parse import SplitResult, quote, unquote, urlencode, urlsplit, urlunsplit
 
 from wahabot.core.skills.errors import SkillError
 from wahabot.core.skills.models import READ_METHODS, SkillConfig, SkillRuntime
@@ -13,7 +13,14 @@ from wahabot.core.tickets.models import Contact, Ticket
 
 _PHONE = re.compile(r"\+\d[\d\s().-]{6,}\d")
 _JID = re.compile(r"\b\d+(?:-\d+)?@[a-z.]+", re.IGNORECASE)
-_METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254"})
+_METADATA_IPS = frozenset(
+    {
+        "169.254.169.254",
+        "fd00:ec2::254",
+        "100.100.100.200",
+        "168.63.129.16",
+    }
+)
 
 
 class EndpointRefused(SkillError):
@@ -38,19 +45,38 @@ def join_skill_url(
     config: SkillConfig, path: str, query: dict[str, str] | None = None
 ) -> str:
     """Build a request URL locked to one configured base path."""
-    decoded, embedded = _relative_path(path)
+    encoded, embedded = relative_path(path)
     urls = config.effective_base_urls
     if not urls:
         raise EndpointRefused("the skill has no base URL")
     base = urlsplit(urls[0])
-    base_path = posixpath.normpath(base.path or "/").rstrip("/")
-    relative = decoded.lstrip("/")
-    joined = posixpath.normpath(f"{base_path}/{relative}") if relative else base_path
-    _require_under_base(joined, base_path)
+    base_encoded = posixpath.normpath(base.path or "/").rstrip("/")
+    base_decoded = posixpath.normpath(decoded_path(base.path or "/")).rstrip("/")
+    relative_encoded = encoded.lstrip("/")
+    relative_decoded = decoded_path(relative_encoded)
+    joined_encoded = (
+        posixpath.normpath(f"{base_encoded}/{relative_encoded}")
+        if relative_encoded
+        else base_encoded
+    )
+    joined_decoded = (
+        posixpath.normpath(f"{base_decoded}/{relative_decoded}")
+        if relative_decoded
+        else base_decoded
+    )
+    require_under_base(joined_decoded, base_decoded)
+    require_under_base(joined_encoded, base_encoded)
     pieces = [
-        part for part in (embedded, urlencode(query, doseq=True) if query else "") if part
+        part
+        for part in (
+            embedded.replace("#", "%23"),
+            urlencode(query, doseq=True) if query else "",
+        )
+        if part
     ]
-    return urlunsplit((base.scheme, base.netloc, joined or "/", "&".join(pieces), ""))
+    return urlunsplit(
+        (base.scheme, base.netloc, joined_encoded or "/", "&".join(pieces), "")
+    )
 
 
 def url_under_base(config: SkillConfig, url: str) -> bool:
@@ -58,49 +84,70 @@ def url_under_base(config: SkillConfig, url: str) -> bool:
     candidate = urlsplit(url)
     if candidate.username or candidate.password:
         return False
-    path = _safe_request_path(candidate.path)
+    path = safe_request_path(candidate.path)
     if path is None:
         return False
     return any(
-        _same_origin_and_path(candidate, base_url, path)
+        same_origin_and_path(candidate, base_url, path)
         for base_url in config.effective_base_urls
     )
 
 
-def _safe_request_path(raw: str) -> str | None:
-    decoded = unquote(raw or "/")
-    if "\\" in decoded or ".." in decoded.split("/"):
+def safe_request_path(raw: str) -> str | None:
+    """A decoded normal path, or None when it tries to escape."""
+    decoded = decoded_path(raw or "/")
+    if has_unsafe_path(decoded):
         return None
     return posixpath.normpath(decoded)
 
 
-def _same_origin_and_path(candidate: SplitResult, base_url: str, path: str) -> bool:
+def same_origin_and_path(candidate: SplitResult, base_url: str, path: str) -> bool:
+    """Whether a parsed URL is on the base origin and under its path."""
     base = urlsplit(base_url)
-    if (candidate.scheme, candidate.hostname, candidate.port) != (
-        base.scheme,
-        base.hostname,
-        base.port,
-    ):
+    left = origin_key(candidate)
+    right = origin_key(base)
+    if left is None or right is None or left != right:
         return False
-    base_path = posixpath.normpath(base.path or "/").rstrip("/")
+    base_path = posixpath.normpath(decoded_path(base.path or "/")).rstrip("/")
     return not base_path or path == base_path or path.startswith(base_path + "/")
 
 
-def _relative_path(path: str) -> tuple[str, str]:
+def relative_path(path: str) -> tuple[str, str]:
+    """Split a caller path into a safe encoded path and its raw query."""
     raw_path, _, embedded = path.partition("?")
     clean = raw_path.strip()
-    if "\\" in clean or clean.startswith("//"):
+    if clean.startswith("//") or "#" in clean:
         raise EndpointRefused("a skill path must be relative to the base URL")
     parsed = urlsplit(clean)
-    if parsed.scheme or parsed.netloc:
+    if parsed.scheme or parsed.netloc or parsed.fragment:
         raise EndpointRefused("a skill path must not be an absolute URL")
-    decoded = unquote(clean)
-    if ".." in decoded.split("/") or decoded.startswith("/../"):
+    if has_unsafe_path(decoded_path(clean)):
         raise EndpointRefused("a skill path must not escape the base URL")
-    return decoded, embedded
+    return clean, embedded
 
 
-def _require_under_base(joined: str, base_path: str) -> None:
+def decoded_path(value: str) -> str:
+    """Decode a path repeatedly, so double-encoded escapes are visible."""
+    decoded = unquote(value)
+    for _ in range(4):
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    return decoded
+
+
+def has_unsafe_path(decoded: str) -> bool:
+    """Traversal, backslash or control characters in a decoded path."""
+    return (
+        "\\" in decoded
+        or ".." in decoded.split("/")
+        or any(ord(char) < 32 or ord(char) == 127 for char in decoded)
+    )
+
+
+def require_under_base(joined: str, base_path: str) -> None:
+    """Refuse a path that leaves the configured base path."""
     if not joined.startswith(base_path or "/"):
         raise EndpointRefused("a skill path must stay under the base URL")
     if base_path and not (joined == base_path or joined.startswith(base_path + "/")):
@@ -109,13 +156,30 @@ def _require_under_base(joined: str, base_path: str) -> None:
 
 def same_origin(first: str, second: str) -> bool:
     """Whether two URLs share scheme, host and effective port."""
-    left = urlsplit(first)
-    right = urlsplit(second)
-    return (left.scheme, left.hostname, left.port) == (
-        right.scheme,
-        right.hostname,
-        right.port,
-    )
+    left = origin_key(urlsplit(first))
+    right = origin_key(urlsplit(second))
+    return left is not None and left == right
+
+
+def effective_port(parsed: SplitResult) -> int | None:
+    """The URL's port, defaulting by scheme and refusing malformed values."""
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if port is not None:
+        return port
+    if parsed.scheme == "https":
+        return 443
+    return 80 if parsed.scheme == "http" else None
+
+
+def origin_key(parsed: SplitResult) -> tuple[str, str | None, int | None] | None:
+    """The (scheme, host, effective port) triple, or None when unparseable."""
+    port = effective_port(parsed)
+    if port is None:
+        return None
+    return parsed.scheme, parsed.hostname, port
 
 
 def ensure_public_endpoint(url: str, *, allow_private: bool) -> PinnedAddress:
@@ -125,17 +189,20 @@ def ensure_public_endpoint(url: str, *, allow_private: bool) -> PinnedAddress:
         raise EndpointRefused("a skill request must be http(s) with a host")
     if parsed.username or parsed.password:
         raise EndpointRefused("a skill request must not carry URL credentials")
+    port = effective_port(parsed)
+    if port is None:
+        raise EndpointRefused("a skill request has an invalid port")
     host = parsed.hostname
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
     addresses = resolve_addresses(host, port)
     if not addresses:
         raise EndpointRefused(f"could not resolve {host}")
     for ip in addresses:
-        _refuse_address(ip, allow_private)
+        refuse_address(ip, allow_private)
     return PinnedAddress(host=host, port=port, ip=addresses[0])
 
 
-def _refuse_address(ip: str, allow_private: bool) -> None:
+def refuse_address(ip: str, allow_private: bool) -> None:
+    """Refuse metadata always, and private/non-global unless the base is local."""
     if is_metadata_ip(ip):
         raise EndpointRefused("the cloud metadata address is not reachable from skills")
     if not allow_private and is_blocked_ip(ip):
@@ -148,7 +215,7 @@ def resolve_addresses(host: str, port: int) -> list[str]:
     """Resolve *host*, IPv4 first, with duplicates removed."""
     try:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise EndpointRefused(f"could not resolve {host}: {exc}") from exc
     found: list[str] = []
     for family, _type, _proto, _canon, sockaddr in infos:
@@ -163,11 +230,19 @@ def resolve_addresses(host: str, port: int) -> list[str]:
 
 def is_metadata_ip(value: str) -> bool:
     """Whether an address is a cloud metadata endpoint."""
-    return value in _METADATA_IPS
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return value in _METADATA_IPS
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return str(address) in _METADATA_IPS
 
 
 def is_blocked_ip(value: str) -> bool:
-    """Loopback, link-local, private, reserved, multicast or unspecified."""
+    """Loopback, link-local, metadata, private, reserved or non-global."""
+    if is_metadata_ip(value):
+        return True
     try:
         address = ipaddress.ip_address(value)
     except ValueError:
@@ -179,6 +254,7 @@ def is_blocked_ip(value: str) -> bool:
         or address.is_reserved
         or address.is_multicast
         or address.is_unspecified
+        or not address.is_global
     )
 
 
@@ -186,10 +262,15 @@ def allows_private(config: SkillConfig) -> bool:
     """Whether the skill's own base URL is a private/local system."""
     if config.kind != "http":
         return False
-    parsed = urlsplit(config.effective_base_urls[0])
+    urls = config.effective_base_urls
+    if not urls:
+        return False
+    parsed = urlsplit(urls[0])
     if not parsed.hostname:
         return False
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    port = effective_port(parsed)
+    if port is None:
+        return False
     try:
         addresses = resolve_addresses(parsed.hostname, port)
     except EndpointRefused:
@@ -208,9 +289,18 @@ def pinned_request(
     pinned = urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, ""))
     headers = {"Host": parsed.netloc}
     extensions: dict[str, object] = {}
-    if parsed.scheme == "https":
+    if parsed.scheme == "https" and not is_ip_address(address.host):
         extensions["sni_hostname"] = address.host
     return pinned, headers, extensions
+
+
+def is_ip_address(value: str) -> bool:
+    """Whether a hostname is an IP literal."""
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
 
 
 PLACEHOLDER_KEYS = (
@@ -219,45 +309,94 @@ PLACEHOLDER_KEYS = (
     "sender.external_user_ref",
     "ticket.number",
 )
+_PLACEHOLDER = re.compile(
+    r"\{(" + "|".join(re.escape(key) for key in PLACEHOLDER_KEYS) + r")\}"
+)
 
 
 def substitute_sender(text: str, run: SkillRuntime) -> str:
-    """Fill only the code-owned placeholders the request actually uses."""
+    """Fill sender and ticket placeholders in plain text."""
+    return fill_placeholders(text, run, encode=False)
+
+
+def substitute_path(text: str, run: SkillRuntime) -> str:
+    """Fill placeholders in a URL path, percent-encoding each value."""
+    return fill_placeholders(text, run, encode=True)
+
+
+def fill_placeholders(text: str, run: SkillRuntime, *, encode: bool) -> str:
+    """Replace used placeholders in one pass so values are never re-expanded."""
     used = {key for key in PLACEHOLDER_KEYS if "{" + key + "}" in text}
     if not used:
         return text
     values = sender_values(run, required=used)
-    for key, value in values.items():
-        text = text.replace("{" + key + "}", value)
-    return text
+    if encode:
+        values = {key: quote(value, safe="") for key, value in values.items()}
+    return _PLACEHOLDER.sub(lambda match: values[match.group(1)], text)
 
 
 def sender_values(run: SkillRuntime, required: set[str] | None = None) -> dict[str, str]:
     """The sender and ticket facts code fills into a request."""
-    ticket, contact = _ticket_and_contact(run)
-    phone = _digits(contact.phone if contact is not None else run.chat_id)
-    external = (ticket.external_user_ref if ticket is not None else "") or (
-        contact.external_user_ref if contact is not None else ""
-    )
+    ticket, contact = ticket_and_contact(run)
+    identity = sender_identity(run, ticket, contact)
     values = {
-        "sender.phone": phone,
-        "sender.chat_id": run.chat_id or (contact.chat_id if contact is not None else ""),
-        "sender.external_user_ref": external,
+        "sender.phone": sender_phone(contact, identity, run.sender_phone),
+        "sender.chat_id": identity,
+        "sender.external_user_ref": sender_external(ticket, contact),
         "ticket.number": str(ticket.number) if ticket is not None else "",
     }
-    _require_values(values, required if required is not None else set(PLACEHOLDER_KEYS))
+    require_values(values, required if required is not None else set())
     return values
 
 
-def _ticket_and_contact(run: SkillRuntime) -> tuple[Ticket | None, Contact | None]:
+def sender_identity(
+    run: SkillRuntime, ticket: Ticket | None, contact: Contact | None
+) -> str:
+    """The sender's own JID, never a team group's chat id."""
+    if run.surface == "team_group":
+        if not run.sender_id or run.sender_id == run.chat_id:
+            return ""
+        return run.sender_id
+    return (
+        (ticket.chat_id if ticket is not None else "")
+        or run.sender_id
+        or (contact.chat_id if contact is not None else "")
+        or run.chat_id
+    )
+
+
+def sender_phone(contact: Contact | None, identity: str, alias: str = "") -> str:
+    """The caller-resolved phone, the contact's phone, or identity digits."""
+    if alias:
+        return digits(alias)
+    return digits(contact.phone if contact is not None and contact.phone else identity)
+
+
+def sender_external(ticket: Ticket | None, contact: Contact | None) -> str:
+    """The current contact ref, falling back to the ticket's snapshot."""
+    return (contact.external_user_ref if contact is not None else "") or (
+        ticket.external_user_ref if ticket is not None else ""
+    )
+
+
+def ticket_and_contact(run: SkillRuntime) -> tuple[Ticket | None, Contact | None]:
+    """The run's ticket and the sender's contact (participant in a team group)."""
     if run.ticket_store is None:
         return None, None
     ticket = run.ticket_store.ticket(run.ticket_id) if run.ticket_id else None
-    chat_id = ticket.chat_id if ticket is not None else run.chat_id
+    if run.surface == "team_group":
+        if not run.sender_id or run.sender_id == run.chat_id:
+            return ticket, None
+        chat_id = run.sender_id
+    elif ticket is not None:
+        chat_id = ticket.chat_id
+    else:
+        chat_id = run.sender_id or run.chat_id
     return ticket, run.ticket_store.contact(chat_id)
 
 
-def _require_values(values: dict[str, str], wanted: set[str]) -> None:
+def require_values(values: dict[str, str], wanted: set[str]) -> None:
+    """Refuse a request whose used placeholders have no value."""
     missing = [key for key in wanted if not values.get(key)]
     if missing:
         raise EndpointRefused(
@@ -265,7 +404,8 @@ def _require_values(values: dict[str, str], wanted: set[str]) -> None:
         )
 
 
-def _digits(value: str) -> str:
+def digits(value: str) -> str:
+    """The numeric local part of a phone-like JID."""
     return "".join(
         char for char in value.split("@", 1)[0].split(":", 1)[0] if char.isdigit()
     )
@@ -275,17 +415,18 @@ def foreign_identifier_error(text: str, run: SkillRuntime) -> str | None:
     """Refuse another person's identifiers in a customer or team-group run."""
     if run.armed:
         return None
-    allowed = _allowed_identifiers(run)
-    jid_error = _jid_error(text, allowed)
-    if jid_error is not None:
-        return jid_error
-    number_error = _number_error(text, allowed)
-    if number_error is not None:
-        return number_error
-    return _contact_error(text, run, allowed)
+    allowed = allowed_identifiers(run)
+    problem = jid_error(text, allowed)
+    if problem is not None:
+        return problem
+    problem = number_error(text, allowed)
+    if problem is not None:
+        return problem
+    return contact_error(text, run, allowed)
 
 
-def _jid_error(text: str, allowed: set[str]) -> str | None:
+def jid_error(text: str, allowed: set[str]) -> str | None:
+    """Refuse a JID that is not the sender's."""
     for jid in _JID.findall(text):
         if jid.casefold() not in allowed:
             return (
@@ -294,10 +435,11 @@ def _jid_error(text: str, allowed: set[str]) -> str | None:
     return None
 
 
-def _number_error(text: str, allowed: set[str]) -> str | None:
+def number_error(text: str, allowed: set[str]) -> str | None:
+    """Refuse an international phone number that is not the sender's."""
     for match in _PHONE.finditer(text):
-        digits = _digits(match.group())
-        if digits and digits not in allowed:
+        value = digits(match.group())
+        if value and value not in allowed:
             return (
                 "the request names another person; "
                 "customer skills may only see the sender"
@@ -305,17 +447,18 @@ def _number_error(text: str, allowed: set[str]) -> str | None:
     return None
 
 
-def _contact_error(text: str, run: SkillRuntime, allowed: set[str]) -> str | None:
+def contact_error(text: str, run: SkillRuntime, allowed: set[str]) -> str | None:
+    """Refuse another known contact's identifiers."""
     if run.ticket_store is None:
         return None
-    _ticket, own_contact = _ticket_and_contact(run)
+    _ticket, own_contact = ticket_and_contact(run)
     folded = text.casefold()
     compact = re.sub(r"[\s().+-]", "", text)
     for contact in run.ticket_store.contacts():
         if own_contact is not None and contact.chat_id == own_contact.chat_id:
             continue
         for value in (contact.phone, contact.chat_id, contact.external_user_ref):
-            if _foreign_value(value, folded, compact, allowed):
+            if foreign_value(value, folded, compact, allowed):
                 return (
                     "the request names another person; "
                     "customer skills may only see the sender"
@@ -323,31 +466,35 @@ def _contact_error(text: str, run: SkillRuntime, allowed: set[str]) -> str | Non
     return None
 
 
-def _foreign_value(value: str, folded: str, compact: str, allowed: set[str]) -> bool:
+def foreign_value(value: str, folded: str, compact: str, allowed: set[str]) -> bool:
+    """Whether one contact identifier appears in the request text."""
     if not value:
         return False
-    digits = _digits(value)
-    if digits and digits in allowed:
+    number = digits(value)
+    if number and number in allowed:
         return False
     normalized = value.casefold()
-    if normalized in folded and (len(digits) >= 7 or len(normalized) >= 4):
+    if normalized in folded and (len(number) >= 7 or len(normalized) >= 4):
         return True
-    return len(digits) >= 7 and digits in compact
+    return len(number) >= 7 and number in compact
 
 
-def _allowed_identifiers(run: SkillRuntime) -> set[str]:
+def allowed_identifiers(run: SkillRuntime) -> set[str]:
+    """The sender, chat and ticket identifiers a non-operator request may use."""
     allowed: set[str] = set()
     for value in sender_values(run, required=set()).values():
         if value:
             allowed.add(value.casefold())
-            digits = _digits(value)
-            if digits:
-                allowed.add(digits)
-    if run.chat_id:
-        allowed.add(run.chat_id.casefold())
-        digits = _digits(run.chat_id)
-        if digits:
-            allowed.add(digits)
+            number = digits(value)
+            if number:
+                allowed.add(number)
+    for jid in (run.sender_id, run.chat_id):
+        if not jid:
+            continue
+        allowed.add(jid.casefold())
+        number = digits(jid)
+        if number:
+            allowed.add(number)
     return allowed
 
 

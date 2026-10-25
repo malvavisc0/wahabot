@@ -98,13 +98,19 @@ test: {method: GET, path: /health}
 uv run wahabot skills list
 uv run wahabot skills import ./customer-records --enable
 uv run wahabot skills test customer-records
+uv run wahabot skills enable customer-records
+uv run wahabot skills disable customer-records
 ```
 
-Secrets are encrypted with Fernet using `WAHABOT_SECRET_KEY` (base64, 32 bytes) and never returned to the model, web layer, prompts, logs, journal, History, tool results or errors. Without the key, secret-bearing skill writes refuse. Import validates that every referenced secret exists. `--enable` and `skills test` run only the prepared safe read (`GET`/`HEAD`/`OPTIONS`) from `skill.yaml`; they never run a write, and a changed service URL, key, instructions or permission marks the test stale until it passes again.
+Secrets are encrypted with Fernet using `WAHABOT_SECRET_KEY` (base64, 32 bytes) and never returned to the model, web layer, prompts, logs, journal, History, tool results or errors. Without the key, secret-bearing skill calls refuse. Import validates that every referenced secret exists. `--enable` and `skills test` run only the prepared safe read (`GET`/`HEAD`/`OPTIONS`) from `skill.yaml`; they never run a write, and a changed service URL, key, instructions or permission marks the test stale until it passes again.
 
 The runtime locks every request to the skill's base origin, refuses path escapes, absolute URLs, host-changing redirects, loopback/private/link-local/metadata addresses (unless the skill itself is a private service), pins the resolved IP, re-checks each redirect, caps body/response/time, and permits five calls per turn with repeated identical calls refused. Customer and team-group runs may use only the sender's own phone, chat id, external user ref and ticket number; another person's identifier is refused.
 
-Customer and team-group writes are staged, never sent. The self-chat shows the exact prepared request and asks `Reply yes.`; quoting that message and answering yes executes the stored request exactly once. Team-group writes always need the operator's yes. Operator commands execute writes directly. Every call lands in `skill_calls`, the ticket event trail and the audit journal.
+Customer writes are staged unless `writes_need_operator` is false; team-group
+writes always ask. The self-chat shows the exact prepared request and asks
+`Reply yes.`; quoting that message and answering yes executes the stored request
+exactly once. Operator commands execute writes directly. Every call lands in
+`skill_calls`, the ticket event trail and the audit journal.
 
 `sql_query` is operator-only in this version: one `SELECT` or `WITH ... SELECT`, SQLite opened `mode=ro`, a read-only Postgres transaction when the optional `postgres` extra is installed, comment/multi-statement/`ATTACH`/`PRAGMA` refusal, and row/column/byte/time caps. Enabled event skills run after the ticket transaction commits for opened, needs-you, done and closed; failures never roll back or block the ticket. `send-to-url` signs a stable payload (event, event id, ticket number, state, resolver, external contact ref, timestamp) with HMAC-SHA256, retries boundedly, and sends no message body by default.
 

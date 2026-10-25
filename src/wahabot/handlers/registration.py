@@ -1,5 +1,6 @@
 """Webhook registration and per-process handler wiring."""
 
+import asyncio
 import time
 from dataclasses import dataclass
 
@@ -132,7 +133,13 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
         data_dir=settings.data_dir,
         ticket_store=ticket_store,
     )
-    ticket_store.on_event = EventDispatcher(skill_service, background=True).emit
+    event_dispatcher = EventDispatcher(skill_service, background=True)
+    ticket_store.on_event = event_dispatcher.emit
+
+    async def stop_skill_events() -> None:
+        await asyncio.to_thread(event_dispatcher.stop)
+
+    on_shutdown(stop_skill_events)
     answer_store = AnswerStore(database.path)
     answer_service = AnswerService(answer_store)
     ticket_translator = TicketTranslator()

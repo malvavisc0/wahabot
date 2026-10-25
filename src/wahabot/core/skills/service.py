@@ -3,10 +3,12 @@
 import json
 import time
 from pathlib import Path
-from urllib.parse import parse_qsl
+from typing import cast
 
 from loguru import logger
 
+from wahabot.core.envelope import error as envelope_error
+from wahabot.core.envelope import ok as envelope_ok
 from wahabot.core.skills.capabilities import (
     active_skills as load_active_skills,
 )
@@ -22,7 +24,8 @@ from wahabot.core.skills.capabilities import (
 from wahabot.core.skills.capabilities import (
     read_skill as read_skill_text,
 )
-from wahabot.core.skills.errors import SkillError
+from wahabot.core.skills.configuration import configuration_changed
+from wahabot.core.skills.errors import QueryRefused, SkillError
 from wahabot.core.skills.execution import (
     CALL_PATH_CAP,
     REQUEST_JSON_CAP,
@@ -30,11 +33,9 @@ from wahabot.core.skills.execution import (
 )
 from wahabot.core.skills.guardrails import (
     check_surface_access,
-    foreign_identifier_error,
     is_write_method,
     join_skill_url,
     needs_confirmation,
-    substitute_sender,
 )
 from wahabot.core.skills.http import decode_response, http_call
 from wahabot.core.skills.loader import load_skill
@@ -46,23 +47,22 @@ from wahabot.core.skills.models import (
     SkillRun,
     SkillRuntime,
     SkillTestResult,
-    envelope_error,
-    envelope_ok,
 )
 from wahabot.core.skills.secrets import SecretStore
 from wahabot.core.skills.service_audit import SkillAuditMixin
-from wahabot.core.skills.sql import execute_query
+from wahabot.core.skills.sql import execute_query, validate_read_query
 from wahabot.core.skills.store import SkillStore
 from wahabot.core.skills.support import (
     body_bytes,
-    body_text,
     claim_attempt,
+    claim_request,
+    prepare_request,
+    redact_data,
     render_result,
     request_error,
     request_json,
     secret_error,
     stored_request,
-    substitute_body,
     summary_text,
 )
 from wahabot.core.tickets.store import TicketStore
@@ -95,19 +95,33 @@ class SkillService(SkillAuditMixin):
         self, run: SkillRuntime | None = None
     ) -> list[tuple[Skill, SkillConfig]]:
         """Every enabled skill the run's surface may use."""
-        return load_active_skills(self.store, self.skills_dir, run)
+        return load_active_skills(self.store, self.skills_dir, run, self.secrets)
 
     def prompt_section(self, run: SkillRuntime) -> str:
         """The active capability list and, when they fit, the skill docs."""
-        return prompt_text(self.store, self.skills_dir, run)
+        return self.safe_text(prompt_text(self.store, self.skills_dir, run, self.secrets))
 
     def capability_summary(self) -> str:
         """Plain-language active skills for the operator's self-chat."""
-        return capability_text(self.store, self.skills_dir)
+        return self.safe_text(capability_text(self.store, self.skills_dir, self.secrets))
 
     def read_skill(self, name: str, run: SkillRuntime) -> str:
         """Read docs on demand when they exceeded the prompt budget."""
-        return read_skill_text(self.store, self.skills_dir, name, run)
+        return self.safe_text(
+            read_skill_text(self.store, self.skills_dir, name, run, self.secrets)
+        )
+
+    def configuration_problem(self, name: str, skill: Skill) -> str | None:
+        """Refuse an enabled skill whose live configuration moved past its test."""
+        if not configuration_changed(self.store, self.secrets, self.skills_dir, name):
+            return None
+        self.store.set_test(
+            name,
+            state="stale",
+            reason="the skill configuration changed after its last test",
+            config_hash=skill.test_config_hash,
+        )
+        return "the skill configuration changed; test it again"
 
     def execute_http(
         self,
@@ -121,16 +135,16 @@ class SkillService(SkillAuditMixin):
         """Run one HTTP skill call, or stage a customer write for the operator."""
         started = time.monotonic()
         method = method.strip().upper()
-        config, prepared, error = self._http_attempt(name, method, path, query, body, run)
+        config, prepared, error = self.http_attempt(name, method, path, query, body, run)
         if error is not None:
-            self._record_refusal(name, run, method, path, error, started)
+            self.record_refusal(name, run, method, path, error, started)
             return error
         assert config is not None and prepared is not None
         if is_write_method(method) and needs_confirmation(config, run):
-            return self._stage(name, config, prepared, run, started)
-        return self._perform_envelope(name, config, prepared, run, started)
+            return self.stage_request(name, config, prepared, run, started)
+        return self.perform_envelope(name, config, prepared, run, started)
 
-    def _http_attempt(
+    def http_attempt(
         self,
         name: str,
         method: str,
@@ -139,7 +153,8 @@ class SkillService(SkillAuditMixin):
         body: object,
         run: SkillRuntime,
     ) -> tuple[SkillConfig | None, PreparedRequest | None, str | None]:
-        config, error = self._usable_config(name, run, write=is_write_method(method))
+        """Preflight one HTTP call: config, caps, secret, URL and sender scope."""
+        config, error = self.usable_config(name, run, write=is_write_method(method))
         if error is not None:
             return None, None, error
         assert config is not None
@@ -150,47 +165,32 @@ class SkillService(SkillAuditMixin):
         if key_error is not None:
             return None, None, key_error
         try:
-            prepared = self._prepare(config, method, path, query, body, run)
+            prepared = prepare_request(config, method, path, query, body, run)
         except SkillError as exc:
-            return None, None, envelope_error(self._safe(str(exc)), skill=name)
-        claim_error = self._claim_request(name, prepared, run)
+            return None, None, envelope_error(self.safe_text(str(exc)), skill=name)
+        claim_error = claim_request(name, prepared, run)
         if claim_error is not None:
             return None, None, envelope_error(claim_error, skill=name)
         return config, prepared, None
 
-    def _claim_request(
-        self, name: str, prepared: PreparedRequest, run: SkillRuntime
-    ) -> str | None:
-        repeat = (
-            f"{name}:{prepared.method}:{prepared.path}:"
-            + f"{json.dumps(prepared.query, sort_keys=True)}:{body_text(prepared.body)}"
-        )
-        refused = claim_attempt(run, repeat)
-        if refused is not None:
-            return refused
-        return foreign_identifier_error(
-            " ".join(
-                [
-                    prepared.path,
-                    json.dumps(prepared.query, sort_keys=True),
-                    body_text(prepared.body),
-                ]
-            ),
-            run,
-        )
-
     def execute_sql(self, name: str, query: str, run: SkillRuntime) -> str:
         """Run an operator-only read query against a SQL skill."""
         started = time.monotonic()
-        config, error = self._sql_config(name, run)
+        config, error = self.sql_config(name, run)
         if error is not None:
-            self._record_refusal(name, run, "SQL", query, error, started)
+            self.record_refusal(name, run, "SQL", query, error, started)
             return error
         assert config is not None and config.sql is not None
         refused = claim_attempt(run, f"{name}:SQL:{query}")
         if refused is not None:
             error = envelope_error(refused, skill=name)
-            self._record_refusal(name, run, "SQL", query, error, started)
+            self.record_refusal(name, run, "SQL", query, error, started)
+            return error
+        try:
+            validate_read_query(query)
+        except QueryRefused as exc:
+            error = envelope_error(str(exc), skill=name)
+            self.record_refusal(name, run, "SQL", query, error, started)
             return error
         try:
             secret = (
@@ -198,8 +198,9 @@ class SkillService(SkillAuditMixin):
             )
             result = execute_query(config, query, secret)
         except SkillError as exc:
-            return self._fail_sql(name, run, str(exc), started)
-        self._record(
+            return self.fail_sql(name, run, query, str(exc), started)
+        result = cast("dict[str, object]", redact_data(result, self.secrets.redact))
+        self.record_call(
             name=name,
             run=run,
             method="SQL",
@@ -214,9 +215,10 @@ class SkillService(SkillAuditMixin):
         self.store.reset_failures(name)
         return envelope_ok(skill=name, **result)
 
-    def _sql_config(
+    def sql_config(
         self, name: str, run: SkillRuntime
     ) -> tuple[SkillConfig | None, str | None]:
+        """The enabled SQL skill config, or the operator-only refusal."""
         if not run.armed and run.surface not in ("operator", "system"):
             return None, envelope_error(
                 "SQL skills are operator-only in this version", skill=name
@@ -224,10 +226,13 @@ class SkillService(SkillAuditMixin):
         skill = self.store.get(name)
         if skill is None or not skill.enabled:
             return None, envelope_error("that skill is not enabled", skill=name)
+        changed = self.configuration_problem(name, skill)
+        if changed is not None:
+            return None, envelope_error(changed, skill=name)
         try:
             config = load_skill(name, self.skills_dir)
         except SkillError as exc:
-            return None, envelope_error(str(exc), skill=name)
+            return None, envelope_error(self.safe_text(str(exc)), skill=name)
         if config.kind != "sql" or config.sql is None:
             return None, envelope_error("that skill is not a SQL skill", skill=name)
         return config, None
@@ -247,7 +252,7 @@ class SkillService(SkillAuditMixin):
             ticket_store=self.ticket_store,
         )
         if not approve:
-            self._record(
+            self.record_call(
                 name=request.skill,
                 run=run,
                 method="CONFIRM",
@@ -263,10 +268,18 @@ class SkillService(SkillAuditMixin):
             return "Request declined."
         try:
             config, prepared = stored_request(self.store, self.skills_dir, request)
-            result = self._perform(config, prepared, run)
+            skill = self.store.get(request.skill)
+            problem = (
+                self.configuration_problem(request.skill, skill)
+                if skill is not None
+                else None
+            )
+            if problem is not None:
+                raise SkillError(problem)
+            result = self.perform_request(config, prepared, run)
         except (SkillError, KeyError, ValueError, TypeError) as exc:
-            safe = self._safe(str(exc))
-            self._record(
+            safe = self.safe_text(str(exc))
+            self.record_call(
                 name=request.skill,
                 run=run,
                 method="CONFIRM",
@@ -278,17 +291,22 @@ class SkillService(SkillAuditMixin):
                 request=request.request_json,
             )
             record_ticket(run, f"{request.skill} staged write failed", "failed")
-            self._note_failure(request.skill, safe)
+            self.count_failure(request.skill, safe)
             self.store.resolve_request(request_id, "failed")
             return f"Request failed: {safe}"
         if not 200 <= result.status < 300:
             self.store.resolve_request(request_id, "failed")
             return f"Request failed: HTTP {result.status}"
         self.store.resolve_request(request_id, "done")
-        return f"Done: {self._safe(render_result(result))}"
+        return f"Done: {self.safe_text(render_result(result))}"
 
     def send_event(self, name: str, body: bytes, headers: dict[str, str]) -> HttpResult:
         """Post one event payload from the system, without staging."""
+        skill = self.store.get(name)
+        if skill is not None:
+            problem = self.configuration_problem(name, skill)
+            if problem is not None:
+                raise SkillError(problem)
         config = enabled_config(self.store, self.skills_dir, name)
         if config.kind != "http":
             raise SkillError("only HTTP skills can send ticket events")
@@ -302,9 +320,9 @@ class SkillService(SkillAuditMixin):
         )
         run = SkillRun(session=self.session, surface="system", armed=True)
         try:
-            result = self._perform(config, prepared, run, extra_headers=headers)
+            result = self.perform_request(config, prepared, run, extra_headers=headers)
         except SkillError as exc:
-            self._fail_event(name, run, prepared, str(exc))
+            self.fail_event(name, run, prepared, str(exc))
             raise
         if not 200 <= result.status < 300:
             raise SkillError(f"the event endpoint returned HTTP {result.status}")
@@ -318,7 +336,7 @@ class SkillService(SkillAuditMixin):
         config = load_skill(name, self.skills_dir)
         if config.kind != "http":
             raise SkillError("safe HTTP probes are only available for HTTP skills")
-        prepared = self._prepare(config, method, path, None, None, SkillRun(armed=True))
+        prepared = prepare_request(config, method, path, None, None, SkillRun(armed=True))
         run = SkillRun(
             session=self.session,
             surface="system",
@@ -326,7 +344,7 @@ class SkillService(SkillAuditMixin):
             ticket_id=0,
             ticket_store=self.ticket_store,
         )
-        return self._perform(config, prepared, run, note_failures=False)
+        return self.perform_request(config, prepared, run, note_failures=False)
 
     def test_sql_probe(self, name: str) -> SkillTestResult:
         """Run a harmless read-only query against one draft SQL skill."""
@@ -338,18 +356,23 @@ class SkillService(SkillAuditMixin):
             raise SkillError("that skill is not a SQL skill")
         secret = self.secrets.get(config.sql.dsn_secret) if config.sql.dsn_secret else ""
         execute_query(config, "SELECT 1", secret)
+        self.store.reset_failures(name)
         return SkillTestResult(True, "read-only SQL probe passed")
 
-    def _usable_config(
+    def usable_config(
         self, name: str, run: SkillRuntime, *, write: bool
     ) -> tuple[SkillConfig | None, str | None]:
+        """The enabled live config, checked against the run's surface."""
         skill = self.store.get(name)
         if skill is None or not skill.enabled:
             return None, envelope_error("that skill is not enabled", skill=name)
+        changed = self.configuration_problem(name, skill)
+        if changed is not None:
+            return None, envelope_error(changed, skill=name)
         try:
             config = load_skill(name, self.skills_dir)
         except SkillError as exc:
-            return None, envelope_error(str(exc), skill=name)
+            return None, envelope_error(self.safe_text(str(exc)), skill=name)
         if config.kind != "http":
             return None, envelope_error("that skill is not an HTTP skill", skill=name)
         blocked = check_surface_access(config, run, write=write)
@@ -357,35 +380,7 @@ class SkillService(SkillAuditMixin):
             return None, envelope_error(blocked, skill=name)
         return config, None
 
-    def _prepare(
-        self,
-        config: SkillConfig,
-        method: str,
-        path: str,
-        query: dict[str, str] | None,
-        body: object,
-        run: SkillRuntime,
-    ) -> PreparedRequest:
-        rendered = substitute_sender(path, run)
-        raw_path, _, embedded = rendered.partition("?")
-        values: dict[str, str] = {
-            str(key): substitute_sender(str(value), run)
-            for key, value in (query or {}).items()
-        }
-        if embedded:
-            for key, value in parse_qsl(embedded, keep_blank_values=True):
-                values[key] = value
-        clean_body = substitute_body(body, run)
-        url = join_skill_url(config, raw_path, values)
-        return PreparedRequest(
-            method=method,
-            path=raw_path,
-            query=values,
-            body=clean_body,
-            url=url,
-        )
-
-    def _stage(
+    def stage_request(
         self,
         name: str,
         config: SkillConfig,
@@ -393,15 +388,14 @@ class SkillService(SkillAuditMixin):
         run: SkillRuntime,
         started: float,
     ) -> str:
+        """Write the pending request and ask the operator in the self-chat."""
         operator = status_state.operator_jid
         if not operator:
             error = envelope_error(
                 "the operator self-chat is not known; the write was not staged",
                 skill=name,
             )
-            self._record_refusal(
-                name, run, prepared.method, prepared.path, error, started
-            )
+            self.record_refusal(name, run, prepared.method, prepared.path, error, started)
             return error
         summary = self.secrets.redact(summary_text(name, prepared, run))
         request = self.store.create_request(
@@ -417,6 +411,7 @@ class SkillService(SkillAuditMixin):
                     "url": prepared.url,
                 },
                 sort_keys=True,
+                default=str,
             ),
             summary=summary,
         )
@@ -432,8 +427,8 @@ class SkillService(SkillAuditMixin):
                 "the confirmation message could not be sent; the write was not staged",
                 skill=name,
             )
-            safe = self._safe(error)
-            self._record(
+            safe = self.safe_text(error)
+            self.record_call(
                 name=name,
                 run=run,
                 method=prepared.method,
@@ -449,7 +444,7 @@ class SkillService(SkillAuditMixin):
             )
             return error
         self.store.set_operator_message(request.id, message_id)
-        self._record(
+        self.record_call(
             name=name,
             run=run,
             method=prepared.method,
@@ -472,7 +467,7 @@ class SkillService(SkillAuditMixin):
             note="waiting for the operator's yes in the self-chat",
         )
 
-    def _perform_envelope(
+    def perform_envelope(
         self,
         name: str,
         config: SkillConfig,
@@ -480,10 +475,11 @@ class SkillService(SkillAuditMixin):
         run: SkillRuntime,
         started: float,
     ) -> str:
+        """Send the prepared call and wrap the result into the tool envelope."""
         try:
-            result = self._perform(config, prepared, run)
+            result = self.perform_request(config, prepared, run)
         except SkillError as exc:
-            return self._fail_http(name, run, prepared, str(exc), started)
+            return self.fail_http(name, run, prepared, str(exc), started)
         fields: dict[str, object] = {
             "skill": name,
             "status": result.status,
@@ -495,7 +491,7 @@ class SkillService(SkillAuditMixin):
             fields["note"] = "the response was cut at the byte cap"
         return envelope_ok(**fields)
 
-    def _perform(
+    def perform_request(
         self,
         config: SkillConfig,
         prepared: PreparedRequest,
@@ -503,6 +499,7 @@ class SkillService(SkillAuditMixin):
         extra_headers: dict[str, str] | None = None,
         note_failures: bool = True,
     ) -> HttpResult:
+        """Add auth, send once, then record and judge the response."""
         headers: dict[str, str] = {"Accept": "application/json"}
         if config.auth.type != "none":
             secret = self.secrets.get(config.auth.secret)
@@ -533,7 +530,7 @@ class SkillService(SkillAuditMixin):
         succeeded = 200 <= result.status < 300
         outcome = "ok" if succeeded else "failed"
         error = "" if succeeded else f"the skill returned HTTP {result.status}"
-        self._record(
+        self.record_call(
             name=config.name,
             run=run,
             method=prepared.method,
@@ -552,10 +549,10 @@ class SkillService(SkillAuditMixin):
         if succeeded:
             self.store.reset_failures(config.name)
         elif note_failures:
-            self._note_failure(config.name, error)
+            self.count_failure(config.name, error)
         return redacted
 
-    def _fail_http(
+    def fail_http(
         self,
         name: str,
         run: SkillRuntime,
@@ -563,8 +560,9 @@ class SkillService(SkillAuditMixin):
         error: str,
         started: float,
     ) -> str:
-        safe = self._safe(error)
-        self._record(
+        """Audit a transport failure, count it, and return the error envelope."""
+        safe = self.safe_text(error)
+        self.record_call(
             name=name,
             run=run,
             method=prepared.method,
@@ -576,5 +574,5 @@ class SkillService(SkillAuditMixin):
             request=request_json(prepared),
         )
         record_ticket(run, f"{name} {prepared.method} {prepared.path} failed", "failed")
-        self._note_failure(name, safe)
+        self.count_failure(name, safe)
         return envelope_error(safe, skill=name)

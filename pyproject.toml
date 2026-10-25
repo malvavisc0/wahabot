@@ -127,7 +127,7 @@ ignore_names = [
     "validate_timezone", "validate_hours", "validate_team_groups",
     "validate_window", "enable", "disable", "uses_count",
     # Typer skill commands and public skill surfaces used by tests/scripts.
-    "skills_app", "skills_list", "skills_import", "skills_test",
+    "skills_app", "skills_list", "skills_import", "skills_test", "skills_enable", "skills_disable",
     "PREDEFINED_DIR", "validate_skill", "operator_message_id", "resolved_at",
-    "save_draft_inputs", "create_draft",
+    "save_draft_inputs", "create_draft", "latest_pending",
 ]

@@ -7,3 +7,7 @@ class SkillError(RuntimeError):
 
 class SecretKeyError(SkillError):
     """The secret key is missing, invalid, or does not decrypt the stored value."""
+
+
+class QueryRefused(SkillError):
+    """A SQL query was refused before execution (shape, comments, mutation)."""

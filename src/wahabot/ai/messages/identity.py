@@ -53,6 +53,17 @@ def conversation_jid(event: WahaEvent) -> str:
     return jid_string(payload.get("from"))
 
 
+def sender_jid(event: WahaEvent) -> str:
+    """The person who sent the message, never a group's own JID."""
+    participant = jid_string(event.payload.get("participant"))
+    if participant:
+        return participant
+    source = jid_string(event.payload.get("from"))
+    if event.payload.get("fromMe") and source.endswith("@g.us"):
+        return ""
+    return source
+
+
 def sent_by_bot_api(event: WahaEvent) -> bool:
     """True for the echo of a message the bot itself sent through WAHA.
 

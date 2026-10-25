@@ -114,7 +114,8 @@ class TicketStore(ScheduleMixin, ContactMixin, AlertMixin, LifecycleMixin, Ident
         finally:
             conn.close()
         ticket = ticket_from_row(row)
-        self.notify("opened", ticket)
+        if ticket.state == TicketState.OPEN.value:
+            self.notify("opened", ticket)
         return ticket
 
     def ticket(self, ticket_id: int) -> Ticket | None:

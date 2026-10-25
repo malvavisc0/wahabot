@@ -12,7 +12,7 @@ import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from loguru import logger
 
@@ -24,9 +24,6 @@ from wahabot.core.tickets.models import TicketUpdate
 from wahabot.core.tickets.store import TicketStore
 from wahabot.core.transport.context import bind_intake_ids
 from wahabot.status import state as _status_state
-
-if TYPE_CHECKING:
-    from wahabot.core.skills.service import SkillService
 
 
 def chat_jid(chat: str | None, target: RunTarget | dict[str, str]) -> str:
@@ -104,11 +101,15 @@ class RunTarget:
     #: Values the model staged for the ticket; applied only after a
     #: confirmed delivery.
     ticket_update: TicketUpdate | None = None
-    #: A staged ``new_ticket`` split summary, applied after delivery.
+    #: The staged ``new_ticket`` split summary, applied after delivery.
     ticket_split: str = ""
-    #: The skill runtime for this registration, and its run-scoped
-    #: counters/docs cache. Bound per run, so turns never share limits.
-    skill_service: SkillService | None = None
+    #: The sender's own JID (the participant in a team group) and phone
+    #: alias, bound by the caller so skill requests never fall back to
+    #: the group chat id.
+    sender_id: str = ""
+    sender_phone: str = ""
+    #: Run-scoped skill counters and docs cache. Bound per run, so turns
+    #: never share limits.
     skill_calls: int = 0
     skill_call_keys: list[str] = field(default_factory=list)
     skill_docs: dict[str, str] = field(default_factory=dict)

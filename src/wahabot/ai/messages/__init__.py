@@ -38,6 +38,7 @@ from wahabot.ai.messages.identity import (
     bot_jids,
     conversation_jid,
     jid_string,
+    sender_jid,
     sent_by_bot_api,
     typed_by_operator,
 )
@@ -72,6 +73,7 @@ __all__ = [
     "replies_to_bot",
     "reply_description",
     "self_command_instruction",
+    "sender_jid",
     "sent_by_bot_api",
     "turn_addressed_note",
     "typed_by_operator",

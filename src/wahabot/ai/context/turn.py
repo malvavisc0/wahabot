@@ -17,6 +17,7 @@ from wahabot.ai.messages import (
     TURN_SERIALS_KWARG,
     conversation_jid,
     newest_quote_flags,
+    sender_jid,
 )
 from wahabot.ai.tools.whatsapp import (
     RunTarget,
@@ -35,6 +36,7 @@ from wahabot.core.notebook import (
     RULE_MESSAGE_PREFIX,
 )
 from wahabot.core.recovery.context import apology
+from wahabot.core.tickets.identity import customer_details
 from wahabot.core.tickets.store import TicketStore
 from wahabot.core.transport import Transport
 from wahabot.core.transport.context import bind_intake_ids, reset_intake_ids
@@ -310,6 +312,8 @@ async def handle_message(
     target = RunTarget(
         session=event.session,
         chat_id=chat_id,
+        sender_id=sender_jid(event),
+        sender_phone=customer_details(event)[1],
         armed=armed,
         typing=typing,
         intake=intake,

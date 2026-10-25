@@ -179,6 +179,16 @@ def test_every_call_is_logged_with_its_safe_path(
 
 
 def test_system_runs_are_attributed_to_system() -> None:
-    from wahabot.core.skills.execution import _initiator
+    from wahabot.core.skills.execution import initiator
 
-    assert _initiator(SkillRun(session="test", surface="system", armed=True)) == "system"
+    assert initiator(SkillRun(session="test", surface="system", armed=True)) == "system"
+
+
+def test_redirect_methods_follow_http_semantics() -> None:
+    from wahabot.core.skills.http import redirected_request
+
+    assert redirected_request("POST", b"x", 302) == ("GET", None)
+    assert redirected_request("POST", b"x", 303) == ("GET", None)
+    assert redirected_request("HEAD", b"", 303) == ("HEAD", b"")
+    assert redirected_request("POST", b"x", 307) == ("POST", b"x")
+    assert redirected_request("PUT", b"x", 308) == ("PUT", b"x")

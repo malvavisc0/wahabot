@@ -119,6 +119,11 @@ def route_message(
     return route_ticket_text(store, body)
 
 
+def is_affirmative(text: str) -> bool:
+    """Whether a message is the exact yes shape the skill confirmation accepts."""
+    return bool(_YES.match(text))
+
+
 def route_skill_confirmation(
     store: SkillStore | None, body: str, quoted: str
 ) -> Route | None:
