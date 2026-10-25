@@ -1,6 +1,5 @@
 """History list and ticket view models for the web back office."""
 
-import datetime
 import hashlib
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,6 +16,7 @@ from wahabot.core.tickets.models import (
     TicketState,
 )
 from wahabot.core.tickets.store import TicketStore
+from wahabot.web.services import format_time
 
 SHOW_CHOICES = (
     ("", "All tickets"),
@@ -252,14 +252,6 @@ def row_for(store: TicketStore, ticket: Ticket, contact: Contact | None) -> Hist
         time=format_time(ticket.updated_at),
         urgent=bool(ticket.urgent),
     )
-
-
-def format_time(value: Any) -> str:
-    """Format a Unix timestamp as a short UTC date-time."""
-    if not value:
-        return ""
-    moment = datetime.datetime.fromtimestamp(int(value), tz=datetime.UTC)
-    return moment.strftime("%Y-%m-%d %H:%M")
 
 
 def filtered_rows(store: TicketStore, q: str, show: str) -> list[HistoryRow]:
