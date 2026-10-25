@@ -16,9 +16,11 @@ from wahabot.settings import Settings
 
 
 @contextlib.contextmanager
-def serving(app: FastAPI) -> Iterator[int]:
+def serving(app: FastAPI, *, lifespan: str = "auto") -> Iterator[int]:
     """Run *app* on an ephemeral localhost port; yields the port."""
-    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error")
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=0, log_level="error", lifespan=lifespan
+    )
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
