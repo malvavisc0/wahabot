@@ -7,13 +7,13 @@
 
   <h2 class="section-title">1. {{ _("Connect WhatsApp") }}</h2>
   {% if status == "WORKING" %}
-  <p class="status connected">{{ _("Connected") }}</p>
+  <p class="status connected" data-setup-status>{{ _("Connected") }}</p>
   {% else %}
-  <p class="status waiting">{{ _("Waiting for your phone") }} — {{ status }}</p>
+  <p class="status waiting" data-setup-status>{{ _("Waiting for your phone") }} — {{ status }}</p>
   {% endif %}
 
   {% if qr_data %}
-  <img class="qr" src="{{ qr_data }}" alt="WhatsApp linking QR code">
+  <img class="qr" id="setup-qr" src="{{ qr_data }}" alt="WhatsApp linking QR code">
   {% elif qr_value %}
   <p class="mono">{{ qr_value }}</p>
   {% endif %}

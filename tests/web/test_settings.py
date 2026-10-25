@@ -90,6 +90,40 @@ def test_who_normalizes_and_resolves(auth_client: TestClient, bot) -> None:
     assert config["blacklist"] == ["491555000003@c.us"]
 
 
+def test_assistant_knowledge_only_toggle(auth_client: TestClient, bot) -> None:
+    """The answers-only switch persists without changing other sections."""
+    token = csrf_of(auth_client.get("/app/settings").text)
+    response = auth_client.post(
+        "/app/settings/assistant",
+        data={
+            "bot_name": "Bridge Club",
+            "goal": "",
+            "instructions": "Stay brief.",
+            "operator_name": "",
+            "knowledge_only": "on",
+            "csrf_token": token,
+        },
+    )
+    assert response.status_code == 200
+    assert read_config(bot)["knowledge_only"] is True
+
+
+def test_who_saves_group_behaviour(auth_client: TestClient, bot) -> None:
+    """Group behaviour is validated and saved with the number lists."""
+    token = csrf_of(auth_client.get("/app/settings").text)
+    response = auth_client.post(
+        "/app/settings/who",
+        data={
+            "whitelist": "",
+            "blacklist": "",
+            "group_participation": "never",
+            "csrf_token": token,
+        },
+    )
+    assert response.status_code == 200
+    assert read_config(bot)["group_participation"] == "never"
+
+
 def test_who_rejects_invalid_number_without_writing(auth_client: TestClient, bot) -> None:
     """A too-short number is reported and the prior list is untouched."""
     token = csrf_of(auth_client.get("/app/settings").text)

@@ -64,6 +64,7 @@
   <div class="result" id="test-result">
     <h2 class="section-title">{{ _("Test result") }}</h2>
     <p class="status {{ result.css }}">{{ result.label }}</p>
+    {% if result.tested_at %}<p class="small muted">Tested at {{ result.tested_at }}</p>{% endif %}
     <p>{{ result.reason }}</p>
     <div class="actions">
       <form method="post" action="/app/skills/{{ skill.name }}/test" data-no-dirty="true">
