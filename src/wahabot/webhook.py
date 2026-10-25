@@ -3,7 +3,6 @@
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from loguru import logger
@@ -11,6 +10,7 @@ from loguru import logger
 from wahabot.core.hmac import verify_hmac
 from wahabot.core.journal import save_event
 from wahabot.core.models import WahaEvent
+from wahabot.web.middleware import web_middleware
 
 #: Coroutines awaited once as the app shuts down. Bounded background
 #: work (e.g. detached escalation sends) drains here instead of being
@@ -79,18 +79,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="wahabot webhook server", lifespan=_lifespan)
 
 
-@app.middleware("http")
-async def web_middleware(request: Request, call_next: Callable[[Request], Any]) -> Any:
-    """Add web security headers and journal web writes without a static cycle."""
-    response = await call_next(request)
-    if request.url.path.startswith(("/app", "/setup", "/login", "/logout")):
-        import importlib
-
-        deps = importlib.import_module("wahabot.web.deps")
-        deps.security_headers(response)
-        with contextlib.suppress(Exception):
-            deps.journal_web_write(request, response)
-    return response
+app.middleware("http")(web_middleware)
 
 Handler = Callable[[WahaEvent], Awaitable[None]]
 IntakeWriter = Callable[[WahaEvent], Awaitable[None]]

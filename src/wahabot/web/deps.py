@@ -35,7 +35,8 @@ TEMPLATES_DIR = PACKAGE_DIR / "templates"
 STATIC_DIR = PACKAGE_DIR / "static"
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-templates.env.globals["_"] = translate
+_globals: dict[str, Any] = templates.env.globals
+_globals["_"] = translate
 NAV_ITEMS = (
     ("/app/history", "History"),
     ("/app/teach", "Teach"),
