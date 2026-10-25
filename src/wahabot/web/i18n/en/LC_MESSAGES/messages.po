@@ -1,0 +1,262 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: wahabot 1.2.0\n"
+"Language: en\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "History"
+msgstr "History"
+
+msgid "Teach"
+msgstr "Teach"
+
+msgid "Skills"
+msgstr "Skills"
+
+msgid "Settings"
+msgstr "Settings"
+
+msgid "Sign out"
+msgstr "Sign out"
+
+msgid "Sign in"
+msgstr "Sign in"
+
+msgid "Passphrase"
+msgstr "Passphrase"
+
+msgid "Enter the passphrase printed with this box."
+msgstr "Enter the passphrase printed with this box."
+
+msgid "Set up WhatsApp"
+msgstr "Set up WhatsApp"
+
+msgid "Connect WhatsApp"
+msgstr "Connect WhatsApp"
+
+msgid "Connected"
+msgstr "Connected"
+
+msgid "Waiting for your phone"
+msgstr "Waiting for your phone"
+
+msgid "Get pairing code"
+msgstr "Get pairing code"
+
+msgid "Restart connection"
+msgstr "Restart connection"
+
+msgid "Refresh"
+msgstr "Refresh"
+
+msgid "Send a test message"
+msgstr "Send a test message"
+
+msgid "Open History"
+msgstr "Open History"
+
+msgid "Search"
+msgstr "Search"
+
+msgid "Show"
+msgstr "Show"
+
+msgid "Show tickets needing me"
+msgstr "Show tickets needing me"
+
+msgid "Clear filters"
+msgstr "Clear filters"
+
+msgid "tickets shown"
+msgstr "tickets shown"
+
+msgid "No tickets in this section."
+msgstr "No tickets in this section."
+
+msgid "No tickets match this search and filter."
+msgstr "No tickets match this search and filter."
+
+msgid "Back to results"
+msgstr "Back to results"
+
+msgid "Conversation"
+msgstr "Conversation"
+
+msgid "Skill calls"
+msgstr "Skill calls"
+
+msgid "Show originals"
+msgstr "Show originals"
+
+msgid "Show English translation"
+msgstr "Show English translation"
+
+msgid "Add answer"
+msgstr "Add answer"
+
+msgid "Edit answer"
+msgstr "Edit answer"
+
+msgid "Question"
+msgstr "Question"
+
+msgid "Answer"
+msgstr "Answer"
+
+msgid "Save"
+msgstr "Save"
+
+msgid "Cancel"
+msgstr "Cancel"
+
+msgid "Undo last deletion"
+msgstr "Undo last deletion"
+
+msgid "Answers"
+msgstr "Answers"
+
+msgid "Delete"
+msgstr "Delete"
+
+msgid "Add skill"
+msgstr "Add skill"
+
+msgid "Needs attention"
+msgstr "Needs attention"
+
+msgid "Configured skills"
+msgstr "Configured skills"
+
+msgid "Saved drafts"
+msgstr "Saved drafts"
+
+msgid "Resume"
+msgstr "Resume"
+
+msgid "Create draft"
+msgstr "Create draft"
+
+msgid "Review"
+msgstr "Review"
+
+msgid "Service"
+msgstr "Service"
+
+msgid "Capabilities"
+msgstr "Capabilities"
+
+msgid "Permissions"
+msgstr "Permissions"
+
+msgid "Test result"
+msgstr "Test result"
+
+msgid "Test connection"
+msgstr "Test connection"
+
+msgid "Enable skill"
+msgstr "Enable skill"
+
+msgid "Switch off"
+msgstr "Switch off"
+
+msgid "Advanced"
+msgstr "Advanced"
+
+msgid "Save draft"
+msgstr "Save draft"
+
+msgid "Continue to test"
+msgstr "Continue to test"
+
+msgid "Back to Skills"
+msgstr "Back to Skills"
+
+msgid "Assistant"
+msgstr "Assistant"
+
+msgid "Who it answers"
+msgstr "Who it answers"
+
+msgid "Hours"
+msgstr "Hours"
+
+msgid "WhatsApp"
+msgstr "WhatsApp"
+
+msgid "Name"
+msgstr "Name"
+
+msgid "What it is for"
+msgstr "What it is for"
+
+msgid "Instructions"
+msgstr "Instructions"
+
+msgid "Operator name"
+msgstr "Operator name"
+
+msgid "Save Assistant"
+msgstr "Save Assistant"
+
+msgid "Only these numbers"
+msgstr "Only these numbers"
+
+msgid "Never these numbers"
+msgstr "Never these numbers"
+
+msgid "Team groups"
+msgstr "Team groups"
+
+msgid "Save Who it answers"
+msgstr "Save Who it answers"
+
+msgid "Timezone"
+msgstr "Timezone"
+
+msgid "Team hours"
+msgstr "Team hours"
+
+msgid "From"
+msgstr "From"
+
+msgid "To"
+msgstr "To"
+
+msgid "Closed"
+msgstr "Closed"
+
+msgid "Away message"
+msgstr "Away message"
+
+msgid "Preview"
+msgstr "Preview"
+
+msgid "Reply window in days"
+msgstr "Reply window in days"
+
+msgid "Night number for urgent tickets"
+msgstr "Night number for urgent tickets"
+
+msgid "Save Hours"
+msgstr "Save Hours"
+
+msgid "Connected number"
+msgstr "Connected number"
+
+msgid "Status"
+msgstr "Status"
+
+msgid "Reconnect"
+msgstr "Reconnect"
+
+msgid "Saved"
+msgstr "Saved"
+
+msgid "Not saved"
+msgstr "Not saved"
+
+msgid "Unsaved"
+msgstr "Unsaved"

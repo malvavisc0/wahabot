@@ -28,12 +28,14 @@ from wahabot.web.auth import (
     is_secure,
     read_session,
 )
+from wahabot.web.i18n import _ as translate
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = PACKAGE_DIR / "templates"
 STATIC_DIR = PACKAGE_DIR / "static"
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+templates.env.globals["_"] = translate
 NAV_ITEMS = (
     ("/app/history", "History"),
     ("/app/teach", "Teach"),

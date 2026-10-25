@@ -2,20 +2,20 @@
 {% block title %}Teach · wahabot{% endblock %}
 {% block content %}
 <div class="surface">
-  <h1 class="page-title">Teach</h1>
+  <h1 class="page-title">{{ _("Teach") }}</h1>
   <p class="page-purpose">Teach answers in your language; customers get replies in theirs.</p>
 
   <div class="editor" id="editor">
-    <h2 class="section-title">{{ "Edit answer" if editor_mode == "edit" else "Add answer" }}</h2>
+    <h2 class="section-title">{{ _("Edit answer") if editor_mode == "edit" else _("Add answer") }}</h2>
     <form method="post" action="{{ editor_action }}" data-warn-leave="true">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label for="question">Question</label>
+      <label for="question">{{ _("Question") }}</label>
       <input id="question" name="question" type="text" value="{{ draft.question }}" required>
-      <label for="answer">Answer</label>
+      <label for="answer">{{ _("Answer") }}</label>
       <textarea id="answer" name="answer" required>{{ draft.answer }}</textarea>
       <div class="actions">
-        <button class="primary" type="submit">Save</button>
-        <a class="button" href="/app/teach">Cancel</a>
+        <button class="primary" type="submit">{{ _("Save") }}</button>
+        <a class="button" href="/app/teach">{{ _("Cancel") }}</a>
         <span class="feedback {{ 'error' if error else 'unsaved' }}" role="status"{% if not error %} hidden{% endif %}>{{ error or "Unsaved" }}</span>
       </div>
     </form>
@@ -25,13 +25,13 @@
   <div class="actions">
     <form method="post" action="/app/teach/undo" data-no-dirty="true">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit">Undo last deletion</button>
+      <button type="submit">{{ _("Undo last deletion") }}</button>
     </form>
     <span class="muted small">Restores the latest deleted answer to its place.</span>
   </div>
   {% endif %}
 
-  <h2 class="section-title">Answers</h2>
+  <h2 class="section-title">{{ _("Answers") }}</h2>
   {% for answer in answers %}
   <article class="teach-item" data-answer-id="{{ answer.id }}">
     <h3 class="row-title">{{ answer.question }}</h3>
@@ -44,7 +44,7 @@
       <a class="button" href="/app/teach?edit={{ answer.id }}#editor">Edit</a>
       <form method="post" action="/app/teach/{{ answer.id }}/delete" data-no-dirty="true" onsubmit="return confirm('Delete this answer?');">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="danger">Delete</button>
+        <button type="submit" class="danger">{{ _("Delete") }}</button>
       </form>
     </div>
   </article>

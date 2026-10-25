@@ -2,14 +2,14 @@
 {% block title %}Skills · wahabot{% endblock %}
 {% block content %}
 <div class="surface">
-  <h1 class="page-title">Skills</h1>
+  <h1 class="page-title">{{ _("Skills") }}</h1>
   <p class="page-purpose">Optional connections to other systems. The assistant works without any skill.</p>
   <div class="actions">
-    <a class="button primary" href="/app/skills/new">Add skill</a>
+    <a class="button primary" href="/app/skills/new">{{ _("Add skill") }}</a>
   </div>
 
   {% if attention %}
-  <h2 class="section-title">Needs attention</h2>
+  <h2 class="section-title">{{ _("Needs attention") }}</h2>
   <ul class="skills-list">
     {% for row in attention %}
     <li class="skill-row">
@@ -24,7 +24,7 @@
   </ul>
   {% endif %}
 
-  <h2 class="section-title">Configured skills</h2>
+  <h2 class="section-title">{{ _("Configured skills") }}</h2>
   {% if configured %}
   <ul class="skills-list">
     {% for row in configured %}
@@ -44,10 +44,10 @@
     {% endfor %}
   </ul>
   {% else %}
-  <p class="muted">No configured skills.</p>
+  <p class="muted">{{ _("No configured skills.") }}</p>
   {% endif %}
 
-  <h2 class="section-title">Saved drafts</h2>
+  <h2 class="section-title">{{ _("Saved drafts") }}</h2>
   {% if drafts %}
   <ul class="skills-list">
     {% for row in drafts %}
@@ -62,13 +62,13 @@
         <span>Test: {{ row.test_label }}</span>
       </div>
       <div class="actions">
-        <a class="button" href="/app/skills/{{ row.name }}">Resume</a>
+        <a class="button" href="/app/skills/{{ row.name }}">{{ _("Resume") }}</a>
       </div>
     </li>
     {% endfor %}
   </ul>
   {% else %}
-  <p class="muted">No saved drafts.</p>
+  <p class="muted">{{ _("No saved drafts.") }}</p>
   {% endif %}
 
   {% if not configured and not drafts and not attention %}

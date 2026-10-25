@@ -2,39 +2,39 @@
 {% block title %}History · wahabot{% endblock %}
 {% block content %}
 <div class="surface">
-  <h1 class="page-title">History</h1>
+  <h1 class="page-title">{{ _("History") }}</h1>
   <p class="page-purpose">Find a ticket and see what happened. Replies stay in WhatsApp.</p>
 
   <form class="filters" method="get" action="/app/history" data-no-dirty="true">
     <div class="field">
-      <label for="q">Search</label>
+      <label for="q">{{ _("Search") }}</label>
       <input id="q" name="q" type="text" value="{{ view.q }}" placeholder="Name, number, ticket number or text">
     </div>
     <div class="field short">
-      <label for="show">Show</label>
+      <label for="show">{{ _("Show") }}</label>
       <select id="show" name="show">
         {% for value, label in view.choices %}
-        <option value="{{ value }}"{% if view.show == value %} selected{% endif %}>{{ label }}</option>
+        <option value="{{ value }}"{% if view.show == value %} selected{% endif %}>{{ _(label) }}</option>
         {% endfor %}
       </select>
     </div>
     <div class="actions">
-      <button class="primary" type="submit">Search</button>
+      <button class="primary" type="submit">{{ _("Search") }}</button>
     </div>
   </form>
 
   <div class="actions">
-    <a class="button" href="/app/history?show=needs_you#needs-you" data-focus-target="needs-you">Show tickets needing me</a>
+    <a class="button" href="/app/history?show=needs_you#needs-you" data-focus-target="needs-you">{{ _("Show tickets needing me") }}</a>
     {% if view.has_filters %}
-    <a class="button" href="/app/history" data-focus-target="q">Clear filters</a>
+    <a class="button" href="/app/history" data-focus-target="q">{{ _("Clear filters") }}</a>
     {% endif %}
-    <span class="muted">{{ view.shown }} tickets shown</span>
+    <span class="muted">{{ view.shown }} {{ _("tickets shown") }}</span>
   </div>
 
   {% for section in view.sections %}
   <section aria-labelledby="{{ section.key }}">
     <div class="section-heading">
-      <h2 class="section-title" id="{{ section.key }}" tabindex="-1">{{ section.title }}</h2>
+      <h2 class="section-title" id="{{ section.key }}" tabindex="-1">{{ _(section.title) }}</h2>
       <span class="muted small">{{ section.rows|length }} {{ "ticket" if section.rows|length == 1 else "tickets" }}</span>
     </div>
     {% if section.rows %}
@@ -60,13 +60,13 @@
       {% endfor %}
     </ul>
     {% else %}
-    <p class="muted">No tickets in this section.</p>
+    <p class="muted">{{ _("No tickets in this section.") }}</p>
     {% endif %}
   </section>
   {% endfor %}
 
   {% if view.shown == 0 %}
-  <p class="notice">No tickets match this search and filter.</p>
+  <p class="notice">{{ _("No tickets match this search and filter.") }}</p>
   {% endif %}
 </div>
 {% endblock %}

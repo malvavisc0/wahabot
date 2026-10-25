@@ -2,7 +2,7 @@
 {% block title %}Ticket {{ view.ticket.number }} · wahabot{% endblock %}
 {% block content %}
 <div class="surface">
-  <p class="small"><a href="{{ view.back }}">Back to results</a></p>
+  <p class="small"><a href="{{ view.back }}">{{ _("Back to results") }}</a></p>
   <h1 class="page-title">{{ view.subject }}</h1>
   <p class="status {{ view.status_class }}">{{ view.status_label }}</p>
   <p class="notice">{{ view.next_step }}</p>
@@ -18,10 +18,10 @@
   </div>
 
   <div class="actions">
-    <a class="button" href="{{ view.toggle_url }}">{{ view.toggle_label }}</a>
+    <a class="button" href="{{ view.toggle_url }}">{{ _(view.toggle_label) }}</a>
   </div>
 
-  <h2 class="section-title">Conversation</h2>
+  <h2 class="section-title">{{ _("Conversation") }}</h2>
   <ul class="thread">
     {% for entry in view.entries %}
     <li class="message {{ entry.style }}">
@@ -58,7 +58,7 @@
   </ul>
 
   {% if view.calls %}
-  <h2 class="section-title">Skill calls</h2>
+  <h2 class="section-title">{{ _("Skill calls") }}</h2>
   <ul class="card-list">
     {% for call in view.calls %}
     <li class="list-row">

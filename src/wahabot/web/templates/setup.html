@@ -2,14 +2,14 @@
 {% block title %}Setup · wahabot{% endblock %}
 {% block content %}
 <div class="surface">
-  <h1 class="page-title">Set up WhatsApp</h1>
+  <h1 class="page-title">{{ _("Set up WhatsApp") }}</h1>
   <p class="page-purpose">Connect the support number, then send one test message from another phone.</p>
 
-  <h2 class="section-title">1. Connect WhatsApp</h2>
+  <h2 class="section-title">1. {{ _("Connect WhatsApp") }}</h2>
   {% if status == "WORKING" %}
-  <p class="status connected">Connected</p>
+  <p class="status connected">{{ _("Connected") }}</p>
   {% else %}
-  <p class="status waiting">Waiting for your phone — {{ status }}</p>
+  <p class="status waiting">{{ _("Waiting for your phone") }} — {{ status }}</p>
   {% endif %}
 
   {% if qr_data %}
@@ -31,7 +31,7 @@
     <p class="field-help">Enter the support number in international format. The QR stays the fallback.</p>
     <input id="phone_number" name="phone_number" type="text" inputmode="tel" value="{{ support_number }}">
     <div class="actions">
-      <button class="primary" type="submit">Get pairing code</button>
+      <button class="primary" type="submit">{{ _("Get pairing code") }}</button>
     </div>
   </form>
   {% if pairing_code %}
@@ -45,8 +45,8 @@
   <form method="post" action="/setup/restart" data-no-dirty="true">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="actions">
-      <button type="submit">Restart connection</button>
-      <a class="button" href="/setup">Refresh</a>
+      <button type="submit">{{ _("Restart connection") }}</button>
+      <a class="button" href="/setup">{{ _("Refresh") }}</a>
     </div>
   </form>
 
@@ -54,7 +54,7 @@
   <p class="feedback error" role="alert">{{ error }}</p>
   {% endif %}
 
-  <h2 class="section-title">2. Send a test message</h2>
+  <h2 class="section-title">2. {{ _("Send a test message") }}</h2>
   {% if exchange %}
   <p>From a phone other than the support number, ask something a customer would ask.</p>
   <div class="result">
@@ -69,7 +69,7 @@
 
   {% if status == "WORKING" and exchange %}
   <div class="actions">
-    <a class="button primary" href="/app/history">Open History</a>
+    <a class="button primary" href="/app/history">{{ _("Open History") }}</a>
   </div>
   {% endif %}
 </div>

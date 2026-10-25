@@ -2,11 +2,11 @@
 {% block title %}Sign in · wahabot{% endblock %}
 {% block content %}
 <div class="surface">
-  <h1 class="login-title">Sign in</h1>
-  <p class="page-purpose">Enter the passphrase printed with this box.</p>
+  <h1 class="login-title">{{ _("Sign in") }}</h1>
+  <p class="page-purpose">{{ _("Enter the passphrase printed with this box.") }}</p>
   <form method="post" action="/login" data-no-dirty="true" novalidate>
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label for="passphrase">Passphrase</label>
+    <label for="passphrase">{{ _("Passphrase") }}</label>
     <input id="passphrase" name="passphrase" type="password" autocomplete="current-password" required autofocus>
     {% if error %}
     <p class="feedback error" role="alert">{{ error }}</p>
@@ -14,7 +14,7 @@
     <p class="feedback" aria-live="polite"></p>
     {% endif %}
     <div class="actions">
-      <button class="primary" type="submit">Sign in</button>
+      <button class="primary" type="submit">{{ _("Sign in") }}</button>
     </div>
   </form>
 </div>
