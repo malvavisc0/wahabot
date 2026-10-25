@@ -230,4 +230,3 @@ def log_event(event: WahaEvent) -> None:
 async def health() -> dict[str, str]:
     """Liveness probe."""
     return {"status": "ok"}
-
