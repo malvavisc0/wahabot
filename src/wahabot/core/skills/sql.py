@@ -1,5 +1,6 @@
 """Read-only SQLite and Postgres execution for SQL skills."""
 
+import importlib
 import json
 import re
 import sqlite3
@@ -26,12 +27,11 @@ _FORBIDDEN = re.compile(
 def load_psycopg() -> Any:
     """The optional Postgres driver, with a clear install message when absent."""
     try:
-        import psycopg
+        return importlib.import_module("psycopg")
     except ImportError as exc:
         raise SkillError(
             "the Postgres driver is not installed; install the postgres extra"
         ) from exc
-    return psycopg
 
 
 def validate_read_query(query: str) -> str:
