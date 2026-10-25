@@ -8,9 +8,7 @@ from tests.web.conftest import csrf_of
 from tests.wire.support import _wait
 
 
-def test_assistant_name_change_reaches_the_next_run(
-    auth_client: TestClient, bot
-) -> None:
+def test_assistant_name_change_reaches_the_next_run(auth_client: TestClient, bot) -> None:
     """A saved Settings value is reloaded for the next inbound message."""
     token = csrf_of(auth_client.get("/app/settings").text)
     saved = auth_client.post(

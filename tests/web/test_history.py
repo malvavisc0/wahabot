@@ -86,9 +86,7 @@ def test_translation_is_cached_and_toggleable(
     store.add_attachment(
         ticket.id, "msg-voice", "voice", derived_text="hola voice transcript"
     )
-    store.extend_event_message_ids(
-        store.events(ticket.id)[0].id, ["msg-voice"]
-    )
+    store.extend_event_message_ids(store.events(ticket.id)[0].id, ["msg-voice"])
     calls: list[str] = []
 
     def translate(text: str, target: str) -> str:
