@@ -516,8 +516,10 @@ attachment's `derived_text` with `page_count`; the turn carries a
 under `[document text, untrusted; verify before relying]`. The record
 grammar escapes each line, so document text cannot forge a ledger line.
 Unreadable and over-limit documents keep their notice and stay attached
-for the operator instead of failing the turn. Tests generate their own
-PDF/DOCX/scan fixtures; no real document or PII is committed.
+for the operator instead of failing the turn. If OCR stops after some
+pages, the text read so far is kept with a bounded notice rather than
+discarded. Tests generate their own PDF/DOCX/scan fixtures; no real
+document or PII is committed.
 
 ### Hours, deferred alerts and the morning summary
 
@@ -535,7 +537,10 @@ At the first opening of a local day, `core/tickets/summary` builds
 yesterday's counts plus needs-you work (urgent first, with ages), sends
 it once to the operator, stores `last_summary_date` and
 `summary_message_id` in `session_state`. The date check is read from
-SQLite on every tick, so a restart does not duplicate the summary.
+SQLite on every tick, so a restart does not duplicate the summary. The
+summary cancels each listed ticket's queued notice and records a nudge,
+so the opening tick cannot page twice. Delivered notices and nudges are
+also stored as alert ids, so quoting one routes to its ticket.
 
 ### Team groups
 

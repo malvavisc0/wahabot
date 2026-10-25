@@ -119,8 +119,8 @@ any code-side default.
 `hours` and `timezone` decide whether the business is open. Inside a
 window the bot answers normally and alerts the operator. Outside it,
 non-urgent handovers are deferred: the ticket becomes needs-you, no
-individual alert is sent, and the queued alert is delivered by the
-60-second tick at the next opening. Urgent handovers still alert
+individual alert is sent immediately, and the composed alert is queued
+for delivery at the next opening. Urgent handovers still alert
 immediately and additionally notify `night_number` when that contact is
 ready. The customer is told when to expect a reply using
 `away_message`, with `{ticket}` and `{next_opening}` filled in code.
@@ -130,7 +130,10 @@ At the first opening of each local day the operator receives one
 morning summary (yesterday's ticket counts and needs-you work, urgent
 first, with ages). `last_summary_date` makes it once per local day and
 restart-safe; the summary message id is stored so quoted ticket numbers
-still route.
+still route. The summary cancels the queued notice for every ticket it
+lists and records a nudge, so the same opening cannot page twice.
+Delivered deferred notices and nudges are stored as alert ids too, so
+quoting one still routes to its ticket.
 
 ## Published answers (Teach)
 
