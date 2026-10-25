@@ -141,3 +141,28 @@ class ScheduleMixin(StoreBase):
             + "WHERE ticket_id = ? AND sent_at IS NULL",
             (at, ticket_id),
         )
+
+    def setup_completed(self, session: str) -> bool:
+        """Whether Setup recorded a completed first customer exchange."""
+        found = self.query_one(
+            "SELECT setup_completed FROM session_state WHERE session = ?",
+            (session,),
+            lambda row: bool(row["setup_completed"]),
+        )
+        return bool(found)
+
+    def set_setup_completed(self, session: str, completed: bool = True) -> None:
+        """Persist the Setup completion flag for one session."""
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                conn.execute(
+                    "INSERT INTO session_state "
+                    + "(session, setup_completed, updated_at) VALUES (?, ?, ?) "
+                    + "ON CONFLICT(session) DO UPDATE SET "
+                    + "setup_completed = excluded.setup_completed, "
+                    + "updated_at = excluded.updated_at",
+                    (session, int(completed), self.now()),
+                )
+        finally:
+            conn.close()

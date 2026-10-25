@@ -102,6 +102,10 @@ class SkillStore:
             (int(enabled), self.now(), name),
         )
 
+    def delete(self, name: str) -> None:
+        """Delete one skill row and its staged requests."""
+        self.run_update("DELETE FROM skills WHERE name = ?", (name,))
+
     def save_draft_inputs(self, name: str, inputs: dict[str, object]) -> None:
         """Persist the resumable draft inputs."""
         self.run_update(
@@ -215,6 +219,19 @@ class SkillStore:
                 f"SELECT {_CALL_COLUMNS} FROM skill_calls WHERE skill = ? "
                 + "ORDER BY id DESC LIMIT ?",
                 (skill, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [call_from_row(row) for row in rows]
+
+    def calls_for_ticket(self, ticket_id: int, limit: int = 20) -> list[SkillCall]:
+        """The calls linked to one ticket, newest first."""
+        conn = connect(self.path)
+        try:
+            rows = conn.execute(
+                f"SELECT {_CALL_COLUMNS} FROM skill_calls WHERE ticket_id = ? "
+                + "ORDER BY id DESC LIMIT ?",
+                (ticket_id, limit),
             ).fetchall()
         finally:
             conn.close()

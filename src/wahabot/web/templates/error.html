@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ status_code|default(503) }} · wahabot{% endblock %}
+{% block content %}
+<div class="surface">
+  <h1 class="page-title">wahabot</h1>
+  <p>{{ message }}</p>
+  <p><a href="/health">Check the server</a></p>
+</div>
+{% endblock %}

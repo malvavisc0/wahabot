@@ -33,6 +33,8 @@ dependencies = [
     "yt-dlp",
     "pyyaml>=6.0.3",
     "cryptography>=50.0.2",
+    "jinja2>=3.1.6",
+    "python-multipart>=0.0.32",
 ]
 
 [project.scripts]
@@ -54,6 +56,7 @@ module-root = "src"
 [dependency-groups]
 dev = [
     "basedpyright",
+    "playwright>=1.64.1",
     "pytest",
     "radon",
     "ruff",
@@ -104,7 +107,11 @@ select = [
 # uvicorn dotted-string protocol reference, the FunctionTool.__call__
 # monkey-patch, and test-only accessors (tests/ is outside vulture's
 # src/ scan, so their call sites never count).
-ignore_decorators = ["@step", "@app.post", "@app.get", "@on_message", "@on_command", "@on_forget", "@on_reaction", "@on_session_status"]
+ignore_decorators = [
+    "@step", "@app.post", "@app.get", "@app.command", "@app.middleware",
+    "@on_message", "@on_command", "@on_forget", "@on_reaction",
+    "@on_session_status", "@router.get", "@router.post", "@router.api_route",
+]
 ignore_names = [
     "session_init", "session_list", "session_view", "session_migrate", "serve", "tell",
     "forget", "escalations", "model_config", "timestamp", "engine",
@@ -130,4 +137,14 @@ ignore_names = [
     "skills_app", "skills_list", "skills_import", "skills_test", "skills_enable", "skills_disable",
     "PREDEFINED_DIR", "validate_skill", "operator_message_id", "resolved_at",
     "save_draft_inputs", "create_draft", "latest_pending",
+    # Phase 5 web view models: fields are read from Jinja templates,
+    # which vulture does not scan.
+    "subject", "choices", "has_filters", "contact_name", "contact_number",
+    "capabilities", "permissions", "stage_label", "test_label",
+    # Test-only fixture, harness and demo attributes read by pytest or
+    # by the task that owns the fixture rather than by a direct call.
+    "_isolated_identity", "_reset_registries", "should_exit", "unhealthy",
+    "secret_echo", "leads", "redirect_same", "redirect_outside",
+    "redirect_other", "observed_state", "write_skill_docs", "start_typing",
+    "stop_typing", "shutdown", "self_llm", "OTHER_CUSTOMER",
 ]

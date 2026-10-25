@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Add skill · wahabot{% endblock %}
+{% block content %}
+<div class="surface">
+  <p class="small"><a href="/app/skills">Back to Skills</a></p>
+  <h1 class="page-title">Add skill</h1>
+  <p class="page-purpose">Start with the service or API documentation address.</p>
+
+  <ol class="progress">
+    <li class="current">1. Connect</li>
+    <li>2. Review</li>
+    <li>3. Test and enable</li>
+  </ol>
+
+  <form method="post" action="/app/skills/new" data-warn-leave="true">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="source_url">Service or API documentation URL</label>
+    <p class="field-help">The address where the service's API is described, not a picker or a second base URL.</p>
+    <input id="source_url" name="source_url" type="url" inputmode="url" placeholder="https://service.example/docs" required>
+    <div class="actions">
+      <button class="primary" type="submit">Create draft</button>
+      <a class="button" href="/app/skills">Cancel</a>
+      <span class="feedback {{ 'error' if error else '' }}" role="status">{{ error }}</span>
+    </div>
+  </form>
+</div>
+{% endblock %}

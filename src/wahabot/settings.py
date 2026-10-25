@@ -299,6 +299,22 @@ class Settings(BaseSettings):
 
     data_dir: Path = Path("data")
 
+    #: Local passphrase login for the operator back office. The hash is
+    #: generated with ``wahabot hash-passphrase`` and the session key is
+    #: a separate random value; both live only in the environment. With
+    #: either missing the web app fails closed.
+    web_passphrase_hash: str = ""
+    web_session_key: str = ""
+    #: Public HTTPS origin of the app (e.g. https://client.c.waha.bot).
+    #: Used only to accept same-site Origin headers behind the tunnel.
+    public_origin: str = ""
+    #: Trust X-Forwarded-Proto from the configured tunnel proxy.
+    web_trusted_proxy: bool = False
+    #: Failed login attempts per client inside the window before a retry
+    #: delay is returned. In-memory only; a restart clears it.
+    web_login_attempts: int = Field(default=5, ge=1, le=100)
+    web_login_window_s: int = Field(default=60, ge=1, le=3600)
+
     #: Fernet key (base64, 32 bytes) for skill credentials. Empty keeps
     #: skills off for secret-bearing integrations; skill writes refuse.
     secret_key: str = ""

@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from loguru import logger
@@ -62,6 +63,9 @@ async def _recovery_loop(app: FastAPI) -> None:
 @contextlib.asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Serve while recovery drains, then stop the ticker on shutdown."""
+    import importlib
+
+    importlib.import_module("wahabot.web").mount_routes(app)
     task = asyncio.create_task(_recovery_loop(app))
     try:
         yield
@@ -73,6 +77,20 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="wahabot webhook server", lifespan=_lifespan)
+
+
+@app.middleware("http")
+async def web_middleware(request: Request, call_next: Callable[[Request], Any]) -> Any:
+    """Add web security headers and journal web writes without a static cycle."""
+    response = await call_next(request)
+    if request.url.path.startswith(("/app", "/setup", "/login", "/logout")):
+        import importlib
+
+        deps = importlib.import_module("wahabot.web.deps")
+        deps.security_headers(response)
+        with contextlib.suppress(Exception):
+            deps.journal_web_write(request, response)
+    return response
 
 Handler = Callable[[WahaEvent], Awaitable[None]]
 IntakeWriter = Callable[[WahaEvent], Awaitable[None]]
@@ -223,3 +241,4 @@ def log_event(event: WahaEvent) -> None:
 async def health() -> dict[str, str]:
     """Liveness probe."""
     return {"status": "ok"}
+

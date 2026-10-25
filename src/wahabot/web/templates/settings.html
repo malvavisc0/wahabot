@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Settings · wahabot{% endblock %}
+{% block content %}
+<div class="surface">
+  <h1 class="page-title">Settings</h1>
+  <p class="page-purpose">Saved changes apply to the next message your assistant handles.</p>
+
+  <div class="settings-layout">
+    <nav class="settings-nav" aria-label="Settings sections">
+      <a href="#assistant"{% if current_section == "assistant" %} class="current" aria-current="true"{% endif %}>Assistant</a>
+      <a href="#who"{% if current_section == "who" %} class="current" aria-current="true"{% endif %}>Who it answers</a>
+      <a href="#hours"{% if current_section == "hours" %} class="current" aria-current="true"{% endif %}>Hours</a>
+      <a href="#whatsapp"{% if current_section == "whatsapp" %} class="current" aria-current="true"{% endif %}>WhatsApp</a>
+    </nav>
+
+    <div>
+      <section class="settings-section" id="assistant" aria-labelledby="assistant-title">
+        <h2 class="section-title" id="assistant-title">Assistant</h2>
+        <p class="muted">Its name, purpose and instructions.</p>
+        <form method="post" action="/app/settings/assistant" data-warn-leave="true">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label for="bot_name">Name</label>
+          <input id="bot_name" name="bot_name" type="text" value="{{ form.get('bot_name', raw.get('bot_name', '')) }}">
+          <label for="goal">What it is for</label>
+          <input id="goal" name="goal" type="text" value="{{ form.get('goal', raw.get('goal', '')) }}">
+          <label for="instructions">Instructions</label>
+          <p class="field-help">Tone, what always needs a person, and what to ask first.</p>
+          <textarea id="instructions" name="instructions">{{ form.get('instructions', raw.get('system_prompt', '')) }}</textarea>
+          <label for="operator_name">Operator name</label>
+          <input id="operator_name" name="operator_name" type="text" value="{{ form.get('operator_name', raw.get('operator_name', '')) }}">
+          {% if tts_configured %}
+          <label><input type="checkbox" name="voice_replies"{% if raw.get('voice_replies') %} checked{% endif %}> Voice-note replies</label>
+          {% endif %}
+          <div class="savebar">
+            <button class="primary" type="submit">Save Assistant</button>
+            <span class="feedback {{ feedback.get('assistant', {}).get('class', '') }}" role="status">{{ feedback.get('assistant', {}).get('message', 'Saved') }}</span>
+          </div>
+        </form>
+      </section>
+
+      <section class="settings-section" id="who" aria-labelledby="who-title">
+        <h2 class="section-title" id="who-title">Who it answers</h2>
+        <p class="muted">One international number per line. Empty means everyone.</p>
+        <form method="post" action="/app/settings/who" data-warn-leave="true">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label for="whitelist">Only these numbers</label>
+          <textarea id="whitelist" name="whitelist">{{ form.get('whitelist', whitelist_text) }}</textarea>
+          <label for="blacklist">Never these numbers</label>
+          <textarea id="blacklist" name="blacklist">{{ form.get('blacklist', blacklist_text) }}</textarea>
+          {% if team_groups %}
+          <h3 class="section-title">Team groups</h3>
+          <p class="field-help">Silent unless named, internal answers only, and never in History.</p>
+          {% for group in team_groups %}
+          <label>
+            <input type="checkbox" name="team_groups" value="{{ group.id }}"{% if group.enabled %} checked{% endif %}>
+            {{ group.name }} · {{ group.count }} members — Reply when named
+          </label>
+          {% endfor %}
+          {% endif %}
+          <div class="savebar">
+            <button class="primary" type="submit">Save Who it answers</button>
+            <span class="feedback {{ feedback.get('who', {}).get('class', '') }}" role="status">{{ feedback.get('who', {}).get('message', 'Saved') }}</span>
+          </div>
+        </form>
+      </section>
+
+      <section class="settings-section" id="hours" aria-labelledby="hours-title">
+        <h2 class="section-title" id="hours-title">Hours</h2>
+        <p class="muted">Timezone, team hours, the away message and the reply window.</p>
+        <form method="post" action="/app/settings/hours" data-warn-leave="true">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label for="timezone">Timezone</label>
+          <input id="timezone" name="timezone" type="text" value="{{ form.get('timezone', raw.get('timezone', '')) }}" placeholder="America/New_York">
+          <h3 class="section-title">Team hours</h3>
+          <div class="hours-grid">
+            {% for day, label in days %}
+            {% set value = hours_values[day] %}
+            <div class="hours-day">
+              <label>{{ label }}</label>
+              <label for="{{ day }}_open">From</label>
+              <input id="{{ day }}_open" name="{{ day }}_open" type="text" value="{{ form.get(day ~ '_open', value.open) }}" placeholder="09:00">
+              <label for="{{ day }}_close">To</label>
+              <input id="{{ day }}_close" name="{{ day }}_close" type="text" value="{{ form.get(day ~ '_close', value.close) }}" placeholder="17:00">
+              <label><input type="checkbox" name="{{ day }}_closed"{% if value.closed %} checked{% endif %}> Closed</label>
+            </div>
+            {% endfor %}
+          </div>
+          <label for="away_message">Away message</label>
+          <p class="field-help">Use <span class="mono">{ticket}</span> and <span class="mono">{next_opening}</span>.</p>
+          <textarea id="away_message" name="away_message">{{ form.get('away_message', raw.get('away_message', '')) }}</textarea>
+          <p class="small muted">Preview: {{ away_preview }}</p>
+          <label for="reply_window_days">Reply window in days (1–30)</label>
+          <input id="reply_window_days" name="reply_window_days" type="number" min="1" max="30" value="{{ form.get('reply_window_days', raw.get('reply_window_days', 7)) }}">
+          <label for="night_number">Night number for urgent tickets</label>
+          <p class="field-help">It must write “hi” once before the assistant can message it.</p>
+          <input id="night_number" name="night_number" type="text" inputmode="tel" value="{{ form.get('night_number', night_number_text) }}">
+          <div class="savebar">
+            <button class="primary" type="submit">Save Hours</button>
+            <span class="feedback {{ feedback.get('hours', {}).get('class', '') }}" role="status">{{ feedback.get('hours', {}).get('message', 'Saved') }}</span>
+          </div>
+        </form>
+      </section>
+
+      <section class="settings-section" id="whatsapp" aria-labelledby="whatsapp-title">
+        <h2 class="section-title" id="whatsapp-title">WhatsApp</h2>
+        <div class="context">
+          <dl>
+            <dt>Connected number</dt><dd class="mono">{{ whatsapp.number or "Not connected" }}</dd>
+            <dt>Status</dt><dd class="status {{ 'connected' if whatsapp.status == 'WORKING' else 'waiting' }}">{{ whatsapp.status }}</dd>
+          </dl>
+        </div>
+        {% if whatsapp.qr_data %}
+        <img class="qr" src="{{ whatsapp.qr_data }}" alt="WhatsApp reconnect QR code">
+        {% endif %}
+        <form method="post" action="/app/settings/whatsapp" data-no-dirty="true">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="savebar">
+            <button class="primary" type="submit">Reconnect</button>
+            <span class="feedback {{ feedback.get('whatsapp', {}).get('class', '') }}" role="status">{{ feedback.get('whatsapp', {}).get('message', '') }}</span>
+          </div>
+        </form>
+      </section>
+    </div>
+  </div>
+</div>
+{% endblock %}
