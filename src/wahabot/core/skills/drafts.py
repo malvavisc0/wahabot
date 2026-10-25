@@ -184,4 +184,11 @@ class SkillDraftService:
         """Store the test state and, for a pass, the configuration it covered."""
         state = "passed" if passed else "failed"
         config_hash = self.configuration_hash(name) if passed else ""
+        skill = self.store.get(name)
+        if not passed and skill is not None and skill.enabled:
+            # A failed retest covers nothing, and an empty hash cannot be
+            # checked for later drift: demote the enabled skill instead of
+            # leaving it live with no verifiable test.
+            self.store.set_enabled(name, False)
+            reason = f"{reason}; the enabled skill was demoted to inactive"
         self.store.set_test(name, state=state, reason=reason, config_hash=config_hash)
