@@ -43,7 +43,7 @@
       <li class="list-row{% if row.urgent %} urgent{% endif %}">
         <div class="row-head">
           <div>
-            <a class="row-title" href="/app/history/{{ row.number }}?back={{ view.back_url }}">{{ row.subject }}</a>
+            <a class="row-title" href="/app/history/{{ row.number }}?back={{ view.back_url|urlencode }}">{{ row.subject }}</a>
             <p class="row-summary">{{ row.summary }}</p>
           </div>
           <span class="status {{ row.status_class }}">{{ row.status_label }}</span>

@@ -74,6 +74,8 @@ class SessionConfig(BaseModel):
     team_groups: list[str] = Field(default_factory=list)
     #: Answers-only support mode; opt-in, never the personal default.
     knowledge_only: bool = False
+    #: Answer a voice note with a synthesized voice note when TTS is configured.
+    voice_replies: bool = False
 
     @field_validator("timezone")
     @classmethod

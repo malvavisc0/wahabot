@@ -7,6 +7,13 @@ from tests.harness import FirstResponse, waha_event
 from tests.web.conftest import csrf_of
 from tests.wire.support import _wait
 
+from wahabot.webhook import app
+
+
+def test_registration_exposes_the_ticket_translator(bot) -> None:
+    """History uses the same translator the agent uses when it is available."""
+    assert callable(app.state.web_translate)
+
 
 def test_assistant_name_change_reaches_the_next_run(auth_client: TestClient, bot) -> None:
     """A saved Settings value is reloaded for the next inbound message."""

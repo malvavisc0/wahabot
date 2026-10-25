@@ -1,9 +1,7 @@
 """History list and ticket view models for the web back office."""
 
-import hashlib
 from dataclasses import dataclass, field
-from typing import Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 from wahabot.core.skills.store import SkillStore
 from wahabot.core.tickets.models import (
@@ -17,6 +15,11 @@ from wahabot.core.tickets.models import (
 )
 from wahabot.core.tickets.store import TicketStore
 from wahabot.web.services import format_time
+from wahabot.web.services.translation import (
+    TRANSLATION_LANGUAGE,
+    Translator,
+    translate_cached,
+)
 
 SHOW_CHOICES = (
     ("", "All tickets"),
@@ -58,6 +61,7 @@ class HistoryRow:
     reason: str
     solved: str
     time: str
+    updated_at: int
     urgent: bool
 
 
@@ -250,6 +254,7 @@ def row_for(store: TicketStore, ticket: Ticket, contact: Contact | None) -> Hist
         reason=latest_reason(events),
         solved=solved,
         time=format_time(ticket.updated_at),
+        updated_at=ticket.updated_at,
         urgent=bool(ticket.urgent),
     )
 
@@ -270,16 +275,16 @@ def filtered_rows(store: TicketStore, q: str, show: str) -> list[HistoryRow]:
 def group_rows(rows: list[HistoryRow]) -> list[HistorySection]:
     """Group into Needs you, Waiting and Resolved without hiding Open."""
     needs = [row for row in rows if row.status_class in {"urgent", "needs-you"}]
-    needs.sort(key=lambda row: (not row.urgent, -row.number))
+    needs.sort(key=lambda row: (not row.urgent, -row.updated_at, -row.number))
     waiting = [
         row
         for row in rows
         if row.status_class in {"waiting", "muted"}
         and row.status_label.startswith(("Open", "Waiting"))
     ]
-    waiting.sort(key=lambda row: -row.number)
+    waiting.sort(key=lambda row: (-row.updated_at, -row.number))
     resolved = [row for row in rows if row not in needs and row not in waiting]
-    resolved.sort(key=lambda row: -row.number)
+    resolved.sort(key=lambda row: (-row.updated_at, -row.number))
     return [
         HistorySection("needs-you", "Needs you", needs),
         HistorySection("waiting", "Waiting for the customer", waiting),
@@ -312,29 +317,12 @@ def list_view(store: TicketStore, *, q: str = "", show: str = "") -> HistoryList
 
 
 def safe_back(value: str) -> str:
-    """Accept only a same-origin History list target."""
-    if not value:
-        return "/app/history"
+    """Accept only a same-origin History list target, without a fragment."""
     parsed = urlsplit(value)
-    if parsed.scheme or parsed.netloc or value.startswith("//"):
+    if parsed.scheme or parsed.netloc or parsed.path != "/app/history":
         return "/app/history"
-    if not value.startswith("/app/history"):
-        return "/app/history"
-    return value
-
-
-def translate_cached(store: TicketStore, text: str, target: str, translate: Any) -> str:
-    """Translate once per source hash and language, caching the result."""
-    if not text.strip():
-        return text
-    source_hash = hashlib.sha256(text.encode()).hexdigest()
-    cached = store.translation(source_hash, target)
-    if cached is not None:
-        return cached
-    rendered = str(translate(text, target))
-    if rendered:
-        store.save_translation(source_hash, target, rendered)
-    return rendered or text
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"/app/history{query}"
 
 
 def attachment_views(
@@ -342,7 +330,7 @@ def attachment_views(
     *,
     lang: str = "originals",
     language: str = "",
-    translate: Any = None,
+    translate: Translator | None = None,
     store: TicketStore | None = None,
 ) -> list[AttachmentView]:
     """Map attachments inline, translating a voice transcript with the thread."""
@@ -356,7 +344,7 @@ def attachment_views(
             and translate is not None
             and store is not None
         ):
-            derived = translate_cached(store, derived, "en", translate)
+            derived = translate_cached(store, derived, TRANSLATION_LANGUAGE, translate)
         views.append(
             AttachmentView(
                 id=item.id,
@@ -406,7 +394,7 @@ def entry_for(
     *,
     lang: str,
     language: str,
-    translate: Any,
+    translate: Translator | None,
     store: TicketStore,
 ) -> ThreadEntry:
     """Build one thread entry with its sender, audience and inline media."""
@@ -419,7 +407,7 @@ def entry_for(
         and (customer or outgoing)
         and language.strip().lower() not in {"", "en"}
     ):
-        body = translate_cached(store, body, "en", translate)
+        body = translate_cached(store, body, TRANSLATION_LANGUAGE, translate)
     inline = inline_attachments(event, attachments)
     return ThreadEntry(
         sender=sender,
@@ -482,7 +470,7 @@ def thread_entries(
     attachments: list[Attachment],
     *,
     lang: str,
-    translate: Any,
+    translate: Translator | None,
 ) -> list[ThreadEntry]:
     """The event thread, translated once and in recorded order."""
     language = contact.language if contact is not None else ""
@@ -507,7 +495,7 @@ def add_orphan_entry(
     *,
     lang: str,
     language: str,
-    translate: Any,
+    translate: Translator | None,
     store: TicketStore,
 ) -> None:
     """Show attachments that no event referenced instead of hiding them."""
@@ -540,7 +528,7 @@ def add_orphan_entry(
 def toggle_values(ticket: Ticket, lang: str, back: str) -> tuple[str, str]:
     """The language toggle URL and its label."""
     query = "lang=en" if lang == "originals" else "lang=originals"
-    url = f"/app/history/{ticket.number}?{query}&back={back}"
+    url = f"/app/history/{ticket.number}?{query}&back={quote(back, safe='')}"
     label = "Show English translation" if lang == "originals" else "Show originals"
     return url, label
 
@@ -551,7 +539,7 @@ def ticket_page(
     ticket: Ticket,
     *,
     lang: str,
-    translate: Any,
+    translate: Translator | None,
     back: str,
 ) -> TicketPage:
     """Build the full ticket detail view."""

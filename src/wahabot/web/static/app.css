@@ -550,6 +550,7 @@ button.link {
   flex-wrap: wrap;
   gap: 4px 20px;
   color: var(--muted);
+  overflow-wrap: anywhere;
   font-size: 13px;
   margin-top: 4px;
 }

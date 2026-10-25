@@ -103,10 +103,10 @@ def draft_mention(name: str) -> str:
         return ""
     pattern = rf"(?iu)(?<![^\W_])@?{re.escape(clean)}(?!\w)"
     try:
-        compiled = re.compile(pattern)
+        re.compile(pattern)
     except re.error:
-        return rf"(?iu)(?<![^\W_])@?{re.escape(clean)}(?!\w)"
-    return pattern if compiled.search(clean) else rf"(?iu){re.escape(clean)}"
+        return rf"(?iu){re.escape(clean)}"
+    return pattern
 
 
 def save_assistant(settings: Settings, form: dict[str, str]) -> None:
@@ -121,17 +121,22 @@ def save_assistant(settings: Settings, form: dict[str, str]) -> None:
     raw["system_prompt"] = instructions
     raw["operator_name"] = form.get("operator_name", "").strip()
     raw["bot_mention_regex"] = draft_mention(name) or None
-    if "knowledge_only" in form:
-        raw["knowledge_only"] = form.get("knowledge_only") == "on"
-    if "voice_replies" in form:
-        raw["voice_replies"] = form.get("voice_replies") == "on"
+    raw["knowledge_only"] = "knowledge_only" in form
+    raw["voice_replies"] = bool(settings.tts_url) and "voice_replies" in form
     commit(settings, raw)
 
 
 def save_who(
-    settings: Settings, form: Mapping[str, object], groups: list[str], waha: WahaClient
+    settings: Settings,
+    form: Mapping[str, object],
+    groups: list[str] | None,
+    waha: WahaClient,
 ) -> None:
-    """Save allowed/blocked numbers, resolving each one on WhatsApp."""
+    """Save allowed/blocked numbers, resolving each one on WhatsApp.
+
+    ``groups`` is None when the list could not be loaded; the stored
+    choices are then kept instead of being cleared by a transient error.
+    """
     raw = read_raw(settings)
     whitelist = resolve_numbers(
         normalize_number_lines(str(form.get("whitelist", ""))), waha, settings.session
@@ -141,12 +146,13 @@ def save_who(
     )
     raw["whitelist"] = whitelist
     raw["blacklist"] = blacklist
-    raw["team_groups"] = groups
-    participation = str(form.get("group_participation", "")).strip()
-    if participation in {"never", "mentioned", "always"}:
-        raw["group_participation"] = participation
-    elif groups:
-        raw["group_participation"] = "mentioned"
+    if groups is not None:
+        raw["team_groups"] = groups
+        participation = str(form.get("group_participation", "")).strip()
+        if participation in {"never", "mentioned", "judicious"}:
+            raw["group_participation"] = participation
+        elif groups:
+            raw["group_participation"] = "mentioned"
     commit(settings, raw)
 
 
@@ -175,6 +181,18 @@ def save_hours(settings: Settings, form: dict[str, str]) -> None:
     commit(settings, raw)
 
 
+def hours_form_values(form: Mapping[str, object]) -> dict[str, dict[str, Any]]:
+    """The submitted weekday hours, retaining a failed save's input."""
+    values: dict[str, dict[str, Any]] = {}
+    for day, _label in DAY_LABELS:
+        values[day] = {
+            "open": str(form.get(f"{day}_open", "")).strip(),
+            "close": str(form.get(f"{day}_close", "")).strip(),
+            "closed": bool(form.get(f"{day}_closed")),
+        }
+    return values
+
+
 def hours_values(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Normalize the stored hours for the form."""
     hours = raw.get("hours")
@@ -191,24 +209,24 @@ def hours_values(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return values
 
 
-def away_preview(raw: dict[str, Any]) -> str:
+def away_preview(values: Mapping[str, object]) -> str:
     """Render the away message with example placeholders."""
     return render_away_message(
-        str(raw.get("away_message") or ""),
+        str(values.get("away_message") or ""),
         142,
         None,
-        str(raw.get("timezone") or "UTC"),
+        str(values.get("timezone") or "UTC"),
     )
 
 
 def team_groups_view(
     waha: WahaClient, session: str, enabled: list[str]
-) -> list[dict[str, Any]]:
-    """The connected number's groups, with name, member count and choice."""
+) -> list[dict[str, Any]] | None:
+    """The connected number's groups, or None when WAHA cannot list them."""
     try:
         chats = waha.list_chats(session)
     except httpx.HTTPError:
-        return []
+        return None
     rows: list[dict[str, Any]] = []
     for chat in chats:
         chat_id = str(chat.get("id") or "")

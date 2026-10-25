@@ -32,6 +32,18 @@ def runtime(settings: Settings) -> Any:
     return skill_runtime_for(settings)
 
 
+def draft_overrides(form: dict[str, str]) -> dict[str, str]:
+    """The submitted review fields, so a failed save keeps the input."""
+    return {
+        "base_url": form.get("base_url", "").strip(),
+        "test_path": form.get("test_path", "").strip(),
+        "customer_chats": form.get("customer_chats", "read"),
+        "writes_need_operator": "on" if "writes_need_operator" in form else "",
+        "instructions": form.get("instructions", ""),
+        "skill_md": form.get("skill_md", ""),
+    }
+
+
 def detail_response(
     request: Request,
     name: str,
@@ -39,6 +51,7 @@ def detail_response(
     *,
     feedback: str = "",
     feedback_class: str = "",
+    form: dict[str, str] | None = None,
 ) -> Response:
     """Render the one-skill page with optional action feedback."""
     settings = current_settings()
@@ -47,6 +60,7 @@ def detail_response(
         page = skill_page(store, secrets, name, ticket_store_for(settings))
     except KeyError:
         return error_page(request, "That skill was not found.", 404)
+    draft = {**page.draft, **draft_overrides(form)} if form else page.draft
     context: dict[str, Any] = {
         "csrf_token": token,
         "skill": page.skill,
@@ -54,7 +68,7 @@ def detail_response(
         "result": page.result,
         "key_set": page.key_set,
         "calls": page.calls,
-        "draft": page.draft,
+        "draft": draft,
         "feedback": feedback,
         "feedback_class": feedback_class,
     }
@@ -77,8 +91,8 @@ def skills_list(request: Request) -> Response:
         return auth
     store, _secrets, _drafts, _service = runtime(settings)
     rows = [row_view(skill) for skill in store.list()]
-    configured = [row for row in rows if row.enabled or row.test_state == "passed"]
-    drafts = [row for row in rows if row not in configured]
+    configured = [row for row in rows if row.lifecycle == "configured"]
+    drafts = [row for row in rows if row.lifecycle != "configured"]
     attention = [row for row in configured if row.failure_count >= 3]
     return render(
         request,
@@ -150,6 +164,7 @@ async def skill_save(request: Request, name: str) -> Response:
     if not valid_write(request, settings, form):
         return forbidden()
     store, secrets, drafts, _service = runtime(settings)
+    values = {key: str(value) for key, value in form.items()}
     try:
         save_skill(
             store,
@@ -157,7 +172,7 @@ async def skill_save(request: Request, name: str) -> Response:
             drafts,
             settings.skills_dir,
             name,
-            {key: str(value) for key, value in form.items()},
+            values,
         )
     except (ValueError, SkillError) as exc:
         return detail_response(
@@ -166,9 +181,11 @@ async def skill_save(request: Request, name: str) -> Response:
             auth.csrf,
             feedback=f"Not saved: {exc}",
             feedback_class="error",
+            form=values,
         )
+    saved = "Saved draft." if values.get("action") == "save" else "Saved."
     return detail_response(
-        request, name, auth.csrf, feedback="Saved.", feedback_class="saved"
+        request, name, auth.csrf, feedback=saved, feedback_class="saved"
     )
 
 

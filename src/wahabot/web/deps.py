@@ -1,7 +1,5 @@
 """Shared web dependencies kept free of route imports."""
 
-import datetime
-import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -44,14 +42,6 @@ NAV_ITEMS = (
     ("/app/settings", "Settings"),
 )
 WEB_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-
-
-def format_time(value: Any) -> str:
-    """Format a Unix timestamp as a short UTC date-time."""
-    if not value:
-        return ""
-    moment = datetime.datetime.fromtimestamp(int(value), tz=datetime.UTC)
-    return moment.strftime("%Y-%m-%d %H:%M")
 
 
 def current_settings() -> Settings:
@@ -164,7 +154,7 @@ def journal_web_write(request: Request, response: Response) -> None:
     path = request.url.path
     if request.method not in WEB_WRITE_METHODS:
         return
-    if not (path.startswith("/app") or path.startswith("/setup") or path == "/logout"):
+    if not path.startswith(("/app", "/setup", "/login", "/logout")):
         return
     settings = current_settings()
     save_action(
@@ -229,17 +219,3 @@ def skill_runtime_for(
     )
     drafts = SkillDraftService(store, secrets, settings.skills_dir, service)
     return store, secrets, drafts, service
-
-
-def translate_cached(store: TicketStore, text: str, target: str, translate: Any) -> str:
-    """Translate once per source hash and target, caching the result."""
-    if not text.strip():
-        return text
-    source_hash = hashlib.sha256(text.encode()).hexdigest()
-    cached = store.translation(source_hash, target)
-    if cached is not None:
-        return cached
-    rendered = str(translate(text, target))
-    if rendered:
-        store.save_translation(source_hash, target, rendered)
-    return rendered or text

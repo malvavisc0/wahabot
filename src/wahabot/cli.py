@@ -351,6 +351,7 @@ def serve(
     setup_logging(settings)
     host = host or settings.host
     port = port or settings.port
+    settings.port = port
     cli_helpers.log_startup_banner(settings, host, port)
     if not settings.access_config.exists():
         message = (

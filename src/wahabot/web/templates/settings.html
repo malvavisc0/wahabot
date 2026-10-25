@@ -29,11 +29,11 @@
           <label for="operator_name">{{ _("Operator name") }}</label>
           <input id="operator_name" name="operator_name" type="text" value="{{ form.get('operator_name', raw.get('operator_name', '')) }}">
           <label>
-            <input type="checkbox" name="knowledge_only"{% if raw.get('knowledge_only') %} checked{% endif %}>
+            <input type="checkbox" name="knowledge_only"{% if knowledge_only_checked %} checked{% endif %}>
             Answers only — never act on customer requests
           </label>
           {% if tts_configured %}
-          <label><input type="checkbox" name="voice_replies"{% if raw.get('voice_replies') %} checked{% endif %}> Voice-note replies</label>
+          <label><input type="checkbox" name="voice_replies"{% if voice_replies_checked %} checked{% endif %}> Voice-note replies</label>
           {% endif %}
           <div class="savebar">
             <button class="primary" type="submit">{{ _("Save Assistant") }}</button>
@@ -47,16 +47,19 @@
         <p class="muted">One international number per line. Empty means everyone.</p>
         <form method="post" action="/app/settings/who" data-warn-leave="true">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="team_groups_available" value="{{ '1' if team_groups_available else '0' }}">
           <label for="whitelist">{{ _("Only these numbers") }}</label>
           <textarea id="whitelist" name="whitelist">{{ form.get('whitelist', whitelist_text) }}</textarea>
           <label for="blacklist">{{ _("Never these numbers") }}</label>
           <textarea id="blacklist" name="blacklist">{{ form.get('blacklist', blacklist_text) }}</textarea>
-          {% if team_groups %}
+          {% if not team_groups_available %}
+          <p class="feedback error">Team groups could not be loaded; the saved choices are kept.</p>
+          {% elif team_groups %}
           <h3 class="section-title">{{ _("Team groups") }}</h3>
           <p class="field-help">Silent unless named, internal answers only, and never in History.</p>
           {% for group in team_groups %}
           <label>
-            <input type="checkbox" name="team_groups" value="{{ group.id }}"{% if group.enabled %} checked{% endif %}>
+            <input type="checkbox" name="team_groups" value="{{ group.id }}"{% if group.id in selected_groups %} checked{% endif %}>
             {{ group.name }} · {{ group.count }} members — Reply when named
           </label>
           {% endfor %}

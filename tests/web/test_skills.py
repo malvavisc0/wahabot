@@ -8,6 +8,7 @@ from tests.harness.rest import FakeRest
 from tests.web.conftest import csrf_of
 
 from wahabot.core.skills.secrets import SecretStore
+from wahabot.core.skills.store import SkillStore
 
 
 def create_draft(client: TestClient, source: str) -> str:
@@ -40,6 +41,52 @@ def test_create_draft_opens_review(auth_client: TestClient, fake_rest: FakeRest)
     assert "Review" in page.text
     assert fake_rest.base in page.text
     assert "Enable skill" not in page.text
+
+
+def test_create_draft_keeps_the_source_url(
+    auth_client: TestClient, fake_rest: FakeRest, bot
+) -> None:
+    """The documentation URL is not replaced by the service destination."""
+    name = create_draft(auth_client, fake_rest.base + "/docs")
+
+    skill = SkillStore(bot.database.path).get(name)
+
+    assert skill is not None
+    assert skill.source_url == fake_rest.base + "/docs"
+
+
+def test_save_draft_stays_inactive_and_never_stores_the_key(
+    auth_client: TestClient, fake_rest: FakeRest, bot
+) -> None:
+    """Save draft persists the fields without configuring or writing the key."""
+    name = create_draft(auth_client, fake_rest.base + "/docs")
+    token = csrf_of(auth_client.get(f"/app/skills/{name}").text)
+    response = auth_client.post(
+        f"/app/skills/{name}/save",
+        data={
+            "base_url": fake_rest.base,
+            "test_path": "/health",
+            "customer_chats": "read",
+            "instructions": "Look up records.",
+            "api_key": "sk-fictional-draft-key",
+            "action": "save",
+            "csrf_token": token,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "Saved draft." in response.text
+    assert "Delete" in response.text
+    store = SkillStore(bot.database.path)
+    skill = store.get(name)
+    assert skill is not None
+    assert skill.lifecycle == "draft"
+    assert skill.draft_stage == "review"
+    assert not (bot.settings.skills_dir / name).exists()
+    secret_ref = f"{name.upper().replace('-', '_')}_KEY"
+    secrets = SecretStore(bot.database.path, bot.settings.secret_key)
+    assert store.secret_exists(secret_ref) is False
+    assert not secrets.ciphertext(secret_ref)
 
 
 def test_invalid_source_url_is_refused(auth_client: TestClient) -> None:
@@ -114,6 +161,7 @@ def test_test_gating_and_stale_configuration(
     )
     tested = auth_client.post(f"/app/skills/{name}/test", data={"csrf_token": token})
     assert "Passed" in tested.text
+    assert "Tested at" in tested.text
     enabled = auth_client.post(f"/app/skills/{name}/enable", data={"csrf_token": token})
     assert "Enabled" in enabled.text
     disabled = auth_client.post(f"/app/skills/{name}/disable", data={"csrf_token": token})
@@ -151,8 +199,12 @@ def test_failed_safe_check_is_recorded(
     )
     failed = auth_client.post(f"/app/skills/{name}/test", data={"csrf_token": token})
     assert "Failed" in failed.text
+    assert "Tested at" in failed.text
     enabled = auth_client.post(f"/app/skills/{name}/enable", data={"csrf_token": token})
     assert "Not enabled" in enabled.text
+    page = auth_client.get("/app/skills")
+    assert "Inactive draft" not in page.text
+    assert "Paused" in page.text
 
 
 def test_delete_removes_row_and_folder(
