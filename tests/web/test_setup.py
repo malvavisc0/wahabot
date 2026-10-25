@@ -4,6 +4,8 @@ from fastapi.testclient import TestClient
 from tests.harness.constants import ME_JID
 from tests.web.conftest import csrf_of, seed_ticket
 
+from wahabot.web.routes.setup import QR_MAX_POLLS
+
 
 def test_setup_creates_session_and_shows_qr(auth_client: TestClient, store, bot) -> None:
     """Opening Setup creates the WAHA session with the bot webhook and a QR."""
@@ -75,6 +77,15 @@ def test_setup_status_json_and_media_auth(auth_client: TestClient, store, bot) -
     assert payload["exchange"]["question"].startswith("hola")
     auth_client.cookies.clear()
     assert auth_client.get("/setup/status").status_code == 401
+
+
+def test_qr_poll_budget_restarts_the_session(auth_client: TestClient, bot) -> None:
+    """Six expiry windows of polling restart the session in place."""
+    bot.waha.session_status = "SCAN_QR_CODE"
+    auth_client.app.state.web_qr_polls = QR_MAX_POLLS - 1
+    payload = auth_client.get("/setup/status").json()
+    assert payload["restarted"] is True
+    assert bot.waha.restarted_sessions == ["default"]
 
 
 def test_setup_write_requires_csrf(auth_client: TestClient) -> None:

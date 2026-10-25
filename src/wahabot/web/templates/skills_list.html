@@ -38,6 +38,7 @@
         <span>{{ row.capabilities }}</span>
         <span>{{ row.permissions }}</span>
         <span>Test: {{ row.test_label }}</span>
+        <span>Updated: {{ row.updated }}</span>
         {% if row.failure_count %}<span class="status error">{{ row.failure_count }} consecutive failures</span>{% endif %}
       </div>
     </li>

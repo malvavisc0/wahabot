@@ -18,6 +18,7 @@ from wahabot.web.deps import (
 from wahabot.web.services.setup import SetupService, SetupState
 
 router = APIRouter()
+QR_MAX_POLLS = 24
 
 
 def service_for(request: Request, settings: Settings) -> SetupService:
@@ -121,6 +122,17 @@ def setup_status(request: Request) -> Response:
     if refused is not None:
         return refused
     state = service_for(request, settings).state()
+    restarted = False
+    if state.status == "SCAN_QR_CODE":
+        count = int(getattr(request.app.state, "web_qr_polls", 0)) + 1
+        if count >= QR_MAX_POLLS:
+            with contextlib.suppress(Exception):
+                service_for(request, settings).restart()
+            count = 0
+            restarted = True
+        request.app.state.web_qr_polls = count
+    else:
+        request.app.state.web_qr_polls = 0
     exchange = None
     if state.exchange is not None:
         exchange = {
@@ -134,6 +146,7 @@ def setup_status(request: Request) -> Response:
             "qr_data": state.qr_data,
             "qr_value": state.qr_value,
             "completed": state.completed,
+            "restarted": restarted,
             "exchange": exchange,
         }
     )

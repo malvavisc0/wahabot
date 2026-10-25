@@ -43,6 +43,27 @@
     if (target) target.focus();
   }
 
+  var setupStatus = document.querySelector("[data-setup-status]");
+  if (setupStatus) {
+    window.setInterval(function () {
+      window
+        .fetch("/setup/status", { credentials: "same-origin" })
+        .then(function (response) {
+          return response.ok ? response.json() : null;
+        })
+        .then(function (state) {
+          if (!state) return;
+          var label = document.querySelector("[data-setup-status]");
+          if (label) label.textContent = state.status;
+          var qr = document.getElementById("setup-qr");
+          if (qr && state.qr_data) qr.src = state.qr_data;
+          if (state.completed) window.location.assign("/app/history");
+          if (state.restarted) window.location.reload();
+        })
+        .catch(function () {});
+    }, 5000);
+  }
+
   document.querySelectorAll("[data-focus-target]").forEach(function (control) {
     control.addEventListener("click", function () {
       var target = document.getElementById(control.dataset.focusTarget);

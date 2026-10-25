@@ -121,6 +121,10 @@ def save_assistant(settings: Settings, form: dict[str, str]) -> None:
     raw["system_prompt"] = instructions
     raw["operator_name"] = form.get("operator_name", "").strip()
     raw["bot_mention_regex"] = draft_mention(name) or None
+    if "knowledge_only" in form:
+        raw["knowledge_only"] = form.get("knowledge_only") == "on"
+    if "voice_replies" in form:
+        raw["voice_replies"] = form.get("voice_replies") == "on"
     commit(settings, raw)
 
 
@@ -138,7 +142,10 @@ def save_who(
     raw["whitelist"] = whitelist
     raw["blacklist"] = blacklist
     raw["team_groups"] = groups
-    if groups:
+    participation = str(form.get("group_participation", "")).strip()
+    if participation in {"never", "mentioned", "always"}:
+        raw["group_participation"] = participation
+    elif groups:
         raw["group_participation"] = "mentioned"
     commit(settings, raw)
 

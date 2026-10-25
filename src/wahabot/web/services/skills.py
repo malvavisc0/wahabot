@@ -47,6 +47,7 @@ class SkillRow:
     test_state: str
     reason: str
     failure_count: int
+    updated: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,6 +297,7 @@ def row_view(skill: Skill) -> SkillRow:
         test_state=skill.test_state,
         reason=skill.test_reason,
         failure_count=skill.failure_count,
+        updated=format_time(skill.updated_at),
     )
 
 

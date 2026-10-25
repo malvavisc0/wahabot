@@ -28,6 +28,10 @@
           <textarea id="instructions" name="instructions">{{ form.get('instructions', raw.get('system_prompt', '')) }}</textarea>
           <label for="operator_name">{{ _("Operator name") }}</label>
           <input id="operator_name" name="operator_name" type="text" value="{{ form.get('operator_name', raw.get('operator_name', '')) }}">
+          <label>
+            <input type="checkbox" name="knowledge_only"{% if raw.get('knowledge_only') %} checked{% endif %}>
+            Answers only — never act on customer requests
+          </label>
           {% if tts_configured %}
           <label><input type="checkbox" name="voice_replies"{% if raw.get('voice_replies') %} checked{% endif %}> Voice-note replies</label>
           {% endif %}
