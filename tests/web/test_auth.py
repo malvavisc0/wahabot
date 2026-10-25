@@ -145,6 +145,21 @@ def test_rate_limit_blocks_correct_passphrase(web_client: TestClient) -> None:
     assert "try again" in blocked.text.lower()
 
 
+def test_rotating_the_session_key_invalidates_cookies(
+    auth_client: TestClient, bot
+) -> None:
+    """Rotation is the recovery path: the old cookie stops working."""
+    assert auth_client.get("/app/history").status_code == 200
+    old_key = bot.settings.web_session_key
+    try:
+        bot.settings.web_session_key = old_key + "-rotated"
+        response = auth_client.get("/app/history", follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == "/login"
+    finally:
+        bot.settings.web_session_key = old_key
+
+
 def test_logout_is_post_only(auth_client: TestClient) -> None:
     """GET /logout never mutates; POST clears the cookie."""
     still_valid = auth_client.get("/app/teach")

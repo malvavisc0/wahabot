@@ -101,6 +101,8 @@ def check_widths(page: Page, base: str, screenshots: Path) -> None:
             expect(page.locator("h1.page-title")).to_have_text(heading)
             no_overflow(page, f"{path} at {width}px")
         if width == 390:
+            signout = page.locator(".signout button")
+            check("Sign out is visible at 390px", signout.is_visible())
             page.goto(f"{base}/app/settings")
             page.screenshot(path=str(screenshots / "settings-390.png"), full_page=True)
             page.goto(f"{base}/app/history")
@@ -136,6 +138,12 @@ def check_controls(page: Page, base: str) -> None:
     page.click("a[href='/app/history?show=needs_you#needs-you']")
     expect(page.locator("#needs-you")).to_be_focused()
     check("the needs-you shortcut focuses its heading", True)
+    page.goto(f"{base}/app/history")
+    page.locator(".row-title").first.click()
+    page.get_by_role("link", name="Show originals").first.focus()
+    page.keyboard.press("Enter")
+    expect(page).to_have_url(re.compile(r".*lang=originals.*"))
+    check("the language toggle works from the keyboard", True)
     check("no JavaScript errors on the main pages", errors == [])
 
 
