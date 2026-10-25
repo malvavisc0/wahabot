@@ -30,6 +30,58 @@ class RecordingWaha(WahaClient):
         self.video_bytes = b""
         #: What ``get_session`` answers — the probe path's WAHA view.
         self.session_status = "WORKING"
+        self.created_sessions: list[dict[str, Any]] = []
+        self.started_sessions: list[str] = []
+        self.restarted_sessions: list[str] = []
+        self.pairing_requests: list[tuple[str, str]] = []
+        self.qr_calls: list[str] = []
+
+    @override
+    def create_session(
+        self,
+        session: str,
+        *,
+        webhook_url: str,
+        hmac_key: str,
+        events: list[str],
+    ) -> dict[str, Any]:
+        """Record the Setup-created session and start in SCAN_QR_CODE."""
+        self.created_sessions.append(
+            {
+                "name": session,
+                "webhook_url": webhook_url,
+                "hmac_key": hmac_key,
+                "events": list(events),
+            }
+        )
+        self.session_status = "SCAN_QR_CODE"
+        return {"name": session, "status": self.session_status}
+
+    @override
+    def start_session(self, session: str) -> dict[str, Any]:
+        """Record a start and become WORKING."""
+        self.started_sessions.append(session)
+        self.session_status = "WORKING"
+        return {"name": session, "status": self.session_status}
+
+    @override
+    def restart_session(self, session: str) -> dict[str, Any]:
+        """Record a restart and return to the QR state."""
+        self.restarted_sessions.append(session)
+        self.session_status = "SCAN_QR_CODE"
+        return {"name": session, "status": self.session_status}
+
+    @override
+    def get_qr(self, session: str) -> bytes | dict[str, Any]:
+        """Return the canned PNG for the Setup QR."""
+        self.qr_calls.append(session)
+        return SMOKE_PNG
+
+    @override
+    def request_code(self, session: str, phone_number: str) -> dict[str, Any]:
+        """Record the pairing number and return a fictional code."""
+        self.pairing_requests.append((session, phone_number))
+        return {"code": "BRIDGE-42"}
 
     @override
     def get_chat_overview(self, session: str, chat_id: str) -> Any:
