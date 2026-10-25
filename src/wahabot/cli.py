@@ -3,6 +3,7 @@
 import contextlib
 import datetime
 import json
+import sys
 from importlib.metadata import version as get_version
 from pathlib import Path
 from typing import Annotated, Any
@@ -205,6 +206,17 @@ def skills_disable(
     except Exception as exc:
         raise typer.BadParameter(str(exc)) from exc
     cli_helpers.ok(console, f"Disabled [bold]{name}[/].")
+
+
+@app.command("hash-passphrase")
+def hash_passphrase_command() -> None:
+    """Read one passphrase from stdin and print its scrypt hash for .env."""
+    from wahabot.web.auth import hash_passphrase
+
+    raw = sys.stdin.readline()
+    if not raw.strip():
+        raise typer.BadParameter("a passphrase is required on stdin")
+    console.print(hash_passphrase(raw.rstrip("\r\n")))
 
 
 @app.command()

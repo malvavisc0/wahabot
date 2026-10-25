@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}wahabot{% endblock %}</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    {% if show_header|default(true) %}
+    <header class="site-header">
+      <div class="shell">
+        <a class="brand" href="/">wahabot</a>
+        {% if session %}
+        <nav class="site-nav" aria-label="Work areas">
+          {% for href, label in nav_items %}
+          <a href="{{ href }}"{% if current_path == href or current_path.startswith(href ~ "/") %} class="current" aria-current="page"{% endif %}>{{ label }}</a>
+          {% endfor %}
+        </nav>
+        <form class="signout" method="post" action="/logout" data-no-dirty="true">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit">Sign out</button>
+        </form>
+        {% endif %}
+      </div>
+    </header>
+    {% endif %}
+    <main class="shell{% if chromeless|default(false) %} login-shell{% endif %}">
+      {% block content %}{% endblock %}
+    </main>
+    <script src="/static/app.js"></script>
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

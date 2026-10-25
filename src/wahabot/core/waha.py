@@ -140,6 +140,68 @@ class WahaClient:
         response.raise_for_status()
         return response_json(response)
 
+    def create_session(
+        self,
+        session: str,
+        *,
+        webhook_url: str,
+        hmac_key: str,
+        events: list[str],
+    ) -> dict[str, Any]:
+        """Create a session with the bot's webhook, HMAC key and events."""
+        body = {
+            "name": session,
+            "start": True,
+            "config": {
+                "webhooks": [
+                    {
+                        "url": webhook_url,
+                        "events": events,
+                        "hmac": {"key": hmac_key},
+                    }
+                ]
+            },
+        }
+        response = self._client.post(f"{API_PREFIX}/sessions", json=body)
+        response.raise_for_status()
+        return response_json(response)
+
+    def start_session(self, session: str) -> dict[str, Any]:
+        """Start an existing stopped session."""
+        response = self._client.post(f"{API_PREFIX}/sessions/{session}/start")
+        response.raise_for_status()
+        return response_json(response)
+
+    def restart_session(self, session: str) -> dict[str, Any]:
+        """Restart a session in place after a failure."""
+        response = self._client.post(f"{API_PREFIX}/sessions/{session}/restart")
+        response.raise_for_status()
+        return response_json(response)
+
+    def get_qr(self, session: str) -> bytes | dict[str, Any]:
+        """Fetch the linking QR: PNG bytes, or WAHA's JSON value form."""
+        response = self._client.get(
+            f"{API_PREFIX}/{quote(session, safe='')}/auth/qr",
+            params={"format": "image"},
+        )
+        response.raise_for_status()
+        if response.headers.get("content-type", "").startswith("application/json"):
+            return response_json(response)
+        return response.content
+
+    def request_code(self, session: str, phone_number: str) -> dict[str, Any]:
+        """Ask WAHA for a pairing code for the support number."""
+        response = self._client.post(
+            f"{API_PREFIX}/{quote(session, safe='')}/auth/request-code",
+            json={"phoneNumber": phone_number},
+        )
+        response.raise_for_status()
+        try:
+            payload = response_json(response)
+        except httpx.HTTPError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
     def list_chats(self, session: str, limit: int = 200) -> list[dict[str, Any]]:
         """Up to *limit* chats (id + name), newest conversation first.
 

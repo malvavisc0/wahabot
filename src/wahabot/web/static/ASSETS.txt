@@ -1,0 +1,4 @@
+htmx.min.js sha256 e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447
+htmx.org 2.0.4 https://cdn.jsdelivr.net/npm/htmx.org@2.0.4/dist/htmx.min.js
+source-sans-3-latin-wght-normal.woff2 sha256 19143dca075972bc84e3fd9eab7416dd40cc565dccb2435a044bdfabe060c7d5
+@fontsource-variable/source-sans-3 5.3.1 https://cdn.jsdelivr.net/npm/@fontsource-variable/source-sans-3@5.3.1/files/source-sans-3-latin-wght-normal.woff2

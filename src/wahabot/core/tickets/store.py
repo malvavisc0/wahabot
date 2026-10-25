@@ -533,6 +533,22 @@ class TicketStore(ScheduleMixin, ContactMixin, AlertMixin, LifecycleMixin, Ident
             attachment_from_row,
         )
 
+    def attachment(self, attachment_id: int) -> Attachment | None:
+        """One stored attachment by id, for authenticated media."""
+        return self.query_one(
+            f"SELECT {_ATTACHMENT_COLUMNS} FROM attachments WHERE id = ?",
+            (attachment_id,),
+            attachment_from_row,
+        )
+
+    def all_tickets(self) -> list[Ticket]:
+        """Every ticket, newest first, for the History list."""
+        return self.query_all(
+            f"SELECT {_TICKET_COLUMNS} FROM tickets ORDER BY number DESC",
+            (),
+            ticket_from_row,
+        )
+
     def tickets_between(self, start: int, end: int) -> list[Ticket]:
         """Tickets created in a half-open instant window, oldest first."""
         return self.query_all(

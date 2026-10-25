@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Ticket {{ view.ticket.number }} · wahabot{% endblock %}
+{% block content %}
+<div class="surface">
+  <p class="small"><a href="{{ view.back }}">Back to results</a></p>
+  <h1 class="page-title">{{ view.subject }}</h1>
+  <p class="status {{ view.status_class }}">{{ view.status_label }}</p>
+  <p class="notice">{{ view.next_step }}</p>
+
+  <div class="context">
+    <dl>
+      <dt>Person</dt><dd>{{ view.contact_name }}</dd>
+      <dt>Number</dt><dd class="mono">{{ view.contact_number }}</dd>
+      <dt>Language</dt><dd>{{ view.language or "Unknown" }}</dd>
+      <dt>Ticket</dt><dd class="mono">#{{ view.ticket.number }}</dd>
+      {% if view.summary %}<dt>Summary</dt><dd>{{ view.summary }}</dd>{% endif %}
+    </dl>
+  </div>
+
+  <div class="actions">
+    <a class="button" href="{{ view.toggle_url }}">{{ view.toggle_label }}</a>
+  </div>
+
+  <h2 class="section-title">Conversation</h2>
+  <ul class="thread">
+    {% for entry in view.entries %}
+    <li class="message {{ entry.style }}">
+      <div class="message-meta">
+        <strong>{{ entry.sender }}</strong>
+        <span>{{ entry.kind_label }}</span>
+        <span>{{ entry.time }}</span>
+        {% if entry.internal %}<span class="status attention">Internal / not sent to customer</span>{% endif %}
+        {% if entry.outgoing and not entry.internal %}<span>Sent to customer</span>{% endif %}
+      </div>
+      {% if entry.body %}
+      <div class="message-body">{{ entry.body }}</div>
+      {% endif %}
+      {% for attachment in entry.attachments %}
+      <div class="attachment">
+        {% if attachment.kind == "image" %}
+        <a href="/app/media/{{ attachment.id }}"><img src="/app/media/{{ attachment.id }}" alt="Attachment image"></a>
+        {% elif attachment.kind in ("video",) %}
+        <video controls preload="metadata" src="/app/media/{{ attachment.id }}"></video>
+        {% elif attachment.kind in ("voice", "audio") %}
+        <audio controls preload="metadata" src="/app/media/{{ attachment.id }}"></audio>
+        {% else %}
+        <a href="/app/media/{{ attachment.id }}">Download attachment</a>
+        {% endif %}
+        {% if attachment.derived_text %}
+        <div class="transcript">{{ attachment.derived_text }}</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </li>
+    {% else %}
+    <li class="message internal">No recorded messages or events for this ticket.</li>
+    {% endfor %}
+  </ul>
+
+  {% if view.calls %}
+  <h2 class="section-title">Skill calls</h2>
+  <ul class="card-list">
+    {% for call in view.calls %}
+    <li class="list-row">
+      <div class="row-head">
+        <strong>{{ call.skill }}</strong>
+        <span class="status {{ 'error' if call.failed else 'done' }}">{{ call.outcome }}</span>
+      </div>
+      <div class="row-meta">
+        <span>{{ call.time }}</span>
+        <span>Started by {{ call.started_by }}</span>
+        <span>{{ call.detail }}</span>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <p class="footer">Reply to the Ticket {{ view.ticket.number }} message in WhatsApp. There is no reply box here.</p>
+</div>
+{% endblock %}

@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}{{ skill.name }} · Skills · wahabot{% endblock %}
+{% block content %}
+<div class="surface">
+  <p class="small"><a href="/app/skills">Back to Skills</a></p>
+  <h1 class="page-title">{{ skill.name }}</h1>
+  <p class="page-purpose">{{ "Choose the destination, then test before enabling." if stage != "test" else "Only a current passing test can be enabled." }}</p>
+
+  <ol class="progress">
+    <li class="{{ 'current' if stage == 'connect' else 'complete' if stage in ('review', 'test') else '' }}">1. Connect</li>
+    <li class="{{ 'current' if stage == 'review' else 'complete' if stage == 'test' else '' }}">2. Review</li>
+    <li class="{{ 'current' if stage == 'test' else '' }}">3. Test and enable</li>
+  </ol>
+
+  {% if feedback %}
+  <p class="feedback {{ feedback_class }}" role="status">{{ feedback }}</p>
+  {% endif %}
+
+  <form method="post" action="/app/skills/{{ skill.name }}/save" data-warn-leave="true">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="stage" value="{{ stage }}">
+
+    <h2 class="section-title">Service</h2>
+    <p class="field-help">Source: <span class="mono">{{ skill.source_url }}</span></p>
+    <label for="base_url">Service destination</label>
+    <input id="base_url" name="base_url" type="url" value="{{ draft.base_url }}" required>
+    <label for="test_path">Prepared safe check path</label>
+    <p class="field-help">A GET check that does not change data, such as <span class="mono">/health</span>.</p>
+    <input id="test_path" name="test_path" type="text" value="{{ draft.test_path }}">
+
+    <h2 class="section-title">Capabilities</h2>
+    <label for="customer_chats">What it may do</label>
+    <select id="customer_chats" name="customer_chats">
+      <option value="read"{% if draft.customer_chats == "read" %} selected{% endif %}>Look up customer details (read only)</option>
+      <option value="read_write"{% if draft.customer_chats == "read_write" %} selected{% endif %}>Look up and allow changes</option>
+      <option value="none"{% if draft.customer_chats == "none" %} selected{% endif %}>Operator requests only</option>
+    </select>
+    <label for="instructions">Instructions</label>
+    <textarea id="instructions" name="instructions">{{ skill.instructions }}</textarea>
+
+    <h2 class="section-title">Permissions</h2>
+    <label>
+      <input type="checkbox" name="writes_need_operator"{% if skill.writes_need_operator %} checked{% endif %}>
+      Changes need your approval in WhatsApp
+    </label>
+    <p class="field-help">Read-only customer lookup is the default. The web app never approves a change.</p>
+    <label for="api_key">Service key{% if key_set %} (set){% endif %}</label>
+    <p class="field-help">The key is write-only. {% if key_set %}A key is already set; leave blank to keep it.{% else %}Leave blank when the service needs no key.{% endif %}</p>
+    <input id="api_key" name="api_key" type="password" autocomplete="off" value="">
+
+    <details>
+      <summary>Advanced</summary>
+      <label for="skill_md">Raw SKILL.md</label>
+      <textarea id="skill_md" name="skill_md">{{ skill.skill_md }}</textarea>
+    </details>
+
+    <div class="actions">
+      <button type="submit" name="action" value="save">Save draft</button>
+      <button class="primary" type="submit" name="action" value="review">Continue to test</button>
+      <a class="button" href="/app/skills">Cancel</a>
+    </div>
+  </form>
+
+  <div class="result" id="test-result">
+    <h2 class="section-title">Test result</h2>
+    <p class="status {{ result.css }}">{{ result.label }}</p>
+    <p>{{ result.reason }}</p>
+    <div class="actions">
+      <form method="post" action="/app/skills/{{ skill.name }}/test" data-no-dirty="true">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="primary" type="submit">Test connection</button>
+      </form>
+      {% if result.label == "Passed" %}
+      <form method="post" action="/app/skills/{{ skill.name }}/enable" data-no-dirty="true">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="primary" type="submit">Enable skill</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if skill.lifecycle == "configured" %}
+  <div class="actions">
+    <form method="post" action="/app/skills/{{ skill.name }}/disable" data-no-dirty="true">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">Switch off</button>
+    </form>
+    <form method="post" action="/app/skills/{{ skill.name }}/delete" data-no-dirty="true" onsubmit="return confirm('Delete this skill?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="danger" type="submit">Delete</button>
+    </form>
+  </div>
+  {% endif %}
+
+  {% if calls %}
+  <h2 class="section-title">Recent calls</h2>
+  <ul class="card-list">
+    {% for call in calls %}
+    <li class="list-row">
+      <div class="row-head">
+        <span>{{ call.method }} {{ call.path }}</span>
+        <span class="status {{ 'error' if call.failed else 'done' }}">{{ call.outcome }}</span>
+      </div>
+      <div class="row-meta">
+        <span>{{ call.time }}</span>
+        <span>Started by {{ call.started_by }}</span>
+        <span>{{ call.duration_ms }} ms</span>
+        {% if call.ticket_number %}<a href="/app/history/{{ call.ticket_number }}">Ticket {{ call.ticket_number }}</a>{% endif %}
+      </div>
+      {% if call.error %}<p class="feedback error">{{ call.error }}</p>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</div>
+{% endblock %}
