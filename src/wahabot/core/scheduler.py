@@ -1,5 +1,6 @@
 """The 60-second ticket tick: close, release pauses and nudge."""
 
+import contextlib
 import datetime
 import threading
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -7,9 +8,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from loguru import logger
 
 from wahabot.core.access import SessionConfig, SessionConfigReloader
+from wahabot.core.echoes import remember_self_echo
 from wahabot.core.schedule.deferred import deliver_due_notices
 from wahabot.core.schedule.hours import effective_timezone, opening_state
-from wahabot.core.tickets.alerts import Translator, retry_alerts
+from wahabot.core.tickets.alerts import Translator, operator_language, retry_alerts
 from wahabot.core.tickets.lifecycle import close_overdue, close_stale
 from wahabot.core.tickets.models import (
     Actor,
@@ -45,17 +47,18 @@ class TicketScheduler:
         self.nudge_lock = threading.Lock()
 
     def tick(self, now: int | None = None) -> None:
-        """Run one timer pass: close tickets, release pauses, nudge."""
+        """Run one timer pass: close tickets, release pauses, summarize, nudge."""
         moment = self.store.now() if now is None else now
         config = self.config_reloader.current_config()
         retry_alerts(self.store, self.waha, moment)
         close_overdue(self.store, config.close_after_days, at=moment)
         close_stale(self.store, config.close_after_days, at=moment)
         self.release_pauses(moment, config)
-        self.nudge(moment)
-        # Send the summary first: it lists every needs-you ticket and cancels
-        # their queued individual alerts, so the same opening cannot page twice.
+        # The summary is the opening notification: it lists every needs-you
+        # ticket, cancels their queued notices and records a nudge per ticket
+        # so the same opening cannot page twice.
         self.morning_summary(moment, config)
+        self.nudge(moment, config)
         self.scheduled_notices(moment, config)
 
     def scheduled_notices(self, moment: int, config: SessionConfig) -> None:
@@ -65,16 +68,16 @@ class TicketScheduler:
             return
         deliver_due_notices(self.store, self.waha, moment)
 
-    def morning_summary(self, moment: int, config: SessionConfig) -> None:
+    def morning_summary(self, moment: int, config: SessionConfig) -> bool:
         """Send the morning summary once per local day at the first opening."""
         if not config.hours:
-            return
+            return False
         destination = status_state.operator_jid
         if not destination:
-            return
+            return False
         zone = effective_timezone(config.timezone, self.settings.timezone)
         try:
-            send_summary(
+            sent = send_summary(
                 self.store,
                 self.waha,
                 self.settings.session,
@@ -88,6 +91,8 @@ class TicketScheduler:
             )
         except Exception as exc:
             logger.warning("Morning summary failed: {exc}", exc=exc)
+            return False
+        return sent is not None
 
     def release_pauses(self, moment: int, config: SessionConfig) -> None:
         """Clear contact and chat pauses once the customer has been quiet."""
@@ -121,50 +126,81 @@ class TicketScheduler:
                 continue
             self.store.set_chat_paused(chat_id, None)
 
-    def nudge(self, moment: int) -> None:
+    def nudge(self, moment: int, config: SessionConfig | None = None) -> None:
         """Tell the operator once per interval that a customer asked again."""
+        current = config if config is not None else self.config_reloader.current_config()
+        state = opening_state(current, moment, self.settings.timezone)
+        if not state.open:
+            return
+        zone = effective_timezone(current.timezone, self.settings.timezone)
+        language = operator_language(current.operator_language)
         with self.nudge_lock:
-            self.nudge_locked(moment)
+            self.nudge_locked(moment, zone, language)
 
-    def nudge_locked(self, moment: int) -> None:
+    def nudge_locked(self, moment: int, timezone: str, language: str) -> None:
         operator_jid = status_state.operator_jid
         if not operator_jid:
             return
+        queued = {notice.ticket_id for notice in self.store.pending_notices(moment)}
         for ticket in self.store.needs_you_tickets():
-            if not self.nudge_due(ticket, moment):
-                continue
-            contact = self.store.contact_by_id(ticket.contact_id)
-            if contact is None:
-                continue
-            alert = self.store.last_event(ticket.id, EventKind.ALERT.value)
-            since = alert.at if alert is not None else ticket.updated_at
-            latest = self.store.last_event(ticket.id, EventKind.CUSTOMER_MESSAGE.value)
-            text = nudge_text(
-                contact,
-                ticket,
-                moment,
-                self.settings.timezone,
-                since=since,
-                words=latest.body if latest is not None else "",
+            if ticket.id not in queued and self.nudge_due(ticket, moment):
+                self.send_nudge(ticket, operator_jid, moment, timezone, language)
+
+    def nudge_message(
+        self, ticket: Ticket, moment: int, timezone: str, language: str
+    ) -> str | None:
+        """The nudge text, or None when the contact is gone."""
+        contact = self.store.contact_by_id(ticket.contact_id)
+        if contact is None:
+            return None
+        alert = self.store.last_event(ticket.id, EventKind.ALERT.value)
+        since = alert.at if alert is not None else ticket.updated_at
+        latest = self.store.last_event(ticket.id, EventKind.CUSTOMER_MESSAGE.value)
+        text = nudge_text(
+            contact,
+            ticket,
+            moment,
+            timezone,
+            since=since,
+            words=latest.body if latest is not None else "",
+        )
+        if language != "en" and self.translator is not None:
+            with contextlib.suppress(Exception):
+                text = self.translator(text, language)
+        return text
+
+    def send_nudge(
+        self,
+        ticket: Ticket,
+        operator_jid: str,
+        moment: int,
+        timezone: str,
+        language: str,
+    ) -> None:
+        """Send and record one nudge for a needs-you ticket."""
+        text = self.nudge_message(ticket, moment, timezone, language)
+        if text is None:
+            return
+        try:
+            sent_id = self.waha.send_text(self.settings.session, operator_jid, text)
+        except Exception as exc:
+            logger.warning("Ticket {n} nudge failed: {exc}", n=ticket.number, exc=exc)
+            return
+        if not sent_id:
+            logger.warning(
+                "Ticket {n} nudge returned no message id; not recorded",
+                n=ticket.number,
             )
-            try:
-                sent_id = self.waha.send_text(self.settings.session, operator_jid, text)
-            except Exception as exc:
-                logger.warning("Ticket {n} nudge failed: {exc}", n=ticket.number, exc=exc)
-                continue
-            if not sent_id:
-                logger.warning(
-                    "Ticket {n} nudge returned no message id; not recorded",
-                    n=ticket.number,
-                )
-                continue
-            self.store.add_event(
-                ticket.id,
-                Actor.SYSTEM.value,
-                EventKind.NUDGE.value,
-                text,
-                at=moment,
-            )
+            return
+        remember_self_echo(sent_id)
+        self.store.append_alert_ids(ticket.id, [sent_id])
+        self.store.add_event(
+            ticket.id,
+            Actor.SYSTEM.value,
+            EventKind.NUDGE.value,
+            text,
+            at=moment,
+        )
 
     def nudge_due(self, ticket: Ticket, moment: int) -> bool:
         """Whether a needs-you ticket has an un-nudged customer re-ask."""

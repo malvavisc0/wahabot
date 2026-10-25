@@ -101,11 +101,11 @@ def pdf_ocr(path: Path, limits: DocumentLimits) -> tuple[str, int, str]:
         for page in pages:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return "", len(pages), "tesseract timed out"
+                return "\n".join(texts), len(pages), "tesseract timed out"
             text_code, stdout, text_err = run_command(
                 ["tesseract", str(page), "stdout"], remaining
             )
             if text_code != 0:
-                return "", len(pages), text_err
+                return "\n".join(texts), len(pages), text_err
             texts.append(stdout.decode(errors="replace"))
         return "\n".join(texts), len(pages), ""

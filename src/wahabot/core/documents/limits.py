@@ -94,6 +94,15 @@ def unreadable_notice(filename: str) -> str:
     )
 
 
+def partial_ocr_notice(error: str) -> str:
+    """A notice for OCR that stopped after reading only some pages."""
+    detail = " ".join(error.split())[:160] or "OCR stopped early"
+    return (
+        f"Only part of the document could be read ({detail}); "
+        "the rest is not included. The original stays in the chat."
+    )
+
+
 def document_marker(result: DocumentText) -> str:
     """The turn payload line describing a document and its status."""
     label = result.filename or "document"

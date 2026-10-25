@@ -4,13 +4,15 @@ import contextlib
 import datetime
 from collections.abc import Callable, Mapping, Sequence
 
+from wahabot.core.echoes import remember_self_echo
 from wahabot.core.schedule.hours import opening_state, session_zone
 from wahabot.core.schedule.models import DayHours, ScheduleWindow
-from wahabot.core.tickets.models import DoneBy, Ticket
+from wahabot.core.tickets.models import Actor, DoneBy, EventKind, Ticket
 from wahabot.core.tickets.store import TicketStore
 from wahabot.core.transport import Transport
 
 SUMMARY_HEADING = "Yesterday"
+SUMMARY_NUDGE = "morning summary"
 
 
 def local_date(now: int, timezone: str) -> datetime.date:
@@ -29,7 +31,7 @@ def day_window(now: int, timezone: str) -> tuple[int, int]:
     return int(start.timestamp()), int(end.timestamp())
 
 
-def needs_you_line(store: TicketStore, ticket: Ticket, now: int, timezone: str) -> str:
+def needs_you_line(store: TicketStore, ticket: Ticket, now: int) -> str:
     """One needs-you line with the customer's age and urgency."""
     contact = store.contact_by_id(ticket.contact_id)
     person = contact.display if contact is not None else "unknown"
@@ -41,7 +43,6 @@ def needs_you_line(store: TicketStore, ticket: Ticket, now: int, timezone: str) 
 
 def build_summary(
     store: TicketStore,
-    session: str,
     now: int,
     timezone: str,
     fallback_timezone: str = "UTC",
@@ -67,7 +68,7 @@ def build_summary(
     ]
     if waiting:
         lines.append("Needs you:")
-        lines.extend(needs_you_line(store, ticket, now, str(zone)) for ticket in waiting)
+        lines.extend(needs_you_line(store, ticket, now) for ticket in waiting)
     else:
         lines.append("No open tickets.")
     return "\n".join(lines)
@@ -118,7 +119,7 @@ def send_summary(
     ):
         return None
     zone = str(session_zone(timezone, fallback_timezone))
-    text = build_summary(store, session, now, zone, fallback_timezone)
+    text = build_summary(store, now, zone, fallback_timezone)
     language = (operator_language or "en").strip() or "en"
     if language != "en" and translate is not None:
         with contextlib.suppress(Exception):
@@ -126,12 +127,21 @@ def send_summary(
     sent_id = waha.send_text(session, destination, text)
     if not sent_id:
         return None
+    remember_self_echo(sent_id)
     store.set_summary_message_id(session, sent_id)
     store.set_last_summary_date(session, str(local_date(now, str(zone))))
     # The summary lists every needs-you ticket, so a queued individual alert
-    # for the same ticket would page the operator twice at the same opening.
+    # or nudge for the same ticket would page the operator twice at the same
+    # opening. Record the summary as the nudge that covered those messages.
     for ticket in store.needs_you_tickets():
         store.cancel_notices(ticket.id, now)
+        store.add_event(
+            ticket.id,
+            Actor.SYSTEM.value,
+            EventKind.NUDGE.value,
+            SUMMARY_NUDGE,
+            at=now,
+        )
     return sent_id
 
 

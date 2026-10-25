@@ -172,6 +172,21 @@ def test_ambiguous_reply_sends_nothing_and_asks(store: TicketStore) -> None:
     assert store.ticket(ticket.id).state == TicketState.NEEDS_YOU.value
 
 
+def test_ambiguous_reply_keeps_the_detected_language(store: TicketStore) -> None:
+    contact, ticket = setup_ticket(store, last_inbound_at=store.now())
+    waha = RecordingWaha()
+    outcome = run(
+        store,
+        waha,
+        contact,
+        ticket,
+        "No estoy seguro de lo que quiere decir",
+        completer(AMBIGUOUS, ""),
+    )
+    assert not outcome.sent
+    assert outcome.detected == "es"
+
+
 def test_wrong_amount_is_not_sent_and_the_draft_is_shown(
     store: TicketStore,
 ) -> None:
@@ -374,7 +389,7 @@ def test_held_answer_offers_save_when_delivered(store: TicketStore) -> None:
         ticket.id,
         Actor.OPERATOR.value,
         EventKind.HELD.value,
-        held_payload(ANSWER, "It shipped yesterday.", "Where is my order?"),
+        held_payload(ANSWER, "It shipped yesterday.", "Where is my order?", "es"),
         at=now,
     )
     answers = AnswerService(AnswerStore(store.path))
@@ -392,6 +407,7 @@ def test_held_answer_offers_save_when_delivered(store: TicketStore) -> None:
     )
 
     assert outcome is not None and outcome.sent
+    assert outcome.detected == "es"
     assert outcome.save_ticket == ticket.number
     candidate = answers.latest_candidate(ticket.id)
     assert candidate is not None

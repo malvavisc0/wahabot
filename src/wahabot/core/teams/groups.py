@@ -6,11 +6,7 @@ from collections.abc import Sequence
 from wahabot.ai.messages.addressing import (
     bot_mention_pattern as configured_mention_pattern,
 )
-from wahabot.ai.messages.addressing import (
-    is_group_addressed,
-)
 from wahabot.core.access import SessionConfig
-from wahabot.core.models import WahaEvent
 
 #: Capabilities a team-group run may never exercise.
 FORBIDDEN_TEAM_CAPABILITIES = frozenset(
@@ -45,17 +41,6 @@ def surface_for(config: SessionConfig, chat_id: str) -> str:
     if chat_id.endswith("@g.us") and is_team_group(config.team_groups, chat_id):
         return "team_group"
     return "customer"
-
-
-def addressed_in_group(config: SessionConfig, event: WahaEvent) -> bool:
-    """Group addressing with the allowlist override applied at the gate."""
-    chat_id = str(event.payload.get("from", ""))
-    return is_group_addressed(
-        event,
-        bot_name=getattr(config, "bot_name", None),
-        bot_mention_regex=getattr(config, "bot_mention_regex", None),
-        participation=group_participation(config, chat_id),
-    )
 
 
 def team_capability_error(target: object, capability: str) -> str | None:

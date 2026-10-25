@@ -78,7 +78,7 @@ Published answers (question/answer pairs) can be saved from the operator desk: r
 
 PDFs, scanned PDFs, DOCX/ODT/RTF, plain text and CSV are read during the turn within page, character, size and time limits. The extracted text is marked untrusted in the prompt, and scanned pages fall back to Tesseract. Unreadable or oversized documents stay attached with a plain-language notice.
 
-Support hours live in the session config: non-urgent handovers outside hours are queued for the next opening, urgent ones alert immediately (and the configured night number once it has written), and the first opening of each local day sends one operator summary. Internal team groups are an allowlist: they run mentioned-only and are fenced in code from tickets, customer sends, TTS and greetings.
+Support hours live in the session config: non-urgent handovers outside hours are queued for the next opening, urgent ones alert immediately (and the configured night number once it has written), and the first opening of each local day sends one operator summary. Internal team groups are an allowlist: they run mentioned-only and are fenced in code from ticket writes, customer sends, TTS and greetings.
 
 ## Straight talk about the channel
 

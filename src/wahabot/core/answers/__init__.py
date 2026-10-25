@@ -6,7 +6,6 @@ from wahabot.core.answers.retrieval import (
     ANSWERS_SEARCH_LIMIT,
     ANSWERS_TOKEN_LIMIT,
     render_answers_section,
-    render_search_results,
 )
 from wahabot.core.answers.service import AnswerService
 from wahabot.core.answers.store import AnswerStore
@@ -21,5 +20,4 @@ __all__ = [
     "AnswerService",
     "AnswerStore",
     "render_answers_section",
-    "render_search_results",
 ]

@@ -1,5 +1,6 @@
 """Handover: validate, stage needs_you, alert and defer outside hours."""
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -20,6 +21,7 @@ from wahabot.ai.tools.ticket_common import (
     ticket_context,
 )
 from wahabot.ai.tools.whatsapp.targets import resolve_message_token
+from wahabot.core.schedule.deferred import defer_notice
 from wahabot.core.schedule.hours import render_away_message
 from wahabot.core.schedule.models import OpeningState
 from wahabot.core.teams.groups import team_capability_error
@@ -218,8 +220,9 @@ def defer_handover(
     )
     moment = store.now()
     not_before = state.next_opening or moment
-    store.defer_notice(
-        view.id,
+    defer_notice(
+        store,
+        view,
         target.session,
         status_state.operator_jid,
         text,
@@ -264,6 +267,8 @@ def notify_night_number(
     session: str,
     ticket: Ticket,
     number: str,
+    language_value: str,
+    translator: Translator | None,
 ) -> bool:
     """Send the after-hours contact a short urgent note, never first contact."""
     if not number.strip() or not store.night_ready(number):
@@ -280,6 +285,10 @@ def notify_night_number(
         f"URGENT ticket {ticket.number}: {ticket.summary or 'a customer needs help'}. "
         "Open the operator chat for the full alert."
     )
+    language = operator_language(language_value)
+    if language != "en" and translator is not None:
+        with contextlib.suppress(Exception):
+            text = translator(text, language)
     try:
         return bool(waha.send_text(session, contact.chat_id, text))
     except Exception as exc:
@@ -357,7 +366,15 @@ def run_handover(
             label="handover",
         )
     if should_notify_night(urgent, night, state):
-        notify_night_number(store, waha, target.session, view, night)
+        notify_night_number(
+            store,
+            waha,
+            target.session,
+            view,
+            night,
+            language_value,
+            translator,
+        )
     return envelope
 
 

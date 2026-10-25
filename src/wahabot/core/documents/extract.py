@@ -15,6 +15,7 @@ from wahabot.core.documents.limits import (
     DocumentText,
     over_limit_notice,
     page_limit_notice,
+    partial_ocr_notice,
     trim_text,
     unreadable_notice,
 )
@@ -145,7 +146,15 @@ def extract_pdf(
     ocr_text, ocr_pages, ocr_error = pdf_ocr(path, limits)
     if ocr_text.strip():
         return apply_page_limit(
-            bounded(ocr_text, STATUS_OCR, ocr_pages, filename, mime, limits),
+            bounded(
+                ocr_text,
+                STATUS_OCR,
+                ocr_pages,
+                filename,
+                mime,
+                limits,
+                notice=partial_ocr_notice(ocr_error) if ocr_error else "",
+            ),
             total_pages,
             filename,
             limits,
@@ -278,7 +287,7 @@ def extract_bytes(
             filename=label,
             mime=mime,
         )
-    temp_path = Path()
+    temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
             prefix="wahabot-doc-", suffix=suffix_for(mime, filename), delete=False
@@ -287,4 +296,5 @@ def extract_bytes(
             handle.write(data)
         return extract_document(temp_path, mime, label, caps)
     finally:
-        temp_path.unlink(missing_ok=True)
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)

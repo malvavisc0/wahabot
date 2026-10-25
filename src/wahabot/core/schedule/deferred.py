@@ -2,6 +2,7 @@
 
 from loguru import logger
 
+from wahabot.core.echoes import remember_self_echo
 from wahabot.core.schedule.models import DeferredNotice
 from wahabot.core.tickets.alerts import forward_attachments
 from wahabot.core.tickets.models import Ticket
@@ -16,16 +17,16 @@ def defer_notice(
     chat_id: str,
     text: str,
     *,
-    now: int,
+    not_before: int,
     at: int | None = None,
 ) -> int:
-    """Queue one notice for the operator until *now* at the earliest."""
+    """Queue one notice for the operator from *not_before* onward."""
     return store.defer_notice(
         ticket.id,
         session,
         chat_id,
         text,
-        not_before=now,
+        not_before=not_before,
         at=store.now() if at is None else at,
     )
 
@@ -47,6 +48,8 @@ def deliver_due_notices(
             continue
         if not sent_id:
             continue
+        remember_self_echo(sent_id)
+        store.append_alert_ids(notice.ticket_id, [sent_id])
         store.mark_notice_sent(notice.id, sent_id, now)
         ticket = store.ticket(notice.ticket_id)
         if ticket is not None:

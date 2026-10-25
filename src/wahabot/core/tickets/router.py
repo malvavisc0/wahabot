@@ -91,14 +91,16 @@ def route_message(store: TicketStore, event: WahaEvent) -> Route:
     if not body:
         return Route(RouteKind.NONE)
     quoted = quoted_id(event)
+    command = route_command(store, body)
     alert = store.ticket_for_alert_message(quoted)
     if alert is not None:
+        if command is not None:
+            return command
         return Route(RouteKind.QUOTE_REPLY, ticket=alert, text=body)
     if quoted and quoted == store.summary_message_id(event.session):
         summary_route = route_ticket_text(store, body)
         if summary_route.kind != RouteKind.NONE:
             return summary_route
-    command = route_command(store, body)
     if command is not None:
         return command
     return route_ticket_text(store, body)

@@ -86,12 +86,23 @@ class AnswerService:
         """List answers for Teach."""
         return self.store.list(include_deleted=include_deleted)
 
-    def search(self, query: str, limit: int = ANSWERS_SEARCH_LIMIT) -> list[AnswerHit]:
-        """Search enabled answers and record a use for every returned hit."""
+    def search(
+        self,
+        query: str,
+        limit: int = ANSWERS_SEARCH_LIMIT,
+        *,
+        record: bool = True,
+    ) -> list[AnswerHit]:
+        """Search enabled answers; record uses for the hits actually returned."""
         hits = self.store.search(query, limit=limit)
+        if record:
+            self.record_hits(hits)
+        return hits
+
+    def record_hits(self, hits: list[AnswerHit]) -> None:
+        """Record one use for each hit returned to the model."""
         for hit in hits:
             self.store.record_use(hit.answer.id)
-        return hits
 
     def prompt_section(self, token_limit: int | None = None) -> str:
         """The whole enabled set when it fits, else a search-before-answering hint."""
@@ -125,6 +136,5 @@ class AnswerService:
         candidate = self.store.candidate(candidate_id)
         if candidate is None or candidate.saved_at is not None:
             return None
-        answer = self.add(candidate.question, candidate.answer)
-        self.store.mark_candidate_saved(candidate.id)
-        return answer
+        clean_question, clean_answer = validate_text(candidate.question, candidate.answer)
+        return self.store.save_candidate(candidate.id, clean_question, clean_answer)

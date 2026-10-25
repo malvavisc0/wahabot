@@ -278,9 +278,30 @@ class AnswerStore(StoreBase):
             candidate_from_row,
         )
 
-    def mark_candidate_saved(self, candidate_id: int, *, at: int | None = None) -> None:
-        """Stamp a candidate so it can never be saved twice."""
-        self.execute(
-            "UPDATE answer_candidates SET saved_at = ? WHERE id = ?",
-            (self.now() if at is None else at, candidate_id),
-        )
+    def save_candidate(
+        self, candidate_id: int, question: str, answer: str, *, at: int | None = None
+    ) -> Answer | None:
+        """Atomically create one answer and stamp its candidate as saved."""
+        moment = self.now() if at is None else at
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                claimed = conn.execute(
+                    "UPDATE answer_candidates SET saved_at = ? "
+                    + "WHERE id = ? AND saved_at IS NULL",
+                    (moment, candidate_id),
+                )
+                if claimed.rowcount != 1:
+                    return None
+                cursor = conn.execute(
+                    "INSERT INTO answers (question, answer, enabled, created_at, "
+                    + "updated_at) VALUES (?, ?, 1, ?, ?)",
+                    (question, answer, moment, moment),
+                )
+                row = conn.execute(
+                    f"SELECT {_ANSWER_COLUMNS} FROM answers WHERE id = ?",
+                    (int(cursor.lastrowid or 0),),
+                ).fetchone()
+        finally:
+            conn.close()
+        return answer_from_row(row)

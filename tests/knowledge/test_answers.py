@@ -108,6 +108,7 @@ def test_search_tool_caps_the_total_payload(store: TicketStore) -> None:
     assert payload["answers"]
     assert total <= 12_000
     assert "rendered" not in payload
+    assert sum(answers.store.uses_count(item.id) for item in answers.list()) == 1
 
 
 def test_safety_line_is_present_without_answers() -> None:

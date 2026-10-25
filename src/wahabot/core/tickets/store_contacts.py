@@ -8,6 +8,20 @@ _CONTACT_COLUMNS = (
     "id, chat_id, phone, lid, display_name, language, external_user_ref, "
     "last_inbound_at, paused_until"
 )
+_PHONE_DOMAINS = ("c.us", "s.whatsapp.net")
+
+
+def phone_jids(number: str) -> tuple[str, ...]:
+    """Canonical JIDs a configured phone number may match."""
+    user, _, domain = number.partition("@")
+    digits = "".join(ch for ch in user.split(":", 1)[0] if ch.isdigit())
+    if not digits:
+        return ()
+    if domain == "lid":
+        return (f"{digits}@lid",)
+    if domain and domain not in _PHONE_DOMAINS:
+        return ()
+    return tuple(f"{digits}@{item}" for item in _PHONE_DOMAINS)
 
 
 class ContactMixin(StoreBase):
@@ -103,17 +117,29 @@ class ContactMixin(StoreBase):
         )
 
     def contact_by_phone(self, phone: str) -> Contact | None:
-        """One contact by phone number or its chat id form."""
-        wanted = "".join(ch for ch in phone.split("@", 1)[0] if ch.isdigit())
-        if not wanted:
+        """One contact by phone number or its chat id form.
+
+        Matches the stored phone JID as well as the chat JID, so a
+        phone-only alias behind a LID chat still resolves. Domains are
+        explicit: a phone number never matches a group or LID JID.
+        """
+        jids = phone_jids(phone)
+        if not jids:
             return None
+        column = "lid" if jids[0].endswith("@lid") else "phone"
+        placeholders = ", ".join("?" for _ in jids)
         return self.query_one(
             f"SELECT {_CONTACT_COLUMNS} FROM contacts "
-            + "WHERE phone = ? OR chat_id = ? OR chat_id LIKE ? "
+            + f"WHERE {column} IN ({placeholders}) "
+            + f"OR chat_id IN ({placeholders}) "
             + "ORDER BY id LIMIT 1",
-            (wanted, f"{wanted}@c.us", f"{wanted}@%"),
+            (*jids, *jids),
             contact_from_row,
         )
+
+    def night_ready(self, number: str) -> bool:
+        """Whether the night number is a known contact (it wrote first)."""
+        return self.contact_by_phone(number) is not None
 
     def contact_by_id(self, contact_id: int) -> Contact | None:
         """One contact by row id."""

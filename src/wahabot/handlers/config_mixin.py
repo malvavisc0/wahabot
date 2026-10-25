@@ -85,8 +85,9 @@ class ConfigMixin(HandlerBase):
         parts = [f"Timezone: {zone}.", participation]
         if target is not None and is_team_group(current.team_groups, target.chat_id):
             parts.append(
-                "Internal team group: answer from reads only; no tickets, no "
-                + "customer messages, no customer-system writes, no TTS, no greetings."
+                "Internal team group: read-only ticket facts, no ticket writes, "
+                + "no customer messages, no customer-system writes, no TTS, "
+                + "no greetings."
             )
         if current.hours:
             state = opening_state(current, int(time.time()), self.settings.timezone)

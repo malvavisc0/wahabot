@@ -178,9 +178,11 @@ def customer_words(store: TicketStore, ticket: Ticket) -> str:
     return event.body if event is not None else ticket.summary
 
 
-def held_payload(kind: str, draft: str, question: str = "") -> str:
+def held_payload(kind: str, draft: str, question: str = "", language: str = "") -> str:
     """Store the held draft with the classification that will resume it."""
-    return json.dumps({"kind": kind, "draft": draft, "question": question})
+    return json.dumps(
+        {"kind": kind, "draft": draft, "question": question, "language": language}
+    )
 
 
 def read_held(body: str) -> tuple[str, str]:
@@ -204,6 +206,17 @@ def held_question(body: str, fallback: str) -> str:
     if not isinstance(value, dict):
         return fallback
     return text_field(value, "question") or fallback
+
+
+def held_language(body: str) -> str:
+    """The operator's detected language when the draft was held."""
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(value, dict):
+        return ""
+    return text_field(value, "language")
 
 
 def confirmation(contact: Contact, ticket: Ticket, kind: str, draft: str) -> str:
@@ -245,6 +258,8 @@ def hold_outcome(
     draft: str,
     moment: int,
     reply_window_days: int,
+    *,
+    detected: str = "",
 ) -> ReplyOutcome | None:
     """Hold a draft when the customer has been silent past the window."""
     if window_open(contact.last_inbound_at, moment, reply_window_days):
@@ -253,7 +268,7 @@ def hold_outcome(
         ticket.id,
         Actor.OPERATOR.value,
         EventKind.HELD.value,
-        held_payload(kind, draft, customer_words(store, ticket)),
+        held_payload(kind, draft, customer_words(store, ticket), detected),
         at=moment,
     )
     if contact.last_inbound_at is None:
@@ -268,6 +283,7 @@ def hold_outcome(
         ),
         kind=kind,
         draft=draft,
+        detected=detected,
     )
 
 
@@ -321,13 +337,15 @@ async def handle_operator_reply(
 ) -> ReplyOutcome:
     """Classify, draft, verify and deliver one operator reply."""
     moment = store.now() if now is None else now
+    detected = detect_language(operator_text)
     kind = await classify_reply(complete, operator_text)
     if kind == AMBIGUOUS:
         return ReplyOutcome(
             confirmation=(
                 "I could not tell whether that was a resolution or an instruction. "
                 f"Ticket {ticket.number} is unchanged; rephrase it for the customer."
-            )
+            ),
+            detected=detected,
         )
     draft = await draft_message(
         complete, operator_text, contact.language, customer_words(store, ticket)
@@ -339,11 +357,22 @@ async def handle_operator_reply(
                 f"Ticket {ticket.number} unchanged."
             ),
             kind=kind,
+            detected=detected,
         )
     refused = fact_check_outcome(kind, draft, operator_text)
     if refused is not None:
+        refused.detected = detected
         return refused
-    held = hold_outcome(store, ticket, contact, kind, draft, moment, reply_window_days)
+    held = hold_outcome(
+        store,
+        ticket,
+        contact,
+        kind,
+        draft,
+        moment,
+        reply_window_days,
+        detected=detected,
+    )
     if held is not None:
         return held
     outcome = await relay_outcome(
@@ -358,7 +387,7 @@ async def handle_operator_reply(
         moment,
         remember,
     )
-    outcome.detected = detect_language(operator_text)
+    outcome.detected = detected
     if outcome.sent and should_offer_save(kind) and answer_service is not None:
         offer_answer_candidate(answer_service, store, ticket, outcome)
     return outcome
@@ -459,6 +488,7 @@ async def deliver_held_event(
             confirmation=f"Held draft for ticket {ticket.number} could not be sent.",
             kind=kind,
             draft=draft,
+            detected=held_language(event.body),
         )
     if remember is not None:
         await remember(draft)
@@ -467,6 +497,7 @@ async def deliver_held_event(
         sent=True,
         kind=kind,
         draft=draft,
+        detected=held_language(event.body),
     )
     if should_offer_save(kind) and answer_service is not None:
         offer_answer_candidate(

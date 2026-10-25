@@ -19,6 +19,7 @@ from wahabot.core import cli as cli_helpers
 from wahabot.core.access import load_session_config
 from wahabot.core.audit import audit_dir
 from wahabot.core.notebook import Notebook
+from wahabot.core.schedule.hours import effective_timezone
 from wahabot.core.waha import WahaClient
 from wahabot.handlers import register_agent_handler, register_forget_handler
 from wahabot.reactions import register_reaction_handler
@@ -128,7 +129,7 @@ def session_view(
     if not raw:
         prompt = render_system_prompt(
             prompt,
-            settings.timezone,
+            effective_timezone(config.timezone, settings.timezone),
             config.bot_name,
             config.goal,
             config.memory,

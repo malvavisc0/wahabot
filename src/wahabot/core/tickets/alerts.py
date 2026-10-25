@@ -9,6 +9,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from wahabot.core.echoes import remember_self_echo
 from wahabot.core.tickets.alert_history import find_delivered_alert
 from wahabot.core.tickets.models import (
     ALERT_SENDING,
@@ -46,11 +47,11 @@ class AlertResult:
         return bool(self.message_ids)
 
 
-def operator_language(config_language: str, detected: str = "") -> str:
-    """The alert language: setting, detected operator language, then English."""
+def operator_language(config_language: str) -> str:
+    """The alert language: configured setting, then English."""
     from wahabot.core.tickets.language import operator_language_for
 
-    return operator_language_for(config_language, detected)
+    return operator_language_for(config_language)
 
 
 def display_phone(phone: str) -> str:
@@ -204,6 +205,8 @@ def finish_alert(
     moment: int,
 ) -> AlertResult:
     """Record a confirmed alert text and forward its remaining attachments."""
+    remember_self_echo(sent_id)
+    store.cancel_notices(ticket.id, moment)
     ids = [sent_id]
     failed = forward_attachments(
         store,
@@ -224,11 +227,13 @@ def finish_alert(
     if failed.count:
         notice = _ALERT_FAILED.format(items=", ".join(failed.failed))
         try:
-            store.append_alert_ids(
-                ticket.id, [waha.send_text(session, destination, notice)]
-            )
+            notice_id = waha.send_text(session, destination, notice)
         except Exception as exc:
             logger.warning("Attachment-failure notice failed: {exc}", exc=exc)
+        else:
+            if notice_id:
+                remember_self_echo(notice_id)
+                store.append_alert_ids(ticket.id, [notice_id])
     ticket.state = updated.state
     return AlertResult(
         text=intent.text,
@@ -360,9 +365,11 @@ def send_alert(
             moment,
         )
         if early is not None:
+            if early.pending or early.delivered:
+                store.cancel_notices(ticket.id, moment)
             return early
         intent = store.alert_intent(key) or intent
-    return send_intent(
+    result = send_intent(
         store,
         waha,
         session,
@@ -372,6 +379,9 @@ def send_alert(
         only_message_ids,
         moment,
     )
+    if result.pending or result.delivered:
+        store.cancel_notices(ticket.id, moment)
+    return result
 
 
 def retry_alert(
@@ -461,6 +471,7 @@ def forward_attachments(
             continue
         message_id = forward_one(waha, session, destination, attachment)
         if message_id:
+            remember_self_echo(message_id)
             ids.extend([attachment.message_id, message_id])
             store.append_alert_ids(ticket.id, [attachment.message_id, message_id])
         else:

@@ -9,6 +9,8 @@ import pytest
 
 from wahabot.ai.serials import SerialRegistry
 from wahabot.ai.turn_records import RecordEntry, Slots, render_entry
+from wahabot.core.documents import extract as extract_module
+from wahabot.core.documents import pdf as pdf_module
 from wahabot.core.documents.extract import (
     DocumentLimits,
     apply_page_limit,
@@ -164,6 +166,47 @@ def test_limits_truncate_and_binary_timeout(tmp_path: Path) -> None:
 
     code, _, error = run_command(["sleep", "2"], 0.01)
     assert code == -2 and "timed out" in error
+
+
+def test_ocr_timeout_keeps_partial_text(tmp_path: Path, monkeypatch) -> None:
+    def fake_run(command: list[str], _timeout: float) -> tuple[int, bytes, bytes]:
+        if command[0] == "pdftoppm":
+            root = Path(command[-1]).parent
+            (root / "page-1.png").write_bytes(b"x")
+            (root / "page-2.png").write_bytes(b"x")
+            return 0, b"", b""
+        if command[1].endswith("page-1.png"):
+            return 0, b"INVOICE 42", b""
+        return -2, b"", b"timed out"
+
+    monkeypatch.setattr(pdf_module, "run_command", fake_run)
+
+    text, pages, error = pdf_module.pdf_ocr(
+        tmp_path / "scan.pdf", DocumentLimits(timeout_s=10)
+    )
+
+    assert "INVOICE" in text
+    assert pages == 2 and error
+
+
+def test_partial_ocr_adds_a_plain_language_notice(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(extract_module, "pdf_page_count", lambda *_args: 2)
+    monkeypatch.setattr(extract_module, "pdf_text", lambda *_args: ("", 0, ""))
+    monkeypatch.setattr(
+        extract_module,
+        "pdf_ocr",
+        lambda *_args: ("INVOICE", 2, "tesseract timed out"),
+    )
+
+    result = extract_module.extract_pdf(
+        tmp_path / "scan.pdf",
+        "scan.pdf",
+        "application/pdf",
+        DocumentLimits(),
+    )
+
+    assert result.text == "INVOICE"
+    assert "Only part" in result.notice
 
 
 def test_over_limit_payload_keeps_the_notice() -> None:
