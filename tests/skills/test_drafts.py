@@ -55,6 +55,28 @@ def test_a_changed_configuration_marks_the_test_stale(
     assert drafts.enable("customer-records") is False
 
 
+def test_a_changed_configuration_marks_a_failed_test_stale(
+    tmp_path: Path, skill_store, secret_store, fake_rest
+) -> None:
+    folder = write_skill(
+        tmp_path,
+        "customer-records",
+        fake_rest.base,
+        test_check="{method: GET, path: /unhealthy}",
+    )
+    import_skill(folder, tmp_path / "skills", skill_store)
+    service = SkillService(
+        skill_store, secret_store, tmp_path / "skills", "test", RecordingWaha()
+    )
+    drafts = SkillDraftService(skill_store, secret_store, tmp_path / "skills", service)
+    assert drafts.run_test("customer-records").passed is False
+    skill_store.save_draft_inputs("customer-records", {"instructions": "changed"})
+
+    drafts.refresh_staleness("customer-records")
+
+    assert skill_store.get("customer-records").test_state == "stale"
+
+
 def test_a_changed_secret_marks_the_test_stale(
     tmp_path: Path, skill_store, secret_store, fake_rest
 ) -> None:

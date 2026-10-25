@@ -49,6 +49,7 @@ class SkillRow:
     reason: str
     failure_count: int
     updated: str
+    lifecycle: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +119,7 @@ def create_draft(store: SkillStore, drafts: SkillDraftService, source_url: str) 
     """Create the inactive draft and move it to Review."""
     origin, seed = source_parts(source_url)
     name = unique_name(seed, store)
-    drafts.create_draft(
+    skill = drafts.create_draft(
         name,
         inputs={
             "source_url": source_url.strip(),
@@ -126,20 +127,23 @@ def create_draft(store: SkillStore, drafts: SkillDraftService, source_url: str) 
             "test_path": "/health",
         },
     )
-    return store.save_draft(name, stage="review")
+    skill.source_url = source_url.strip()
+    skill.draft_stage = "review"
+    return store.upsert(skill)
 
 
 def draft_values(skill: Skill) -> dict[str, str]:
     """The resumable inputs plus saved instructions."""
     inputs = skill.draft_inputs
     fallback = skill.base_urls[0] if skill.base_urls else ""
-    base_url = str(inputs.get("base_url") or fallback)
+    base_url = str(inputs["base_url"]) if "base_url" in inputs else fallback
     return {
         "base_url": base_url,
         "test_path": str(inputs.get("test_path") or "/health"),
         "customer_chats": skill.customer_chats,
         "writes_need_operator": "on" if skill.writes_need_operator else "",
         "instructions": skill.instructions,
+        "skill_md": skill.skill_md,
     }
 
 
@@ -156,15 +160,19 @@ class ReviewValues:
     writes_need_operator: bool
 
 
+def normalized_test_path(value: str) -> str:
+    """A leading-slash safe-check path, defaulting to ``/health``."""
+    path = value.strip() or "/health"
+    return path if path.startswith("/") else f"/{path}"
+
+
 def parse_review(form: dict[str, str]) -> ReviewValues:
     """Validate the review form without mutating anything."""
     base_url = form.get("base_url", "").strip()
     origin = source_parts(base_url)[0] if "://" in base_url else ""
     if not origin:
         raise ValueError("enter the service destination")
-    test_path = form.get("test_path", "").strip() or "/health"
-    if not test_path.startswith("/"):
-        test_path = f"/{test_path}"
+    test_path = normalized_test_path(form.get("test_path", ""))
     customer_chats = form.get("customer_chats", "read")
     if customer_chats not in CAPABILITIES:
         raise ValueError("choose what the skill may do")
@@ -211,6 +219,30 @@ def apply_review(
     return skill
 
 
+def save_draft_fields(skill: Skill, form: dict[str, str], store: SkillStore) -> Skill:
+    """Persist draft edits without configuring, writing files or storing a key."""
+    base_url = form.get("base_url", "").strip()
+    origin = source_parts(base_url)[0] if base_url else ""
+    customer_chats = form.get("customer_chats", skill.customer_chats)
+    if customer_chats not in CAPABILITIES:
+        raise ValueError("choose what the skill may do")
+    skill.base_urls = [origin] if origin else skill.base_urls
+    skill.source_url = skill.source_url or origin
+    skill.instructions = form.get("instructions", skill.instructions).strip()
+    skill.skill_md = form.get("skill_md", skill.skill_md).strip()
+    skill.customer_chats = customer_chats
+    skill.writes_need_operator = form.get("writes_need_operator", "") == "on"
+    skill.draft_stage = "review"
+    skill.draft_inputs.update(
+        {
+            "source_url": skill.source_url,
+            "base_url": origin,
+            "test_path": normalized_test_path(form.get("test_path", "")),
+        }
+    )
+    return store.upsert(skill)
+
+
 def save_skill(
     store: SkillStore,
     secrets: SecretStore,
@@ -219,10 +251,14 @@ def save_skill(
     name: str,
     form: dict[str, str],
 ) -> Skill:
-    """Persist review fields, write the folder and invalidate an old test."""
+    """Save the draft, or configure it and invalidate an old test."""
     skill = store.get(name)
     if skill is None:
         raise ValueError("unknown skill")
+    if form.get("action") == "save":
+        updated = save_draft_fields(skill, form, store)
+        drafts.refresh_staleness(name)
+        return store.get(name) or updated
     values = parse_review(form)
     updated = store.upsert(apply_review(skill, values, secrets, store))
     write_folder(skills_dir, updated, values.test_path)
@@ -280,6 +316,7 @@ def result_view(skill: Skill) -> dict[str, str]:
     return {
         "label": label,
         "css": classes.get(skill.test_state, "muted"),
+        "tested_at": format_time(skill.last_tested_at),
         "reason": reason,
     }
 
@@ -299,6 +336,7 @@ def row_view(skill: Skill) -> SkillRow:
         reason=skill.test_reason,
         failure_count=skill.failure_count,
         updated=format_time(skill.updated_at),
+        lifecycle=skill.lifecycle,
     )
 
 

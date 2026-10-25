@@ -36,11 +36,11 @@
       <option value="none"{% if draft.customer_chats == "none" %} selected{% endif %}>Operator requests only</option>
     </select>
     <label for="instructions">Instructions</label>
-    <textarea id="instructions" name="instructions">{{ skill.instructions }}</textarea>
+    <textarea id="instructions" name="instructions">{{ draft.instructions }}</textarea>
 
     <h2 class="section-title">{{ _("Permissions") }}</h2>
     <label>
-      <input type="checkbox" name="writes_need_operator"{% if skill.writes_need_operator %} checked{% endif %}>
+      <input type="checkbox" name="writes_need_operator"{% if draft.writes_need_operator %} checked{% endif %}>
       Changes need your approval in WhatsApp
     </label>
     <p class="field-help">Read-only customer lookup is the default. The web app never approves a change.</p>
@@ -51,7 +51,7 @@
     <details>
       <summary>{{ _("Advanced") }}</summary>
       <label for="skill_md">Raw SKILL.md</label>
-      <textarea id="skill_md" name="skill_md">{{ skill.skill_md }}</textarea>
+      <textarea id="skill_md" name="skill_md">{{ draft.skill_md }}</textarea>
     </details>
 
     <div class="actions">
@@ -80,18 +80,18 @@
     </div>
   </div>
 
-  {% if skill.lifecycle == "configured" %}
   <div class="actions">
+    {% if skill.lifecycle == "configured" %}
     <form method="post" action="/app/skills/{{ skill.name }}/disable" data-no-dirty="true">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit">{{ _("Switch off") }}</button>
     </form>
+    {% endif %}
     <form method="post" action="/app/skills/{{ skill.name }}/delete" data-no-dirty="true" onsubmit="return confirm('Delete this skill?');">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button class="danger" type="submit">{{ _("Delete") }}</button>
     </form>
   </div>
-  {% endif %}
 
   {% if calls %}
   <h2 class="section-title">Recent calls</h2>

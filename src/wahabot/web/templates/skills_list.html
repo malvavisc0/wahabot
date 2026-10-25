@@ -34,6 +34,7 @@
         <span class="status {{ 'enabled' if row.enabled else 'off' }}">{{ "Enabled" if row.enabled else "Paused" }}</span>
       </div>
       <div class="skill-fields">
+        <span class="mono">{{ row.source_url }}</span>
         <span>{{ row.host }}</span>
         <span>{{ row.capabilities }}</span>
         <span>{{ row.permissions }}</span>
@@ -58,6 +59,7 @@
         <span class="status muted">Inactive draft</span>
       </div>
       <div class="skill-fields">
+        <span class="mono">{{ row.source_url }}</span>
         <span>{{ row.host }}</span>
         <span>Saved stage: {{ row.stage_label }}</span>
         <span>Test: {{ row.test_label }}</span>

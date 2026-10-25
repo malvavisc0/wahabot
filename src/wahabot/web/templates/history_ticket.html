@@ -69,7 +69,7 @@
       <div class="row-meta">
         <span>{{ call.time }}</span>
         <span>Started by {{ call.started_by }}</span>
-        <span>{{ call.detail }}</span>
+        <span class="mono">{{ call.method }} {{ call.path }}</span>
       </div>
     </li>
     {% endfor %}

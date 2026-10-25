@@ -96,6 +96,11 @@ class ConfigMixin(HandlerBase):
                 + "no customer messages, no customer-system writes, no TTS, "
                 + "no greetings."
             )
+        if current.voice_replies and self.settings.tts_url:
+            parts.append(
+                "Voice replies are enabled: when the customer sends a voice note, "
+                + "deliver the answer as a voice note."
+            )
         if current.hours:
             state = opening_state(current, int(time.time()), self.settings.timezone)
             if state.open:

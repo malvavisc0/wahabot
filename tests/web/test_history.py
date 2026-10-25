@@ -1,7 +1,9 @@
 """History list, ticket thread, translation cache and media auth."""
 
+import hashlib
 import json
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi.testclient import TestClient
 from tests.harness.constants import SMOKE_PNG
@@ -29,6 +31,28 @@ def test_list_groups_and_counts(auth_client: TestClient, store) -> None:
     assert "Open" in response.text
     assert "Needs you" in response.text
     assert "Waiting for the customer" in response.text
+
+
+def test_rows_order_by_last_activity(auth_client: TestClient, store) -> None:
+    """A newly active older ticket moves above a newer untouched one."""
+    older = seed_ticket(store, summary="Older first")
+    newer = seed_ticket(
+        store,
+        phone="491555000002@c.us",
+        display="Riverside Rowing",
+        summary="Newer second",
+    )
+    store.update_ticket(
+        older.id,
+        TicketUpdate(summary="Older but just updated"),
+        at=newer.updated_at + 60,
+    )
+
+    response = auth_client.get("/app/history")
+
+    assert response.text.find("Older but just updated") < response.text.find(
+        "Newer second"
+    )
 
 
 def test_search_and_filters(auth_client: TestClient, store) -> None:
@@ -76,6 +100,25 @@ def test_back_parameter_cannot_leave_the_app(auth_client: TestClient, store) -> 
     )
     assert "evil.invalid" not in response.text
     assert 'href="/app/history"' in response.text
+    traversal = auth_client.get(
+        f"/app/history/{ticket.number}", params={"back": "/app/history/../skills"}
+    )
+    assert "/app/history/../skills" not in traversal.text
+    assert 'href="/app/history"' in traversal.text
+
+
+def test_filtered_back_and_toggle_urls_are_encoded(
+    auth_client: TestClient, store
+) -> None:
+    """A filtered return target survives both links without losing its query."""
+    ticket = seed_ticket(store)
+    back = "/app/history?q=Bridge&show=open"
+    page = auth_client.get(f"/app/history/{ticket.number}", params={"back": back})
+    listing = auth_client.get("/app/history", params={"q": "Bridge", "show": "open"})
+
+    assert f"back={quote(back, safe='')}" in page.text
+    assert 'href="/app/history?q=Bridge&amp;show=open"' in page.text
+    assert "back=/app/history%3Fq%3DBridge%26show%3Dopen" in listing.text
 
 
 def test_translation_is_cached_and_toggleable(
@@ -109,6 +152,18 @@ def test_translation_is_cached_and_toggleable(
     assert "hola, abren" in originals.text
     assert "hola voice transcript" in originals.text
     assert "Show English translation" in originals.text
+
+
+def test_missing_translator_does_not_cache_the_source(
+    auth_client: TestClient, store
+) -> None:
+    """Without a translator nothing is cached, so a later one can still run."""
+    ticket = seed_ticket(store, language="es")
+    auth_client.get(f"/app/history/{ticket.number}")
+
+    source_hash = hashlib.sha256(b"hola, abren el lunes?").hexdigest()
+
+    assert store.translation(source_hash, "en") is None
 
 
 def test_media_requires_cookie_and_streams(

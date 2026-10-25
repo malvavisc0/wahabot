@@ -1,7 +1,9 @@
 """Settings: independent saves, validation, normalization and hot reload."""
 
 import json
+import re
 
+import httpx
 from fastapi.testclient import TestClient
 from tests.web.conftest import csrf_of
 
@@ -72,6 +74,34 @@ def test_assistant_rejects_empty_instructions(auth_client: TestClient, bot) -> N
     assert read_config(bot) == before
 
 
+def test_assistant_checkboxes_can_be_turned_off(auth_client: TestClient, bot) -> None:
+    """An unchecked box clears the stored value instead of keeping it."""
+    bot.settings.tts_url = "http://tts.invalid"
+    token = csrf_of(auth_client.get("/app/settings").text)
+    data = {
+        "bot_name": "Bridge Club",
+        "goal": "",
+        "instructions": "Stay brief.",
+        "operator_name": "",
+        "knowledge_only": "on",
+        "voice_replies": "on",
+        "csrf_token": token,
+    }
+    auth_client.post("/app/settings/assistant", data=data)
+    config = read_config(bot)
+    assert config["knowledge_only"] is True
+    assert config["voice_replies"] is True
+
+    data.pop("knowledge_only")
+    data.pop("voice_replies")
+    response = auth_client.post("/app/settings/assistant", data=data)
+
+    assert response.status_code == 200
+    config = read_config(bot)
+    assert config["knowledge_only"] is False
+    assert config["voice_replies"] is False
+
+
 def test_who_normalizes_and_resolves(auth_client: TestClient, bot) -> None:
     """International formats become resolved @c.us ids."""
     token = csrf_of(auth_client.get("/app/settings").text)
@@ -122,6 +152,58 @@ def test_who_saves_group_behaviour(auth_client: TestClient, bot) -> None:
     )
     assert response.status_code == 200
     assert read_config(bot)["group_participation"] == "never"
+
+
+def test_who_keeps_group_mode_when_no_team_groups(
+    auth_client: TestClient, bot, monkeypatch
+) -> None:
+    """Saving a number list does not turn off a global group mode."""
+    config = read_config(bot)
+    config["group_participation"] = "judicious"
+    config["team_groups"] = []
+    bot.settings.access_config.write_text(json.dumps(config))
+    monkeypatch.setattr(bot.waha, "list_chats", lambda session: [])
+    page = auth_client.get("/app/settings")
+    response = auth_client.post(
+        "/app/settings/who",
+        data={
+            "whitelist": "",
+            "blacklist": "",
+            "csrf_token": csrf_of(page.text),
+        },
+    )
+
+    assert response.status_code == 200
+    assert read_config(bot)["group_participation"] == "judicious"
+
+
+def test_unavailable_team_groups_keep_saved_choices(
+    auth_client: TestClient, bot, monkeypatch
+) -> None:
+    """A failed group listing never clears the saved team groups."""
+    config = read_config(bot)
+    config["team_groups"] = ["120363000000000001@g.us"]
+    config["group_participation"] = "mentioned"
+    bot.settings.access_config.write_text(json.dumps(config))
+
+    def unavailable(session: str) -> list[dict]:
+        raise httpx.ConnectError("WAHA is down")
+
+    monkeypatch.setattr(bot.waha, "list_chats", unavailable)
+    page = auth_client.get("/app/settings")
+    assert "could not be loaded" in page.text
+    response = auth_client.post(
+        "/app/settings/who",
+        data={
+            "whitelist": "",
+            "blacklist": "",
+            "team_groups_available": "0",
+            "csrf_token": csrf_of(page.text),
+        },
+    )
+
+    assert response.status_code == 200
+    assert read_config(bot)["team_groups"] == ["120363000000000001@g.us"]
 
 
 def test_who_rejects_invalid_number_without_writing(auth_client: TestClient, bot) -> None:
@@ -232,6 +314,30 @@ def test_hours_reject_invalid_window(auth_client: TestClient, bot) -> None:
     assert response.status_code == 400
     assert "Not saved" in response.text
     assert read_config(bot) == before
+
+
+def test_failed_hours_save_keeps_submitted_values(auth_client: TestClient, bot) -> None:
+    """A rejected Hours save re-renders the submitted hours and preview."""
+    token = csrf_of(auth_client.get("/app/settings").text)
+    response = auth_client.post(
+        "/app/settings/hours",
+        data={
+            "timezone": "Europe/Berlin",
+            "mon_open": "08:00",
+            "mon_close": "16:00",
+            "mon_closed": "on",
+            "away_message": "New away message for {next_opening}.",
+            "reply_window_days": "99",
+            "night_number": "",
+            "csrf_token": token,
+        },
+    )
+
+    assert response.status_code == 400
+    assert 'value="Europe/Berlin"' in response.text
+    assert 'value="08:00"' in response.text
+    assert "New away message" in response.text
+    assert re.search(r'name="mon_closed"[^>]*checked', response.text)
 
 
 def test_whatsapp_reconnect(auth_client: TestClient, bot) -> None:

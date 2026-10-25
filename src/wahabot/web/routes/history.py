@@ -1,6 +1,6 @@
 """History list and read-only ticket detail."""
 
-from typing import Any
+from typing import cast
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
@@ -15,19 +15,15 @@ from wahabot.web.deps import (
     ticket_store_for,
 )
 from wahabot.web.services.history import list_view, safe_back, ticket_page
+from wahabot.web.services.translation import Translator
 
 router = APIRouter()
 
 
-def identity_translation(text: str, target: str) -> str:
-    """No translator configured: keep the source text."""
-    del target
-    return text
-
-
-def translator(request: Request) -> Any:
-    """The configured display translator, or an identity fallback."""
-    return getattr(request.app.state, "web_translate", identity_translation)
+def translator(request: Request) -> Translator | None:
+    """The configured display translator, when the agent registered one."""
+    found = getattr(request.app.state, "web_translate", None)
+    return cast(Translator, found) if callable(found) else None
 
 
 @router.get("/app/history")

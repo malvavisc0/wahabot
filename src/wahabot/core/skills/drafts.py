@@ -126,9 +126,9 @@ class SkillDraftService:
         return None
 
     def refresh_staleness(self, name: str) -> None:
-        """Mark a passed test stale when its covered configuration changed."""
+        """Mark a previous test stale when its covered configuration changed."""
         skill = self.store.get(name)
-        if skill is None or skill.test_state != "passed":
+        if skill is None or skill.test_state in {"untested", "stale"}:
             return
         current = self.configuration_hash(name)
         if current != skill.test_config_hash:
@@ -181,14 +181,13 @@ class SkillDraftService:
         return fingerprint(self.store, self.secrets, self.skills_dir, name)
 
     def record_test(self, name: str, passed: bool, reason: str) -> None:
-        """Store the test state and, for a pass, the configuration it covered."""
+        """Store the test state and the configuration it checked."""
         state = "passed" if passed else "failed"
-        config_hash = self.configuration_hash(name) if passed else ""
+        config_hash = self.configuration_hash(name)
         skill = self.store.get(name)
         if not passed and skill is not None and skill.enabled:
-            # A failed retest covers nothing, and an empty hash cannot be
-            # checked for later drift: demote the enabled skill instead of
-            # leaving it live with no verifiable test.
+            # A failed retest must not leave an enabled skill live until
+            # someone notices; demote it with the failure.
             self.store.set_enabled(name, False)
             reason = f"{reason}; the enabled skill was demoted to inactive"
         self.store.set_test(name, state=state, reason=reason, config_hash=config_hash)

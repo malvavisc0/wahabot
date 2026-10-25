@@ -35,6 +35,7 @@ placeholder expansion.
 | `night_number` | `string` | `""` | After-hours contact for urgent work. It is only messaged after that number has written once; otherwise the alert notes the setup gap and never messages a stranger first. |
 | `team_groups` | `string[]` | `[]` | Group chat ids that run as the internal team surface. Listed groups become mentioned-only and can never write tickets, message customers, use TTS or greet first. |
 | `knowledge_only` | `boolean` | `false` | Opt-in answers-only support mode. When on, uncovered questions get "I don't know" plus a handover offer instead of open-domain answering. |
+| `voice_replies` | `boolean` | `false` | When TTS is configured, answer a customer's voice note with a synthesized voice note. The web Settings page shows this only when TTS is available. |
 
 Example:
 
@@ -61,6 +62,7 @@ Example:
   },
   "away_message": "Ticket {ticket}: we are away and reply after {next_opening}.",
   "knowledge_only": true,
+  "voice_replies": false,
   "team_groups": ["<internal-team-jid>@g.us"]
 }
 ```

@@ -205,6 +205,7 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
     handlers.agent = agent
     ticket_translator.bind(lambda prompt: str(agent.llm.complete(prompt).text))
     webhook_app.state.ticket_scheduler = scheduler
+    webhook_app.state.web_translate = ticket_translator
     webhook_app.state.intake_writer = handlers.record_webhook_intake
     on_message(handlers.reply_with_agent)
     logger.info(
