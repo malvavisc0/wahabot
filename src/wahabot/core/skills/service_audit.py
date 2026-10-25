@@ -5,7 +5,6 @@ import time
 from pathlib import Path
 
 from wahabot.core.envelope import error as envelope_error
-from wahabot.core.skills.errors import SkillError
 from wahabot.core.skills.execution import (
     CALL_PATH_CAP,
     REQUEST_JSON_CAP,
@@ -110,11 +109,11 @@ class SkillAuditMixin:
         )
 
     def safe_text(self, text: str) -> str:
-        """Redact known secret values, returning the text on redaction failure."""
+        """Redact known secret values, failing closed on a store failure."""
         try:
             return self.secrets.redact(text)
-        except SkillError:
-            return text
+        except Exception:
+            return "[redaction unavailable]"
 
     def fail_event(
         self, name: str, run: SkillRuntime, prepared: PreparedRequest, error: str

@@ -132,8 +132,13 @@ def initiator(run: SkillRuntime) -> str:
 
 
 def redacted(redact: Callable[[str], str], text: str) -> str:
-    """Redact secrets, falling back to the original text if redaction fails."""
+    """Redact secrets, failing closed: an unreadable secret store scrubs the text.
+
+    Returning the raw text when the store errors (a locked database, a
+    failing host path) would stage exactly the text that cannot be
+    proven secret-free.
+    """
     try:
         return redact(text)
     except Exception:
-        return text
+        return "[redaction unavailable]"

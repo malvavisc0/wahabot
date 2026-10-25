@@ -228,25 +228,42 @@ def resolve_addresses(host: str, port: int) -> list[str]:
     return found
 
 
+_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+
+
+def transition_ipv4(address: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    """The IPv4 carried by an IPv4-mapped or NAT64 transition address.
+
+    Python's ``is_global`` happily passes ``64:ff9b::<private v4>``, a
+    NAT64 embedding of an internal host, so the embedded IPv4 must be
+    checked itself. 6to4 (``2002::/16``) is already non-global and
+    blocked by the fallback classification.
+    """
+    if address.ipv4_mapped:
+        return address.ipv4_mapped
+    if address in _NAT64_PREFIX:
+        return ipaddress.ip_address(int(address) & 0xFFFFFFFF)
+    return None
+
+
 def is_metadata_ip(value: str) -> bool:
     """Whether an address is a cloud metadata endpoint."""
     try:
         address = ipaddress.ip_address(value)
     except ValueError:
         return value in _METADATA_IPS
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-        address = address.ipv4_mapped
+    if isinstance(address, ipaddress.IPv6Address):
+        embedded = transition_ipv4(address)
+        address = embedded if embedded is not None else address
     return str(address) in _METADATA_IPS
 
 
-def is_blocked_ip(value: str) -> bool:
-    """Loopback, link-local, metadata, private, reserved or non-global."""
-    if is_metadata_ip(value):
-        return True
-    try:
-        address = ipaddress.ip_address(value)
-    except ValueError:
-        return True
+def is_blocked_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Loopback, link-local, private, reserved, metadata or non-global."""
+    if isinstance(address, ipaddress.IPv6Address):
+        embedded = transition_ipv4(address)
+        if embedded is not None:
+            return is_blocked_address(embedded)
     return (
         address.is_private
         or address.is_loopback
@@ -256,6 +273,16 @@ def is_blocked_ip(value: str) -> bool:
         or address.is_unspecified
         or not address.is_global
     )
+
+
+def is_blocked_ip(value: str) -> bool:
+    """Whether the textual address is blocked; unparseable text refuses."""
+    if is_metadata_ip(value):
+        return True
+    try:
+        return is_blocked_address(ipaddress.ip_address(value))
+    except ValueError:
+        return True
 
 
 def allows_private(config: SkillConfig) -> bool:

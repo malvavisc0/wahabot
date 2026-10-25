@@ -277,7 +277,7 @@ class SkillService(SkillAuditMixin):
             if problem is not None:
                 raise SkillError(problem)
             result = self.perform_request(config, prepared, run)
-        except (SkillError, KeyError, ValueError, TypeError) as exc:
+        except Exception as exc:
             safe = self.safe_text(str(exc))
             self.record_call(
                 name=request.skill,
