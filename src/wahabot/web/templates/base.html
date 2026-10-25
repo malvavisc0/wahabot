@@ -14,12 +14,12 @@
         {% if session %}
         <nav class="site-nav" aria-label="Work areas">
           {% for href, label in nav_items %}
-          <a href="{{ href }}"{% if current_path == href or current_path.startswith(href ~ "/") %} class="current" aria-current="page"{% endif %}>{{ label }}</a>
+          <a href="{{ href }}"{% if current_path == href or current_path.startswith(href ~ "/") %} class="current" aria-current="page"{% endif %}>{{ _(label) }}</a>
           {% endfor %}
         </nav>
         <form class="signout" method="post" action="/logout" data-no-dirty="true">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit">Sign out</button>
+          <button type="submit">{{ _("Sign out") }}</button>
         </form>
         {% endif %}
       </div>
