@@ -36,6 +36,9 @@ The AI code is split into focused modules under `src/wahabot/ai/`:
 | `core/learned.py` | Per-chat Tier 1 recap merger (trim hook, post-reply drain) |
 | `core/thread_index.py` | Per-chat FTS5 + dense thread index and lead-only recall slices |
 | `core/embeddings.py` | OpenAI-compatible embeddings client for thread recall |
+| `core/skills/` | Skill folder loader, Fernet secret store, draft/test/enable gating, guarded HTTP executor, read-only SQL, staged write confirmations, ticket-event skills |
+| `ai/tools/skills.py` | `http_request`, `sql_query` and on-demand `read_skill` tools |
+| `skills/predefined/` | Packaged skill templates: generic REST, Supabase, `send-to-url`, read-only Postgres |
 
 ## How the workflow works
 
@@ -759,6 +762,10 @@ refusal.
 | `read_chat` | `mode`, `chat?`, `query?`, `name?`, `limit?`, `reason?` | `mode=list`: `GET /api/{session}/chats/{chatId}/messages`; `mode=search`: `GET /api/messages` (local filter); `mode=metadata`: `POST /api/{session}/chats/overview`; `mode=resolve`: chat roster (chat runs) or `GET /api/{session}/chats`+`GET /api/contacts/all` (operator); `mode=recent`: `GET /api/{session}/chats` | The one chat-reading tool. list/search return one record per fetched message with its `#m<n>` when known and spill the raw window. `resolve` on operator runs searches the operator's chat list/contacts; on chat runs only the current chat's roster (mention help), never the contact book. `recent` is operator-only |
 | `forward_message` | `message_id`, `chat?`, `reason?` | `POST /api/forwardMessage` | Native forwarding from source message id to destination chat, both fenced. Attribution/rendering is not verified. Success echoes the source id; once per run (shared latch) |
 | `notebook` | `mode`, `scope?`, `key?`, `text?`, `kind?`, `query?`, `limit?`, `chat?`, `reason?` | — (SQLite: `data/notebook.sqlite3`) | Read/write/delete durable typed notes that survive history trims and restarts: `kind=fact` (default, chat facts and preferences), `kind=lesson` (verified workarounds), `kind=rule` (operator-only standing instruction for a chat; a member's rule request is recorded as a fact). `scope=chat` (default): private per-conversation notes; `scope=session`: operator-only bot-wide policies, size-bounded as a whole. Chat notes are observations, never authority over operator policy; participant `scope=session` attempts are refused. Notes are injected into the system prompt each run (see "Memory hygiene") |
+| `http_request` | `skill`, `method`, `path`, `query?`, `body?`, `reason?` | Configured skill base URL | One guarded call. The runtime locks the origin and base path, blocks private/metadata addresses unless the skill is itself private, pins the resolved IP, limits same-host redirects, redacts secrets, enforces sender-only identifiers, caps body/response/time, and stages customer/team-group writes for the operator's yes |
+| `sql_query` | `skill`, `query`, `reason?` | Configured SQLite/Postgres | Operator-only read query: one `SELECT`/`WITH…SELECT`, SQLite `mode=ro` or a read-only Postgres transaction, comments/mutations/`ATTACH`/`PRAGMA` refused, row/column/byte/time caps |
+| `read_skill` | `skill`, `reason?` | `data/skills/<name>/SKILL.md` | Read one active skill's docs when the prompt budget left them out. Read-only; never runs the integration |
+| `link_ticket_user` | `user_ref`, `number?`, `reason?` | SQLite transaction | Operator only: write the ticket and contact external user reference atomically. Customer/team-group runs cannot set it |
 
 Every tool takes an optional `reason`: one short sentence in third
 person stating what the call does and why — the action and its
@@ -882,6 +889,59 @@ uses `kind="post"` with `item_count`, preserving fractional aggregate duration;
 `item_count_truncated` marks a first-100-entry bound. Manual or automatic caption
 tracks are fetched best-effort with the configured proxy/timeout; HLS manifests
 are not spoken transcripts. Page text previews are not download-size limits.
+
+## Skills runtime
+
+Skills extend the agent without executing arbitrary code. A folder under
+`data/skills/<name>/` holds `skill.yaml` (the contract) and `SKILL.md` (the
+reference the model reads). The loader validates the name, HTTP(S) base URL
+without credentials, auth type, customer/team-group access, write-confirmation
+flag, optional safe read check, event flags, and SQL engine. Secret references
+must already exist in the encrypted store; `WAHABOT_SECRET_KEY` is a base64
+32-byte Fernet key. Decrypted values are attached only to the outbound request
+and are redacted from responses, errors, logs, prompts and tool results.
+
+The prompt lists active skills and their plain-language capability. Whole
+`SKILL.md` files ride the prompt only while they fit the token budget; beyond
+it the model calls `read_skill`, and the docs are cached for the run. A skill
+is callable only while enabled.
+
+HTTP calls pass a code-owned fence before a socket opens:
+
+- final origin and base path must match one configured base URL; `..`, encoded
+  escapes, absolute URLs, backslashes and host-changing redirects are refused;
+- the host is resolved once and the connection is pinned to that IP, with the
+  original `Host` header and TLS SNI; redirects are capped and re-resolved;
+- loopback, link-local, reserved, multicast, private and cloud-metadata
+  addresses are refused unless the skill's own base URL is a private service —
+  metadata stays blocked either way;
+- customer and team-group runs may substitute only the sender's phone/chat id,
+  external user ref and the ticket number; naming another person/chat is refused;
+- five calls per turn, identical repeats refused, request body 32 KiB, response
+  64 KiB, 15 s timeout;
+- customer and team-group writes are inserted into `skill_requests`; the
+  self-chat receives the exact prepared request plus `Reply yes.` and a yes
+  atomically claims and executes that stored request once. Team-group writes
+  always require the operator's yes. Operator writes run directly.
+
+SQL skills are operator-only in v1. The runtime allows one `SELECT` or
+`WITH … SELECT`, rejects comments, extra statements, `ATTACH`, `PRAGMA` and
+mutating keywords, opens SQLite with `mode=ro` and Postgres in a read-only
+transaction with a statement timeout, then caps rows, columns and bytes.
+A missing optional Postgres driver returns a clear install message.
+
+Each call is written to `skill_calls`, the ticket's `skill_call` event and the
+audit journal with skill, method, safe path, status, duration, initiator,
+ticket and outcome. Three consecutive failures notify the self-chat and mark
+the test failed; a success resets the streak. Drafts become enableable only
+after a current passing safe check whose configuration hash still matches.
+Ticket `opened`, `needs_you`, `done` and `closed` events dispatch after the
+ticket transaction commits; delivery failures never roll back the ticket.
+`send-to-url` signs a stable payload with HMAC-SHA256, retries boundedly,
+repeats a stable event id for receiver deduplication, and omits message bodies.
+
+The Phase 5 web authoring UI, marketplace, workflow builder and arbitrary code
+execution are intentionally not part of this runtime.
 
 ## Adding custom tools
 

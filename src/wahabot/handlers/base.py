@@ -23,6 +23,7 @@ from wahabot.core.delivery.intents import IntentStore
 from wahabot.core.delivery.model import FAILED, PREPARED, SENDING, UNKNOWN
 from wahabot.core.models import WahaEvent
 from wahabot.core.scheduler import TicketScheduler
+from wahabot.core.skills.service import SkillService
 from wahabot.core.tickets.router import Route
 from wahabot.core.tickets.store import TicketStore
 from wahabot.core.tickets.translate import TicketTranslator
@@ -59,6 +60,7 @@ class HandlerBase:
     ticket_translator: TicketTranslator | None
     scheduler: TicketScheduler | None
     answer_service: AnswerService | None
+    skill_service: SkillService | None
     bursts: bursts.Bursts
     albums: albums.Albums
     started_at: float
@@ -75,6 +77,8 @@ class HandlerBase:
     async def run_burst(self, *args: Any, **kwargs: Any) -> Any: ...
     async def run_album(self, *args: Any, **kwargs: Any) -> Any: ...
     async def ticket_gate_events(self, events: list[WahaEvent]) -> bool: ...
+    async def ticket_skill_route(self, event: WahaEvent, route: Route) -> bool: ...
+    async def ticket_send_operator(self, event: WahaEvent, text: str) -> None: ...
     def ticket_active_id(self, chat_id: str) -> int: ...
     def finalize_ticket(
         self, target: RunTarget | None, outcome: str, reply: str = ""

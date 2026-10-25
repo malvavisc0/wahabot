@@ -9,6 +9,7 @@ from wahabot.core.access import SessionConfig, SessionConfigReloader
 from wahabot.core.answers.service import AnswerService
 from wahabot.core.delivery.intents import IntentStore
 from wahabot.core.scheduler import TicketScheduler
+from wahabot.core.skills.service import SkillService
 from wahabot.core.tickets.store import TicketStore
 from wahabot.core.tickets.translate import TicketTranslator
 from wahabot.core.transport import Transport
@@ -17,12 +18,19 @@ from wahabot.handlers.burst_mixin import BurstMixin
 from wahabot.handlers.config_mixin import ConfigMixin
 from wahabot.handlers.ingest_mixin import IngestMixin
 from wahabot.handlers.single_mixin import SingleMixin
+from wahabot.handlers.skill_mixin import SkillMixin
 from wahabot.handlers.ticket_mixin import TicketMixin
 from wahabot.settings import Settings
 
 
 class Handlers(
-    AlbumMixin, BurstMixin, IngestMixin, SingleMixin, TicketMixin, ConfigMixin
+    AlbumMixin,
+    BurstMixin,
+    IngestMixin,
+    SingleMixin,
+    TicketMixin,
+    SkillMixin,
+    ConfigMixin,
 ):
     """One registration's handler state and methods."""
 
@@ -41,6 +49,7 @@ class Handlers(
         ticket_translator: TicketTranslator | None = None,
         scheduler: TicketScheduler | None = None,
         answer_service: AnswerService | None = None,
+        skill_service: SkillService | None = None,
     ) -> None:
         self.settings = settings
         self.waha = waha
@@ -55,6 +64,7 @@ class Handlers(
         self.ticket_translator = ticket_translator
         self.scheduler = scheduler
         self.answer_service = answer_service
+        self.skill_service = skill_service
         self.transport = waha
         self.bursts = Bursts(
             settings.burst_inactivity_s,

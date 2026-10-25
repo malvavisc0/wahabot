@@ -3,7 +3,8 @@
 import datetime
 import json
 from importlib.metadata import version as get_version
-from typing import Any
+from pathlib import Path
+from typing import Annotated, Any
 
 import typer
 import uvicorn
@@ -18,12 +19,18 @@ from wahabot.commands import build_command_event, register_command_handler
 from wahabot.core import cli as cli_helpers
 from wahabot.core.access import load_session_config
 from wahabot.core.audit import audit_dir
+from wahabot.core.db import Database
 from wahabot.core.notebook import Notebook
 from wahabot.core.schedule.hours import effective_timezone
+from wahabot.core.skills.drafts import SkillDraftService
+from wahabot.core.skills.loader import import_skill
+from wahabot.core.skills.secrets import SecretStore
+from wahabot.core.skills.service import SkillService
+from wahabot.core.skills.store import SkillStore
 from wahabot.core.waha import WahaClient
 from wahabot.handlers import register_agent_handler, register_forget_handler
 from wahabot.reactions import register_reaction_handler
-from wahabot.settings import get_settings, setup_logging
+from wahabot.settings import Settings, get_settings, setup_logging
 from wahabot.status import (
     register_session_status_handler,
     seed_health,
@@ -41,8 +48,118 @@ sessions_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(sessions_app, name="sessions")
+skills_app = typer.Typer(
+    name="skills",
+    help="List, import and test configured skills.",
+    no_args_is_help=True,
+)
+app.add_typer(skills_app, name="skills")
 
 console = Console()
+
+
+def skill_runtime(
+    settings: Settings,
+) -> tuple[SkillStore, SkillDraftService]:
+    """Build the CLI's skill stores and draft service against the data dir."""
+    database = Database(settings.data_dir / "wahabot.db")
+    database.migrate()
+    store = SkillStore(database.path)
+    secrets = SecretStore(database.path, settings.secret_key)
+    waha = WahaClient(base_url=settings.waha_url, api_key=settings.waha_api_key)
+    service = SkillService(
+        store,
+        secrets,
+        settings.skills_dir,
+        settings.session,
+        waha,
+        data_dir=settings.data_dir,
+    )
+    return store, SkillDraftService(store, secrets, settings.skills_dir, service)
+
+
+def skill_host(skill: Any) -> str:
+    """The base host only: never a credential-bearing URL."""
+    urls = getattr(skill, "base_urls", [])
+    if not urls:
+        return "local SQL"
+    from urllib.parse import urlsplit
+
+    return urlsplit(str(urls[0])).hostname or "unknown"
+
+
+@skills_app.command("list")
+def skills_list() -> None:
+    """List configured skills without URLs or secrets."""
+    settings = get_settings()
+    store, _drafts = skill_runtime(settings)
+    skills = store.list()
+    if not skills:
+        console.print("[dim]No skills configured.[/]")
+        return
+    table = Table(box=None, show_header=True, pad_edge=False)
+    for column in ("name", "lifecycle", "enabled", "test", "chats", "host"):
+        table.add_column(column)
+    for skill in skills:
+        table.add_row(
+            skill.name,
+            skill.lifecycle,
+            "yes" if skill.enabled else "no",
+            skill.test_state,
+            skill.customer_chats,
+            skill_host(skill),
+        )
+    console.print(table)
+
+
+@skills_app.command("import")
+def skills_import(
+    path: Annotated[
+        Path, typer.Argument(help="Skill folder containing skill.yaml and SKILL.md.")
+    ],
+    enable: bool = typer.Option(
+        False, "--enable", help="Run the safe check and enable when it passes."
+    ),
+) -> None:
+    """Import a skill folder into <data>/skills/."""
+    settings = get_settings()
+    try:
+        store, drafts = skill_runtime(settings)
+        skill = import_skill(path, settings.skills_dir, store)
+        if not enable:
+            cli_helpers.ok(
+                console,
+                f"Imported [bold]{skill.name}[/]; "
+                + f"run `wahabot skills test {skill.name}`.",
+            )
+            return
+        result = drafts.run_test(skill.name)
+        if not result.passed or not drafts.enable(skill.name):
+            raise typer.BadParameter(f"{skill.name} stays inactive: {result.reason}")
+    except Exception as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    cli_helpers.ok(console, f"Imported and enabled [bold]{skill.name}[/].")
+
+
+@skills_app.command("test")
+def skills_test(
+    name: str = typer.Argument(help="Skill name."),
+) -> None:
+    """Run only the prepared safe check; never a write."""
+    settings = get_settings()
+    try:
+        store, drafts = skill_runtime(settings)
+        if store.get(name) is None:
+            raise typer.BadParameter(f"unknown skill: {name}")
+        result = drafts.run_test(name)
+    except typer.BadParameter:
+        raise
+    except Exception as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if not result.passed:
+        console.print(f"[yellow]FAIL[/] {name}: {result.reason}")
+        raise typer.Exit(1)
+    console.print(f"[green]PASS[/] {name}: {result.reason}")
 
 
 @app.command()

@@ -22,6 +22,7 @@ from wahabot.ai.tools.external import (
 from wahabot.ai.tools.image import image_builder
 from wahabot.ai.tools.knowledge import search_knowledge
 from wahabot.ai.tools.notebook import notebook_builder
+from wahabot.ai.tools.skills import build_skill_tools
 from wahabot.ai.tools.ticket_common import OperatorLanguage
 from wahabot.ai.tools.tickets import build_ticket_tools
 from wahabot.ai.tools.whatsapp import (
@@ -37,6 +38,7 @@ from wahabot.ai.tools.whatsapp import (
 )
 from wahabot.core.answers.service import AnswerService
 from wahabot.core.schedule.models import OpeningState
+from wahabot.core.skills.service import SkillService
 from wahabot.core.tickets.alerts import Translator
 from wahabot.core.tickets.store import TicketStore
 from wahabot.core.transport import Transport
@@ -57,6 +59,7 @@ def build_default_tools(
     ticket_schedule: Callable[[], OpeningState] | None = None,
     ticket_night_number: Callable[[], str] | None = None,
     ticket_away_message: Callable[[], str] | None = None,
+    skill_service: SkillService | None = None,
 ) -> list[BaseTool]:
     """Build all bundled tools.
 
@@ -85,6 +88,7 @@ def build_default_tools(
         visit_url_builder(settings),
         search_knowledge(answer_service),
     ]
+    tools.extend(build_skill_tools(skill_service))
     if settings.shell_tool:
         tools.append(shell_builder(settings))
     tools.extend(

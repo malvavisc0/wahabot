@@ -163,12 +163,17 @@ surface `team_group` and the restrictions are enforced in code:
 - never open, update or close a ticket; read-only ticket facts are
   available (including open work for "what's open?");
 - never send from the group run to a customer chat;
-- no customer-system writes;
+- no customer-system writes directly: a configured skill may stage a write
+  for the operator, and a team-group write always needs the operator's own
+  `yes`, even when the skill sets `writes_need_operator: false`;
 - no TTS and no posting first. The run wakes only when the newest body
   names the assistant, quotes its message, or replies to it.
 
 Group traffic is still journaled and chat-scoped notebook notes still
-work; a group note never becomes a customer-chat note.
+work; a group note never becomes a customer-chat note. Skills are
+installed once for the deployment, not per session: their
+`customer_chats` field controls whether customer and team-group runs may
+read, while operator commands can use every enabled skill.
 
 ## System prompt variables
 

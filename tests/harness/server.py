@@ -65,6 +65,7 @@ def smoke_settings(data_dir: Path, llm_base: str) -> Settings:
         triage_gate=False,
         timezone="UTC",
         tts_url="",
+        secret_key="d2FoYWJvdC10ZXN0LTMyLWJ5dGUtc2VjcmV0LWtleSE=",
         langfuse_public_key="",
         langfuse_secret_key="",
         langfuse_tracing_environment="test",

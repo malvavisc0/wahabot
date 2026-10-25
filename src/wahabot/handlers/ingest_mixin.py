@@ -427,7 +427,11 @@ class IngestMixin(HandlerBase):
             or body
             or ""
         )
-        route = route_message(self.ticket_store, routed_event(event, instruction))
+        route = route_message(
+            self.ticket_store,
+            routed_event(event, instruction),
+            self.skill_service.store if self.skill_service is not None else None,
+        )
         if route.kind == RouteKind.NONE:
             return False
         await self.handle_ticket_route(event, route, config)

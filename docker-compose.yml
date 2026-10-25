@@ -74,6 +74,9 @@ services:
       WAHABOT_SHELL_TIMEOUT: ${WAHABOT_SHELL_TIMEOUT:-30}
       WAHABOT_SHELL_MAX_OUTPUT: ${WAHABOT_SHELL_MAX_OUTPUT:-2000}
       WAHABOT_SESSION: ${WAHABOT_SESSION:-default}
+      # Base64 32-byte Fernet key for skill credentials. Empty keeps
+      # secret-bearing skills disabled; skill writes refuse without it.
+      WAHABOT_SECRET_KEY: ${WAHABOT_SECRET_KEY:-}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-}

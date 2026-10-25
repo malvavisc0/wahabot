@@ -6,6 +6,8 @@ from enum import StrEnum
 
 from wahabot.ai.messages import bot_jids, jid_string
 from wahabot.core.models import WahaEvent
+from wahabot.core.skills.models import SkillRequest
+from wahabot.core.skills.store import SkillStore
 from wahabot.core.tickets.models import (
     ACTIVE_STATES,
     Contact,
@@ -26,6 +28,9 @@ _NUMBERED = re.compile(
     re.IGNORECASE,
 )
 _NAMED = re.compile(r"^\s*([^:\n]{1,60}):\s*(.+)$")
+_YES = re.compile(r"^\s*yes\s*[.!]?\s*$", re.IGNORECASE)
+_NO = re.compile(r"^\s*no\s*[.!]?\s*$", re.IGNORECASE)
+_CAPABILITIES = re.compile(r"^\s*what\s+can\s+you\s+do\??\s*$", re.IGNORECASE)
 _QUOTED_ID_KEYS = ("id", "_serialized")
 
 
@@ -40,6 +45,8 @@ class RouteKind(StrEnum):
     PAUSE = "pause"
     RESUME = "resume"
     SAVE = "save"
+    SKILL_CONFIRM = "skill_confirm"
+    CAPABILITIES = "capabilities"
     ASK = "ask"
     NONE = "none"
 
@@ -53,6 +60,7 @@ class Route:
     contact: Contact | None = None
     text: str = ""
     candidates: list[Ticket] = field(default_factory=list)
+    skill_request: SkillRequest | None = None
 
 
 def is_self_chat_event(event: WahaEvent) -> bool:
@@ -85,12 +93,17 @@ def quoted_id(event: WahaEvent) -> str:
     return ""
 
 
-def route_message(store: TicketStore, event: WahaEvent) -> Route:
+def route_message(
+    store: TicketStore, event: WahaEvent, skill_store: SkillStore | None = None
+) -> Route:
     """Parse one operator message into a known shape or ``NONE``."""
     body = str(event.payload.get("body", "") or "").removeprefix("[voice note]").strip()
     if not body:
         return Route(RouteKind.NONE)
     quoted = quoted_id(event)
+    skill_route = route_skill_confirmation(skill_store, body, quoted)
+    if skill_route is not None:
+        return skill_route
     command = route_command(store, body)
     alert = store.ticket_for_alert_message(quoted)
     if alert is not None:
@@ -106,10 +119,24 @@ def route_message(store: TicketStore, event: WahaEvent) -> Route:
     return route_ticket_text(store, body)
 
 
+def route_skill_confirmation(
+    store: SkillStore | None, body: str, quoted: str
+) -> Route | None:
+    """A quoted or latest staged write answered with yes/no."""
+    if store is None or not (_YES.match(body) or _NO.match(body)):
+        return None
+    request = store.pending_for_message(quoted) if quoted else store.latest_pending()
+    if request is None:
+        return None
+    return Route(RouteKind.SKILL_CONFIRM, text=body, skill_request=request)
+
+
 def route_command(store: TicketStore, body: str) -> Route | None:
     """Recognize the fixed command words."""
     if _WHATS_OPEN.match(body):
         return Route(RouteKind.WHATS_OPEN)
+    if _CAPABILITIES.match(body):
+        return Route(RouteKind.CAPABILITIES)
     save = _SAVE.match(body)
     if save:
         number = save.group(1)

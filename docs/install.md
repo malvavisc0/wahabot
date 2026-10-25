@@ -40,7 +40,8 @@ Key env vars:
 | `WAHABOT_HOST` / `WAHABOT_PORT` | Webhook server bind | `0.0.0.0:8080` |
 | `WAHABOT_LOG_LEVEL` | loguru level | `INFO` |
 | `WAHABOT_SESSION` | WAHA session name | `default` |
-| `WAHABOT_DATA_DIR` | Root for session configs, memory, the notebook, the event journal and the intake/outbound ledger | `data` |
+| `WAHABOT_DATA_DIR` | Root for session configs, memory, the notebook, the event journal, skill folders and the intake/outbound ledger | `data` |
+| `WAHABOT_SECRET_KEY` | Base64 32-byte Fernet key for skill secrets (empty = secret-bearing skills refuse writes) | — |
 | `WAHABOT_TIMEZONE` | TZ for the prompt's date/time placeholders | `UTC` |
 | `WAHABOT_MEMORY_TOKEN_LIMIT` | Per-chat rolling memory budget | `8000` |
 | `WAHABOT_MEMORY_PERSIST` | Persist per-chat memory to `data/memory/` (survives restarts/LRU evictions) | `true` |
@@ -84,6 +85,53 @@ Key env vars:
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Opt-in tracing (see README) | — |
 
 The durable intake and outbound-intent ledger lives in `data/wahabot.db` (SQLite, WAL, numbered migrations applied automatically at startup). Back it up with `notebook.sqlite3`; a fresh database still runs, but accepted messages and pending deliveries from before a restart are lost.
+
+## Skills
+
+Skills are folders under `data/skills/<name>/`, each with `skill.yaml` and
+`SKILL.md`. Import validates the contract, copies the folder and writes a
+disabled configured row:
+
+```bash
+uv run wahabot skills import ./customer-records          # configure only
+uv run wahabot skills test customer-records              # safe read check only
+uv run wahabot skills import ./customer-records --enable # import + safe test + enable
+uv run wahabot skills list
+```
+
+`--enable` and `skills test` run only the prepared read (`GET`/`HEAD`/`OPTIONS`)
+from `skill.yaml`; a write is never used as a test, and a skill with no safe
+check stays inactive with an explanation. Configure the secret before import:
+
+```bash
+export WAHABOT_SECRET_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+```
+
+Store each credential through the skill backend (`secrets` table); do not put
+it in `skill.yaml`. Missing keys refuse writes, and a wrong key fails clearly.
+The key is required only for skills that reference a secret.
+
+HTTP skills get a base-URL lock, address checks (loopback, link-local,
+metadata and private ranges are refused unless the skill's own base is
+private), same-host redirect limits with IP pinning, sender-only substitution,
+per-turn/repeat limits and body/response/time caps. Customer and team-group
+writes are staged in `skill_requests` and confirm in the self-chat with the
+exact prepared request; reply `yes` (quote the message when more than one is
+pending). Team-group writes always need the operator's yes. Operator writes
+execute directly.
+
+SQL skills are operator-only: one `SELECT` or `WITH ... SELECT`, SQLite opened
+`mode=ro` or Postgres through a read-only user/transaction, with comment,
+multi-statement, `ATTACH`/`PRAGMA` and mutation refusal plus row/column/byte/
+time caps. Install the optional driver with `uv sync --extra postgres` (or
+`pip install "wahabot[postgres]"`); without it the tool returns a clear error
+instead of crashing.
+
+Enabled event skills run after the ticket transaction commits for `opened`,
+`needs_you`, `done` and `closed`. A failure is logged and never rolls back the
+ticket. `send-to-url` sends a stable, bounded JSON payload signed with
+HMAC-SHA256; it carries no message bodies by default. The web authoring UI,
+marketplace, workflow builder and arbitrary code execution are Phase 5 work.
 
 Run one wahabot process per session. The chat lock and intake claim owners are in-process, so multiple workers against the same session are unsupported. The outbound retry policy treats a WAHA 5xx as a definite pre-acceptance failure; verify that assumption against your WAHA version before relying on automatic retries.
 

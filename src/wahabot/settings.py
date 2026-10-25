@@ -299,10 +299,19 @@ class Settings(BaseSettings):
 
     data_dir: Path = Path("data")
 
+    #: Fernet key (base64, 32 bytes) for skill credentials. Empty keeps
+    #: skills off for secret-bearing integrations; skill writes refuse.
+    secret_key: str = ""
+
     @property
     def access_config(self) -> Path:
         """Path of this session's access config."""
         return self.data_dir / "sessions" / f"{self.session}.json"
+
+    @property
+    def skills_dir(self) -> Path:
+        """Directory of imported skill folders."""
+        return self.data_dir / "skills"
 
     @property
     def journal_dir(self) -> Path:
