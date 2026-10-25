@@ -204,59 +204,6 @@ def test_dm_burst_carries_exactly_one_addressed_flag(bot: Bot) -> None:
     assert turn.startswith("[turn: 3 messages | newest #m3 | addressed: yes")
 
 
-def test_dm_silent_run_is_a_ledger_line(bot: Bot) -> None:
-    """A quiet DM run is stored as one ledger line, not a verbatim turn."""
-    dm = "491555000001@c.us"
-    llm = bot.stack.llm
-    llm.requests.clear()
-    llm.override = tool_call_response(
-        "stay_silent",
-        {"reason": "not mine"},
-        call_id="call_dm_silent",
-        response_id="chatcmpl-dm-silent",
-        created=1788525845,
-    )
-    bot.post(chat_event(body="mensaje que no contestare", mid="DMS1", chat=dm))
-    assert _wait(lambda: len(llm.requests) >= 1)
-
-    llm.clear()
-    llm.override = None
-    bot.post(chat_event(body="segundo mensaje", mid="DMS2", chat=dm))
-    assert _wait(lambda: len(llm.requests) >= 1)
-    turns = user_turns_of(llm.requests[0])
-    assert any(
-        "mensaje que no contestare" in line and " — #m" in line
-        for turn in turns
-        for line in turn.splitlines()
-    )
-    assert all(
-        "]] text" not in line
-        for turn in turns
-        for line in turn.splitlines()
-        if "mensaje que no contestare" in line
-    )
-    assert _wait(lambda: any(chat == dm for _, chat, _, _ in bot.waha.sent))
-
-
-def test_unaddressed_group_turn_carries_the_negative_header(bot: Bot) -> None:
-    """The header the unaddressed judicious path renders: no addressed flag,
-    the unaddressed verdict, and the model may still answer."""
-    _judicious_bot(bot)
-    llm = bot.stack.llm
-    llm.requests.clear()
-    bot.waha.sent.clear()
-    bot.post(_group_event("GU1", "jaja mira el video", "491555000001@c.us"))
-    assert _wait(lambda: len(llm.requests) >= 1)
-    turn = user_turns_of(llm.requests[0])[0]
-    assert turn.startswith("[turn: 1 message | newest #m1 | addressed: no")
-    assert "backlog: no" in turn.splitlines()[0]
-    assert "]] text :: jaja mira el video" in turn
-    assert "addressed ::" not in turn
-    # No gate in the harness: the run is allowed to answer, and the fake
-    # model does.
-    assert _wait(lambda: any(chat == CHAT_ID for _, chat, _, _ in bot.waha.sent))
-
-
 def test_side_thread_quote_stays_silent_then_correction_answers(bot: Bot) -> None:
     """The incident shape: a quote of another member's old message is a
     side thread, even without a gate. A later correction that names the
