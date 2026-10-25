@@ -16,6 +16,7 @@ globals between scenarios. Here the boot order becomes fixtures:
 
 import json
 import tempfile
+import time
 import unittest.mock
 from collections.abc import Iterator
 from pathlib import Path
@@ -210,6 +211,20 @@ def _isolated_identity() -> Iterator[None]:
     identity_module.names.clear()
 
 
+def _drain_in_flight_runs(timeout: float = 15.0) -> None:
+    """Wait for agent runs of the finished test to complete.
+
+    A test usually returns before its run's trailing LLM round (the
+    final answer after a tool delivery) finishes. The stack's LLM is
+    session-scoped, so that in-flight request would otherwise land in
+    the next test's window and steal its scripted first answer. Waiting
+    for the chat locks to drain quiesces the system between tests.
+    """
+    deadline = time.monotonic() + timeout
+    while _chat_lock_pending and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
 @pytest.fixture()
 def _reset_registries() -> Iterator[None]:
     """Wipe every process-global tracker before and after each test."""
@@ -226,6 +241,7 @@ def _reset_registries() -> Iterator[None]:
     status_state.llm_healthy = True
     status_state.llm_timeout_notified = False
     yield
+    _drain_in_flight_runs()
     reset_handlers()
     _echoes.clear()
     _seen_ids.clear()
