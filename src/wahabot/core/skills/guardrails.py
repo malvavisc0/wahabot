@@ -240,9 +240,9 @@ def transition_ipv4(address: ipaddress.IPv6Address) -> ipaddress.IPv4Address | N
     blocked by the fallback classification.
     """
     if address.ipv4_mapped:
-        return address.ipv4_mapped
+        return ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
     if address in _NAT64_PREFIX:
-        return ipaddress.ip_address(int(address) & 0xFFFFFFFF)
+        return ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
     return None
 
 
