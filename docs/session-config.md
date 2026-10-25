@@ -172,8 +172,10 @@ surface `team_group` and the restrictions are enforced in code:
 Group traffic is still journaled and chat-scoped notebook notes still
 work; a group note never becomes a customer-chat note. Skills are
 installed once for the deployment, not per session: their
-`customer_chats` field controls whether customer and team-group runs may
-read, while operator commands can use every enabled skill.
+`customer_chats` field controls whether customer and team-group runs may use
+them (`read` or `read_write`). Customer writes stage unless
+`writes_need_operator` is false; team-group writes always wait for the
+operator. Operator commands can use every enabled skill whose test is current.
 
 ## System prompt variables
 

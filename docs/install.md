@@ -41,7 +41,7 @@ Key env vars:
 | `WAHABOT_LOG_LEVEL` | loguru level | `INFO` |
 | `WAHABOT_SESSION` | WAHA session name | `default` |
 | `WAHABOT_DATA_DIR` | Root for session configs, memory, the notebook, the event journal, skill folders and the intake/outbound ledger | `data` |
-| `WAHABOT_SECRET_KEY` | Base64 32-byte Fernet key for skill secrets (empty = secret-bearing skills refuse writes) | — |
+| `WAHABOT_SECRET_KEY` | Base64 32-byte Fernet key for skill secrets (empty = secret-bearing skill calls refuse) | — |
 | `WAHABOT_TIMEZONE` | TZ for the prompt's date/time placeholders | `UTC` |
 | `WAHABOT_MEMORY_TOKEN_LIMIT` | Per-chat rolling memory budget | `8000` |
 | `WAHABOT_MEMORY_PERSIST` | Persist per-chat memory to `data/memory/` (survives restarts/LRU evictions) | `true` |
@@ -102,30 +102,37 @@ uv run wahabot skills list
 ```
 
 `--enable` and `skills test` run only the prepared read (`GET`/`HEAD`/`OPTIONS`)
-from `skill.yaml`; a write is never used as a test, and a non-SQL skill with no
-safe check stays inactive with an explanation. Configure the secret before import:
+from `skill.yaml`; a passing HTTP check must return a 2xx, a write is never used
+as a test, and a non-SQL skill with no safe check stays inactive with an
+explanation. Editing an enabled skill's folder marks its test stale: it is
+hidden from prompts, and calls, events and staged confirmations refuse until
+`skills test` passes again. `skills list` shows the stale state. Configure the
+secret before import:
 
 ```bash
 export WAHABOT_SECRET_KEY="$(uv run python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
 ```
 
 Store each credential through the skill backend (`secrets` table); do not put
-it in `skill.yaml`. Missing keys refuse writes, and a wrong key fails clearly.
+it in `skill.yaml`. Missing keys refuse secret-bearing calls, and a wrong
+key fails clearly.
 The key is required only for skills that reference a secret.
 
 HTTP skills get a base-URL lock, address checks (loopback, link-local,
-metadata and private ranges are refused unless the skill's own base is
-private), same-host redirect limits with IP pinning, sender-only substitution,
-per-turn/repeat limits and body/response/time caps. Customer writes are staged
-in `skill_requests` unless `writes_need_operator` is false; team-group writes
-always ask. Approvals confirm in the self-chat with the exact prepared request;
+metadata, private, non-global/CGNAT and reserved ranges are refused unless the
+skill's own base is private), same-host redirect limits with IP pinning and
+HTTP method semantics, sender-only substitution, per-turn/repeat limits and
+body/response/time caps. Customer writes are staged in `skill_requests`
+unless `writes_need_operator` is false; team-group writes always ask.
+Approvals confirm in the self-chat with the exact prepared request;
 reply `yes` (quote the message when more than one is pending). Operator writes
 execute directly.
 
 SQL skills are operator-only: one `SELECT` or `WITH ... SELECT`, SQLite opened
 `mode=ro` or Postgres through a read-only user/transaction, with comment,
 multi-statement, `ATTACH`/`PRAGMA` and mutation refusal plus row/column/byte/
-time caps. Install the optional driver with `uv sync --extra postgres`; without
+time caps. A refused query is recorded as a refusal, not a runtime failure.
+Install the optional driver with `uv sync --extra postgres`; without
 it the tool returns a clear error instead of crashing. Draft SQL skills are
 tested with a harmless read-only `SELECT 1` probe before they can be enabled.
 
