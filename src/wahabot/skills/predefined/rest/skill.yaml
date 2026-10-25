@@ -1,0 +1,7 @@
+name: rest
+kind: http
+base_url: https://api.example.invalid
+auth: {type: bearer, secret: REST_API_KEY}
+customer_chats: read
+writes_need_operator: true
+test: {method: GET, path: /health}

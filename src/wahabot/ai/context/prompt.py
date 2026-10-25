@@ -31,6 +31,7 @@ def render_system_prompt(
     operator_name: str = "",
     answers: str = "",
     knowledge_only: bool = False,
+    skills: str = "",
 ) -> str:
     """Substitute date/time/name/host placeholders in the system prompt.
 
@@ -71,7 +72,7 @@ def render_system_prompt(
     ).strip()
     if text_tokens(memory) > CONFIG_MEMORY_TOKEN_LIMIT:
         raise ValueError(f"Session memory exceeds {CONFIG_MEMORY_TOKEN_LIMIT} tokens")
-    return assemble_prompt(prompt, goal, memory, answers, knowledge_only)
+    return assemble_prompt(prompt, goal, memory, answers, knowledge_only, skills)
 
 
 def prompt_zone(tz_name: str) -> datetime.tzinfo:
@@ -115,6 +116,7 @@ def assemble_prompt(
     memory: str,
     answers: str,
     knowledge_only: bool,
+    skills: str = "",
 ) -> str:
     """Order safety, instructions, answers and the opt-in answers-only rule."""
     sections: list[str] = [BASE_SAFETY]
@@ -127,6 +129,8 @@ def assemble_prompt(
         sections.append(KNOWLEDGE_ONLY_RULE)
     if answers.strip():
         sections.append(answers.strip())
+    if skills.strip():
+        sections.append(skills.strip())
     return "\n\n".join(sections)
 
 

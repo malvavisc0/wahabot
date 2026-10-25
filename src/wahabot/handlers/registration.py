@@ -30,6 +30,10 @@ from wahabot.core.recovery import Recovery
 from wahabot.core.runs import chat_lock, contexts
 from wahabot.core.schedule.hours import opening_state
 from wahabot.core.scheduler import TicketScheduler
+from wahabot.core.skills.events import EventDispatcher
+from wahabot.core.skills.secrets import SecretStore
+from wahabot.core.skills.service import SkillService
+from wahabot.core.skills.store import SkillStore
 from wahabot.core.thread_index import forget_thread_index
 from wahabot.core.tickets.store import TicketStore
 from wahabot.core.tickets.translate import TicketTranslator
@@ -94,6 +98,7 @@ class Registration:
     database: Database
     handlers: Handlers
     recovery: Recovery
+    skill_service: SkillService
 
 
 def webhook_app_state(recovery: Recovery) -> None:
@@ -118,6 +123,16 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
     enable_langfuse(settings)
     escalation_channel = EscalationChannel()
     ticket_store = TicketStore(database.path)
+    skill_service = SkillService(
+        SkillStore(database.path),
+        SecretStore(database.path, settings.secret_key),
+        settings.skills_dir,
+        settings.session,
+        transport,
+        data_dir=settings.data_dir,
+        ticket_store=ticket_store,
+    )
+    ticket_store.on_event = EventDispatcher(skill_service).emit
     answer_store = AnswerStore(database.path)
     answer_service = AnswerService(answer_store)
     ticket_translator = TicketTranslator()
@@ -150,6 +165,7 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
         ticket_translator,
         scheduler,
         answer_service,
+        skill_service,
     )
     agent = build_agent(
         settings,
@@ -170,6 +186,7 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
             ),
             ticket_night_number=lambda: config_reloader.current_config().night_number,
             ticket_away_message=lambda: config_reloader.current_config().away_message,
+            skill_service=skill_service,
         ),
         system_prompt=config.system_prompt,
         prompt_renderer=handlers.render_prompt,
@@ -198,4 +215,5 @@ def register_agent_handler(settings: Settings, waha: WahaClient) -> Registration
         database=database,
         handlers=handlers,
         recovery=recovery,
+        skill_service=skill_service,
     )

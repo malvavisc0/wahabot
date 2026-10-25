@@ -2,7 +2,9 @@
 
 import json
 import sqlite3
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Iterable
+from pathlib import Path
 
 from wahabot.core.db.connection import connect, transaction
 from wahabot.core.tickets.models import (
@@ -20,31 +22,42 @@ from wahabot.core.tickets.models import (
 )
 from wahabot.core.tickets.store_alerts import AlertMixin
 from wahabot.core.tickets.store_base import (
+    TICKET_COLUMNS as _TICKET_COLUMNS,
+)
+from wahabot.core.tickets.store_base import (
     attachment_from_row,
     contact_from_row,
     event_from_row,
     ticket_from_row,
 )
 from wahabot.core.tickets.store_contacts import ContactMixin
+from wahabot.core.tickets.store_events import LifecycleMixin
+from wahabot.core.tickets.store_identity import IdentityMixin
 from wahabot.core.tickets.store_schedule import ScheduleMixin
 
-_TICKET_COLUMNS = (
-    "id, number, contact_id, chat_id, state, urgent, done_by, summary, "
-    "details_json, missing_json, external_user_ref, alert_message_ids_json, "
-    "previous_ticket_id, created_at, updated_at, done_at, closed_at, last_customer_at"
-)
 _EVENT_COLUMNS = "id, ticket_id, at, actor, kind, body, message_ids_json"
 _ATTACHMENT_COLUMNS = (
     "id, ticket_id, message_id, kind, mime, bytes, sha256, path, derived_text, page_count"
 )
 
 
-class TicketStore(ScheduleMixin, ContactMixin, AlertMixin):
+class TicketStore(ScheduleMixin, ContactMixin, AlertMixin, LifecycleMixin, IdentityMixin):
     """CRUD and transactions for the ticket tables.
 
     One connection per operation; every write that changes a ticket's
     state also appends a ``ticket_event`` in the same transaction.
+    Lifecycle listeners run after commit and never raise or block.
     """
+
+    def __init__(
+        self,
+        path: Path,
+        clock: Callable[[], float] = time.time,
+        *,
+        on_event: Callable[[str, Ticket], None] | None = None,
+    ) -> None:
+        super().__init__(path, clock)
+        self.on_event = on_event
 
     def create_ticket(
         self,
@@ -100,7 +113,9 @@ class TicketStore(ScheduleMixin, ContactMixin, AlertMixin):
                 ).fetchone()
         finally:
             conn.close()
-        return ticket_from_row(row)
+        ticket = ticket_from_row(row)
+        self.notify("opened", ticket)
+        return ticket
 
     def ticket(self, ticket_id: int) -> Ticket | None:
         """One ticket by row id."""
@@ -175,6 +190,7 @@ class TicketStore(ScheduleMixin, ContactMixin, AlertMixin):
         """Apply staged values and append the matching event atomically."""
         moment = self.now() if at is None else at
         conn = connect(self.path)
+        previous = ""
         try:
             with transaction(conn):
                 current = conn.execute(
@@ -182,6 +198,7 @@ class TicketStore(ScheduleMixin, ContactMixin, AlertMixin):
                 ).fetchone()
                 if current is None:
                     raise KeyError(f"ticket {ticket_id} not found")
+                previous = str(current["state"])
                 self.apply_update(conn, current, update, moment)
                 self.insert_event(conn, ticket_id, actor, kind, body, (), moment)
                 row = conn.execute(
@@ -189,7 +206,9 @@ class TicketStore(ScheduleMixin, ContactMixin, AlertMixin):
                 ).fetchone()
         finally:
             conn.close()
-        return ticket_from_row(row)
+        ticket = ticket_from_row(row)
+        self.notify_transition(previous, ticket)
+        return ticket
 
     def apply_update(
         self,
@@ -409,6 +428,7 @@ class TicketStore(ScheduleMixin, ContactMixin, AlertMixin):
                 ).fetchone()
                 if current is None:
                     raise KeyError(f"ticket {ticket_id} not found")
+                previous = str(current["state"])
                 stored = json_list(str(current["alert_message_ids_json"]))
                 for message_id in ids:
                     if message_id and message_id not in stored:
@@ -447,7 +467,9 @@ class TicketStore(ScheduleMixin, ContactMixin, AlertMixin):
                 ).fetchone()
         finally:
             conn.close()
-        return ticket_from_row(row)
+        ticket = ticket_from_row(row)
+        self.notify_transition(previous, ticket)
+        return ticket
 
     def ticket_for_alert_message(self, message_id: str) -> Ticket | None:
         """The ticket whose alert or forwarded message carries *message_id*."""

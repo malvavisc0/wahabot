@@ -427,7 +427,7 @@ class TicketMixin(HandlerBase):
             text = route.text or ask_which_ticket(route.candidates)
             await self.ticket_send_operator(event, text)
             return True
-        return False
+        return await self.ticket_skill_route(event, route)
 
     async def ticket_save_answer(self, event: WahaEvent, route: Route) -> None:
         """Save the newest answer candidate, or say there is none."""
@@ -587,6 +587,7 @@ class TicketMixin(HandlerBase):
         )
         await self.ticket_send_operator(event, message)
 
+    @override
     async def ticket_send_operator(self, event: WahaEvent, text: str) -> None:
         """Send a command answer back to the operator's self-chat."""
         command = WahaEvent.model_validate(build_command_event(event.session, text))

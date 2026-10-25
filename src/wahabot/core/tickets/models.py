@@ -38,6 +38,7 @@ class Actor(StrEnum):
     OPERATOR = "operator"
     CUSTOMER = "customer"
     SYSTEM = "system"
+    SKILL = "skill"
 
 
 class EventKind(StrEnum):
@@ -54,6 +55,7 @@ class EventKind(StrEnum):
     STATE = "state"
     ATTACHMENT = "attachment"
     NUDGE = "nudge"
+    SKILL_CALL = "skill_call"
 
 
 @dataclass(slots=True)

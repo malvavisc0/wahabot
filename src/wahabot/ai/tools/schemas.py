@@ -363,3 +363,50 @@ class NewTicketSchema(BaseModel):
 
     summary: str = Field(description="Short summary of the new issue.")
     reason: str = Field(default="", description=REASON_DESCRIPTION)
+
+
+class HttpRequestSchema(BaseModel):
+    """Call one configured HTTP skill through its guardrails."""
+
+    skill: str = Field(description="The configured skill name.")
+    method: str = Field(description="HTTP method: GET, POST, PUT, PATCH or DELETE.")
+    path: str = Field(
+        description="Relative path under the skill's base URL; no absolute URLs."
+    )
+    query: dict[str, str] = Field(default={}, description="Optional query parameters.")
+    body: dict[str, object] = Field(
+        default={},
+        description=(
+            "Optional JSON body. Use the sender placeholders "
+            "{sender.phone}, {sender.chat_id}, {sender.external_user_ref} and "
+            "{ticket.number}; never type another person's identifiers."
+        ),
+    )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
+
+
+class SqlQuerySchema(BaseModel):
+    """Run one operator-only read-only SQL query."""
+
+    skill: str = Field(description="The configured SQL skill name.")
+    query: str = Field(description="One SELECT or WITH...SELECT statement.")
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
+
+
+class ReadSkillSchema(BaseModel):
+    """Read a skill's docs when they were left out of the prompt."""
+
+    skill: str = Field(description="The configured skill name.")
+    reason: str = Field(default="", description=REASON_DESCRIPTION)
+
+
+class LinkTicketUserSchema(BaseModel):
+    """Operator-only: link a ticket to an external user reference."""
+
+    user_ref: str = Field(
+        description="The external system's stable user reference for this contact."
+    )
+    number: int = Field(
+        default=0, description="Ticket number; 0 means this chat's ticket."
+    )
+    reason: str = Field(default="", description=REASON_DESCRIPTION)

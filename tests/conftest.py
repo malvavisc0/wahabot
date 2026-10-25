@@ -35,6 +35,7 @@ from tests.harness import (
     smoke_settings,
     write_session_config,
 )
+from tests.harness.rest import FakeRest, serve, stop
 from wahabot.ai.context import roster_cache
 from wahabot.commands import register_command_handler
 from wahabot.core import identity as identity_module
@@ -247,3 +248,16 @@ def bot(stack: Stack, _reset_registries: None) -> Iterator[Bot]:
         yield bot
     bot.bursts.reset()
     bot.albums.reset()
+
+
+@pytest.fixture()
+def fake_rest() -> Iterator[FakeRest]:
+    """Two local REST services so cross-origin redirects are real."""
+    rest, (main_server, main_thread, _port), (other_server, other_thread, _other) = (
+        serve()
+    )
+    try:
+        yield rest
+    finally:
+        stop(main_server, main_thread)
+        stop(other_server, other_thread)

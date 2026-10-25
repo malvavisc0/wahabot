@@ -18,7 +18,7 @@ Incoming message -> context and memory -> model
                               final reply, reaction, or silence
 ```
 
-The bundled tools cover text and media delivery, quoting and numeric mentions, reactions, native forwarding, chat context, published-answer search, web search, page and video-metadata retrieval, human escalation, an optional host shell, and optional image generation/editing. Python builder docstrings are for developers; explicit tool descriptions and parameter schemas are the instructions sent to the model.
+The bundled tools cover text and media delivery, quoting and numeric mentions, reactions, native forwarding, chat context, published-answer search, web search, page and video-metadata retrieval, human escalation, guarded HTTP/SQL skills, operator-only ticket identity linking, an optional host shell, and optional image generation/editing. Python builder docstrings are for developers; explicit tool descriptions and parameter schemas are the instructions sent to the model.
 
 The loop has brakes: `stay_silent` ends a run and cancels other tools in that batch, repeated calls are blocked, and round and run-time limits stop runaway work. Text, media, and forwarding share one successful-send allowance per run; reactions have a separate allowance. After successful delivery, further research or actions are blocked. In groups, mentioned mode responds when addressed, while judicious mode asks the triage gate whether an unaddressed message is worth a run; once admitted, the model still decides whether to speak.
 
@@ -80,6 +80,36 @@ PDFs, scanned PDFs, DOCX/ODT/RTF, plain text and CSV are read during the turn wi
 
 Support hours live in the session config: non-urgent handovers outside hours are queued for the next opening, urgent ones alert immediately (and the configured night number once it has written), and the first opening of each local day sends one operator summary. Internal team groups are an allowlist: they run mentioned-only and are fenced in code from ticket writes, customer sends, TTS and greetings.
 
+## Skills: guarded integrations
+
+A skill is a folder the operator installs into `data/skills/<name>/`. It contains a `skill.yaml` contract and a `SKILL.md` note the model reads when it is relevant. Four supporting skills ship as templates in `src/wahabot/skills/predefined/`: generic REST, Supabase, a signed event sender (`send-to-url`), and read-only Postgres.
+
+```yaml
+name: customer-records
+kind: http
+base_url: https://crm.example.com/api
+auth: {type: bearer, secret: CRM_API_KEY}
+customer_chats: read
+writes_need_operator: true
+test: {method: GET, path: /health}
+```
+
+```bash
+uv run wahabot skills list
+uv run wahabot skills import ./customer-records --enable
+uv run wahabot skills test customer-records
+```
+
+Secrets are encrypted with Fernet using `WAHABOT_SECRET_KEY` (base64, 32 bytes) and never returned to the model, web layer, prompts, logs, journal, History, tool results or errors. Without the key, secret-bearing skill writes refuse. Import validates that every referenced secret exists. `--enable` and `skills test` run only the prepared safe read (`GET`/`HEAD`/`OPTIONS`) from `skill.yaml`; they never run a write, and a changed service URL, key, instructions or permission marks the test stale until it passes again.
+
+The runtime locks every request to the skill's base origin, refuses path escapes, absolute URLs, host-changing redirects, loopback/private/link-local/metadata addresses (unless the skill itself is a private service), pins the resolved IP, re-checks each redirect, caps body/response/time, and permits five calls per turn with repeated identical calls refused. Customer and team-group runs may use only the sender's own phone, chat id, external user ref and ticket number; another person's identifier is refused.
+
+Customer and team-group writes are staged, never sent. The self-chat shows the exact prepared request and asks `Reply yes.`; quoting that message and answering yes executes the stored request exactly once. Team-group writes always need the operator's yes. Operator commands execute writes directly. Every call lands in `skill_calls`, the ticket event trail and the audit journal.
+
+`sql_query` is operator-only in this version: one `SELECT` or `WITH ... SELECT`, SQLite opened `mode=ro`, a read-only Postgres transaction when the optional `postgres` extra is installed, comment/multi-statement/`ATTACH`/`PRAGMA` refusal, and row/column/byte/time caps. Enabled event skills run after the ticket transaction commits for opened, needs-you, done and closed; failures never roll back or block the ticket. `send-to-url` signs a stable payload (event, event id, ticket number, state, resolver, external contact ref, timestamp) with HMAC-SHA256, retries boundedly, and sends no message body by default.
+
+The skill loader, CLI, tests and runtime are Phase 4. The web authoring UI, marketplace, workflow builder and arbitrary code execution are intentionally deferred to Phase 5.
+
 ## Straight talk about the channel
 
 Two things you should know before you put this on a business number:
@@ -91,7 +121,7 @@ Memory, event journals, audit records and the intake/outbound ledger live on you
 
 ## Where this is heading
 
-The current project is the conversation engine with durable tickets, a WhatsApp operator desk, published answers, bounded document reading, support hours with a restart-safe morning summary, and fenced internal team groups. A web History page and CRM/job-system connectors are future directions, not bundled features.
+The current project is the conversation engine with durable tickets, a WhatsApp operator desk, published answers, bounded document reading, support hours with a restart-safe morning summary, fenced internal team groups, and the Phase 4 skills runtime. The Phase 5 web UI (including History and skill authoring), a marketplace, a workflow builder and arbitrary code execution are future directions, not bundled features.
 
 ## Install
 
@@ -129,6 +159,7 @@ uv run pytest                  # unit and end-to-end tests with fake services
 - [Agent workflow](docs/agent-workflow.md) (the full pipeline)
 - [How conversations work](docs/conversations.md) (contexts, memory, group participation)
 - [Session config](docs/session-config.md) (fields, group participation, access control)
+- [Installation: skills](docs/install.md#skills) (folder format, secrets, CLI, limits)
 - [WAHA identity fields](docs/waha-identity-fields.md) (`from` / `participant` / `to` semantics)
 - [WAHA albums](docs/waha-albums.md) (multi-image reassembly)
 - [WAHA broadcast sources](docs/waha-broadcast-sources.md) (status/newsletter handling)

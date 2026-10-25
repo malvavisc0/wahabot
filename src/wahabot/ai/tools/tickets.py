@@ -13,6 +13,7 @@ from wahabot.ai.tools.runcontext import (
     operator_run,
 )
 from wahabot.ai.tools.schemas import (
+    LinkTicketUserSchema,
     NewTicketSchema,
     SupportStateSchema,
     UpdateTicketSchema,
@@ -214,6 +215,36 @@ def update_ticket() -> BaseTool:
     )
 
 
+def link_ticket_user() -> BaseTool:
+    """Build the operator-only tool that writes the ticket/contact link atomically."""
+
+    def link_ticket_user_fn(user_ref: str, number: int = 0, reason: str = "") -> str:
+        target = current_target()
+        if not target.armed and target.surface != "operator":
+            return error("linking an external user reference is operator-only")
+        store: TicketStore | None = target.ticket_store
+        if store is None:
+            return error("tickets are not available for this run")
+        ticket = (
+            store.ticket_by_number(number) if number else store.ticket(target.ticket_id)
+        )
+        if ticket is None:
+            return error("no matching ticket found")
+        log_action_reason("link_ticket_user", reason, ticket=ticket.number)
+        linked = store.link_ticket_user(ticket.id, user_ref)
+        return ok(ticket=linked.number, external_user_ref=linked.external_user_ref)
+
+    return FunctionTool.from_defaults(
+        fn=link_ticket_user_fn,
+        fn_schema=LinkTicketUserSchema,
+        name="link_ticket_user",
+        description=(
+            "Operator only: atomically link a ticket and its contact to the "
+            "external system's stable user reference. Customer runs cannot set it."
+        ),
+    )
+
+
 def update_staging_error(
     target: RunTarget, state: str | None, done_by: str | None
 ) -> str | None:
@@ -300,6 +331,7 @@ def build_ticket_tools(
     return [
         support_state(),
         update_ticket(),
+        link_ticket_user(),
         hand_to_operator(
             settings,
             waha,

@@ -1,0 +1,15 @@
+name: send-to-url
+kind: http
+base_url: https://events.example.invalid
+auth: {type: none}
+customer_chats: none
+writes_need_operator: true
+sign_events: true
+signing_secret: SEND_TO_URL_SECRET
+event_path: /
+test: {method: GET, path: /health}
+events:
+  opened: true
+  needs_you: true
+  done: true
+  closed: true

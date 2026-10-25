@@ -1,0 +1,6 @@
+name: postgres-readonly
+kind: sql
+sql: {engine: postgres, dsn_secret: POSTGRES_DSN}
+customer_chats: none
+writes_need_operator: true
+test: {}

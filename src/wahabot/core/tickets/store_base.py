@@ -16,6 +16,12 @@ from wahabot.core.tickets.models import (
     json_object,
 )
 
+TICKET_COLUMNS = (
+    "id, number, contact_id, chat_id, state, urgent, done_by, summary, "
+    "details_json, missing_json, external_user_ref, alert_message_ids_json, "
+    "previous_ticket_id, created_at, updated_at, done_at, closed_at, last_customer_at"
+)
+
 
 class StoreBase:
     """Connection-per-operation helpers shared by every ticket mixin."""

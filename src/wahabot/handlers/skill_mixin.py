@@ -1,0 +1,35 @@
+"""Self-chat skill confirmations and capability answers."""
+
+import asyncio
+from typing import override
+
+from wahabot.core.models import WahaEvent
+from wahabot.core.tickets.router import Route, RouteKind
+from wahabot.handlers.base import HandlerBase
+
+
+class SkillMixin(HandlerBase):
+    """Handle the self-chat routes owned by the skill runtime."""
+
+    @override
+    async def ticket_skill_route(self, event: WahaEvent, route: Route) -> bool:
+        """Handle a staged-write yes/no or a capability question."""
+        if route.kind == RouteKind.CAPABILITIES:
+            summary = (
+                self.skill_service.capability_summary()
+                if self.skill_service is not None
+                else "No skills are configured yet."
+            )
+            await self.ticket_send_operator(event, summary)
+            return True
+        if route.kind != RouteKind.SKILL_CONFIRM:
+            return False
+        service = self.skill_service
+        request = route.skill_request
+        if service is None or request is None:
+            await self.ticket_send_operator(event, "No staged request is waiting.")
+            return True
+        approve = route.text.strip().lower().startswith("y")
+        text = await asyncio.to_thread(service.confirm, request.id, approve=approve)
+        await self.ticket_send_operator(event, text)
+        return True

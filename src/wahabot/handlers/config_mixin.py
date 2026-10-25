@@ -43,6 +43,12 @@ class ConfigMixin(HandlerBase):
             if self.answer_service is not None
             else ""
         )
+        skills = ""
+        if self.skill_service is not None:
+            try:
+                skills = self.skill_service.prompt_section(current_target())
+            except RuntimeError:
+                skills = ""
         return render_system_prompt(
             current.system_prompt,
             current.timezone or self.settings.timezone,
@@ -54,6 +60,7 @@ class ConfigMixin(HandlerBase):
             operator_name=current.operator_name,
             answers=answers,
             knowledge_only=current.knowledge_only,
+            skills=skills,
         )
 
     def participation_brief(self, current: SessionConfig, target: object) -> str:
