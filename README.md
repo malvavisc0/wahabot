@@ -74,7 +74,7 @@ The operator console is the self-chat itself: reply to an alert or name the tick
 
 ## Knowledge, documents and support hours
 
-Published answers (question/answer pairs) can be saved from the operator desk: reply to a ticket with an explanation, then send `save` when asked. The enabled set rides the prompt when it fits and is searchable with `search_knowledge` when it does not. `knowledge_only` is an opt-in answers-only mode; the personal default still answers from the full conversation and tools.
+Published answers (question/answer pairs) can be saved from the operator desk: reply to a ticket with an explanation, then send `save` (or `save N`) when asked. The enabled set rides the prompt when it fits and is searchable with `search_knowledge` when it does not. `knowledge_only` is an opt-in answers-only mode; the personal default still answers from the full conversation and tools.
 
 PDFs, scanned PDFs, DOCX/ODT/RTF, plain text and CSV are read during the turn within page, character, size and time limits. The extracted text is marked untrusted in the prompt, and scanned pages fall back to Tesseract. Unreadable or oversized documents stay attached with a plain-language notice.
 
