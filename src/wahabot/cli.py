@@ -216,7 +216,7 @@ def hash_passphrase_command() -> None:
     raw = sys.stdin.readline()
     if not raw.strip():
         raise typer.BadParameter("a passphrase is required on stdin")
-    console.print(hash_passphrase(raw.rstrip("\r\n")))
+    typer.echo(hash_passphrase(raw.rstrip("\r\n")))
 
 
 @app.command()
