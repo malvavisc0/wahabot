@@ -14,6 +14,7 @@ from wahabot.core.skills.models import SAFE_NAME, Skill
 from wahabot.core.skills.secrets import SecretStore
 from wahabot.core.skills.store import SkillStore
 from wahabot.core.tickets.store import TicketStore
+from wahabot.web.services import format_time
 
 CAPABILITIES = {
     "none": "Operator requests only",
@@ -318,16 +319,6 @@ def call_rows(store: SkillStore, name: str, tickets: TicketStore) -> list[SkillC
         )
         for call in store.calls(name)
     ]
-
-
-def format_time(value: int) -> str:
-    """Format a Unix timestamp as a short UTC date-time."""
-    import datetime
-
-    if not value:
-        return ""
-    moment = datetime.datetime.fromtimestamp(int(value), tz=datetime.UTC)
-    return moment.strftime("%Y-%m-%d %H:%M")
 
 
 def skill_page(
