@@ -69,7 +69,12 @@ class SetupService:
         return str(payload.get("status") or "UNKNOWN")
 
     def ensure_session(self) -> str:
-        """Create, start or restart the session so a QR is available."""
+        """Create or start the session so a QR is available.
+
+        A FAILED session is left alone: restarting it on every poll
+        would log the phone out repeatedly, so the operator uses the
+        explicit Restart control instead.
+        """
         status = self.status()
         if status == "NOT_CREATED":
             self.waha.create_session(
@@ -82,9 +87,6 @@ class SetupService:
         if status in {"STOPPED", "UNKNOWN"}:
             self.waha.start_session(self.settings.session)
             return "STARTING"
-        if status == "FAILED":
-            self.restart()
-            return "STARTING"
         return status
 
     def restart(self) -> None:
@@ -93,7 +95,10 @@ class SetupService:
 
     def webhook_url(self) -> str:
         """The internal URL WAHA posts the bot's events to."""
-        return f"http://wahabot:{self.settings.port}/api/webhook/{self.settings.session}"
+        return (
+            f"http://{self.settings.webhook_host}:{self.settings.port}"
+            + f"/api/webhook/{self.settings.session}"
+        )
 
     def qr(self) -> tuple[str, str]:
         """The QR as a data URL, or its raw text value."""
@@ -128,8 +133,14 @@ class SetupService:
         return str(code or "Pairing code requested")
 
     def first_exchange(self) -> Exchange | None:
-        """The first customer conversation answered outside the self chat."""
+        """The first customer conversation answered outside the self chat.
+
+        Without the account's own ids the exclusion cannot be verified,
+        so no exchange is reported rather than a possible self chat.
+        """
         own = self.own_ids()
+        if not own:
+            return None
         tickets = sorted(self.store.all_tickets(), key=lambda item: item.number)
         for ticket in tickets:
             contact = self.store.contact_by_id(ticket.contact_id)

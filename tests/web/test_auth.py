@@ -210,3 +210,79 @@ def test_no_secret_in_logs_or_pages(auth_client: TestClient, bot) -> None:
     assert PASSPHRASE not in page.text
     assert SESSION_KEY not in page.text
     assert bot.settings.web_passphrase_hash not in page.text
+
+
+def test_host_spoof_does_not_unlock_plain_http(bot) -> None:
+    """A non-loopback peer stays refused even with a loopback Host header."""
+    from tests.conftest import webhook_app as build_app
+
+    bot.settings.web_passphrase_hash = hash_passphrase(PASSPHRASE)
+    bot.settings.web_session_key = SESSION_KEY
+    app = build_app()
+    from wahabot.web import mount_routes
+
+    mount_routes(app)
+    plain = TestClient(app, base_url="http://lan.testserver")
+    try:
+        spoofed = plain.get("/login", headers={"Host": "localhost"})
+        forwarded = plain.get("/login", headers={"X-Forwarded-Proto": "https"})
+    finally:
+        plain.close()
+    assert spoofed.status_code == 403
+    assert forwarded.status_code == 403
+
+
+def test_forwarded_scheme_trusted_only_from_configured_proxies(bot) -> None:
+    """X-Forwarded-Proto counts only from a configured proxy address."""
+    from starlette.requests import Request
+
+    from wahabot.web.auth import cookie_secure, is_secure
+
+    def request_with(peer: str, forwarded: str) -> Request:
+        return Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "scheme": "http",
+                "path": "/login",
+                "query_string": b"",
+                "root_path": "",
+                "http_version": "1.1",
+                "client": (peer, 50000),
+                "server": ("10.0.0.5", 8080),
+                "headers": [(b"x-forwarded-proto", forwarded.encode())],
+            }
+        )
+
+    proxied = request_with("172.18.0.5", "https")
+    mapped = request_with("::ffff:172.18.0.5", "https")
+    mapped_loopback = request_with("::ffff:127.0.0.1", "")
+    direct = request_with("192.168.1.9", "https")
+    loopback = request_with("127.0.0.1", "")
+    bot.settings.web_trusted_proxy_hosts = ""
+    try:
+        assert is_secure(proxied, bot.settings) is False
+        assert cookie_secure(proxied, bot.settings) is False
+        bot.settings.web_trusted_proxy_hosts = "172.18.0.0/16"
+        assert is_secure(proxied, bot.settings) is True
+        assert cookie_secure(proxied, bot.settings) is True
+        assert is_secure(mapped, bot.settings) is True
+        assert is_secure(direct, bot.settings) is False
+        assert is_secure(loopback, bot.settings) is True
+        assert is_secure(mapped_loopback, bot.settings) is True
+    finally:
+        bot.settings.web_trusted_proxy_hosts = ""
+
+
+def test_non_ascii_csrf_token_is_refused_not_crashed(web_client: TestClient) -> None:
+    """A non-ASCII CSRF token never raises a 500."""
+    web_client.get("/login")
+    token = web_client.post("/login", data={"passphrase": "x", "csrf_token": "nö-ascii"})
+    assert token.status_code == 403
+
+
+def test_non_ascii_cookie_signature_is_rejected() -> None:
+    """verify_payload rejects a non-ASCII signature instead of raising."""
+    from wahabot.web.auth import verify_payload
+
+    assert verify_payload(SESSION_KEY, "abc.sïgnature") is None

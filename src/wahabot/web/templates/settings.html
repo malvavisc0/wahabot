@@ -20,7 +20,7 @@
         <form method="post" action="/app/settings/assistant" data-warn-leave="true">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <label for="bot_name">{{ _("Name") }}</label>
-          <input id="bot_name" name="bot_name" type="text" value="{{ form.get('bot_name', raw.get('bot_name', '')) }}">
+          <input id="bot_name" name="bot_name" type="text" value="{{ form.get('bot_name', raw.get('bot_name')) | default('', boolean=true) }}">
           <label for="goal">{{ _("What it is for") }}</label>
           <input id="goal" name="goal" type="text" value="{{ form.get('goal', raw.get('goal', '')) }}">
           <label for="instructions">{{ _("Instructions") }}</label>

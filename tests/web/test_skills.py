@@ -239,3 +239,33 @@ def test_write_requires_csrf(auth_client: TestClient, fake_rest: FakeRest) -> No
         "/app/skills/new", data={"source_url": fake_rest.base + "/docs"}
     )
     assert response.status_code == 403
+
+
+def test_delete_removes_staged_requests(auth_client: TestClient, bot) -> None:
+    """Deleting a skill drops its pending approval prompts with it."""
+    token = csrf_of(auth_client.get("/app/skills").text)
+    created = auth_client.post(
+        "/app/skills/new",
+        data={"source_url": "https://docs.example.com/api", "csrf_token": token},
+        follow_redirects=True,
+    )
+    name = re.search(r"/app/skills/([a-z0-9-]+)", str(created.url))
+    assert name is not None
+    skills = SkillStore(bot.settings.data_dir / "wahabot.db")
+    skills.create_request(
+        skill=name.group(1),
+        ticket_id=None,
+        chat_id="491555000001@c.us",
+        request_json="{}",
+        summary="staged write",
+    )
+    assert skills.latest_pending() is not None
+
+    deleted = auth_client.post(
+        f"/app/skills/{name.group(1)}/delete",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+
+    assert deleted.status_code == 303
+    assert skills.latest_pending() is None

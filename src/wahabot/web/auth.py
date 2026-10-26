@@ -3,8 +3,10 @@
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import secrets
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -89,10 +91,10 @@ def verify_payload(key: str, value: str) -> dict[str, Any] | None:
     if not key or "." not in value:
         return None
     body, _, signature = value.rpartition(".")
-    expected = hmac.new(key.encode(), body.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature, expected):
-        return None
     try:
+        expected = hmac.new(key.encode(), body.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature.encode(), expected.encode()):
+            return None
         padding = "=" * (-len(body) % 4)
         raw = base64.urlsafe_b64decode(body + padding)
         payload = json.loads(raw)
@@ -184,30 +186,69 @@ def csrf_matches(request: Request, settings: Settings, submitted: str) -> bool:
     session = read_session(request, settings)
     if session is None or not submitted:
         return False
-    return hmac.compare_digest(session.csrf, submitted)
+    return hmac.compare_digest(session.csrf.encode(), submitted.encode())
+
+
+def peer_address(
+    peer: str,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The parsed peer address, with IPv4-mapped IPv6 unwrapped."""
+    try:
+        address = ipaddress.ip_address(peer)
+    except ValueError:
+        return None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped
+    return address
+
+
+def peer_is_trusted_proxy(peer: str, settings: Settings) -> bool:
+    """Whether the direct peer is a configured trusted proxy address."""
+    address = peer_address(peer)
+    if address is None:
+        return False
+    for entry in settings.web_trusted_proxy_hosts.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if address in ipaddress.ip_network(entry, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def forwarded_scheme(request: Request, settings: Settings) -> str:
+    """The X-Forwarded-Proto scheme, honored only from a trusted proxy."""
+    if request.client is None or not peer_is_trusted_proxy(request.client.host, settings):
+        return ""
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    return forwarded.split(",", 1)[0].strip().lower()
 
 
 def cookie_secure(request: Request, settings: Settings) -> bool:
     """The cookie's Secure flag follows the actual transport, not loopback policy."""
     if request.url.scheme == "https":
         return True
-    if settings.web_trusted_proxy:
-        forwarded = request.headers.get("x-forwarded-proto", "")
-        return forwarded.split(",", 1)[0].strip().lower() == "https"
-    return False
+    return forwarded_scheme(request, settings) == "https"
 
 
 def is_secure(request: Request, settings: Settings) -> bool:
-    """Whether the request arrived over HTTPS, a trusted proxy or loopback."""
-    if settings.web_trusted_proxy:
-        forwarded = request.headers.get("x-forwarded-proto", "")
-        scheme = forwarded.split(",", 1)[0].strip().lower()
-        if scheme:
-            return scheme == "https"
+    """Whether the request arrived over HTTPS, a trusted proxy or loopback.
+
+    Loopback is decided by the parsed socket peer, never by the
+    client's Host header, and the forwarded scheme counts only when
+    the peer is a configured proxy.
+    """
+    forwarded = forwarded_scheme(request, settings)
+    if forwarded:
+        return forwarded == "https"
     if request.url.scheme == "https":
         return True
-    host = (request.url.hostname or "").lower()
-    return host in {"127.0.0.1", "::1", "localhost"}
+    peer = request.client.host if request.client is not None else ""
+    address = peer_address(peer)
+    return address is not None and address.is_loopback
 
 
 def origin_ok(request: Request, settings: Settings) -> bool:
@@ -236,29 +277,35 @@ class RateLimiter:
         self.limit = limit
         self.window_s = window_s
         self.failures: dict[str, list[float]] = {}
+        self.lock = threading.Lock()
 
     def retry_after(self, key: str, now: float | None = None) -> int | None:
         """Seconds to wait, or None when the client may try again."""
         moment = time.time() if now is None else now
-        recent = [
-            item for item in self.failures.get(key, []) if moment - item < self.window_s
-        ]
-        self.failures[key] = recent
-        if len(recent) < self.limit:
-            return None
-        return max(1, int(self.window_s - (moment - recent[0])) + 1)
+        with self.lock:
+            recent = [
+                item
+                for item in self.failures.get(key, [])
+                if moment - item < self.window_s
+            ]
+            self.failures[key] = recent
+            if len(recent) < self.limit:
+                return None
+            return max(1, int(self.window_s - (moment - recent[0])) + 1)
 
     def record_failure(self, key: str, now: float | None = None) -> None:
         """Record one failed attempt."""
         moment = time.time() if now is None else now
-        self.failures.setdefault(key, []).append(moment)
+        with self.lock:
+            self.failures.setdefault(key, []).append(moment)
 
     def reset(self, key: str | None = None) -> None:
         """Clear one client's failures, or every client's."""
-        if key is None:
-            self.failures.clear()
-        else:
-            self.failures.pop(key, None)
+        with self.lock:
+            if key is None:
+                self.failures.clear()
+            else:
+                self.failures.pop(key, None)
 
 
 def forbidden() -> HTMLResponse:

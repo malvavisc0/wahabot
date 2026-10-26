@@ -299,6 +299,11 @@ class Settings(BaseSettings):
 
     data_dir: Path = Path("data")
 
+    #: Host WAHA uses to reach this bot's webhook. The default is the
+    #: compose service name; a standalone deployment sets it to the
+    #: address WAHA can resolve (Setup writes it into the session).
+    webhook_host: str = "wahabot"
+
     #: Local passphrase login for the operator back office. The hash is
     #: generated with ``wahabot hash-passphrase`` and the session key is
     #: a separate random value; both live only in the environment. With
@@ -308,8 +313,10 @@ class Settings(BaseSettings):
     #: Public HTTPS origin of the app (e.g. https://client.c.waha.bot).
     #: Used only to accept same-site Origin headers behind the tunnel.
     public_origin: str = ""
-    #: Trust X-Forwarded-Proto from the configured tunnel proxy.
-    web_trusted_proxy: bool = False
+    #: Comma-separated IPs/CIDRs of reverse proxies whose
+    #: X-Forwarded-Proto header may be trusted (tunnel deployments).
+    #: Empty trusts no proxy, and the header is then ignored.
+    web_trusted_proxy_hosts: str = ""
     #: Failed login attempts per client inside the window before a retry
     #: delay is returned. In-memory only; a restart clears it.
     web_login_attempts: int = Field(default=5, ge=1, le=100)

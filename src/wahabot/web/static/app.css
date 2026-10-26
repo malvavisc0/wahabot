@@ -430,6 +430,11 @@ button.link {
   border-left: 3px solid var(--teal);
 }
 
+.message.operator {
+  background: #ffffff;
+  border-left: 3px solid var(--slate-soft);
+}
+
 .message.internal {
   background: #fbf6ec;
   border-left: 3px solid var(--amber);
