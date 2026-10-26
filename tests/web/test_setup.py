@@ -96,3 +96,65 @@ def test_setup_write_requires_csrf(auth_client: TestClient) -> None:
         ).status_code
         == 403
     )
+
+
+def test_setup_routes_survive_an_unreachable_waha(auth_client: TestClient, bot) -> None:
+    """Pairing and the poll target report the error instead of a 500."""
+    import httpx
+
+    class DeadWaha(type(bot.waha)):
+        def get_session(self, session: str) -> dict:
+            raise httpx.ConnectError("WAHA is unreachable")
+
+        def get_me(self, session: str) -> dict:
+            raise httpx.ConnectError("WAHA is unreachable")
+
+        def start_session(self, session: str) -> dict:
+            raise httpx.ConnectError("WAHA is unreachable")
+
+        def request_code(self, session: str, phone_number: str) -> dict:
+            raise httpx.ConnectError("WAHA is unreachable")
+
+    original = auth_client.app.state.web_waha_client
+    auth_client.app.state.web_waha_client = DeadWaha()
+    try:
+        token = csrf_of(auth_client.get("/setup").text)
+        pairing = auth_client.post(
+            "/setup/pairing",
+            data={"phone_number": "491555000000", "csrf_token": token},
+        )
+        status = auth_client.get("/setup/status")
+    finally:
+        auth_client.app.state.web_waha_client = original
+    assert pairing.status_code == 200
+    assert "refused the pairing code" in pairing.text
+    assert status.status_code == 200
+    assert status.json()["status"] == "UNKNOWN"
+
+
+def test_a_failed_session_is_not_auto_restarted(auth_client: TestClient, bot) -> None:
+    """A FAILED session waits for the operator instead of restart spam."""
+    bot.waha.session_status = "FAILED"
+    for _ in range(3):
+        auth_client.get("/setup/status")
+    assert bot.waha.restarted_sessions == []
+
+
+def test_no_own_identity_means_no_exchange(auth_client: TestClient, store, bot) -> None:
+    """When the account identity cannot be read, completion stays off."""
+    import httpx
+
+    seed_ticket(store, phone=ME_JID, display="Support")
+    bot.waha.session_status = "WORKING"
+
+    def no_me(session: str) -> dict:
+        raise httpx.ConnectError("no identity")
+
+    original = bot.waha.get_me
+    bot.waha.get_me = no_me
+    try:
+        payload = auth_client.get("/setup/status").json()
+    finally:
+        bot.waha.get_me = original
+    assert payload["exchange"] is None
+    assert payload["completed"] is False

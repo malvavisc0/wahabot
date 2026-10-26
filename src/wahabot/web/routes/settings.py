@@ -322,7 +322,10 @@ async def settings_whatsapp(request: Request) -> Response:
     message = "Reconnect requested."
     classes = "saved"
     try:
-        service.ensure_session()
+        # This is an explicit operator action, so a FAILED session is
+        # restarted here; the automatic poll loop never restarts it.
+        if service.ensure_session() == "FAILED":
+            service.restart()
     except Exception as exc:
         message = f"Not saved: {type(exc).__name__}"
         classes = "error"

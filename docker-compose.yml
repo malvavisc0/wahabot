@@ -79,7 +79,7 @@ services:
       WAHABOT_WEB_PASSPHRASE_HASH: ${WAHABOT_WEB_PASSPHRASE_HASH:-}
       WAHABOT_WEB_SESSION_KEY: ${WAHABOT_WEB_SESSION_KEY:-}
       WAHABOT_PUBLIC_ORIGIN: ${WAHABOT_PUBLIC_ORIGIN:-}
-      WAHABOT_WEB_TRUSTED_PROXY: ${WAHABOT_WEB_TRUSTED_PROXY:-false}
+      WAHABOT_WEB_TRUSTED_PROXY_HOSTS: ${WAHABOT_WEB_TRUSTED_PROXY_HOSTS:-}
       # Base64 32-byte Fernet key for skill credentials. Empty keeps
       # secret-bearing skills disabled; skill writes refuse without it.
       WAHABOT_SECRET_KEY: ${WAHABOT_SECRET_KEY:-}
@@ -91,6 +91,8 @@ services:
       WAHABOT_HOST: 0.0.0.0
       WAHABOT_PORT: "8080"
       WAHABOT_DATA_DIR: /app/data
+      # Service name WAHA uses to reach the bot's webhook in this network.
+      WAHABOT_WEBHOOK_HOST: wahabot
     ports:
       - "${WAHABOT_PORT:-8080}:8080"
     volumes:

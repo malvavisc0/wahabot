@@ -26,6 +26,21 @@ def service_for(request: Request, settings: Settings) -> SetupService:
     return SetupService(settings, ticket_store_for(settings), waha_for(request, settings))
 
 
+def safe_state(service: SetupService) -> SetupState:
+    """The page state; an unreachable WAHA becomes a renderable error state."""
+    try:
+        return service.state()
+    except Exception as exc:
+        return SetupState(
+            status="UNKNOWN",
+            qr_data="",
+            qr_value="",
+            exchange=None,
+            completed=False,
+            error=f"WAHA is not reachable: {type(exc).__name__}",
+        )
+
+
 def setup_context(
     request: Request, settings: Settings, state: SetupState, token: str
 ) -> dict[str, object]:
@@ -52,17 +67,7 @@ def setup_page(request: Request, reconnect: str = "") -> Response:
     if isinstance(auth, Response):
         return auth
     service = service_for(request, settings)
-    try:
-        state = service.state()
-    except Exception as exc:
-        state = SetupState(
-            status="UNKNOWN",
-            qr_data="",
-            qr_value="",
-            exchange=None,
-            completed=False,
-            error=f"WAHA is not reachable: {type(exc).__name__}",
-        )
+    state = safe_state(service)
     if state.completed and not reconnect:
         return RedirectResponse("/app/history", status_code=303)
     return render(
@@ -91,7 +96,7 @@ async def setup_pairing(request: Request) -> Response:
         error = str(exc)
     except Exception as exc:
         error = f"WAHA refused the pairing code: {type(exc).__name__}"
-    state = service.state()
+    state = safe_state(service)
     context = setup_context(request, settings, state, auth.csrf)
     context.update({"pairing_code": pairing_code, "error": error})
     return render(request, "setup.html", context)
@@ -121,13 +126,14 @@ def setup_status(request: Request) -> Response:
     refused = media_auth(request, settings)
     if refused is not None:
         return refused
-    state = service_for(request, settings).state()
+    service = service_for(request, settings)
+    state = safe_state(service)
     restarted = False
     if state.status == "SCAN_QR_CODE":
         count = int(getattr(request.app.state, "web_qr_polls", 0)) + 1
         if count >= QR_MAX_POLLS:
             with contextlib.suppress(Exception):
-                service_for(request, settings).restart()
+                service.restart()
             count = 0
             restarted = True
         request.app.state.web_qr_polls = count

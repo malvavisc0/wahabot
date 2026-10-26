@@ -3,6 +3,7 @@
 import contextlib
 import datetime
 import json
+import os
 import sys
 from importlib.metadata import version as get_version
 from pathlib import Path
@@ -348,10 +349,15 @@ def serve(
     settings = get_settings()
     if session:
         settings.session = session
+        # The reload subprocess rebuilds Settings from the environment;
+        # export the flag so the child serves the same session.
+        os.environ["WAHABOT_SESSION"] = session
     setup_logging(settings)
     host = host or settings.host
     port = port or settings.port
-    settings.port = port
+    if port:
+        settings.port = port
+        os.environ["WAHABOT_PORT"] = str(port)
     cli_helpers.log_startup_banner(settings, host, port)
     if not settings.access_config.exists():
         message = (

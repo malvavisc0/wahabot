@@ -115,9 +115,11 @@ def page_auth(request: Request, settings: Settings) -> AuthSession | Response:
 
 
 def media_auth(request: Request, settings: Settings) -> Response | None:
-    """Media is a non-page endpoint: refuse with a bodyless 401."""
+    """Media and poll endpoints: auth-gated like pages, without redirects."""
     if not configured(settings):
         return Response(status_code=401)
+    if not is_secure(request, settings):
+        return Response(status_code=403)
     session = read_session(request, settings)
     if session is None or not session.authenticated:
         return Response(status_code=401)

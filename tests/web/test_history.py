@@ -240,3 +240,77 @@ def test_every_write_is_journaled_as_web(auth_client: TestClient, bot) -> None:
     assert all("passphrase" not in json.dumps(row).lower() for row in web_rows)
     assert any(row.get("path") == "/app/teach/add" for row in web_rows)
     assert SESSION_COOKIE not in json.dumps(rows)
+
+
+def test_operator_relay_is_labelled_operator(auth_client: TestClient, store) -> None:
+    """An operator-approved relay shows the operator as its sender."""
+    ticket = seed_ticket(store)
+    store.add_event(ticket.id, "operator", "sent", "approved relay text")
+    response = auth_client.get(f"/app/history/{ticket.number}")
+    relay = response.text.find("approved relay text")
+    operator = response.text.find("<strong>Operator</strong>")
+    assert "Relay" in response.text
+    assert relay != -1
+    assert operator != -1 and operator < relay
+
+
+def test_done_by_customer_matches_the_assistant_filter(
+    auth_client: TestClient, store
+) -> None:
+    """A customer-closed ticket is reachable through Done by the assistant."""
+    ticket = seed_ticket(store, summary="Customer closed")
+    store.update_ticket(ticket.id, TicketUpdate(state="done", done_by="customer"))
+    filtered = auth_client.get("/app/history", params={"show": "done_assistant"})
+    assert "Customer closed" in filtered.text
+
+
+def test_urgent_resolved_ticket_is_not_in_needs_you(
+    auth_client: TestClient, store
+) -> None:
+    """A closed urgent ticket lands in Resolved, not the action queue."""
+    ticket = seed_ticket(store, summary="Resolved urgent", urgent=True)
+    store.update_ticket(ticket.id, TicketUpdate(state="closed"))
+    response = auth_client.get("/app/history")
+    resolved = response.text.find("Resolved urgent")
+    needs_you_end = response.text.find("Waiting for the customer")
+    assert resolved != -1
+    assert resolved > needs_you_end
+
+
+def test_unsafe_attachment_mime_is_downloaded_not_rendered(
+    auth_client: TestClient, store, bot, tmp_path: Path
+) -> None:
+    """A stored HTML mime never renders inline same-origin."""
+    ticket = seed_ticket(store)
+    path = bot.settings.data_dir / "media" / "page.html"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"<script>alert(1)</script>")
+    attachment = store.add_attachment(
+        ticket.id,
+        "msg-3",
+        "image",
+        mime="text/html",
+        size=25,
+        path=str(path),
+    )
+    response = auth_client.get(f"/app/media/{attachment.id}")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert "attachment" in response.headers["content-disposition"]
+
+
+def test_media_mime_parameters_cannot_smuggle_svg_inline(
+    auth_client: TestClient, store, bot
+) -> None:
+    """An SVG with parameters or whitespace in the stored mime downloads."""
+    ticket = seed_ticket(store)
+    path = bot.settings.data_dir / "media" / "smoke.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(SMOKE_PNG)
+    for mime in ("image/svg+xml;charset=utf-8", " image/svg+xml "):
+        attachment = store.add_attachment(
+            ticket.id, "msg-4", "image", mime=mime, size=len(SMOKE_PNG), path=str(path)
+        )
+        response = auth_client.get(f"/app/media/{attachment.id}")
+        assert response.headers["content-type"] == "application/octet-stream"
+        assert "attachment" in response.headers["content-disposition"]

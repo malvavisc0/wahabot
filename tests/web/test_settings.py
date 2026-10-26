@@ -378,3 +378,33 @@ def test_mention_and_number_helpers() -> None:
     assert pattern
     assert normalize_number("+49 1555 000002") == "491555000002"
     assert normalize_number("00 49 1555 000002") == "491555000002"
+
+
+def test_cleared_bot_name_renders_empty(auth_client: TestClient, bot) -> None:
+    """A cleared name does not come back as the literal string None."""
+    token = csrf_of(auth_client.get("/app/settings").text)
+    saved = auth_client.post(
+        "/app/settings/assistant",
+        data={
+            "bot_name": "",
+            "goal": "",
+            "instructions": "Stay brief.",
+            "operator_name": "",
+            "csrf_token": token,
+        },
+    )
+    assert saved.status_code == 200
+    page = auth_client.get("/app/settings")
+    assert 'value="None"' not in page.text
+    assert read_config(bot)["bot_name"] is None
+
+
+def test_whatsapp_reconnect_restarts_a_failed_session(
+    auth_client: TestClient, bot
+) -> None:
+    """The explicit Reconnect action restarts a FAILED session."""
+    bot.waha.session_status = "FAILED"
+    token = csrf_of(auth_client.get("/app/settings").text)
+    response = auth_client.post("/app/settings/whatsapp", data={"csrf_token": token})
+    assert response.status_code == 200
+    assert bot.waha.restarted_sessions == ["default"]

@@ -161,8 +161,8 @@ def match_show(ticket: Ticket, show: str) -> bool:
     if show == "closed":
         return ticket.state == TicketState.CLOSED.value
     if show == "done_assistant":
-        return ticket.state == TicketState.DONE.value and ticket.done_by == (
-            DoneBy.ASSISTANT.value
+        return ticket.state == TicketState.DONE.value and ticket.done_by != (
+            DoneBy.OPERATOR.value
         )
     if show == "done_you":
         return ticket.state == TicketState.DONE.value and ticket.done_by == (
@@ -172,7 +172,7 @@ def match_show(ticket: Ticket, show: str) -> bool:
 
 
 def search_matches(
-    store: TicketStore, ticket: Ticket, contact: Contact | None, q: str
+    ticket: Ticket, contact: Contact | None, q: str, events: list[TicketEvent]
 ) -> bool:
     """Search name, number, ticket number, summary and recorded text."""
     needle = q.strip().casefold()
@@ -183,7 +183,7 @@ def search_matches(
         fields.extend([contact.display, contact.phone, contact.chat_id])
     if any(needle in value.casefold() for value in fields):
         return True
-    return any(needle in event.body.casefold() for event in store.events(ticket.id))
+    return any(needle in event.body.casefold() for event in events)
 
 
 def status_label(ticket: Ticket) -> str:
@@ -198,14 +198,14 @@ def status_label(ticket: Ticket) -> str:
 
 def status_class(ticket: Ticket) -> str:
     """A semantic class; the word always carries the meaning too."""
-    if ticket.urgent or ticket.state == TicketState.NEEDS_YOU.value:
-        return "urgent" if ticket.urgent else "needs-you"
-    if ticket.state == TicketState.WAITING_CUSTOMER.value:
-        return "waiting"
     if ticket.state == TicketState.DONE.value:
         return "done"
     if ticket.state == TicketState.CLOSED.value:
         return "off"
+    if ticket.urgent or ticket.state == TicketState.NEEDS_YOU.value:
+        return "urgent" if ticket.urgent else "needs-you"
+    if ticket.state == TicketState.WAITING_CUSTOMER.value:
+        return "waiting"
     return "muted"
 
 
@@ -237,9 +237,10 @@ def number_text(contact: Contact | None, ticket: Ticket) -> str:
     return raw.split("@", 1)[0]
 
 
-def row_for(store: TicketStore, ticket: Ticket, contact: Contact | None) -> HistoryRow:
+def row_for(
+    ticket: Ticket, contact: Contact | None, events: list[TicketEvent]
+) -> HistoryRow:
     """Build one list row from the stored ticket text."""
-    events = store.events(ticket.id)
     solved = ""
     if ticket.state == TicketState.DONE.value and ticket.done_by:
         solved = "you" if ticket.done_by == DoneBy.OPERATOR.value else ticket.done_by
@@ -263,12 +264,13 @@ def filtered_rows(store: TicketStore, q: str, show: str) -> list[HistoryRow]:
     """Every ticket matching the search and Show filter."""
     rows: list[HistoryRow] = []
     for ticket in store.all_tickets():
-        contact = contact_for(store, ticket)
         if not match_show(ticket, show):
             continue
-        if not search_matches(store, ticket, contact, q):
+        events = store.events(ticket.id)
+        contact = contact_for(store, ticket)
+        if not search_matches(ticket, contact, q, events):
             continue
-        rows.append(row_for(store, ticket, contact))
+        rows.append(row_for(ticket, contact, events))
     return rows
 
 
@@ -283,7 +285,8 @@ def group_rows(rows: list[HistoryRow]) -> list[HistorySection]:
         and row.status_label.startswith(("Open", "Waiting"))
     ]
     waiting.sort(key=lambda row: (-row.updated_at, -row.number))
-    resolved = [row for row in rows if row not in needs and row not in waiting]
+    grouped = {id(row) for row in needs} | {id(row) for row in waiting}
+    resolved = [row for row in rows if id(row) not in grouped]
     resolved.sort(key=lambda row: (-row.updated_at, -row.number))
     return [
         HistorySection("needs-you", "Needs you", needs),
@@ -367,8 +370,16 @@ def describe_event(
         sender = contact.display if contact is not None else "Customer"
         return sender, "customer", "Customer message", internal, outgoing, customer
     if outgoing:
-        label = "Outgoing reply" if event.kind == EventKind.REPLY.value else "Relay"
-        return "Assistant", "assistant", label, internal, outgoing, customer
+        if event.kind == EventKind.REPLY.value:
+            return (
+                "Assistant",
+                "assistant",
+                "Outgoing reply",
+                internal,
+                outgoing,
+                customer,
+            )
+        return "Operator", "operator", "Relay", internal, outgoing, customer
     label = event.kind.replace("_", " ").title()
     if internal:
         sender = "Operator" if event.kind == EventKind.OPERATOR_REPLY.value else "System"

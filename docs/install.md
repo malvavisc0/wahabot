@@ -159,6 +159,11 @@ Point WAHA at the webhook in your session config:
 {"url": "http://host:8080/api/webhook/default", "events": ["message.any", "message.reaction", "session.status"], "hmac": {"key": "your-secret-key"}}
 ```
 
+The operator web app's Setup page can also create this session for you;
+the URL it writes is derived from `WAHABOT_WEBHOOK_HOST` (the compose
+service name `wahabot` by default — set it to the address your WAHA can
+resolve when running outside compose).
+
 `message.any` (not `message`) is required: `message` carries incoming
 messages only, while the bot also needs the account's own messages —
 operator commands in the self-chat, and the human operator's messages

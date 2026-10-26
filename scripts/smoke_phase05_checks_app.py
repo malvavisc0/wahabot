@@ -28,7 +28,6 @@ def check_setup(root: Path, waha_port: int) -> None:
     settings = settings_for(
         root / "setup",
         waha_url=f"http://127.0.0.1:{waha_port}",
-        web_trusted_proxy=False,
     )
     write_session_config(settings)
     store = make_db(settings)

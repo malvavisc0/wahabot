@@ -104,7 +104,13 @@ class SkillStore:
 
     def delete(self, name: str) -> None:
         """Delete one skill row and its staged requests."""
-        self.run_update("DELETE FROM skills WHERE name = ?", (name,))
+        conn = connect(self.path)
+        try:
+            with transaction(conn):
+                conn.execute("DELETE FROM skill_requests WHERE skill = ?", (name,))
+                conn.execute("DELETE FROM skills WHERE name = ?", (name,))
+        finally:
+            conn.close()
 
     def save_draft_inputs(self, name: str, inputs: dict[str, object]) -> None:
         """Persist the resumable draft inputs."""
