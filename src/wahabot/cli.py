@@ -261,7 +261,9 @@ def session_init(
     path.write_text(json.dumps(cli_helpers.session_template(), indent=2) + "\n")
     cli_helpers.ok(
         console,
-        f"Wrote [bold]{path}[/] — edit system_prompt (and goal/bot_name) before serving.",
+        f"Wrote [bold]{path}[/] — edit system_prompt, goal and bot_name before "
+        + "serving; groups stay off until you set bot_name/bot_mention_regex and "
+        + "group_participation.",
     )
 
 

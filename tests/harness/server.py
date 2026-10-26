@@ -76,7 +76,7 @@ def smoke_settings(data_dir: Path, llm_base: str) -> Settings:
 
 
 def write_session_config(settings: Settings) -> None:
-    """A minimal working session config, as `sessions init` would write."""
+    """A minimal working session config for tests."""
     path = settings.access_config
     path.parent.mkdir(parents=True, exist_ok=True)
     config = {

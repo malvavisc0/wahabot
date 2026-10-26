@@ -170,8 +170,10 @@ operator commands in the self-chat, and the human operator's messages
 in groups and DMs (see [How conversations work](conversations.md),
 §1a).
 
-`wahabot sessions init` writes a starter `data/sessions/default.json` — edit it
-to at least set a `system_prompt`:
+`wahabot sessions init` writes a starter `data/sessions/default.json` with every
+config field. A new config has no display name, so `group_participation` starts
+at `never`: set `bot_name` (or `bot_mention_regex`) and switch it to
+`mentioned`/`judicious` to answer in groups. For example:
 
 ```json
 {

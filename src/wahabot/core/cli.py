@@ -19,6 +19,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from wahabot.core.access import SessionConfig
 from wahabot.core.waha import WahaClient
 from wahabot.settings import Settings
 from wahabot.status import own_identity
@@ -142,13 +143,16 @@ def ok(console: Console, message: str) -> None:
 
 
 def session_template() -> dict[str, object]:
-    """Return a fresh starter config for ``sessions init``."""
-    return {
-        "whitelist": [],
-        "blacklist": [],
-        "goal": "Be a helpful, concise, and friendly assistant in WhatsApp chats.",
-        "memory": "",
-        "system_prompt": (
+    """Return a fresh starter config for ``sessions init``.
+
+    Defaults come from :class:`SessionConfig` so they cannot drift. A
+    fresh config has no ``bot_name``, so groups start at ``never``; set
+    one (or ``bot_mention_regex``) and switch ``group_participation`` to
+    ``mentioned``/``judicious`` to answer in groups.
+    """
+    return SessionConfig(
+        goal="Be a helpful, concise, and friendly assistant in WhatsApp chats.",
+        system_prompt=(
             "You are {{bot_name}}, texting on WhatsApp. "
             "Today is {{date}}. Current time {{time}} ({{tz}}).\n"
             "\n"
@@ -261,10 +265,8 @@ def session_template() -> dict[str, object]:
             "operator's instruction. If you have nothing real to attach, "
             "deliver text only."
         ),
-        "bot_name": None,
-        "bot_mention_regex": None,
-        "group_participation": "mentioned",
-    }
+        group_participation="never",
+    ).model_dump(mode="json")
 
 
 def identity_kwargs(settings: Settings) -> dict[str, str]:
